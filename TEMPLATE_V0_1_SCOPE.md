@@ -122,14 +122,14 @@ Check items off as they are completed. Keep one task `in_progress` at a time whe
 
 ## 6.2 Backend Project & Tooling
 
-- [ ] `backend/pyproject.toml` with `uv` project metadata
-- [ ] Dependencies pinned: FastAPI, Uvicorn, SQLAlchemy 2, Pydantic 2, `pydantic-settings`, Alembic, asyncpg/psycopg, structured-logging library
-- [ ] Dev dependencies: pytest, pytest-asyncio, httpx, Ruff, Pyright
-- [ ] `backend/uv.lock` committed
-- [ ] Ruff configuration (lint rules + formatting)
-- [ ] Pyright configuration (strict mode)
-- [ ] pytest configuration (`backend/pytest.ini` or pyproject section) + `conftest.py`
-- [ ] `.pre-commit-config.yaml` (Ruff, Ruff format, basic hooks)
+- [x] `backend/pyproject.toml` with `uv` project metadata
+- [x] Dependencies pinned: FastAPI, Uvicorn, SQLAlchemy 2, Pydantic 2, `pydantic-settings`, Alembic, asyncpg/psycopg, structured-logging library
+- [x] Dev dependencies: pytest, pytest-asyncio, httpx, Ruff, Pyright
+- [x] `backend/uv.lock` committed
+- [x] Ruff configuration (lint rules + formatting)
+- [x] Pyright configuration (strict mode)
+- [x] pytest configuration (`backend/pytest.ini` or pyproject section) + `conftest.py`
+- [x] `.pre-commit-config.yaml` (Ruff, Ruff format, basic hooks)
 
 ## 6.3 Backend Application Shell
 
