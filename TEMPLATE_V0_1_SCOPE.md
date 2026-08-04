@@ -93,6 +93,7 @@ v0.1 is done when **all** of the following are true:
 8. CI runs the same gate on push and is green.
 9. Governance docs (AGENTS, ARCHITECTURE, API_CONVENTIONS, SECURITY, CONTRIBUTING) and ADRs 0001–0007 exist and are non-empty.
 10. No secrets are committed; `.env.example` documents every variable the app reads.
+11. A clean architecture audit (`prompts/04-architecture-audit.md`) passes with no CRITICAL or MAJOR findings before tagging.
 
 ---
 
@@ -102,7 +103,7 @@ Check items off as they are completed. Keep one task `in_progress` at a time whe
 
 ## 6.1 Repository & Governance
 
-- [ ] Initialise git repository
+- [x] Initialise git repository
 - [ ] Root `.gitignore` (Python, Node, env, editor, OS, build output)
 - [ ] `.editorconfig`
 - [ ] `README.md` (overview, prerequisites, quick start, command reference)
@@ -206,6 +207,7 @@ Check items off as they are completed. Keep one task `in_progress` at a time whe
 - [ ] Fresh-clone run verified: `cp .env.example .env` → `make dev` works
 - [ ] `make check` green from a clean checkout
 - [ ] CI green on the default branch
+- [ ] Architecture audit (`prompts/04-architecture-audit.md`) clean — no CRITICAL or MAJOR findings
 - [ ] Tag `v0.1.0`
 
 ---
