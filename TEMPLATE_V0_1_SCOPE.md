@@ -214,22 +214,35 @@ Check items off as they are completed. Keep one task `in_progress` at a time whe
 
 # 7. Blueprint Reference Map
 
-Each §6 subsection maps to specific sections of `Internal_Custom_Application_Starter_Architecture_v2.md`. Implementers and reviewers read **only** the listed sections for a given task — not the whole blueprint. This keeps context lean and focused.
+Each scope subsection (left column) maps to specific sections of `Internal_Custom_Application_Starter_Architecture_v2.md`. Implementers and reviewers read **only** the listed sections for a given task — not the whole blueprint. This keeps context lean and focused.
 
-| Subsection | Blueprint sections | What to extract |
+## Disambiguating section numbers
+
+Two documents use the `§` symbol. Do not confuse them:
+
+- **Scope §6.x** — a subsection of *this file's* checklist (e.g. §6.3 = "Backend Application Shell").
+- **BP §N** — a section of the *blueprint* (e.g. BP §13 = "API Errors", starting at line 636).
+
+The map below always uses `BP §N` for blueprint sections and `Scope §6.x` for this file's checklist. **Never** write a bare `§6` or `§13` — always prefix with `Scope` or `BP` so the next reader knows which document you mean.
+
+## Map
+
+Line ranges let you jump straight to the section with `view` + offset/limit — no grep needed. Each range covers the section up to the next `#` heading.
+
+| Scope subsection | Blueprint sections | What to extract |
 | --- | --- | --- |
-| §6.1 Repository & Governance | §33 (agent governance), §34 (ADRs), §40 (repo structure) | Required docs, ADR format, agent rules, top-level layout |
-| §6.2 Backend Project & Tooling | §3 (stack), §32 (tooling), §27 (config) | Dependency list, tool choices, typed settings model |
-| §6.3 Backend Application Shell | §6 (request flow), §13 (API errors), §27 (config), §28 (observability) | Layered flow, error schema, exception mappings, health endpoints, logging context |
-| §6.4 Database & Migrations | §7 (models & schemas), §10 (DB conventions) | ORM/Pydantic separation, naming, timestamps, UUIDv7, Alembic use |
-| §6.5 Frontend Project & Tooling | §14 (frontend arch), §16 (UI & design) | Directory layout, Vue conventions, state management split, design tokens |
-| §6.6 Generated Client Pipeline | §15 (generated client) | Source-of-truth flow, openapi-typescript + openapi-fetch, drift rules |
-| §6.7 Local Dev Infrastructure | §36 (Docker & build) | One backend Dockerfile, frontend Dockerfile, compose file layout, runtime commands |
-| §6.8 Makefile | §32 (shared commands) | The canonical command list and what each does |
-| §6.9 CI | §37 (CI/CD) | CI checks list, immutable image tagging, migration-as-release-job |
-| §6.10 Validation | §42 (template validation), §45 (v1 readiness — subset) | Fresh-clone test procedure, the v0.1-relevant readiness items only |
+| **Scope §6.1** Repository & Governance | **BP §33** (lines 1627–1672), **BP §34** (lines 1673–1699), **BP §40** (lines 1947–1975) | Required docs, ADR format, agent rules, top-level layout |
+| **Scope §6.2** Backend Project & Tooling | **BP §3** (lines 62–130), **BP §32** (lines 1576–1626), **BP §27** (lines 1340–1384) | Dependency list, tool choices, typed settings model |
+| **Scope §6.3** Backend Application Shell | **BP §6** (lines 217–269), **BP §13** (lines 636–685), **BP §27** (lines 1340–1384), **BP §28** (lines 1385–1427) | Layered flow, error schema, exception mappings, health endpoints, logging context |
+| **Scope §6.4** Database & Migrations | **BP §7** (lines 270–324), **BP §10** (lines 463–543) | ORM/Pydantic separation, naming, timestamps, UUIDv7, Alembic use |
+| **Scope §6.5** Frontend Project & Tooling | **BP §14** (lines 686–742), **BP §16** (lines 779–817) | Directory layout, Vue conventions, state management split, design tokens |
+| **Scope §6.6** Generated Client Pipeline | **BP §15** (lines 743–778) | Source-of-truth flow, openapi-typescript + openapi-fetch, drift rules |
+| **Scope §6.7** Local Dev Infrastructure | **BP §36** (lines 1814–1860) | One backend Dockerfile, frontend Dockerfile, compose file layout, runtime commands |
+| **Scope §6.8** Makefile | **BP §32** (lines 1576–1626) | The canonical command list and what each does |
+| **Scope §6.9** CI | **BP §37** (lines 1861–1903) | CI checks list, immutable image tagging, migration-as-release-job |
+| **Scope §6.10** Validation | **BP §42** (lines 2038–2059), **BP §45** (lines 2113–2134) | Fresh-clone test procedure, the v0.1-relevant readiness items only |
 
-If a task touches a concern not listed here (e.g. security baseline), consult the blueprint's table of contents and read only the relevant section. When in doubt, read less rather than more — the scope file §2–§5 already encodes the v0.1 contract.
+If a task touches a concern not listed here (e.g. security baseline), consult the blueprint's table of contents and read only the relevant section. When in doubt, read less rather than more — this file's §2–§5 already encodes the v0.1 contract.
 
 ---
 
