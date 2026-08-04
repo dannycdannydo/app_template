@@ -41,7 +41,7 @@ You are the **implementer**.
 
 6. Fix anything that fails before declaring the work ready.
 
-7. **Prepare a handoff summary for the reviewer** (required). Include:
+7. **Write the handoff summary to a file.** This is required — do not skip it. Write to `.handoff/implementation.md` (this directory is gitignored). The file is what the reviewer reads in their session — they will not see your chat output. Include:
    - subsection completed;
    - files created or changed, with a one-line purpose each;
    - which §6 items should now be checked;
@@ -51,8 +51,8 @@ You are the **implementer**.
    - what the reviewer should pay closest attention to;
    - validation commands run and their results.
 
-8. **Do not commit. Do not check off boxes.** Leave the work uncommitted so the reviewer can inspect the diff cleanly.
+8. **Do not commit. Do not check off boxes.** Leave the work uncommitted so the reviewer can inspect the diff cleanly. The handoff file `.handoff/implementation.md` must exist before you hand off.
 
 ## Done means
 
-Implementation is complete, validated, and a handoff summary is written. The work is ready for `02-review`.
+Implementation is complete, validated, and `.handoff/implementation.md` has been written. The work is ready for `02-review`.

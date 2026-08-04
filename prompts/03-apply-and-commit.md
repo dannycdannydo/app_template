@@ -21,7 +21,7 @@ You are the **implementer**, picking up after a review.
 
 ## Instructions
 
-1. Read the reviewer's structured review. Note the verdict and any must-fix, should-fix, and nit items.
+1. Read `.handoff/review.md`. This is the reviewer's structured review — it contains the verdict and any must-fix, should-fix, and nit items. If the file does not exist, stop and tell the user to run `02-review` first.
 
 2. If the verdict was APPROVED with no must-fix or should-fix items, skip to step 5.
 
@@ -46,7 +46,9 @@ You are the **implementer**, picking up after a review.
 
    Include the attribution lines required by the project (see existing commits or the project's commit conventions).
 
-8. **Report status.** After committing, state:
+8. **Clear the handoff files.** Delete `.handoff/implementation.md` and `.handoff/review.md`. They have served their purpose and should not linger — the next cycle starts fresh.
+
+9. **Report status.** After committing, state:
    - which subsection was completed and committed;
    - whether the review was clean or changes were applied (summarise);
    - validation results;

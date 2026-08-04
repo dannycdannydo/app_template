@@ -22,13 +22,11 @@ You are the **reviewer**. You did not write this code. Your job is to find probl
 
 ## Instructions
 
-1. Find the implementer's handoff summary (recent conversation or session output). If unavailable, reconstruct from `git status` and `git diff`. Identify:
-   - which §6 subsection was being implemented;
-   - **which blueprint sections the implementer says they followed** — you will read exactly those.
+1. Read `.handoff/implementation.md`. This is the implementer's handoff summary — it tells you which §6 subsection was implemented and **which blueprint sections they followed**. If the file does not exist, stop and tell the user to run `01-implement-next` first.
 
 2. Read the relevant §6 subsection in the scope file to confirm which checkbox items this work was supposed to complete.
 
-3. Read **only** the blueprint sections the implementer referenced. These define the conventions you are checking against.
+3. Read **only** the blueprint sections the implementer referenced in the handoff file. These define the conventions you are checking against.
 
 4. Review the changes against these lenses, in priority order:
 
@@ -49,7 +47,7 @@ You are the **reviewer**. You did not write this code. Your job is to find probl
    - `make typecheck`
    - `make test`
 
-6. Write a structured review:
+6. **Write the review to `.handoff/review.md`.** This file is what the next step reads — they will not see your chat output. Use this format:
 
    ```
    VERDICT: APPROVED  |  CHANGES REQUESTED
@@ -75,8 +73,8 @@ You are the **reviewer**. You did not write this code. Your job is to find probl
    - (any incomplete, with reason)
    ```
 
-7. **Do not commit. Do not edit the scope file.** Your output is the review.
+7. **Do not commit. Do not edit the scope file.** Your output is `.handoff/review.md`. If the verdict is APPROVED with no must-fix or should-fix items, note this clearly so the user can go straight to `03-apply-and-commit` for a quick commit.
 
 ## Done means
 
-A structured review with a clear verdict is written. If APPROVED with no must-fix or should-fix items, the user can go straight to `03-apply-and-commit` to check off and commit directly. If CHANGES REQUESTED, the implementer applies fixes first.
+`.handoff/review.md` has been written with a clear verdict. The work is ready for `03-apply-and-commit`.

@@ -28,8 +28,22 @@ The audit is **not** part of the daily loop. It reads the universal rule section
 
 1. Open a fresh agent session (or continue an existing one).
 2. Paste the prompt for the role you need.
-3. The agent reads the project documents, finds its place, and acts.
+3. The agent reads the project documents and handoff files, finds its place, and acts.
 4. When the loop completes one task, start again with `01` for the next.
+
+## How handoffs work between sessions
+
+Each step writes its output to a file in `.handoff/` (gitignored), so the next step can pick it up in a **different session**. Chat output does not persist — only files do.
+
+```
+Prompt 01 writes  →  .handoff/implementation.md
+Prompt 02 reads       .handoff/implementation.md
+Prompt 02 writes  →  .handoff/review.md
+Prompt 03 reads       .handoff/review.md
+Prompt 03 clears  →  both files deleted after commit
+```
+
+If `.handoff/implementation.md` exists, a review is waiting to happen. If `.handoff/review.md` exists, an apply-and-commit is waiting to happen. Prompt 03 clears both after committing so the next cycle starts clean.
 
 ## Token economy — how context is managed
 

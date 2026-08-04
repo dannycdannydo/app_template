@@ -1,0 +1,54 @@
+# ---- Environment ----
+.env
+.env.*
+!.env.example
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.pyright/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---- Node / frontend ----
+node_modules/
+frontend/dist/
+frontend/coverage/
+*.tsbuildinfo
+.pnpm-store/
+
+# ---- Editor / IDE ----
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.~lock*
+
+# ---- OS ----
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ---- Logs ----
+*.log
+logs/
+
+# ---- Local development ----
+*.pid
+*.seed
+.docker/
+data/
+
+# ---- Transient handoff files (implement-review-commit loop) ----
+.handoff/
