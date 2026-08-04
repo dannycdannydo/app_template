@@ -104,21 +104,21 @@ Check items off as they are completed. Keep one task `in_progress` at a time whe
 ## 6.1 Repository & Governance
 
 - [x] Initialise git repository
-- [ ] Root `.gitignore` (Python, Node, env, editor, OS, build output)
-- [ ] `.editorconfig`
-- [ ] `README.md` (overview, prerequisites, quick start, command reference)
-- [ ] `AGENTS.md` (mandatory agent rules from blueprint §33)
-- [ ] `ARCHITECTURE.md` (condensed system shape and request flow)
-- [ ] `API_CONVENTIONS.md` (REST, versioning, pagination, error format)
-- [ ] `SECURITY.md` (baseline controls and responsible disclosure)
-- [ ] `CONTRIBUTING.md` (workflow, commit style, review requirements)
-- [ ] `docs/decisions/0001-use-workos.md`
-- [ ] `docs/decisions/0002-use-sqlalchemy-and-pydantic.md`
-- [ ] `docs/decisions/0003-use-vue.md`
-- [ ] `docs/decisions/0004-use-dramatiq.md`
-- [ ] `docs/decisions/0005-use-shadcn-vue.md`
-- [ ] `docs/decisions/0006-provider-neutral-storage.md`
-- [ ] `docs/decisions/0007-two-deployment-profiles.md`
+- [x] Root `.gitignore` (Python, Node, env, editor, OS, build output)
+- [x] `.editorconfig`
+- [x] `README.md` (overview, prerequisites, quick start, command reference)
+- [x] `AGENTS.md` (mandatory agent rules from blueprint §33)
+- [x] `ARCHITECTURE.md` (condensed system shape and request flow)
+- [x] `API_CONVENTIONS.md` (REST, versioning, pagination, error format)
+- [x] `SECURITY.md` (baseline controls and responsible disclosure)
+- [x] `CONTRIBUTING.md` (workflow, commit style, review requirements)
+- [x] `docs/decisions/0001-use-workos.md`
+- [x] `docs/decisions/0002-use-sqlalchemy-and-pydantic.md`
+- [x] `docs/decisions/0003-use-vue.md`
+- [x] `docs/decisions/0004-use-dramatiq.md`
+- [x] `docs/decisions/0005-use-shadcn-vue.md`
+- [x] `docs/decisions/0006-provider-neutral-storage.md`
+- [x] `docs/decisions/0007-two-deployment-profiles.md`
 
 ## 6.2 Backend Project & Tooling
 

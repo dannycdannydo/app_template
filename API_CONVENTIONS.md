@@ -1,0 +1,131 @@
+# API Conventions
+
+REST, JSON, OpenAPI, versioned under `/api/v1`. GraphQL is not part of the default architecture.
+
+## Style
+
+- REST over JSON.
+- OpenAPI is the source of truth for the HTTP surface; the frontend client is generated from it (see `frontend/src/api/`).
+- Endpoints are grouped by domain under `/api/v1`.
+
+## Versioning
+
+The bundled frontend and backend may evolve together.
+
+Backward compatibility is required for:
+
+- external clients;
+- published APIs;
+- integrations;
+- webhooks;
+- retained domain events.
+
+New API versions are introduced only for genuine breaking contracts that must coexist. There is no per-endpoint ad-hoc versioning.
+
+## Resources and verbs
+
+- Collection endpoints use the plural noun: `GET /api/v1/properties`, `POST /api/v1/properties`.
+- Item endpoints use the singular with an identifier: `GET /api/v1/properties/{id}`, `PATCH /api/v1/properties/{id}`, `DELETE /api/v1/properties/{id}`.
+- Nested resources are modelled explicitly where the hierarchy is real, not for convenience.
+- Actions that do not fit resource verbs use explicit sub-resources or read-only search endpoints.
+
+## Pagination
+
+Default format:
+
+```text
+?page=1&page_size=50
+```
+
+Response:
+
+```json
+{
+  "items": [],
+  "page": 1,
+  "page_size": 50,
+  "total": 0
+}
+```
+
+Use cursor pagination only where justified (e.g. high-volume append-only streams).
+
+## Filtering and sorting
+
+```text
+?search=manchester
+&status=active
+&sort=-created_at
+&page=1
+&page_size=50
+```
+
+- Only approved filter and sort fields are allowed; unknown fields are rejected.
+- Prefix a field with `-` to sort descending.
+- `search` is a domain-defined text search.
+
+## Search endpoints
+
+Use domain-specific endpoints. For large structured searches, use read-only POST endpoints:
+
+```text
+POST /api/v1/properties/search
+```
+
+## Errors
+
+One structured error format for the whole API:
+
+```json
+{
+  "code": "property_not_found",
+  "message": "The property could not be found.",
+  "details": null,
+  "request_id": "..."
+}
+```
+
+Validation example:
+
+```json
+{
+  "code": "validation_error",
+  "message": "The request contains invalid data.",
+  "details": [
+    {
+      "field": "asking_price",
+      "message": "Value must be greater than or equal to zero."
+    }
+  ],
+  "request_id": "..."
+}
+```
+
+### Exception rules
+
+Services raise domain exceptions; central FastAPI exception handlers translate them to HTTP responses. Typical mappings:
+
+| Exception | HTTP status |
+| --- | --- |
+| `NotFoundError` | 404 |
+| `PermissionDenied` | 403 |
+| `ConflictError` | 409 |
+| `ValidationError` | 422 |
+| `RateLimitExceeded` | 429 |
+
+- Error messages must not leak internals, stack traces, or secrets.
+- Every error response includes the `request_id` from the request context to correlate with logs.
+
+## Request IDs and logging
+
+- Every request carries a `request_id`, generated at the edge and propagated through logs and error responses.
+- Structured JSON logging is used; see `ARCHITECTURE.md` and the blueprint §28.
+
+## Response schemas
+
+- Every endpoint declares an explicit response schema; nothing is returned as an ad-hoc dict.
+- ORM models are never API request models (blueprint §7).
+
+## Authn/authz
+
+Authentication and authorisation arrive in v0.2 (WorkOS). All `/api/v1` routes except public health endpoints are expected to require authenticated, organisation-scoped context in the final shape; authorisation is default-deny and tenant-scoped.
