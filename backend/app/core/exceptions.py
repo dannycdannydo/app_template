@@ -68,6 +68,12 @@ class NotFoundError(APIError):
     default_message = "The requested resource could not be found."
 
 
+class BadRequestError(APIError):
+    status_code = 400
+    code = "bad_request"
+    default_message = "The request is invalid."
+
+
 class UnauthorizedError(APIError):
     status_code = 401
     code = "unauthorized"

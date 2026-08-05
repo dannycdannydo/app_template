@@ -64,6 +64,26 @@ export interface paths {
     patch?: never
     trace?: never
   }
+  '/api/v1/organisations': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    /**
+     * Create Organisation Endpoint
+     * @description Create an organisation; the creator becomes its owner.
+     */
+    post: operations['create_organisation_endpoint_api_v1_organisations_post']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
 }
 export type webhooks = Record<string, never>
 export interface components {
@@ -155,6 +175,42 @@ export interface components {
      * @enum {string}
      */
     MembershipStatus: 'active' | 'invited' | 'suspended' | 'left'
+    /**
+     * OrganisationCreate
+     * @description Request payload for creating an organisation.
+     *
+     *     Only the name is client-supplied. Unknown fields — including any identity
+     *     fields a client might try to smuggle in, such as an owner id — are
+     *     rejected outright so server-controlled values can never come from a
+     *     request body.
+     */
+    OrganisationCreate: {
+      /** Name */
+      name: string
+    }
+    /**
+     * OrganisationResponse
+     * @description Response payload for an organisation.
+     */
+    OrganisationResponse: {
+      /**
+       * Id
+       * Format: uuid
+       */
+      id: string
+      /** Name */
+      name: string
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string
+      /**
+       * Updated At
+       * Format: date-time
+       */
+      updated_at: string
+    }
     /**
      * UserListItem
      * @description A user in list contexts; never the full identity record.
@@ -266,6 +322,41 @@ export interface operations {
         }
         content: {
           'application/json': components['schemas']['MeResponse']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  create_organisation_endpoint_api_v1_organisations_post: {
+    parameters: {
+      query?: never
+      header?: {
+        authorization?: string | null
+      }
+      path?: never
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['OrganisationCreate']
+      }
+    }
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['OrganisationResponse']
         }
       }
       /** @description Validation Error */

@@ -16,7 +16,15 @@ from app.modules.organisations.models import MembershipStatus
 
 
 class OrganisationCreate(BaseModel):
-    """Request payload for creating an organisation."""
+    """Request payload for creating an organisation.
+
+    Only the name is client-supplied. Unknown fields — including any identity
+    fields a client might try to smuggle in, such as an owner id — are
+    rejected outright so server-controlled values can never come from a
+    request body.
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
     name: str = Field(min_length=1, max_length=255)
 

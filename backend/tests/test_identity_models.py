@@ -12,7 +12,7 @@ from typing import cast
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy import CheckConstraint, Table, UniqueConstraint
+from sqlalchemy import CheckConstraint, Enum, Table, UniqueConstraint
 
 from app.db.base import Base
 from app.modules.organisations.models import (
@@ -106,6 +106,12 @@ def test_membership_status_enum_values() -> None:
     assert MembershipStatus.INVITED.value == "invited"
     assert MembershipStatus.SUSPENDED.value == "suspended"
     assert MembershipStatus.LEFT.value == "left"
+
+
+def test_membership_status_persists_values_not_names() -> None:
+    """The ORM must store "active", not "ACTIVE", to satisfy the check constraint."""
+    status_type = cast(Enum, _table_of(OrganisationMembership).c.status.type)
+    assert list(status_type.enums) == ["active", "invited", "suspended", "left"]
 
 
 def test_organisation_create_validates_name() -> None:

@@ -136,11 +136,11 @@ Depends on §6.1 (users table). Centralises session validation per the guide's b
 
 Depends on §6.2. Resolves the validated identity to an organisation context for every protected request.
 
-- [ ] `get_current_membership` dependency — resolves `X-Org-Id` against the current user's memberships
-- [ ] Standard errors for context failures: missing token (`401`), missing/malformed `X-Org-Id` (`400`), not a member (`403`)
-- [ ] `POST /api/v1/organisations` — creates an organisation and assigns the creator the `owner` role (transactional)
-- [ ] Organisation ID derived from validated context, never from request bodies
-- [ ] Update `API_CONVENTIONS.md` authn/authz section with the real conventions (headers, codes, default deny)
+- [x] `get_current_membership` dependency — resolves `X-Org-Id` against the current user's memberships
+- [x] Standard errors for context failures: missing token (`401`), missing/malformed `X-Org-Id` (`400`), not a member (`403`)
+- [x] `POST /api/v1/organisations` — creates an organisation and assigns the creator the `owner` role (transactional)
+- [x] Organisation ID derived from validated context, never from request bodies
+- [x] Update `API_CONVENTIONS.md` authn/authz section with the real conventions (headers, codes, default deny)
 
 ## 6.4 Roles & Permissions
 

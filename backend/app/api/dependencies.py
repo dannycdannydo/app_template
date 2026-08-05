@@ -1,20 +1,23 @@
 """Shared FastAPI dependencies (blueprint §5, §6, §8).
 
 Routers stay thin and receive their dependencies here: the database session,
-the current request ID, and the authenticated user resolved from a validated
-WorkOS session token.
+the current request ID, the authenticated user resolved from a validated
+WorkOS session token, and the caller's organisation membership resolved from
+the ``X-Org-Id`` header (Scope §6.3).
 """
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import AsyncIterator
 from typing import Annotated
 
 import structlog
 from fastapi import Depends, Header
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import PermissionDenied, UnauthorizedError
+from app.core.exceptions import BadRequestError, PermissionDenied, UnauthorizedError
 from app.core.logging import current_request_id
 from app.core.security import (
     InvalidSessionError,
@@ -24,6 +27,7 @@ from app.core.security import (
     get_user_profile_client,
 )
 from app.db.session import async_session_factory
+from app.modules.organisations.models import MembershipStatus, OrganisationMembership
 from app.modules.users.models import User
 from app.modules.users.service import get_or_provision_user
 
@@ -90,3 +94,55 @@ async def get_current_user(
             message="Your account is disabled.",
         )
     return user
+
+
+def _org_context_id(x_org_id: str | None) -> uuid.UUID:
+    """Parse the ``X-Org-Id`` header; missing or malformed values are 400.
+
+    The organisation id always comes from this validated header context and
+    never from a request body.
+    """
+    if not x_org_id:
+        raise BadRequestError(
+            code="org_context_required",
+            message="The X-Org-Id header is required.",
+        )
+    try:
+        return uuid.UUID(x_org_id)
+    except ValueError as exc:
+        raise BadRequestError(
+            code="invalid_org_id",
+            message="The X-Org-Id header must be a valid organisation id.",
+        ) from exc
+
+
+async def get_current_membership(
+    session: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+    x_org_id: Annotated[str | None, Header()] = None,
+) -> OrganisationMembership:
+    """Resolve the ``X-Org-Id`` header to the caller's active membership.
+
+    Missing token → 401 (from ``get_current_user``); missing or malformed
+    ``X-Org-Id`` → 400; an organisation the user does not belong to, or a
+    non-active membership → 403. Only active memberships establish an
+    organisation context (Scope §6.3).
+    """
+    org_id = _org_context_id(x_org_id)
+    membership = await session.scalar(
+        select(OrganisationMembership).where(
+            OrganisationMembership.user_id == user.id,
+            OrganisationMembership.organisation_id == org_id,
+        )
+    )
+    if membership is None or membership.status != MembershipStatus.ACTIVE:
+        logger.warning(
+            "membership_context_rejected",
+            user_id=str(user.id),
+            organisation_id=str(org_id),
+        )
+        raise PermissionDenied(
+            code="not_a_member",
+            message="You are not an active member of this organisation.",
+        )
+    return membership

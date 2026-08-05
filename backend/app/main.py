@@ -26,6 +26,7 @@ from app.api.health import router as health_router
 from app.core.config import get_settings
 from app.core.exceptions import APIError, ErrorDetail, ErrorResponse
 from app.core.logging import configure_logging, current_request_id
+from app.modules.organisations.router import router as organisations_router
 from app.modules.users.router import router as users_router
 
 logger = structlog.get_logger()
@@ -162,6 +163,7 @@ def create_app() -> FastAPI:
     _register_middleware(app)
     app.include_router(health_router)
     app.include_router(users_router)
+    app.include_router(organisations_router)
     return app
 
 

@@ -31,6 +31,11 @@ class MembershipStatus(enum.StrEnum):
     LEFT = "left"
 
 
+def _membership_status_values(enum_class: type[MembershipStatus]) -> list[str]:
+    """Return the values a membership-status column stores, not the names."""
+    return [member.value for member in enum_class]
+
+
 class Organisation(Base, TimestampMixin):
     """A tenant boundary; all tenant-scoped data hangs off this table."""
 
@@ -64,7 +69,16 @@ class OrganisationMembership(Base, TimestampMixin):
         ForeignKey("organisations.id"), index=True, nullable=False
     )
     status: Mapped[MembershipStatus] = mapped_column(
-        Enum(MembershipStatus, name="membership_status", native_enum=False, length=16),
+        Enum(
+            MembershipStatus,
+            name="membership_status",
+            native_enum=False,
+            length=16,
+            # Persist the enum values ("active", ...) so rows match the check
+            # constraint and server default; SQLAlchemy defaults to names
+            # ("ACTIVE") for Python enums, which the constraint rejects.
+            values_callable=_membership_status_values,
+        ),
         nullable=False,
         default=MembershipStatus.ACTIVE,
         server_default=MembershipStatus.ACTIVE.value,
