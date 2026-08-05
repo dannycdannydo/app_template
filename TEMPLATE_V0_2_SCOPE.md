@@ -167,12 +167,12 @@ Depends on §6.3 and §6.4. Demonstrates the full module pattern from blueprint 
 
 Depends on §6.5 (exercises the module). Closes the release.
 
-- [ ] Mandatory security tests (blueprint §31): unauthenticated rejected; invalid session rejected; cross-organisation access denied; viewer writes denied; disabled users denied; stack traces not exposed
-- [ ] Docs updated: `SECURITY.md`, `API_CONVENTIONS.md`, `AGENTS.md` (auth/permission/tenant rules), `ARCHITECTURE.md` (identity flow, request context)
-- [ ] `.env.example` documents every new variable (WorkOS config)
-- [ ] `make check` green from a clean checkout; generated-client drift clean; CI green
-- [ ] Human review recorded for authentication, permission-model and tenant-isolation changes (blueprint §33)
-- [ ] Architecture audit (`prompts/04-architecture-audit.md`) clean — no CRITICAL or MAJOR findings
+- [x] Mandatory security tests (blueprint §31): unauthenticated rejected; invalid session rejected; cross-organisation access denied; viewer writes denied; disabled users denied; stack traces not exposed
+- [x] Docs updated: `SECURITY.md`, `API_CONVENTIONS.md`, `AGENTS.md` (auth/permission/tenant rules), `ARCHITECTURE.md` (identity flow, request context)
+- [x] `.env.example` documents every new variable (WorkOS config)
+- [x] `make check` green from a clean checkout; generated-client drift clean; CI green
+- [x] Human review recorded for authentication, permission-model and tenant-isolation changes (blueprint §33)
+- [x] Architecture audit (`prompts/04-architecture-audit.md`) clean — no CRITICAL or MAJOR findings
 
 ---
 
