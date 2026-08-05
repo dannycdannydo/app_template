@@ -182,15 +182,15 @@ Local development follows **ADR-0008** (native app code + containerised infrastr
 
 ## 6.8 Makefile
 
-- [ ] `make dev`
-- [ ] `make dev-docker`
-- [ ] `make migrate`
-- [ ] `make lint`
-- [ ] `make typecheck`
-- [ ] `make test`
-- [ ] `make format`
-- [ ] `make generate-client`
-- [ ] `make check`
+- [x] `make dev`
+- [x] `make dev-docker`
+- [x] `make migrate`
+- [x] `make lint`
+- [x] `make typecheck`
+- [x] `make test`
+- [x] `make format`
+- [x] `make generate-client`
+- [x] `make check`
 
 ## 6.9 CI
 
