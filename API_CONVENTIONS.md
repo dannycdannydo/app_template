@@ -128,4 +128,28 @@ Services raise domain exceptions; central FastAPI exception handlers translate t
 
 ## Authn/authz
 
-Authentication and authorisation arrive in v0.2 (WorkOS). All `/api/v1` routes except public health endpoints are expected to require authenticated, organisation-scoped context in the final shape; authorisation is default-deny and tenant-scoped.
+WorkOS owns login and sessions; the application resolves a validated identity to an internal user and an organisation context (v0.2). Conventions:
+
+### Authentication
+
+- Every `/api/v1` route except `/health` and `/ready` requires a Bearer token in the `Authorization` header: `Authorization: Bearer <session-token>`.
+- Missing or malformed token → `401` with code `invalid_token`; a token that fails signature/issuer/audience/expiry validation → `401` with code `invalid_session`.
+- A disabled user is rejected with `403` and code `user_disabled` even with an otherwise valid session.
+- Identity fields are never trusted from the client: email/name come from the validated WorkOS profile, and request bodies that attempt to smuggle identity fields are rejected outright (`extra` fields are forbidden on request schemas).
+
+### Organisation context
+
+- Tenant-scoped endpoints additionally require the `X-Org-Id` header, which carries the organisation the caller acts within.
+- Missing `X-Org-Id` → `400` with code `org_context_required`; malformed (not a valid UUID) → `400` with code `invalid_org_id`.
+- An organisation the caller is not an active member of → `403` with code `not_a_member`.
+- The organisation id is always derived from this validated header context, never from a request body.
+- Two bootstrap endpoints are intentionally identity-scoped and require only the Bearer token, because the caller cannot yet be a member of any organisation:
+  - `GET /api/v1/me` — returns the current user and their memberships (used to pick an organisation).
+  - `POST /api/v1/organisations` — creates an organisation; the creator's membership is assigned the `owner` role.
+
+### Authorisation
+
+- Default deny: a caller may act only through permissions granted to the roles on their memberships.
+- Backend permissions are authoritative; frontend visibility is only a UX aid.
+- Cross-organisation access must never leak: resources outside the caller's organisation are treated as not found where the resource model requires it.
+- Every write to a tenant-scoped resource is permission-gated; the permission model lands with the roles and permissions work unit (Scope §6.4).

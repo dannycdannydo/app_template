@@ -18,3 +18,11 @@ class Base(DeclarativeBase):
     """Root class for every ORM model."""
 
     metadata = MetaData(naming_convention=NAMING_CONVENTION)
+
+
+# Model modules are imported here, after Base is defined, so their tables are
+# registered on Base.metadata for Alembic autogenerate. They cannot be imported
+# at the top of this file: every model subclasses Base.
+import app.modules.organisations.models  # pyright: ignore[reportUnusedImport]
+import app.modules.permissions.models  # pyright: ignore[reportUnusedImport]
+import app.modules.users.models  # pyright: ignore[reportUnusedImport]

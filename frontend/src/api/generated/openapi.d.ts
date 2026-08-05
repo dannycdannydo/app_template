@@ -44,6 +44,46 @@ export interface paths {
     patch?: never
     trace?: never
   }
+  '/api/v1/me': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /**
+     * Me
+     * @description Return the current user with their memberships and roles.
+     */
+    get: operations['me_api_v1_me_get']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/api/v1/organisations': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    /**
+     * Create Organisation Endpoint
+     * @description Create an organisation; the creator becomes its owner.
+     */
+    post: operations['create_organisation_endpoint_api_v1_organisations_post']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
 }
 export type webhooks = Record<string, never>
 export interface components {
@@ -75,6 +115,11 @@ export interface components {
        */
       request_id: string
     }
+    /** HTTPValidationError */
+    HTTPValidationError: {
+      /** Detail */
+      detail?: components['schemas']['ValidationError'][]
+    }
     /**
      * HealthResponse
      * @description Payload returned by the health endpoints.
@@ -85,6 +130,121 @@ export interface components {
        * @default ok
        */
       status: string
+    }
+    /**
+     * MeResponse
+     * @description The current user with their memberships and role codes.
+     */
+    MeResponse: {
+      user: components['schemas']['UserListItem']
+      /** Memberships */
+      memberships: components['schemas']['MembershipListItem'][]
+      /** Roles */
+      roles: string[]
+    }
+    /**
+     * MembershipListItem
+     * @description One membership in a list context, e.g. the current user's memberships.
+     */
+    MembershipListItem: {
+      /**
+       * Id
+       * Format: uuid
+       */
+      id: string
+      /**
+       * Organisation Id
+       * Format: uuid
+       */
+      organisation_id: string
+      /**
+       * User Id
+       * Format: uuid
+       */
+      user_id: string
+      status: components['schemas']['MembershipStatus']
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string
+    }
+    /**
+     * MembershipStatus
+     * @description Lifecycle state of a user's membership in an organisation.
+     * @enum {string}
+     */
+    MembershipStatus: 'active' | 'invited' | 'suspended' | 'left'
+    /**
+     * OrganisationCreate
+     * @description Request payload for creating an organisation.
+     *
+     *     Only the name is client-supplied. Unknown fields — including any identity
+     *     fields a client might try to smuggle in, such as an owner id — are
+     *     rejected outright so server-controlled values can never come from a
+     *     request body.
+     */
+    OrganisationCreate: {
+      /** Name */
+      name: string
+    }
+    /**
+     * OrganisationResponse
+     * @description Response payload for an organisation.
+     */
+    OrganisationResponse: {
+      /**
+       * Id
+       * Format: uuid
+       */
+      id: string
+      /** Name */
+      name: string
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string
+      /**
+       * Updated At
+       * Format: date-time
+       */
+      updated_at: string
+    }
+    /**
+     * UserListItem
+     * @description A user in list contexts; never the full identity record.
+     */
+    UserListItem: {
+      /**
+       * Id
+       * Format: uuid
+       */
+      id: string
+      /** Email */
+      email: string
+      /** Name */
+      name: string
+      /** Is Active */
+      is_active: boolean
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string
+    }
+    /** ValidationError */
+    ValidationError: {
+      /** Location */
+      loc: (string | number)[]
+      /** Message */
+      msg: string
+      /** Error Type */
+      type: string
+      /** Input */
+      input?: unknown
+      /** Context */
+      ctx?: Record<string, never>
     }
   }
   responses: never
@@ -140,6 +300,72 @@ export interface operations {
         }
         content: {
           'application/json': components['schemas']['ErrorResponse']
+        }
+      }
+    }
+  }
+  me_api_v1_me_get: {
+    parameters: {
+      query?: never
+      header?: {
+        authorization?: string | null
+      }
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['MeResponse']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  create_organisation_endpoint_api_v1_organisations_post: {
+    parameters: {
+      query?: never
+      header?: {
+        authorization?: string | null
+      }
+      path?: never
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['OrganisationCreate']
+      }
+    }
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['OrganisationResponse']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
         }
       }
     }
