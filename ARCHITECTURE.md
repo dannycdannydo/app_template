@@ -62,6 +62,41 @@ PostgreSQL
 - **Services** own business rules, permission enforcement, transaction boundaries, orchestration, domain state changes, and audit/event creation.
 - **SQLAlchemy** may be used directly inside services for simple operations; reusable or complex queries live in `queries.py`.
 
+## Identity flow and request context (v0.2)
+
+WorkOS owns login and sessions; the application owns the internal user record, organisation membership, roles, and permissions. Every protected request resolves through the shared dependencies in `app/api/dependencies.py`:
+
+```text
+Authorization: Bearer <session-token>
+        │
+        ▼
+validate signature / issuer / audience / expiry      → 401 invalid_session
+        │
+        ▼
+map workos_user_id to internal user (provision on first login)
+        │   (email/name from the WorkOS profile, never the client)
+        ▼
+user disabled?                                         → 403 user_disabled
+        │
+        ▼
+X-Org-Id header (tenant-scoped routes only)
+        │   missing / malformed                        → 400
+        ▼
+active membership for (user, org)?                     → 403 not_a_member
+        │
+        ▼
+require_permission(code): code in the membership's
+role bundles? (default deny)                           → 403 permission_denied
+        │
+        ▼
+service call, org-scoped queries (queries.py) — resources outside
+the caller's organisation behave as not found (404)
+```
+
+- `GET /api/v1/me` and `POST /api/v1/organisations` are the two bootstrap endpoints: they require only a valid session, because the caller is not yet a member of any organisation. Every other `/api/v1` route requires both the Bearer token and the `X-Org-Id` header.
+- The organisation id is always derived from the validated header context, never from a request body; request schemas use `extra="forbid"` so identity fields cannot be smuggled in.
+- The security properties of this flow are enforced by the mandatory reusable security suite in `backend/tests/test_security_suite.py` (blueprint §31), which parametrises over the whole protected surface.
+
 ## Frontend structure
 
 Vue 3 + TypeScript SPA. Directory layout, conventions, and state-management split follow blueprint §14; UI follows the design system in blueprint §16. API types are generated, never hand-written (blueprint §15).

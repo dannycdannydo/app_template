@@ -1,12 +1,12 @@
 # Security
 
-The practical baseline is **OWASP ASVS Level 2**. This file records the controls the template enforces and the expectations for applications built from it. Deferred capabilities (auth, storage, jobs, audit) arrive in later template releases; the controls below state the target for the final system.
+The practical baseline is **OWASP ASVS Level 2**. This file records the controls the template enforces and the expectations for applications built from it. Deferred capabilities (storage, jobs, audit) arrive in later template releases; the controls below state the target for the final system.
 
 ## Baseline controls
 
-- WorkOS session validation for all authenticated routes.
-- Default-deny authorisation; permissions are explicit, never implicit.
-- Tenant-scoped queries; cross-tenant access is a bug.
+- WorkOS session validation for all authenticated routes (v0.2: `app/core/security.py`, enforced by the `get_current_user` dependency).
+- Default-deny authorisation; permissions are explicit, never implicit (v0.2: `require_permission`, Scope §6.4).
+- Tenant-scoped queries; cross-tenant access is a bug (v0.2: `X-Org-Id` context, org-scoped queries in `queries.py`).
 - Explicit CORS allowlist, no wildcard origins in production.
 - CSRF protection where cookie authentication requires it.
 - Input limits on request bodies, string lengths, and upload sizes.
@@ -15,13 +15,36 @@ The practical baseline is **OWASP ASVS Level 2**. This file records the controls
 - Private object storage; no public buckets.
 - Upload scanning hook on all uploaded content.
 - Restricted external URL fetching (SSRF controls, see below).
-- Webhook signature verification for inbound webhooks.
+- Webhook signature verification for inbound webhooks (v0.2: `verify_webhook_signature` in `app/core/security.py`; no consumer until v0.5).
 - Non-public PostgreSQL and Redis; no exposed database ports.
 - Least-privilege database credentials per role.
 - Encrypted backups; off-site copies.
 - Secret scanning, dependency scanning, and container scanning in CI.
 - Non-root containers.
 - Safe error messages: the standard API error format never leaks internals, stack traces, or secrets (see `API_CONVENTIONS.md`).
+
+## Identity, tenancy and permissions (v0.2)
+
+The identity and tenancy core enforces the following rules; each is covered by a mandatory security test (see below):
+
+- **Session validation**: token signature, issuer, audience and expiry are validated centrally; a disabled user is blocked with `403` even with a valid session.
+- **Identity fields are never trusted from the client**: email/name come from the validated WorkOS profile; request schemas use `extra="forbid"` so smuggled identity fields are rejected outright.
+- **Organisation context**: tenant-scoped routes require the `X-Org-Id` header; the organisation id is always derived from this validated context, never from a request body. Missing/malformed header is a `400`, a non-membership is a `403`, and resources outside the caller's organisation are treated as not found (`404`) where the resource model requires it.
+- **Default deny**: a caller may act only through permissions granted to the roles on their memberships; a code granted to no role is denied with `403`.
+- **No universal bypass**: cross-organisation support or impersonation must be explicit, limited, visible and fully audited.
+
+## Mandatory reusable security test suite
+
+Blueprint §31 requires a reusable security test set that runs in CI. `backend/tests/test_security_suite.py` implements it for the whole protected API surface:
+
+- unauthenticated requests rejected (`401`);
+- invalid sessions rejected — garbage tokens and tokens with tampered signatures, wrong issuer, wrong audience/client id, or expired expiry (`401`);
+- cross-organisation access denied (`403`);
+- viewer writes denied (`403`);
+- disabled users denied (`403`);
+- stack traces not exposed — every error response is the standard envelope and never leaks tracebacks or internals.
+
+The suite is table-driven: `PROTECTED_ROUTES` in that file lists every protected route once, and a completeness guard test fails when a new `/api/v1` route is registered without being added to the table. **Adding an endpoint to the table is a mandatory part of adding the endpoint itself.** Webhook-signature rejection is covered in `backend/tests/test_security.py`; oversized-upload rejection is not applicable until the storage capability lands (v0.4).
 
 ## File security
 
@@ -68,4 +91,4 @@ If you find a security issue, report it privately to the maintainers before disc
 
 ## Deferred controls
 
-The following controls land with their owning capabilities in later releases and must be present before v1.0: WorkOS session validation (v0.2), tenant isolation enforcement (v0.2), storage/file controls (v0.4), audit logging (v0.5), and rate limiting at the edge for production profiles.
+The following controls land with their owning capabilities in later releases and must be present before v1.0: storage/file controls (v0.4), audit logging (v0.5), and rate limiting at the edge for production profiles.
