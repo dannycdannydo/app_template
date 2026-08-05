@@ -25,4 +25,5 @@ class Base(DeclarativeBase):
 # at the top of this file: every model subclasses Base.
 import app.modules.organisations.models  # pyright: ignore[reportUnusedImport]
 import app.modules.permissions.models  # pyright: ignore[reportUnusedImport]
+import app.modules.records.models  # pyright: ignore[reportUnusedImport]
 import app.modules.users.models  # pyright: ignore[reportUnusedImport]
