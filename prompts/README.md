@@ -7,11 +7,15 @@ Standardised prompts for driving the stage-by-stage build of the application sta
 Work proceeds through a repeating cycle:
 
 ```
-01-implement-next  →  02-review  →  03-apply-and-commit  →  01-implement-next ...
+00-scope-next → 00b-scope-review → 01-implement-next → 02-review → 03-apply-and-commit → 01-implement-next ...
 ```
+
+Prompt 00 runs **once per release** to draft the next scope file (`TEMPLATE_V0_N_SCOPE.md`) from the implementation guide; 00b reviews that draft before it is committed. The daily loop (01–03) then executes each subsection of the new scope file.
 
 | Prompt | When to use | Role | Outcome |
 | --- | --- | --- | --- |
+| `00-scope-next.md` | Once per release, before the daily loop | Planner | Next release's `TEMPLATE_V0_N_SCOPE.md` drafted and ready for review |
+| `00b-scope-review.md` | After `00-scope-next` | Reviewer | Scope plan reviewed; approved plan committed, or fixes requested |
 | `01-implement-next.md` | Starting a new chunk of work | Implementer | Next unchecked task is built, tested, and ready for review |
 | `02-review.md` | After implementation | Reviewer | Structured review with approve / request-changes verdict |
 | `03-apply-and-commit.md` | After review | Implementer | Review feedback applied, task checked off, committed |
@@ -27,7 +31,7 @@ Work proceeds through a repeating cycle:
 CI runs the full quality gate on every push to `main` and on every pull request (see `.github/workflows/ci.yml`); pushes to other branches trigger nothing. Work each scope subsection on its own branch and merge through a reviewed PR so `main` only changes via CI-gated merges:
 
 ```
-git checkout -b feature/<unit>     # start of prompt 01
+git checkout -b feature/<unit>     # start of prompt 01 (or prompt 00 for the scope file)
 … implement → review → apply-and-commit …
 git push -u origin feature/<unit>  # after commit; no CI run on the branch
 open PR to main → CI runs on the PR → merge (single CI run on main)
@@ -49,6 +53,9 @@ The audit is **not** part of the daily loop. It reads the universal rule section
 Each step writes its output to a file in `.handoff/` (gitignored), so the next step can pick it up in a **different session**. Chat output does not persist — only files do.
 
 ```
+Prompt 00 writes  →  .handoff/scope.md
+Prompt 00b reads      .handoff/scope.md
+Prompt 00b writes →  .handoff/scope_review.md   (cleared on approval)
 Prompt 01 writes  →  .handoff/implementation.md
 Prompt 02 reads       .handoff/implementation.md
 Prompt 02 writes  →  .handoff/review.md
@@ -56,7 +63,7 @@ Prompt 03 reads       .handoff/review.md
 Prompt 03 clears  →  both files deleted after commit
 ```
 
-If `.handoff/implementation.md` exists, a review is waiting to happen. If `.handoff/review.md` exists, an apply-and-commit is waiting to happen. Prompt 03 clears both after committing so the next cycle starts clean.
+If `.handoff/scope.md` exists, a scope-plan review is waiting to happen (00b). If `.handoff/scope_review.md` exists, the scope plan has been reviewed and the verdict decides whether to commit or re-run 00. If `.handoff/implementation.md` exists, a review is waiting to happen. If `.handoff/review.md` exists, an apply-and-commit is waiting to happen. Prompt 03 clears both after committing so the next cycle starts clean.
 
 ## Token economy — how context is managed
 
@@ -67,19 +74,19 @@ The architecture blueprint (`Internal_Custom_Application_Starter_Architecture_v2
 - **Prompt 03 (apply-and-commit):** Does **not** read the blueprint or implementation guide at all. It is a mechanical step — apply fixes, validate, tick boxes, commit. It needs only the review feedback and the scope checklist.
 - **Prompt 04 (audit):** Reads four cross-cutting rule sections of the blueprint (§33, §10, §12, §13) regardless of task, because it checks the whole codebase against universal rules. These sections are compact — together they are under 150 lines.
 
-The `IMPLEMENTATION_GUIDE.md` is referenced in prompt 01 as optional broader context. It is not required for day-to-day work.
+The `IMPLEMENTATION_GUIDE.md` is referenced in prompt 01 as optional broader context and in prompt 00 as the authoritative source for the next release's capability list. It is not required for day-to-day review and apply steps.
 
 ## Project documents
 
-Three documents exist in the repo root:
+Three documents exist in the repo root (plus one more per release):
 
 - `Internal_Custom_Application_Starter_Architecture_v2.md` — the long-term architecture standard. Read selectively, via the reference map.
-- `IMPLEMENTATION_GUIDE.md` — the build plan and incremental release sequence. Optional reference.
-- `TEMPLATE_V0_1_SCOPE.md` — the current release contract with the progress checklist and blueprint reference map. Always read.
+- `IMPLEMENTATION_GUIDE.md` — the build plan and incremental release sequence. Always read in prompt 00; optional elsewhere.
+- `TEMPLATE_V0_N_SCOPE.md` — the current release contract with the progress checklist and blueprint reference map (highest-numbered `TEMPLATE_V0_*_SCOPE.md` present). Always read.
 
 ## Notes
 
 - The unit of work is one subsection of the scope checklist (e.g. §6.2, §6.3). The implementer may batch closely related line items within a subsection.
 - If a review comes back clean (approved), skip the fix steps in `03` and go straight to commit.
 - The audit (`04`) runs on demand or at release gates — not after every commit. CRITICAL findings block the release tag; MAJOR and MINOR findings are fed back into the daily loop as follow-up work.
-- After every subsection in §6 is checked and all acceptance criteria in §5 (including the clean audit) are met, the release is tagged and the next scope file (`TEMPLATE_V0_2_SCOPE.md`) is opened.
+- Prompt 00 runs once per release; prompts 01–03 loop within a release. After every subsection in §6 is checked and all acceptance criteria in §5 (including the clean audit) are met, the release is tagged and prompt 00 drafts the next scope file (`TEMPLATE_V0_N_SCOPE.md`).
