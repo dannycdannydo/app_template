@@ -156,12 +156,12 @@ Depends on §6.1 and §6.3. Default-deny permission model over memberships.
 
 Depends on §6.3 and §6.4. Demonstrates the full module pattern from blueprint §5 with tenancy.
 
-- [ ] `Record` model with `organisation_id` FK + migration
-- [ ] Schemas: `RecordCreate`, `RecordUpdate`, `RecordListItem`, `RecordDetail`
-- [ ] Service with tenant-scoped queries, transaction boundaries, domain exceptions
-- [ ] `queries.py` with the reusable org-scoped query
-- [ ] Router: list (paginated envelope), create, get, update, delete — all org-scoped and permission-gated (`records.read`, `records.create`, `records.update`, `records.delete`)
-- [ ] Integration tests: CRUD within org, cross-org access returns `404`, viewer writes return `403`, pagination envelope correct
+- [x] `Record` model with `organisation_id` FK + migration
+- [x] Schemas: `RecordCreate`, `RecordUpdate`, `RecordListItem`, `RecordDetail`
+- [x] Service with tenant-scoped queries, transaction boundaries, domain exceptions
+- [x] `queries.py` with the reusable org-scoped query
+- [x] Router: list (paginated envelope), create, get, update, delete — all org-scoped and permission-gated (`records.read`, `records.create`, `records.update`, `records.delete`)
+- [x] Integration tests: CRUD within org, cross-org access returns `404`, viewer writes return `403`, pagination envelope correct
 
 ## 6.6 Cross-Org Security Tests & Release Governance
 

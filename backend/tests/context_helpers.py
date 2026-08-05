@@ -35,6 +35,7 @@ from app.modules.organisations.models import (
     OrganisationMembership,
 )
 from app.modules.permissions.models import MembershipRole, Role
+from app.modules.records.models import Record
 from app.modules.users.models import User
 
 
@@ -49,6 +50,7 @@ class ContextState:
     organisations: list[Organisation] = field(default_factory=list[Organisation])
     memberships: list[OrganisationMembership] = field(default_factory=list[OrganisationMembership])
     membership_roles: list[MembershipRole] = field(default_factory=list[MembershipRole])
+    records: list[Record] = field(default_factory=list[Record])
     owner_role: Role | None = None
     granted_permissions: set[str] = field(  # consumed by scalars() (permission checks)
         default_factory=set[str]
@@ -86,6 +88,19 @@ def make_membership(
     return membership
 
 
+def make_record(
+    organisation_id: uuid.UUID,
+    *,
+    title: str = "First record",
+    body: str = "Record body",
+) -> Record:
+    record = Record(organisation_id=organisation_id, title=title, body=body)
+    record.id = uuid.uuid4()
+    record.created_at = datetime.now(UTC)
+    record.updated_at = datetime.now(UTC)
+    return record
+
+
 class _ScalarsResult:
     """Stand-in for an async ``ScalarResult``: carries rows and exposes .all()."""
 
@@ -110,7 +125,12 @@ class FakeSession:
 
     async def scalars(self, statement: object) -> _ScalarsResult:
         # The permission check queries permission codes for a membership; the
-        # fake answers from the granted set the test configures.
+        # fake answers from the granted set the test configures. The records
+        # list query selects the Record entity; the fake answers from the
+        # records the test staged. Anything else falls back to the granted set.
+        descriptions = getattr(statement, "column_descriptions", None)
+        if descriptions and descriptions[0].get("entity") is Record:
+            return _ScalarsResult(list(self._state.records))
         return _ScalarsResult(sorted(self._state.granted_permissions))
 
     def add(self, instance: Any) -> None:
@@ -135,12 +155,19 @@ class FakeSession:
                 self._state.memberships.append(obj)
             elif isinstance(obj, MembershipRole):
                 self._state.membership_roles.append(obj)
+            elif isinstance(obj, Record):
+                # Updates reuse the staged instance, so never append twice.
+                if all(existing is not obj for existing in self._state.records):
+                    self._state.records.append(obj)
             elif isinstance(obj, User):
                 # Mirrors the model's ``is_active`` default applied at flush time;
                 # provisioned users are always created active.
                 obj.is_active = True
                 self._state.users[obj.workos_user_id] = obj
         self._added.clear()
+
+    async def delete(self, instance: Any) -> None:
+        self._state.records = [record for record in self._state.records if record.id != instance.id]
 
     async def rollback(self) -> None:
         self._added.clear()
