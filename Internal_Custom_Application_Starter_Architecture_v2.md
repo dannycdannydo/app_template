@@ -1856,6 +1856,10 @@ deploy/compose/
 
 Do not use production Compose to describe fully managed cloud infrastructure.
 
+## Local development model
+
+The blueprint is intentionally silent on whether application code runs natively or inside containers during local development. That decision is fixed by **ADR-0008** (`docs/decisions/0008-local-development-model.md`): day-to-day development runs Vue, FastAPI, and the worker natively with PostgreSQL and Redis in Docker (`make dev`), while a full-container path (`make dev-docker`) exists for CI parity and onboarding.
+
 ---
 
 # 37. CI/CD

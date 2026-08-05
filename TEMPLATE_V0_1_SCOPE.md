@@ -39,7 +39,7 @@ Ruff, Pyright, pytest (backend)
 ESLint, Prettier, vue-tsc, Vitest (frontend)
 GitHub Actions CI workflow
 .env.example
-Architecture Decision Records (ADRs 0001–0007)
+Architecture Decision Records (ADRs 0001–0008)
 pre-commit hooks
 ```
 
@@ -67,7 +67,8 @@ These are **not** part of v0.1. They appear in later releases per `IMPLEMENTATIO
 # 4. Commands That Must Work
 
 ```bash
-make dev              # start Postgres, Redis, API, frontend
+make dev              # Postgres + Redis in Docker; API + frontend native with live reload (ADR-0008)
+make dev-docker       # entire stack in containers (CI parity, onboarding, Dockerfile validation)
 make migrate          # run Alembic migrations
 make lint             # Ruff (backend) + ESLint (frontend)
 make typecheck        # Pyright (backend) + vue-tsc (frontend)
@@ -91,7 +92,7 @@ v0.1 is done when **all** of the following are true:
 6. `make generate-client` regenerates the TypeScript client and produces no diff against the committed output.
 7. `make check` passes with zero lint errors, zero type errors, and green tests.
 8. CI runs the same gate on push and is green.
-9. Governance docs (AGENTS, ARCHITECTURE, API_CONVENTIONS, SECURITY, CONTRIBUTING) and ADRs 0001–0007 exist and are non-empty.
+9. Governance docs (AGENTS, ARCHITECTURE, API_CONVENTIONS, SECURITY, CONTRIBUTING) and ADRs 0001–0008 exist and are non-empty.
 10. No secrets are committed; `.env.example` documents every variable the app reads.
 11. A clean architecture audit (`prompts/04-architecture-audit.md`) passes with no CRITICAL or MAJOR findings before tagging.
 
@@ -171,15 +172,18 @@ Check items off as they are completed. Keep one task `in_progress` at a time whe
 
 ## 6.7 Local Development Infrastructure
 
-- [ ] `backend/Dockerfile` (dev image, non-root user)
-- [ ] `frontend/Dockerfile` (dev image)
-- [ ] `deploy/compose/compose.local.yml` — PostgreSQL, Redis, API, frontend with healthchecks
+Local development follows **ADR-0008** (native app code + containerised infrastructure). `make dev` runs Vue/FastAPI on the host with live reload and starts only PostgreSQL + Redis in Docker; `make dev-docker` runs the entire stack in containers for CI parity and onboarding.
+
+- [ ] `backend/Dockerfile` (non-root user; serves CI, both production profiles, and `make dev-docker`)
+- [ ] `frontend/Dockerfile` (serves CI and `make dev-docker`)
+- [ ] `deploy/compose/compose.local.yml` — PostgreSQL, Redis (infra-only, healthchecked). Uses Compose profiles (or equivalent) so the same file also serves the full-stack `make dev-docker` path without adding a fourth Compose file
 - [ ] `.env.example` documenting every variable
-- [ ] Volume mounts for live reload (backend + frontend)
+- [ ] Host toolchain documented in README clean-clone procedure (Python 3.13 + `uv`, Node + `pnpm`)
 
 ## 6.8 Makefile
 
 - [ ] `make dev`
+- [ ] `make dev-docker`
 - [ ] `make migrate`
 - [ ] `make lint`
 - [ ] `make typecheck`
@@ -237,7 +241,7 @@ Line ranges let you jump straight to the section with `view` + offset/limit — 
 | **Scope §6.4** Database & Migrations | **BP §7** (lines 270–324), **BP §10** (lines 463–543) | ORM/Pydantic separation, naming, timestamps, UUIDv7, Alembic use |
 | **Scope §6.5** Frontend Project & Tooling | **BP §14** (lines 686–742), **BP §16** (lines 779–817) | Directory layout, Vue conventions, state management split, design tokens |
 | **Scope §6.6** Generated Client Pipeline | **BP §15** (lines 743–778) | Source-of-truth flow, openapi-typescript + openapi-fetch, drift rules |
-| **Scope §6.7** Local Dev Infrastructure | **BP §36** (lines 1814–1860) | One backend Dockerfile, frontend Dockerfile, compose file layout, runtime commands |
+| **Scope §6.7** Local Dev Infrastructure | **BP §36** (lines 1814–1860); **ADR-0008** | One backend Dockerfile, frontend Dockerfile, compose file layout, runtime commands; the native-app + containerised-infra model is fixed by ADR-0008 |
 | **Scope §6.8** Makefile | **BP §32** (lines 1576–1626) | The canonical command list and what each does |
 | **Scope §6.9** CI | **BP §37** (lines 1861–1903) | CI checks list, immutable image tagging, migration-as-release-job |
 | **Scope §6.10** Validation | **BP §42** (lines 2038–2059), **BP §45** (lines 2113–2134) | Fresh-clone test procedure, the v0.1-relevant readiness items only |
