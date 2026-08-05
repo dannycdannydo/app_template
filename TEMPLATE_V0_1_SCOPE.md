@@ -151,15 +151,15 @@ Check items off as they are completed. Keep one task `in_progress` at a time whe
 
 ## 6.5 Frontend Project & Tooling
 
-- [ ] Scaffold via `pnpm create vue@latest frontend` (TS, Router, Pinia, Vitest, Playwright, ESLint, Prettier)
-- [ ] `frontend/package.json` with pinned dependencies
-- [ ] `frontend/pnpm-lock.yaml` committed
-- [ ] Tailwind CSS configured (PostCSS, `tailwind.config`, design tokens)
-- [ ] shadcn-vue initialised (`components.json`) with base components: `button`, `card`, `input`, `label`
-- [ ] TanStack Vue Query installed and provider wired
-- [ ] Base layout + a home view that calls `GET /health` via the generated client
-- [ ] ESLint + Prettier configured
-- [ ] `vue-tsc` strict typecheck passing
+- [x] Scaffold via `pnpm create vue@latest frontend` (TS, Router, Pinia, Vitest, Playwright, ESLint, Prettier)
+- [x] `frontend/package.json` with pinned dependencies
+- [x] `frontend/pnpm-lock.yaml` committed
+- [x] Tailwind CSS configured (PostCSS, `tailwind.config`, design tokens)
+- [x] shadcn-vue initialised (`components.json`) with base components: `button`, `card`, `input`, `label`
+- [x] TanStack Vue Query installed and provider wired
+- [x] Base layout + a home view that calls `GET /health` via the generated client
+- [x] ESLint + Prettier configured
+- [x] `vue-tsc` strict typecheck passing
 
 ## 6.6 Generated Client Pipeline
 
