@@ -154,10 +154,10 @@ Depends on §6.2 (session). Builds the navigable shell with organisation context
 
 Depends on §6.1 and §6.3. TanStack Vue Query owns all server state; components never touch the HTTP client (blueprint §14, §15).
 
-- [ ] `useMeQuery` — current user, memberships, roles (drives user menu and org selector)
-- [ ] Records query composables — list (paginated, org-scoped), detail; mutations (create, update, delete) with invalidation
-- [ ] Organisation-switch invalidation — changing the selected org refetches org-scoped queries
-- [ ] Query-key convention documented (per-org keys), matching the API envelope and filter/sort conventions (blueprint §12)
+- [x] `useMeQuery` — current user, memberships, roles (drives user menu and org selector)
+- [x] Records query composables — list (paginated, org-scoped), detail; mutations (create, update, delete) with invalidation
+- [x] Organisation-switch invalidation — changing the selected org refetches org-scoped queries
+- [x] Query-key convention documented (per-org keys), matching the API envelope and filter/sort conventions (blueprint §12)
 
 ## 6.5 Standard Table (`DataTable`)
 
