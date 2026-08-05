@@ -35,6 +35,9 @@ src = ["app", "tests"]
 select = ["E", "F", "I", "UP", "B", "C4", "SIM", "RUF"]
 ignore = ["E501"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"

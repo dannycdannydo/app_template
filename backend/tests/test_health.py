@@ -7,11 +7,12 @@ database: the ``get_db`` dependency is overridden with a fake session.
 
 from collections.abc import AsyncIterator
 
-from app.api.dependencies import get_db
-from app.main import create_app
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient, Response
 from sqlalchemy.exc import SQLAlchemyError
+
+from app.api.dependencies import get_db
+from app.main import create_app
 
 
 class _DatabaseUnavailableError(SQLAlchemyError):

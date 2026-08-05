@@ -133,21 +133,21 @@ Check items off as they are completed. Keep one task `in_progress` at a time whe
 
 ## 6.3 Backend Application Shell
 
-- [ ] `backend/app/main.py` — app factory, lifespan, router registration, exception handlers, middleware
-- [ ] `backend/app/core/config.py` — typed `pydantic-settings` model, fail-fast on invalid production config
-- [ ] `backend/app/core/exceptions.py` — domain exceptions (`NotFoundError`, `PermissionDenied`, `ConflictError`, `ValidationError`, etc.) and standard error schema
-- [ ] `backend/app/core/logging.py` — structured JSON logging, request ID context
-- [ ] `backend/app/api/dependencies.py` — request ID, DB session dependency
-- [ ] `backend/app/api/health.py` — `/health` and `/ready` routes
+- [x] `backend/app/main.py` — app factory, lifespan, router registration, exception handlers, middleware
+- [x] `backend/app/core/config.py` — typed `pydantic-settings` model, fail-fast on invalid production config
+- [x] `backend/app/core/exceptions.py` — domain exceptions (`NotFoundError`, `PermissionDenied`, `ConflictError`, `ValidationError`, etc.) and standard error schema
+- [x] `backend/app/core/logging.py` — structured JSON logging, request ID context
+- [x] `backend/app/api/dependencies.py` — request ID, DB session dependency
+- [x] `backend/app/api/health.py` — `/health` and `/ready` routes
 
 ## 6.4 Database & Migrations
 
-- [ ] `backend/app/db/base.py` — declarative `Base`
-- [ ] `backend/app/db/session.py` — session factory / dependency
-- [ ] `backend/app/db/conventions.py` — naming, timestamp helpers, UUIDv7 type
-- [ ] Alembic initialised: `backend/alembic/`, `alembic.ini`, `env.py`
-- [ ] `env.py` wired to app settings and `Base.metadata`
-- [ ] Baseline migration created and applies cleanly to a fresh database
+- [x] `backend/app/db/base.py` — declarative `Base`
+- [x] `backend/app/db/session.py` — session factory / dependency
+- [x] `backend/app/db/conventions.py` — naming, timestamp helpers, UUIDv7 type
+- [x] Alembic initialised: `backend/alembic/`, `alembic.ini`, `env.py`
+- [x] `env.py` wired to app settings and `Base.metadata`
+- [x] Baseline migration created and applies cleanly to a fresh database
 
 ## 6.5 Frontend Project & Tooling
 

@@ -1,8 +1,9 @@
 """Tests for typed configuration and fail-fast validation (§27)."""
 
 import pytest
-from app.core.config import Settings
 from pydantic import ValidationError
+
+from app.core.config import Settings
 
 
 def test_settings_load_from_environment_defaults() -> None:
