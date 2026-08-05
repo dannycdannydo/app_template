@@ -26,3 +26,40 @@ def test_rejects_non_postgres_database_url() -> None:
 def test_rejects_missing_database_url() -> None:
     with pytest.raises(ValidationError, match="PostgreSQL"):
         Settings(app_env="development", database_url="")
+
+
+def test_production_requires_workos_credentials() -> None:
+    with pytest.raises(ValidationError, match="workos_api_key"):
+        Settings(
+            app_env="production",
+            database_url="postgresql+asyncpg://x",
+            workos_client_id="client_1",
+        )
+    with pytest.raises(ValidationError, match="workos_client_id"):
+        Settings(
+            app_env="production",
+            database_url="postgresql+asyncpg://x",
+            workos_api_key="sk_test",
+        )
+    settings = Settings(
+        app_env="production",
+        database_url="postgresql+asyncpg://x",
+        workos_api_key="sk_test",
+        workos_client_id="client_1",
+    )
+    assert settings.workos_api_base_url == "https://api.workos.com/"
+    assert settings.workos_jwt_leeway == 30.0
+
+
+def test_development_does_not_require_workos_credentials() -> None:
+    settings = Settings(app_env="development", database_url="postgresql+asyncpg://x")
+    assert settings.workos_api_key == ""
+
+
+def test_rejects_insecure_workos_base_url() -> None:
+    with pytest.raises(ValidationError, match="https"):
+        Settings(
+            app_env="development",
+            database_url="postgresql+asyncpg://x",
+            workos_api_base_url="http://api.workos.com/",
+        )

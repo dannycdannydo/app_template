@@ -9,13 +9,16 @@ dependencies = [
     "fastapi>=0.141.1",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.14.2",
+    "pyjwt>=2.10.0",
     "sqlalchemy[asyncio]>=2.0.51",
     "structlog>=26.1.0",
     "uvicorn[standard]>=0.52.1",
+    "workos>=6.0.0",
 ]
 
 [dependency-groups]
 dev = [
+    "cryptography>=44.0.0",
     "httpx>=0.28.1",
     "pyright>=1.1.402",
     "pytest>=8.4.0",

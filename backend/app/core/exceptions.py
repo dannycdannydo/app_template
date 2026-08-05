@@ -68,6 +68,12 @@ class NotFoundError(APIError):
     default_message = "The requested resource could not be found."
 
 
+class UnauthorizedError(APIError):
+    status_code = 401
+    code = "unauthorized"
+    default_message = "Authentication is required to access this resource."
+
+
 class PermissionDenied(APIError):
     status_code = 403
     code = "permission_denied"

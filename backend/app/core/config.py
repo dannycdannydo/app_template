@@ -36,6 +36,22 @@ class Settings(BaseSettings):
         default="",
         description="Async SQLAlchemy database URL, e.g. postgresql+asyncpg://user:pass@host:5432/db",
     )
+    workos_api_key: str = Field(
+        default="",
+        description="WorkOS secret API key; used to fetch user profiles when provisioning internal users",
+    )
+    workos_client_id: str = Field(
+        default="",
+        description="WorkOS client id; doubles as the audience for session tokens and the JWKS path",
+    )
+    workos_api_base_url: str = Field(
+        default="https://api.workos.com/",
+        description="WorkOS API base URL; session tokens must be issued by the matching issuer",
+    )
+    workos_jwt_leeway: float = Field(
+        default=30.0,
+        description="Clock-skew leeway in seconds when validating WorkOS session tokens",
+    )
 
     @model_validator(mode="after")
     def _validate_config(self) -> Settings:
@@ -43,6 +59,12 @@ class Settings(BaseSettings):
             raise ValueError("database_url must be a PostgreSQL URL")
         if self.app_env == "production" and self.debug:
             raise ValueError("debug must be False in the production environment")
+        if self.app_env == "production" and not self.workos_api_key:
+            raise ValueError("workos_api_key is required in the production environment")
+        if self.app_env == "production" and not self.workos_client_id:
+            raise ValueError("workos_client_id is required in the production environment")
+        if self.workos_api_base_url and not self.workos_api_base_url.startswith("https://"):
+            raise ValueError("workos_api_base_url must use https")
         return self
 
 

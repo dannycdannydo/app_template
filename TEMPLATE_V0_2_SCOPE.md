@@ -126,11 +126,11 @@ Foundation for everything else; §6.2 and §6.4 depend on these tables existing.
 
 Depends on §6.1 (users table). Centralises session validation per the guide's backend rules.
 
-- [ ] Settings added to `app/core/config.py`: `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, WorkOS environment/API base, and any session-validation inputs the SDK requires; fail-fast validation for production
-- [ ] `app/core/security.py` — centralised session validation: token signature, issuer, audience, expiry (via WorkOS SDK)
-- [ ] Webhook-signature validation helper in `app/core/security.py` (centralised; no consumer until v0.5)
-- [ ] Auth dependency `get_current_user` — Bearer token → validated session → internal user; provisions the user on first login; rejects disabled users
-- [ ] `GET /api/v1/me` route — current user with memberships and roles
+- [x] Settings added to `app/core/config.py`: `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, WorkOS environment/API base, and any session-validation inputs the SDK requires; fail-fast validation for production
+- [x] `app/core/security.py` — centralised session validation: token signature, issuer, audience, expiry (via WorkOS SDK)
+- [x] Webhook-signature validation helper in `app/core/security.py` (centralised; no consumer until v0.5)
+- [x] Auth dependency `get_current_user` — Bearer token → validated session → internal user; provisions the user on first login; rejects disabled users
+- [x] `GET /api/v1/me` route — current user with memberships and roles
 
 ## 6.3 Request Context & Organisation Selection
 
