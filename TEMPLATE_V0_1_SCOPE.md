@@ -163,11 +163,11 @@ Check items off as they are completed. Keep one task `in_progress` at a time whe
 
 ## 6.6 Generated Client Pipeline
 
-- [ ] `openapi-typescript` and `openapi-fetch` installed in frontend
-- [ ] Script to export `openapi.json` from the FastAPI app
-- [ ] Generation script writes `frontend/src/api/generated/`
-- [ ] `frontend/src/api/client.ts` — typed `openapi-fetch` client wrapper
-- [ ] `make generate-client` works end-to-end
+- [x] `openapi-typescript` and `openapi-fetch` installed in frontend
+- [x] Script to export `openapi.json` from the FastAPI app
+- [x] Generation script writes `frontend/src/api/generated/`
+- [x] `frontend/src/api/client.ts` — typed `openapi-fetch` client wrapper
+- [x] `make generate-client` works end-to-end
 
 ## 6.7 Local Development Infrastructure
 

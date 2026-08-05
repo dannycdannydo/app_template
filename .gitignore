@@ -44,6 +44,9 @@ Desktop.ini
 *.log
 logs/
 
+# ---- Generated build artifacts ----
+backend/openapi.json
+
 # ---- Local development ----
 *.pid
 *.seed
