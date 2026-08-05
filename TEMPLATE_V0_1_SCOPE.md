@@ -210,9 +210,9 @@ Local development follows **ADR-0008** (native app code + containerised infrastr
 - [x] Clean-clone procedure documented in README
 - [x] Fresh-clone run verified: `cp .env.example .env` → `make dev` works
 - [x] `make check` green from a clean checkout
-- [ ] CI green on the default branch
+- [x] CI green on the default branch
 - [x] Architecture audit (`prompts/04-architecture-audit.md`) clean — no CRITICAL or MAJOR findings
-- [ ] Tag `v0.1.0`
+- [x] Tag `v0.1.0`
 
 ---
 
