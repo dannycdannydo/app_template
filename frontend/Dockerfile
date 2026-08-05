@@ -1,0 +1,34 @@
+# Frontend image (blueprint §36, ADR-0008).
+#
+# The frontend is a static build artefact: this image compiles the Vue
+# application and serves the result from nginx with an API reverse proxy. The
+# same image serves CI (container build validation) and the full-container
+# `make dev-docker` path.
+
+# --- Build stage: compile the Vue application -------------------------------
+FROM node:24-alpine AS build
+
+WORKDIR /app
+
+# npm/pnpm registry override for networks where registry.npmjs.org is slow or
+# blocked (e.g. mirrors like https://registry.npmmirror.com). Pass with:
+#   --build-arg NPM_REGISTRY=https://registry.npmmirror.com
+ARG NPM_REGISTRY=https://registry.npmjs.org
+
+# pnpm pinned to the version used locally so installs are reproducible.
+RUN npm install --global --registry=${NPM_REGISTRY} pnpm@11.13.0
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile --registry=${NPM_REGISTRY}
+
+COPY . .
+ARG VITE_API_BASE_URL=
+RUN VITE_API_BASE_URL=${VITE_API_BASE_URL} pnpm build
+
+# --- Serve stage: static files behind nginx with API proxy ------------------
+FROM nginx:1.28-alpine AS serve
+
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /app/dist /usr/share/nginx/html
+
+EXPOSE 80

@@ -9,7 +9,7 @@ This repository is a **template**, not an application. New projects start from a
 - Modular monolith backend with typed configuration, structured logging, and a standard API error format
 - Vue 3 SPA with a generated, type-safe OpenAPI client
 - Alembic migrations wired to application settings
-- Docker Compose local development (PostgreSQL, Redis, API, frontend)
+- Local development per ADR-0008: PostgreSQL and Redis in Docker, app code native (`make dev`), with a full-container path for CI parity (`make dev-docker`)
 - A single Makefile surface for development and quality gates
 - CI that runs the same gate on every push
 - Governance docs and architecture decision records (ADRs)
@@ -20,9 +20,9 @@ The authoritative design standard is `Internal_Custom_Application_Starter_Archit
 
 ```text
 backend/                 FastAPI application (app/, alembic/, pyproject.toml)
-frontend/                Vue 3 + Vite application (src/, package.json)
-deploy/                  Compose files and deployment profiles
-docs/decisions/          Architecture decision records (ADR 0001-0007)
+frontend/                Vue 3 + Vite application (src/, Dockerfile, nginx.conf)
+deploy/compose/          Compose files (compose.local.yml = local development)
+docs/decisions/          Architecture decision records (ADR 0001-0008)
 .github/workflows/       CI pipeline
 Makefile                 Command surface for development and quality gates
 .env.example             Documented environment variables
@@ -30,24 +30,41 @@ Makefile                 Command surface for development and quality gates
 
 ## Prerequisites
 
-- Docker (with Docker Compose) for local services
-- `uv` for backend dependency management (`pip install uv` or your package manager)
-- `pnpm` for frontend dependency management (`corepack enable` or `npm i -g pnpm`)
+Local development follows **ADR-0008**: PostgreSQL and Redis run in Docker, while the API and frontend run natively on the host. The host toolchain is therefore required and pinned:
+
+- **Python 3.13** with `uv` for the backend (`uv` installs Python if needed; the version is recorded in `backend/.python-version`)
+- **Node >= 24** with `pnpm` (11.x) for the frontend
+- **Docker with Compose** for PostgreSQL and Redis
 - `make`
 
-## Quick start
+## Clean clone
 
 ```bash
-# 1. Clone and prepare environment
+# 1. Clone, then prepare the environment (single .env at the repo root)
 cp .env.example .env
 
-# 2. Start everything: Postgres, Redis, API, frontend
+# 2. Start PostgreSQL + Redis in Docker, and the API + frontend natively
+#    with live reload (this is the day-to-day workflow)
 make dev
+
+# 3. Apply the baseline migration to the fresh database
+make migrate
+
+# 4. Run the full quality gate (lint + typecheck + test + client drift)
+make check
 ```
 
-The API is served at `http://localhost:8000` (docs at `/docs`) and the frontend at `http://localhost:5173`.
+The API is served at `http://localhost:8000` (docs at `/docs`) and the frontend at `http://localhost:5173`, which proxies API traffic to the backend.
 
-Clean-clone verification: `cp .env.example .env && make dev` must start both services, `make migrate` must apply the baseline migration, and `make check` must pass with zero lint errors, zero type errors, and green tests.
+For CI parity, onboarding, or Dockerfile validation the **entire stack runs in containers** instead:
+
+```bash
+make dev-docker
+```
+
+`make dev-docker` starts the same Postgres and Redis, plus the API and frontend containers (built from `backend/Dockerfile` and `frontend/Dockerfile`), and runs migrations automatically on container start. Both commands share `deploy/compose/compose.local.yml`: the default service set is infrastructure only, and the `fullstack` Compose profile adds the application containers.
+
+Verification: after `cp .env.example .env`, both `make dev` and `make dev-docker` must start the services, `make migrate` must apply the baseline migration, and `make check` must pass with zero lint errors, zero type errors, and green tests.
 
 ## Command reference
 

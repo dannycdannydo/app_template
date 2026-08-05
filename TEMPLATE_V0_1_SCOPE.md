@@ -174,11 +174,11 @@ Check items off as they are completed. Keep one task `in_progress` at a time whe
 
 Local development follows **ADR-0008** (native app code + containerised infrastructure). `make dev` runs Vue/FastAPI on the host with live reload and starts only PostgreSQL + Redis in Docker; `make dev-docker` runs the entire stack in containers for CI parity and onboarding.
 
-- [ ] `backend/Dockerfile` (non-root user; serves CI, both production profiles, and `make dev-docker`)
-- [ ] `frontend/Dockerfile` (serves CI and `make dev-docker`)
-- [ ] `deploy/compose/compose.local.yml` — PostgreSQL, Redis (infra-only, healthchecked). Uses Compose profiles (or equivalent) so the same file also serves the full-stack `make dev-docker` path without adding a fourth Compose file
-- [ ] `.env.example` documenting every variable
-- [ ] Host toolchain documented in README clean-clone procedure (Python 3.13 + `uv`, Node + `pnpm`)
+- [x] `backend/Dockerfile` (non-root user; serves CI, both production profiles, and `make dev-docker`)
+- [x] `frontend/Dockerfile` (serves CI and `make dev-docker`)
+- [x] `deploy/compose/compose.local.yml` — PostgreSQL, Redis (infra-only, healthchecked). Uses Compose profiles (or equivalent) so the same file also serves the full-stack `make dev-docker` path without adding a fourth Compose file
+- [x] `.env.example` documenting every variable
+- [x] Host toolchain documented in README clean-clone procedure (Python 3.13 + `uv`, Node + `pnpm`)
 
 ## 6.8 Makefile
 

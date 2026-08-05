@@ -1,0 +1,13 @@
+# Keep the build context small and reproducible: virtual environments, caches,
+# test artefacts, and generated files never reach the Docker daemon.
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.pyright/
+build/
+dist/
+*.egg-info/
+tests/
+openapi.json
