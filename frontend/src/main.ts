@@ -6,6 +6,8 @@ import { createApp } from 'vue'
 
 import App from './App.vue'
 import { getSession } from './features/auth/workos'
+import { installOrganisationSwitchInvalidation } from './queries/organisationInvalidation'
+import { queryClient } from './queries/queryClient'
 import router from './router'
 import { useSessionStore } from './stores/session'
 
@@ -15,7 +17,12 @@ async function bootstrap(): Promise<void> {
 
   app.use(pinia)
   app.use(router)
-  app.use(VueQueryPlugin)
+  app.use(VueQueryPlugin, { queryClient })
+
+  // Switching the selected organisation refetches every org-scoped query
+  // (v0.3 Scope §6.4): the selection is Pinia client state, the data under it
+  // is TanStack Query server state.
+  installOrganisationSwitchInvalidation(pinia)
 
   // Restore the WorkOS session (if any) before the app mounts so the API
   // client can attach the Bearer token from the first request on.
