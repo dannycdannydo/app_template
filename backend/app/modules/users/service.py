@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import ServiceUnavailableError
 from app.core.security import UserProfileClient, ValidatedSession
 from app.modules.organisations.models import OrganisationMembership
+from app.modules.permissions.models import MembershipRole, Role
 from app.modules.users.models import User
 
 
@@ -56,8 +57,8 @@ async def get_me_payload(
 ) -> tuple[list[OrganisationMembership], list[str]]:
     """Return the current user's memberships and role codes for the /me route.
 
-    Roles are populated by the roles and permissions work unit (Scope §6.4);
-    until the role model exists the role list is empty.
+    Roles are the distinct role codes across all of the user's memberships,
+    ordered by code; a user with no roles yields an empty list.
     """
     memberships = (
         await session.scalars(
@@ -66,4 +67,17 @@ async def get_me_payload(
             .order_by(OrganisationMembership.created_at)
         )
     ).all()
-    return list(memberships), []
+    roles = (
+        await session.scalars(
+            select(Role.code)
+            .join(MembershipRole, MembershipRole.role_id == Role.id)
+            .join(
+                OrganisationMembership,
+                OrganisationMembership.id == MembershipRole.membership_id,
+            )
+            .where(OrganisationMembership.user_id == user.id)
+            .distinct()
+            .order_by(Role.code)
+        )
+    ).all()
+    return list(memberships), list(roles)

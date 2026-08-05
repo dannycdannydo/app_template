@@ -28,6 +28,7 @@ from app.core.security import (
 )
 from app.db.session import async_session_factory
 from app.modules.organisations.models import MembershipStatus, OrganisationMembership
+from app.modules.permissions.queries import permission_codes_for_membership
 from app.modules.users.models import User
 from app.modules.users.service import get_or_provision_user
 
@@ -146,3 +147,33 @@ async def get_current_membership(
             message="You are not an active member of this organisation.",
         )
     return membership
+
+
+def require_permission(permission_code: str):
+    """Return a dependency requiring the caller's membership to hold a permission.
+
+    Composes ``get_current_membership`` so the caller must first be an active
+    member of the organisation in ``X-Org-Id``, then checks the permission
+    against the role bundles of that membership. Default deny: a code not
+    granted to any of the caller's roles is rejected with 403 (Scope §6.4,
+    blueprint §9 rules).
+    """
+
+    async def _require_permission(
+        session: Annotated[AsyncSession, Depends(get_db)],
+        membership: Annotated[OrganisationMembership, Depends(get_current_membership)],
+    ) -> OrganisationMembership:
+        granted = await permission_codes_for_membership(session, membership.id)
+        if permission_code not in granted:
+            logger.warning(
+                "permission_denied",
+                organisation_id=str(membership.organisation_id),
+                permission=permission_code,
+            )
+            raise PermissionDenied(
+                code="permission_denied",
+                message="You do not have permission to perform this action.",
+            )
+        return membership
+
+    return _require_permission

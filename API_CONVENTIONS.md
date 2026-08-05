@@ -152,4 +152,4 @@ WorkOS owns login and sessions; the application resolves a validated identity to
 - Default deny: a caller may act only through permissions granted to the roles on their memberships.
 - Backend permissions are authoritative; frontend visibility is only a UX aid.
 - Cross-organisation access must never leak: resources outside the caller's organisation are treated as not found where the resource model requires it.
-- Every write to a tenant-scoped resource is permission-gated; the permission model lands with the roles and permissions work unit (Scope §6.4).
+- Every write to a tenant-scoped resource is permission-gated with `require_permission(...)` (Scope §6.4), which resolves the caller's membership from `X-Org-Id` and checks the permission code against the role bundles; a code not granted to any of the caller's roles is denied with `403` and code `permission_denied`.

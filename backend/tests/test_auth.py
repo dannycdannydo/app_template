@@ -44,6 +44,9 @@ class AuthState:
         default_factory=list[User | None]
     )
     memberships: list[OrganisationMembership] = field(default_factory=list[OrganisationMembership])
+    scalars_queue: list[list[Any]] = field(  # consumed by scalars() in call order
+        default_factory=list[list[Any]]
+    )
     fail_commits: int = 0
     profile_calls: list[str] = field(default_factory=list[str])
 
@@ -69,6 +72,8 @@ class FakeSession:
         return None
 
     async def scalars(self, statement: object) -> _ScalarsResult:
+        if self._state.scalars_queue:
+            return _ScalarsResult(self._state.scalars_queue.pop(0))
         return _ScalarsResult(self._state.memberships)
 
     def add(self, instance: User) -> None:
@@ -254,12 +259,14 @@ async def test_me_rejects_disabled_user(auth_app: AuthApp) -> None:
     assert response.json()["code"] == "user_disabled"
 
 
-async def test_me_returns_memberships(auth_app: AuthApp) -> None:
+async def test_me_returns_memberships_and_roles(auth_app: AuthApp) -> None:
     app, state, private_key = auth_app
     user = _make_user()
     state.users[WORKOS_USER_ID] = user
     state.lookup_queue = [user]
-    state.memberships = [_make_membership(user)]
+    membership = _make_membership(user)
+    state.memberships = [membership]
+    state.scalars_queue = [[membership], ["owner"]]  # memberships, then role codes
 
     async with _client(app) as client:
         response = await _get_me(client, make_token(private_key))
@@ -268,7 +275,7 @@ async def test_me_returns_memberships(auth_app: AuthApp) -> None:
     body = response.json()
     assert len(body["memberships"]) == 1
     assert body["memberships"][0]["status"] == "active"
-    assert body["roles"] == []
+    assert body["roles"] == ["owner"]
 
 
 async def test_me_handles_concurrent_provisioning_race(auth_app: AuthApp) -> None:

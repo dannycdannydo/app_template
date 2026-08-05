@@ -146,11 +146,11 @@ Depends on §6.2. Resolves the validated identity to an organisation context for
 
 Depends on §6.1 and §6.3. Default-deny permission model over memberships.
 
-- [ ] Models: `Role`, `Permission`, `RolePermission`, `MembershipRole` + Alembic migration
-- [ ] Data migration seeding the five default roles (`owner`, `administrator`, `manager`, `member`, `viewer`) and the example permission set from blueprint §9
-- [ ] Permission codes and a `require_permission(...)` dependency/helper enforcing default deny
-- [ ] Role-assignment service — `owner`/`administrator` manages member roles; enforced via permissions such as `users.manage_roles`
-- [ ] Integration tests: seeded roles exist, permission checks deny by default, role assignment works
+- [x] Models: `Role`, `Permission`, `RolePermission`, `MembershipRole` + Alembic migration
+- [x] Data migration seeding the five default roles (`owner`, `administrator`, `manager`, `member`, `viewer`) and the example permission set from blueprint §9
+- [x] Permission codes and a `require_permission(...)` dependency/helper enforcing default deny
+- [x] Role-assignment service — `owner`/`administrator` manages member roles; enforced via permissions such as `users.manage_roles`
+- [x] Integration tests: seeded roles exist, permission checks deny by default, role assignment works
 
 ## 6.5 Tenant-Scoped Example Module (`records`)
 
