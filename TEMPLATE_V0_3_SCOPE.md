@@ -124,10 +124,10 @@ Subsections are ordered so later work builds on earlier work: the generated clie
 
 Foundation for everything else; §6.2–§6.7 depend on the typed client and the error/`401` surface.
 
-- [ ] `make generate-client` regenerates `openapi.d.ts` covering `me`, `organisations`, `records`; drift gate stays in `make check` (blueprint §15)
-- [ ] `src/api/client.ts` gains Bearer-token injection from the session store and a central `401` handler (clear session, redirect to login)
-- [ ] Error normalization: the standard envelope (`code`, `message`, `details`, `request_id`) is parsed into a typed client error (blueprint §13) used by toasts and forms
-- [ ] Audit pass: no hand-written API interfaces in `frontend/src`; every backend call goes through `client.ts` (blueprint §15 rules)
+- [x] `make generate-client` regenerates `openapi.d.ts` covering `me`, `organisations`, `records`; drift gate stays in `make check` (blueprint §15)
+- [x] `src/api/client.ts` gains Bearer-token injection from the session store and a central `401` handler (clear session, redirect to login)
+- [x] Error normalization: the standard envelope (`code`, `message`, `details`, `request_id`) is parsed into a typed client error (blueprint §13) used by toasts and forms
+- [x] Audit pass: no hand-written API interfaces in `frontend/src`; every backend call goes through `client.ts` (blueprint §15 rules)
 
 ## 6.2 Auth Flow & Session Store
 

@@ -1,0 +1,128 @@
+import { createPinia, setActivePinia } from 'pinia'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+import { useSessionStore } from '@/stores/session'
+
+const fetchMock = vi.fn<(input: Request, init?: RequestInit) => Promise<Response>>()
+
+/**
+ * Stub `fetch` before the client module evaluates: openapi-fetch captures the
+ * global fetch at `createClient` time, so the mock must be in place before the
+ * dynamic import below resolves.
+ */
+vi.stubGlobal('fetch', fetchMock)
+
+let client: typeof import('@/api/client')['client']
+let originalLocation: Location
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  })
+}
+
+beforeEach(async () => {
+  vi.resetModules()
+  fetchMock.mockReset()
+  setActivePinia(createPinia())
+  // jsdom location methods are not spyable; swap in a stub we can assert on.
+  originalLocation = window.location
+  const assignMock = vi.fn<(path: string) => void>()
+  Object.defineProperty(window, 'location', {
+    configurable: true,
+    value: { ...originalLocation, assign: assignMock },
+  })
+  // openapi-fetch builds absolute URLs, so the client needs a base URL.
+  vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:8000')
+  ;({ client } = await import('@/api/client'))
+})
+
+afterEach(() => {
+  Object.defineProperty(window, 'location', {
+    configurable: true,
+    value: originalLocation,
+  })
+  vi.unstubAllEnvs()
+})
+
+describe('client bearer-token injection', () => {
+  it('attaches the session token as a Bearer Authorization header', async () => {
+    const session = useSessionStore()
+    session.setSession('token-abc')
+
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ user: { id: 'u1', email: 'a@b.c' }, memberships: [], roles: [] }),
+    )
+
+    await client.GET('/api/v1/me')
+
+    expect(fetchMock).toHaveBeenCalledOnce()
+    const [request] = fetchMock.mock.calls[0]!
+    expect(request.headers.get('authorization')).toBe('Bearer token-abc')
+  })
+
+  it('sends no Authorization header without a session', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ status: 'ok' }))
+
+    await client.GET('/health')
+
+    const [request] = fetchMock.mock.calls[0]!
+    expect(request.headers.has('authorization')).toBe(false)
+  })
+
+  it('does not overwrite an explicit Authorization header', async () => {
+    const session = useSessionStore()
+    session.setSession('token-abc')
+
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ items: [], page: 1, page_size: 50, total: 0 }),
+    )
+
+    await client.GET('/api/v1/records', {
+      params: { header: { authorization: 'Bearer explicit' } },
+    })
+
+    const [request] = fetchMock.mock.calls[0]!
+    expect(request.headers.get('authorization')).toBe('Bearer explicit')
+  })
+})
+
+describe('client 401 handling', () => {
+  it('clears the session store and redirects to /login on 401', async () => {
+    const session = useSessionStore()
+    session.setSession('expired-token')
+    const assignMock = window.location.assign as ReturnType<typeof vi.fn<(path: string) => void>>
+
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(
+        { code: 'unauthorized', message: 'Session expired.', request_id: 'req-9' },
+        401,
+      ),
+    )
+
+    await expect(client.GET('/api/v1/me')).rejects.toMatchObject({
+      status: 401,
+      code: 'unauthorized',
+      requestId: 'req-9',
+    })
+
+    expect(session.token).toBeNull()
+    expect(session.isAuthenticated).toBe(false)
+    expect(assignMock).toHaveBeenCalledWith('/login')
+  })
+
+  it('normalizes non-2xx responses into the typed error envelope', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(
+        { code: 'validation_error', message: 'Bad input.', details: null, request_id: 'req-10' },
+        422,
+      ),
+    )
+
+    const error = await client.GET('/api/v1/records').catch((e: unknown) => e)
+
+    expect(error).toMatchObject({ status: 422, code: 'validation_error', requestId: 'req-10' })
+    expect(error).toHaveProperty('message', 'Bad input.')
+  })
+})
