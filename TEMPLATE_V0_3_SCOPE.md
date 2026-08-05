@@ -163,10 +163,10 @@ Depends on §6.1 and §6.3. TanStack Vue Query owns all server state; components
 
 Depends on §6.4 (query state). The reusable table every list screen uses.
 
-- [ ] shadcn-vue table primitives added; `DataTable` application component over TanStack Table (blueprint §16 data grids)
-- [ ] Pagination bound to the standard envelope (`items`, `page`, `page_size`, `total`) with page controls wired to query state
-- [ ] Loading, empty and error states (error state consumes the typed client error)
-- [ ] Vitest coverage with a mocked query result
+- [x] shadcn-vue table primitives added; `DataTable` application component over TanStack Table (blueprint §16 data grids)
+- [x] Pagination bound to the standard envelope (`items`, `page`, `page_size`, `total`) with page controls wired to query state
+- [x] Loading, empty and error states (error state consumes the typed client error)
+- [x] Vitest coverage with a mocked query result
 
 ## 6.6 Standard Form & Toast / Error Handling
 
