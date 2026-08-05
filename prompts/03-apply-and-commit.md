@@ -6,12 +6,12 @@ Paste this prompt to have the agent apply any review feedback, check off the com
 
 ## Project Context
 
-You are picking up after a review on the v0.1 foundation release of the application starter template. This is the final step of the implement → review → apply-and-commit loop.
+You are picking up after a review on the current release of the application starter template. This is the final step of the implement → review → apply-and-commit loop.
 
 You need only two things, both already available:
 
 1. The reviewer's structured review (in the recent conversation or session output).
-2. `TEMPLATE_V0_1_SCOPE.md` §6 — the progress checklist you will update.
+2. The current scope file — `TEMPLATE_V0_N_SCOPE.md`, the highest-numbered `TEMPLATE_V0_*_SCOPE.md` in the repo root — §6 the progress checklist you will update.
 
 **You do not need to read the architecture blueprint or the implementation guide for this step.** This is a mechanical step: apply fixes, validate, check boxes, commit.
 
@@ -34,12 +34,12 @@ You are the **implementer**, picking up after a review.
    - `make typecheck`
    - `make test`
 
-6. **Update the scope file.** In `TEMPLATE_V0_1_SCOPE.md` §6, change `[ ]` to `[x]` for every checkbox item now genuinely complete. Leave unchecked any item where a should-fix was skipped — note it in your report.
+6. **Update the scope file.** In the current scope file §6, change `[ ]` to `[x]` for every checkbox item now genuinely complete. Leave unchecked any item where a should-fix was skipped — note it in your report.
 
 7. **Commit.** Stage all relevant changes (implementation files + updated scope file). Write a clear commit message:
 
    ```
-   Implement <subsection name> for template v0.1
+   Implement <subsection name> for template v0.N
 
    <1-2 sentences on what this adds and why it matters for the template foundation.>
    ```
@@ -56,8 +56,8 @@ You are the **implementer**, picking up after a review.
    - validation results;
    - the commit hash;
    - which subsection is next in the sequence;
-   - if this was the last subsection in §6, note that §5 acceptance criteria should be verified before tagging v0.1.0.
+   - if this was the last subsection in §6, note that §5 acceptance criteria should be verified before tagging v0.N.0.
 
 ## Done means
 
-Review feedback is applied, validation passes, the scope file reflects the new state, and the work is committed. The loop is ready to restart at `01-implement-next.md` for the next subsection — or, if v0.1 is complete, to verify acceptance criteria and tag the release.
+Review feedback is applied, validation passes, the scope file reflects the new state, and the work is committed. The loop is ready to restart at `01-implement-next.md` for the next subsection — or, if the current release is complete, to verify acceptance criteria and tag the release.

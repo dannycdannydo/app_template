@@ -8,11 +8,11 @@ Paste this prompt to have the agent review the most recent uncommitted implement
 
 You are reviewing work on a reusable full-stack application starter template: FastAPI + SQLAlchemy 2 + Pydantic 2 + PostgreSQL + Vue 3 + TypeScript + Tailwind + shadcn-vue.
 
-The build is **stage by stage**. The current release is v0.1 (foundation). Each subsection of the checklist is one work unit, worked through a three-step loop: implement → review → apply-and-commit.
+The build is **stage by stage**. The current release is the one whose scope file exists as `TEMPLATE_V0_N_SCOPE.md` (the highest-numbered such file, currently `TEMPLATE_V0_1_SCOPE.md`). Each subsection of the checklist is one work unit, worked through a three-step loop: implement → review → apply-and-commit.
 
 One local file governs this release:
 
-- `TEMPLATE_V0_1_SCOPE.md` — §2 deliverables, §3 exclusions, §4 commands, §5 acceptance criteria, §6 progress checklist, §7 blueprint reference map.
+- The current scope file — `TEMPLATE_V0_N_SCOPE.md`, the highest-numbered `TEMPLATE_V0_*_SCOPE.md` in the repo root — §2 deliverables, §3 exclusions, §4 commands, §5 acceptance criteria, §6 progress checklist, §7 blueprint reference map.
 
 The architecture blueprint (`Internal_Custom_Application_Starter_Architecture_v2.md`) is large. **Do not read the whole file.** Read only the specific blueprint sections the implementer references in their handoff summary — no more.
 
@@ -40,7 +40,7 @@ You are the **reviewer**. You did not write this code. Your job is to find probl
 
    **Code quality** — Clear naming, no dead code, no stubs/TODOs, no unjustified dependencies, strict types.
 
-   **Scope discipline** — Stayed within v0.1 scope (§2)? Avoided pulling in deferred work (§3)? Flag any scope creep.
+   **Scope discipline** — Stayed within the current release's scope (§2)? Avoided pulling in deferred work (§3)? Flag any scope creep.
 
 5. Run the validation commands yourself to confirm:
    - `make lint`
