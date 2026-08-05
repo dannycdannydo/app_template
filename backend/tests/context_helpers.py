@@ -50,6 +50,9 @@ class ContextState:
     memberships: list[OrganisationMembership] = field(default_factory=list[OrganisationMembership])
     membership_roles: list[MembershipRole] = field(default_factory=list[MembershipRole])
     owner_role: Role | None = None
+    granted_permissions: set[str] = field(  # consumed by scalars() (permission checks)
+        default_factory=set[str]
+    )
 
 
 def make_owner_role() -> Role:
@@ -83,6 +86,16 @@ def make_membership(
     return membership
 
 
+class _ScalarsResult:
+    """Stand-in for an async ``ScalarResult``: carries rows and exposes .all()."""
+
+    def __init__(self, rows: list[Any]) -> None:
+        self._rows = rows
+
+    def all(self) -> list[Any]:
+        return self._rows
+
+
 class FakeSession:
     """Minimal session stand-in for the request-context and creation flows."""
 
@@ -94,6 +107,11 @@ class FakeSession:
         if self._state.lookup_queue:
             return self._state.lookup_queue.pop(0)
         return None
+
+    async def scalars(self, statement: object) -> _ScalarsResult:
+        # The permission check queries permission codes for a membership; the
+        # fake answers from the granted set the test configures.
+        return _ScalarsResult(sorted(self._state.granted_permissions))
 
     def add(self, instance: Any) -> None:
         self._added.append(instance)

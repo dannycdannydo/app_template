@@ -1,16 +1,13 @@
-"""Role and membership-role ORM models (blueprint §9, §10).
+"""Role, permission and membership-role ORM models (blueprint §9, §10).
 
 Roles are permission bundles attached to memberships through the
 ``membership_roles`` join table. The five default roles come from blueprint §9
 (``owner``, ``administrator``, ``manager``, ``member``, ``viewer``); they are
 seeded by the data migration that creates these tables so a freshly migrated
 database always has the ``owner`` role the organisation service assigns to a
-creator.
-
-The permission model (``permission``, ``role_permissions``) and the
-``require_permission`` machinery land with the roles and permissions work unit
-(Scope §6.4); this module holds the tables the organisation creation flow needs
-so the owner assignment is real and transactional from the start.
+creator. The permission catalogue (``permissions``) and the per-role grants
+(``role_permissions``) are seeded by the data migration that creates those
+tables, from the catalogue in ``app.modules.permissions.constants``.
 """
 
 from __future__ import annotations
@@ -24,8 +21,8 @@ from app.db.base import Base
 from app.db.conventions import TimestampMixin, UuidV7, uuid7
 
 # The stable code of the role assigned to an organisation's creator. Kept in
-# sync with the seeded row in the roles migration and with the default role
-# set that Scope §6.4 completes.
+# sync with the seeded row in the roles migration and with the default role set
+# from blueprint §9.
 OWNER_ROLE_CODE = "owner"
 
 
@@ -37,6 +34,44 @@ class Role(Base, TimestampMixin):
     id: Mapped[uuid.UUID] = mapped_column(UuidV7, primary_key=True, default=uuid7)
     code: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class Permission(Base, TimestampMixin):
+    """A named action a role can be granted; the atomic unit of authorisation.
+
+    The catalogue is seeded by the data migration from
+    :mod:`app.modules.permissions.constants`; enforcement is default deny, so a
+    permission code not granted to any of the caller's roles is denied.
+    """
+
+    __tablename__ = "permissions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UuidV7, primary_key=True, default=uuid7)
+    code: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class RolePermission(Base, TimestampMixin):
+    """Grants one permission to one role, building the role's bundle."""
+
+    __tablename__ = "role_permissions"
+    __table_args__ = (
+        UniqueConstraint(
+            "role_id", "permission_id", name="uq_role_permissions_role_id_permission_id"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UuidV7, primary_key=True, default=uuid7)
+    role_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("roles.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    permission_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("permissions.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
 
 
 class MembershipRole(Base, TimestampMixin):
