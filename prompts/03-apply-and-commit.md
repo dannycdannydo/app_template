@@ -1,6 +1,6 @@
-# Prompt 03 — Apply Review and Commit
+# Prompt 03 — Apply Review, Commit and Merge
 
-Paste this prompt to have the agent apply any review feedback, check off the completed task, commit, and report what is next.
+Paste this prompt to have the agent apply any review feedback, check off the completed task, commit, merge to `main`, and report what is next.
 
 ---
 
@@ -13,7 +13,7 @@ You need only two things, both already available:
 1. The reviewer's structured review (in the recent conversation or session output).
 2. The current scope file — `TEMPLATE_V0_N_SCOPE.md`, the highest-numbered `TEMPLATE_V0_*_SCOPE.md` in the repo root — §6 the progress checklist you will update.
 
-**You do not need to read the architecture blueprint or the implementation guide for this step.** This is a mechanical step: apply fixes, validate, check boxes, commit.
+**You do not need to read the architecture blueprint or the implementation guide for this step.** This is a mechanical step: apply fixes, validate, check boxes, commit, merge.
 
 ## Your Role
 
@@ -46,18 +46,18 @@ You are the **implementer**, picking up after a review.
 
    Include the attribution lines required by the project (see existing commits or the project's commit conventions).
 
-8. **Push and open a PR** (unless the work was already committed and merged). The work unit lives on a `feature/*` branch — never push directly to `main`. Push the branch and open a pull request to `main` so CI runs on the PR and the single merge to `main` is the gate (see `CONTRIBUTING.md` → Branch workflow).
+8. **Push, open a PR, and merge it to `main`.** The work unit lives on a `feature/*` branch — never push directly to `main`. Push the branch and open a pull request to `main`: the PR is where CI runs and is the single merge gate (see `CONTRIBUTING.md` → Branch workflow). Once CI on the PR is green, **merge the PR into `main`** (and close it if the merge does not close it automatically) as part of this step. The review has already happened earlier in the loop, so do not leave the PR open for further review — PRs should not pile up. Delete the merged `feature/*` branch after merging.
 
 9. **Clear the handoff files.** Delete `.handoff/implementation.md` and `.handoff/review.md`. They have served their purpose and should not linger — the next cycle starts fresh.
 
-10. **Report status.** After committing, state:
-   - which subsection was completed and committed;
+10. **Report status.** After committing and merging, state:
+   - which subsection was completed, committed and merged;
    - whether the review was clean or changes were applied (summarise);
    - validation results;
-   - the commit hash;
+   - the commit hash and the PR number;
    - which subsection is next in the sequence;
    - if this was the last subsection in §6, note that §5 acceptance criteria should be verified before tagging v0.N.0.
 
 ## Done means
 
-Review feedback is applied, validation passes, the scope file reflects the new state, and the work is committed. The loop is ready to restart at `01-implement-next.md` for the next subsection — or, if the current release is complete, to verify acceptance criteria and tag the release.
+Review feedback is applied, validation passes, the scope file reflects the new state, and the work is committed and merged to `main`. The loop is ready to restart at `01-implement-next.md` for the next subsection — or, if the current release is complete, to verify acceptance criteria and tag the release.

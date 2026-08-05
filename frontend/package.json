@@ -20,6 +20,8 @@
   "dependencies": {
     "@lucide/vue": "1.28.0",
     "@tanstack/vue-query": "5.101.4",
+    "@tanstack/vue-table": "^8.21.3",
+    "@tanstack/vue-virtual": "^3.13.35",
     "@vueuse/core": "14.4.0",
     "@workos-inc/authkit-js": "0.20.2",
     "class-variance-authority": "0.7.1",
