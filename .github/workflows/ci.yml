@@ -1,0 +1,283 @@
+# CI workflow (blueprint §37, Scope §6.9).
+#
+# One shared workflow runs the v0.1 quality gate on every push to main and on
+# every pull request. Jobs map one-to-one to the Scope §6.9 checklist items:
+# backend format/lint, backend typecheck, backend tests, frontend
+# format/lint, frontend typecheck, frontend tests, generated-client drift,
+# migration validity, and container build.
+#
+# Local `make lint` auto-fixes; CI runs the same checks in check-only mode
+# (no --fix) so formatting and lint failures fail the build instead of being
+# silently corrected. The `check` target's drift gate is covered by the
+# dedicated generate-client-drift job.
+#
+# Toolchain versions are pinned to match the local toolchain and the
+# Dockerfiles (uv 0.12.1, pnpm 11.13.0, Node 24, Python 3.13, Postgres 17).
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.12.1"
+  PYTHON_VERSION: "3.13"
+  PNPM_VERSION: "11.13.0"
+  NODE_VERSION: "24"
+
+jobs:
+  backend-format-lint:
+    name: Backend formatting & linting (Ruff)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-python: true
+      - name: Sync dependencies from lockfile
+        run: uv sync --frozen
+      - name: Check formatting (Ruff format)
+        run: uv run ruff format --check .
+      - name: Lint (Ruff)
+        run: uv run ruff check .
+
+  backend-typecheck:
+    name: Backend type checks (Pyright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-python: true
+      - name: Sync dependencies from lockfile
+        run: uv sync --frozen
+      - name: Typecheck (Pyright)
+        run: uv run pyright
+
+  backend-test:
+    name: Backend tests (pytest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: app_template_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app -d app_template_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    # conftest.py falls back to this same URL, so a PostgreSQL service turns
+    # the migration smoke test into a real upgrade/downgrade run.
+    env:
+      DATABASE_URL: postgresql+asyncpg://app:app@localhost:5432/app_template_test
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-python: true
+      - name: Sync dependencies from lockfile
+        run: uv sync --frozen
+      - name: Test (pytest)
+        run: uv run pytest
+
+  frontend-format-lint:
+    name: Frontend formatting & linting (Prettier + ESLint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/setup@v2.0.0
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          runtime: node@${{ env.NODE_VERSION }}
+          install: false
+          cache: true
+          package-json-file: frontend/package.json
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Install dependencies from lockfile
+        run: pnpm install --frozen-lockfile
+      - name: Check formatting (Prettier)
+        run: pnpm exec prettier --check .
+      - name: Lint (oxlint)
+        run: pnpm exec oxlint .
+      - name: Lint (ESLint)
+        run: pnpm exec eslint .
+
+  frontend-typecheck:
+    name: Frontend type checks (vue-tsc)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/setup@v2.0.0
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          runtime: node@${{ env.NODE_VERSION }}
+          install: false
+          cache: true
+          package-json-file: frontend/package.json
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Install dependencies from lockfile
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck (vue-tsc)
+        run: pnpm type-check
+
+  frontend-test:
+    name: Frontend tests (Vitest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/setup@v2.0.0
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          runtime: node@${{ env.NODE_VERSION }}
+          install: false
+          cache: true
+          package-json-file: frontend/package.json
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Install dependencies from lockfile
+        run: pnpm install --frozen-lockfile
+      - name: Test (Vitest)
+        run: pnpm vitest run
+
+  generate-client-drift:
+    name: Generated-client drift detection
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-python: true
+      - uses: pnpm/setup@v2.0.0
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          runtime: node@${{ env.NODE_VERSION }}
+          install: false
+          cache: true
+          package-json-file: frontend/package.json
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Sync backend dependencies from lockfile
+        run: uv sync --frozen
+        working-directory: backend
+      - name: Install frontend dependencies from lockfile
+        run: pnpm install --frozen-lockfile
+        working-directory: frontend
+      # The exported openapi.json is a gitignored build artifact; only the
+      # generated TypeScript client is committed, so drift means the diff is
+      # non-empty (blueprint §15, Scope §6.6).
+      - name: Regenerate client and fail on drift
+        run: |
+          make generate-client
+          git diff --exit-code -- frontend/src/api/generated/openapi.d.ts
+
+  migration-validity:
+    name: Migration validity (Alembic on fresh DB)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: app
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app -d app"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://app:app@localhost:5432/app
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-python: true
+      - name: Sync dependencies from lockfile
+        run: uv sync --frozen
+      - name: Upgrade to head on a fresh database
+        run: uv run alembic upgrade head
+      - name: Downgrade back to base
+        run: uv run alembic downgrade base
+      - name: Upgrade again (idempotent re-apply)
+        run: uv run alembic upgrade head
+
+  container-build:
+    name: Container build (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: backend
+            context: ./backend
+          - image: frontend
+            context: ./frontend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4.2.0
+      - name: Build image (validation only, no push)
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: ${{ matrix.context }}
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -194,16 +194,16 @@ Local development follows **ADR-0008** (native app code + containerised infrastr
 
 ## 6.9 CI
 
-- [ ] `.github/workflows/ci.yml` with jobs for:
-  - [ ] backend formatting + linting (Ruff)
-  - [ ] backend type checks (Pyright)
-  - [ ] backend tests (pytest)
-  - [ ] frontend formatting + linting (ESLint + Prettier)
-  - [ ] Vue type checks (vue-tsc)
-  - [ ] frontend tests (Vitest)
-  - [ ] generated-client drift detection
-  - [ ] migration validity (Alembic upgrade against fresh DB)
-  - [ ] container build (backend + frontend)
+- [x] `.github/workflows/ci.yml` with jobs for:
+  - [x] backend formatting + linting (Ruff)
+  - [x] backend type checks (Pyright)
+  - [x] backend tests (pytest)
+  - [x] frontend formatting + linting (ESLint + Prettier)
+  - [x] Vue type checks (vue-tsc)
+  - [x] frontend tests (Vitest)
+  - [x] generated-client drift detection
+  - [x] migration validity (Alembic upgrade against fresh DB)
+  - [x] container build (backend + frontend)
 
 ## 6.10 Validation
 
