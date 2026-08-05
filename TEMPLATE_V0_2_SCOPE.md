@@ -115,12 +115,12 @@ Subsections are ordered so later work builds on earlier work: the data model pre
 
 Foundation for everything else; §6.2 and §6.4 depend on these tables existing.
 
-- [ ] `User` model — `workos_user_id` (unique), email, name, `is_active`, UUIDv7 PK, timestamps
-- [ ] `Organisation` model — name, UUIDv7 PK, timestamps
-- [ ] `OrganisationMembership` model — user_id + organisation_id with unique constraint, status
-- [ ] Alembic migration creating the three tables with naming conventions and constraints
-- [ ] Pydantic schemas (`UserListItem`, `OrganisationCreate`, `OrganisationResponse`, membership schemas) — ORM models are never API request models
-- [ ] `base.py` registration of the new models for Alembic autogenerate
+- [x] `User` model — `workos_user_id` (unique), email, name, `is_active`, UUIDv7 PK, timestamps
+- [x] `Organisation` model — name, UUIDv7 PK, timestamps
+- [x] `OrganisationMembership` model — user_id + organisation_id with unique constraint, status
+- [x] Alembic migration creating the three tables with naming conventions and constraints
+- [x] Pydantic schemas (`UserListItem`, `OrganisationCreate`, `OrganisationResponse`, membership schemas) — ORM models are never API request models
+- [x] `base.py` registration of the new models for Alembic autogenerate
 
 ## 6.2 WorkOS Authentication Foundation
 

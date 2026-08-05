@@ -38,6 +38,11 @@ ignore = ["E501"]
 [tool.ruff.lint.isort]
 known-first-party = ["app", "scripts"]
 
+# base.py imports model modules at the bottom of the file so their tables are
+# registered on Base.metadata for Alembic autogenerate (see the file itself).
+[tool.ruff.lint.per-file-ignores]
+"app/db/base.py" = ["E402", "F401"]
+
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
