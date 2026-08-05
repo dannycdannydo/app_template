@@ -14,7 +14,7 @@ This repository is a **template**, not an application. New projects start from a
 - CI that runs the same gate on every push to `main` and on pull requests
 - Governance docs and architecture decision records (ADRs)
 
-The authoritative design standard is `Internal_Custom_Application_Starter_Architecture_v2.md`. The scoped contract and progress log for the current release is `TEMPLATE_V0_1_SCOPE.md`. Agents read the architecture documentation before structural changes (see `AGENTS.md`).
+The authoritative design standard is `Internal_Custom_Application_Starter_Architecture_v2.md`. The scoped contract and progress log for the current release is `TEMPLATE_V0_3_SCOPE.md`. Agents read the architecture documentation before structural changes (see `AGENTS.md`).
 
 ## Repository layout
 
@@ -87,6 +87,6 @@ Verification: after `cp .env.example .env`, both `make dev` and `make dev-docker
 
 ## Releases
 
-The template is versioned and tagged. `make check` passing is the gate for a release. Current release: v0.1 (foundation). See `TEMPLATE_V0_1_SCOPE.md` §6 for the progress log.
+The template is versioned and tagged. `make check` passing is the gate for a release. Current release: v0.3 (frontend application shell). See `TEMPLATE_V0_3_SCOPE.md` §6 for the progress log.
 
 Development follows the branch workflow in `CONTRIBUTING.md`: work units live on `feature/*` branches and reach `main` only through reviewed pull requests, so CI runs once per merged unit rather than on every push.

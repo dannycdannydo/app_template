@@ -8,7 +8,7 @@ Paste this prompt to have the agent review the most recent uncommitted implement
 
 You are reviewing work on a reusable full-stack application starter template: FastAPI + SQLAlchemy 2 + Pydantic 2 + PostgreSQL + Vue 3 + TypeScript + Tailwind + shadcn-vue.
 
-The build is **stage by stage**. The current release is the one whose scope file exists as `TEMPLATE_V0_N_SCOPE.md` (the highest-numbered such file, currently `TEMPLATE_V0_1_SCOPE.md`). Each subsection of the checklist is one work unit, worked through a three-step loop: implement → review → apply-and-commit.
+The build is **stage by stage**. The current release is the one whose scope file exists as `TEMPLATE_V0_N_SCOPE.md` (the highest-numbered such file, currently `TEMPLATE_V0_3_SCOPE.md`). Each subsection of the checklist is one work unit, worked through a three-step loop: implement → review → apply-and-commit.
 
 One local file governs this release:
 

@@ -18,9 +18,9 @@ This audit reads the universal rule sections of the blueprint and scans the **wh
 
 You are auditing work on a reusable full-stack application starter template: FastAPI + SQLAlchemy 2 + Pydantic 2 + PostgreSQL + Vue 3 + TypeScript + Tailwind + shadcn-vue.
 
-The build is **stage by stage**. The current release is v0.1 (foundation). One local file tracks progress:
+The build is **stage by stage**. The current release is v0.3 (frontend application shell). One local file tracks progress:
 
-- `TEMPLATE_V0_1_SCOPE.md` — §2 deliverables, §3 exclusions, §6 progress checklist.
+- `TEMPLATE_V0_3_SCOPE.md` — §2 deliverables, §3 exclusions, §6 progress checklist.
 
 The architecture blueprint (`Internal_Custom_Application_Starter_Architecture_v2.md`) is large. **You do not read the whole file.** You read only the cross-cutting, universal rule sections listed below. These are the conventions that apply to every task, not just one.
 
@@ -46,9 +46,9 @@ Do not read other blueprint sections unless a specific finding sends you there.
 2. Survey the codebase as it currently stands. Use `ls`, file reads (scoped, not whole-file where possible), `grep`, and `git log` to understand what has been built so far and how it is structured.
 
 3. Be **applicability-aware**. The codebase is growing incrementally. Only check a rule where the relevant code exists. For example:
-   - In early v0.1, before any routers or services exist, rules like "routers remain thin" or "business logic belongs in services" are **not applicable yet** — note this and move on.
-   - Once routers and services land (v0.2+), those rules become live and must be checked.
-   - "ORM models are never API request models" only applies once both ORM models and API request schemas exist.
+   - The foundation (v0.1) and identity/tenancy core (v0.2) are shipped, so "routers remain thin" and "business logic belongs in services" are **live** wherever routers and services exist — check them.
+   - "ORM models are never API request models" applies wherever both ORM models and API request schemas coexist — check it in every module that has both.
+   - Rules for capabilities that have not landed yet — e.g. "provider SDKs stay behind adapters" and "long-running work uses Dramatiq" (v0.4) — are **not applicable yet** — note this and move on.
    - State explicitly which rules are not yet applicable and why, so the user knows you did not skip them by accident.
 
 4. For each applicable rule, scan the codebase for violations. Common things to look for:
@@ -109,7 +109,7 @@ Do not read other blueprint sections unless a specific finding sends you there.
 ## When to use this prompt
 
 - **On demand**, when you suspect drift or want a health check.
-- **At the end of each release**, before tagging. For v0.1, this means after §6.10 is complete and before tagging `v0.1.0` — a clean audit is a gating acceptance criterion (see scope §5).
+- **At the end of each release**, before tagging. For the current release (v0.3), this means after the final §6 subsection is complete and before tagging `v0.3.0` — a clean audit is a gating acceptance criterion (see scope §5).
 - **After a cluster of related subsections**, if you want an early sweep before the release gate.
 
 ## How findings are handled
