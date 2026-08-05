@@ -205,9 +205,7 @@ def _iter_http_routes(app: FastAPI) -> Iterator[Route]:
         included = cast(Any, route)
         # Lazy inclusion on FastAPI 0.141+; fall back to plain router objects
         # holding ``routes`` in case the internal attribute is ever renamed.
-        router = getattr(included, "original_router", None) or getattr(
-            included, "routes", None
-        )
+        router = getattr(included, "original_router", None) or getattr(included, "routes", None)
         if router is None:
             continue
         yield from (sub for sub in router.routes if isinstance(sub, Route))

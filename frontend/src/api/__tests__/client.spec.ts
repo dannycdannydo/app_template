@@ -12,7 +12,7 @@ const fetchMock = vi.fn<(input: Request, init?: RequestInit) => Promise<Response
  */
 vi.stubGlobal('fetch', fetchMock)
 
-let client: typeof import('@/api/client')['client']
+let client: (typeof import('@/api/client'))['client']
 let originalLocation: Location
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -75,9 +75,7 @@ describe('client bearer-token injection', () => {
     const session = useSessionStore()
     session.setSession('token-abc')
 
-    fetchMock.mockResolvedValueOnce(
-      jsonResponse({ items: [], page: 1, page_size: 50, total: 0 }),
-    )
+    fetchMock.mockResolvedValueOnce(jsonResponse({ items: [], page: 1, page_size: 50, total: 0 }))
 
     await client.GET('/api/v1/records', {
       params: { header: { authorization: 'Bearer explicit' } },
@@ -95,10 +93,7 @@ describe('client 401 handling', () => {
     const assignMock = window.location.assign as ReturnType<typeof vi.fn<(path: string) => void>>
 
     fetchMock.mockResolvedValueOnce(
-      jsonResponse(
-        { code: 'unauthorized', message: 'Session expired.', request_id: 'req-9' },
-        401,
-      ),
+      jsonResponse({ code: 'unauthorized', message: 'Session expired.', request_id: 'req-9' }, 401),
     )
 
     await expect(client.GET('/api/v1/me')).rejects.toMatchObject({

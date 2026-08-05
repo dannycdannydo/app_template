@@ -133,12 +133,12 @@ Foundation for everything else; §6.2–§6.7 depend on the typed client and the
 
 Depends on §6.1 (client + error surface). Implements the WorkOS authorization-code flow behind an adapter.
 
-- [ ] `src/features/auth/workos.ts` adapter — the only module importing the WorkOS browser SDK; exposes `startLogin`, `completeLogin`, `signOut`, `getSession`
-- [ ] `VITE_WORKOS_CLIENT_ID` (+ callback URL config) added to settings handling and `.env.example`
-- [ ] Login view (`/login`) — "Continue with WorkOS" starts the flow; no identity fields are ever collected or submitted
-- [ ] Auth callback route — completes the code flow, stores the session, redirects to the shell; failure shows an error and returns to login
-- [ ] Session store (Pinia) — token/session state, `isAuthenticated`, logout; client state only, no server-state caching
-- [ ] Vitest coverage: start/completed/denied flow with stubbed adapter; no identity fields sent to the backend
+- [x] `src/features/auth/workos.ts` adapter — the only module importing the WorkOS browser SDK; exposes `startLogin`, `completeLogin`, `signOut`, `getSession`
+- [x] `VITE_WORKOS_CLIENT_ID` (+ callback URL config) added to settings handling and `.env.example`
+- [x] Login view (`/login`) — "Continue with WorkOS" starts the flow; no identity fields are ever collected or submitted
+- [x] Auth callback route — completes the code flow, stores the session, redirects to the shell; failure shows an error and returns to login
+- [x] Session store (Pinia) — token/session state, `isAuthenticated`, logout; client state only, no server-state caching
+- [x] Vitest coverage: start/completed/denied flow with stubbed adapter; no identity fields sent to the backend
 
 ## 6.3 Protected Routes & Application Shell
 
@@ -184,7 +184,7 @@ Depends on §6.3–§6.6. Proves the shell end-to-end on the v0.2 tenant-scoped 
 - [ ] Records list view — `DataTable` + `useRecordsQuery` + org selector context; viewer sees read-only UI (no write actions)
 - [ ] Record create form — standard form + toast; round-trips through the generated client
 - [ ] Record edit form and delete action with confirmation; permission-aware visibility derived from `/me`
-- [ ] Playwright journeys — authenticated shell (injected test-profile session): navigate to records, create a record, see it in the list, edit and delete it; unauthenticated visit redirects to login
+- [ ] Playwright journeys — authenticated shell (injected test-profile session): navigate to records, create a record, see it in the list, edit and delete it; unauthenticated visit redirects to login; **the successful callback round-trip is explicitly covered** (`/auth/callback?code=…` → session stored → redirect to `/`), per §6.2 review feedback on the boot-restore × history-snapshot coupling
 
 ## 6.8 Tests, Docs & Release Governance
 
