@@ -1,6 +1,7 @@
 import { createPinia, setActivePinia } from 'pinia'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { useOrganisationStore } from '@/stores/organisation'
 import { useSessionStore } from '@/stores/session'
 
 const fetchMock = vi.fn<(input: Request, init?: RequestInit) => Promise<Response>>()
@@ -25,6 +26,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 beforeEach(async () => {
   vi.resetModules()
   fetchMock.mockReset()
+  localStorage.clear()
   setActivePinia(createPinia())
   // jsdom location methods are not spyable; swap in a stub we can assert on.
   originalLocation = window.location
@@ -83,6 +85,44 @@ describe('client bearer-token injection', () => {
 
     const [request] = fetchMock.mock.calls[0]!
     expect(request.headers.get('authorization')).toBe('Bearer explicit')
+  })
+})
+
+describe('client organisation-context injection', () => {
+  it('attaches the selected organisation as the X-Org-Id header', async () => {
+    const organisation = useOrganisationStore()
+    organisation.setSelectedOrganisation('org-aaa')
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({ items: [], page: 1, page_size: 50, total: 0 }))
+
+    await client.GET('/api/v1/records')
+
+    expect(fetchMock).toHaveBeenCalledOnce()
+    const [request] = fetchMock.mock.calls[0]!
+    expect(request.headers.get('x-org-id')).toBe('org-aaa')
+  })
+
+  it('sends no X-Org-Id header without a selected organisation', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ items: [], page: 1, page_size: 50, total: 0 }))
+
+    await client.GET('/api/v1/records')
+
+    const [request] = fetchMock.mock.calls[0]!
+    expect(request.headers.has('x-org-id')).toBe(false)
+  })
+
+  it('does not overwrite an explicit X-Org-Id header', async () => {
+    const organisation = useOrganisationStore()
+    organisation.setSelectedOrganisation('org-aaa')
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({ items: [], page: 1, page_size: 50, total: 0 }))
+
+    await client.GET('/api/v1/records', {
+      params: { header: { 'x-org-id': 'org-explicit' } },
+    })
+
+    const [request] = fetchMock.mock.calls[0]!
+    expect(request.headers.get('x-org-id')).toBe('org-explicit')
   })
 })
 

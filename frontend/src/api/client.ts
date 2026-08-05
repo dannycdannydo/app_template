@@ -1,5 +1,6 @@
 import createClient, { type Middleware } from 'openapi-fetch'
 
+import { useOrganisationStore } from '@/stores/organisation'
 import { useSessionStore } from '@/stores/session'
 
 import { normalizeErrorResponse } from './errors'
@@ -32,6 +33,14 @@ const sessionMiddleware: Middleware = {
     const token = session.token
     if (token && !request.headers.has('Authorization')) {
       request.headers.set('Authorization', `Bearer ${token}`)
+    }
+    // Tenant context (Scope §6.3, acceptance §5.6): the selected organisation
+    // is client state owned by Pinia and attached as X-Org-Id on every
+    // request. The backend resolves the caller's membership from it.
+    const organisation = useOrganisationStore()
+    const organisationId = organisation.selectedOrganisationId
+    if (organisationId && !request.headers.has('X-Org-Id')) {
+      request.headers.set('X-Org-Id', organisationId)
     }
     return request
   },

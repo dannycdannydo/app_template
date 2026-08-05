@@ -144,11 +144,11 @@ Depends on §6.1 (client + error surface). Implements the WorkOS authorization-c
 
 Depends on §6.2 (session). Builds the navigable shell with organisation context.
 
-- [ ] Router guard `requiresAuth` — redirects to `/login` without a session, and away from `/login` with one; callback route is always public
-- [ ] Main layout — collapsible sidebar (shadcn-vue sheet/drawer primitives), header, mobile handling; sidebar state in Pinia (`stores/ui.ts`) and persisted
-- [ ] User menu — current user from `GET /api/v1/me` (name, email), logout action
-- [ ] Organisation selector — memberships from `/me`, persisted selected organisation in Pinia, sets `X-Org-Id` on the client (blueprint §14 client-state boundary)
-- [ ] Vitest/component tests for the guard, layout, user menu and selector
+- [x] Router guard `requiresAuth` — redirects to `/login` without a session, and away from `/login` with one; callback route is always public
+- [x] Main layout — collapsible sidebar (shadcn-vue sheet/drawer primitives), header, mobile handling; sidebar state in Pinia (`stores/ui.ts`) and persisted
+- [x] User menu — current user from `GET /api/v1/me` (name, email), logout action
+- [x] Organisation selector — memberships from `/me`, persisted selected organisation in Pinia, sets `X-Org-Id` on the client (blueprint §14 client-state boundary)
+- [x] Vitest/component tests for the guard, layout, user menu and selector
 
 ## 6.4 Server-State Query Layer
 

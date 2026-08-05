@@ -31,6 +31,9 @@ async function bootstrap(): Promise<void> {
   const session = useSessionStore(pinia)
   const token = await getSession()
   if (token) session.setSession(token)
+  // The router guard waits for this before deciding between /login and the
+  // shell, so an authenticated reload lands inside the shell (Scope §6.3).
+  session.markBootRestored()
 
   app.mount('#app')
 }
