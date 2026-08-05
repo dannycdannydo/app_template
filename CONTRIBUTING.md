@@ -4,7 +4,7 @@ This repository is a maintained template product. Changes go through a three-ste
 
 ## Workflow
 
-1. Pick the next unchecked work unit in `TEMPLATE_V0_1_SCOPE.md` §6 (in sequence).
+1. Pick the next unchecked work unit in `TEMPLATE_V0_3_SCOPE.md` §6 (in sequence).
 2. Read the blueprint sections listed for that unit in §7 of the scope file, plus existing repo patterns. Do not invent conventions that contradict the blueprint.
 3. **Implement** fully and end-to-end: real working files, configuration wired, tests where they naturally belong.
 4. Run the quality gate immediately after changes: `make lint`, `make typecheck`, `make test`, plus any other relevant check from the scope file §4. Fix anything that fails.
@@ -16,7 +16,7 @@ This repository is a maintained template product. Changes go through a three-ste
 
 CI runs the full quality gate on every push to `main` and on every pull request (see `.github/workflows/ci.yml`). Pushes to any other branch trigger nothing. Work therefore happens on branches, and `main` only ever changes through a reviewed, merged pull request:
 
-1. Start each work unit on its own branch: `git checkout -b feature/<unit>` (the unit name from `TEMPLATE_V0_1_SCOPE.md` §6).
+1. Start each work unit on its own branch: `git checkout -b feature/<unit>` (the unit name from `TEMPLATE_V0_3_SCOPE.md` §6).
 2. Run the implement → review → apply-and-commit loop on that branch: implement uncommitted, have the reviewer inspect the diff (steps 1–6 above), then commit.
 3. Push the branch after the reviewed commit: `git push -u origin feature/<unit>`. This does not start a build.
 4. Open a pull request to `main` when the work unit is complete. CI runs on the PR; it must be green.

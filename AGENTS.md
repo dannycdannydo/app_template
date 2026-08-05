@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Instructions for human and AI contributors working in this repository. The canonical design standard is `Internal_Custom_Application_Starter_Architecture_v2.md`; the release contract is `TEMPLATE_V0_2_SCOPE.md` (see its §7 reference map for which blueprint sections apply to each work unit).
+Instructions for human and AI contributors working in this repository. The canonical design standard is `Internal_Custom_Application_Starter_Architecture_v2.md`; the release contract is `TEMPLATE_V0_3_SCOPE.md` (see its §7 reference map for which blueprint sections apply to each work unit).
 
 ## Mandatory agent rules
 
@@ -17,7 +17,7 @@ Instructions for human and AI contributors working in this repository. The canon
 - Provider SDKs stay behind adapters.
 - Frontend API types are generated.
 - Tests accompany behavioural changes.
-- Keep the mandatory security suite green: new protected `/api/v1` endpoints must be added to `PROTECTED_ROUTES` in `backend/tests/test_security_suite.py` (blueprint §31, Scope §6.6), which then checks unauthenticated/invalid-session/disabled-user rejection, cross-organisation denial, viewer-write denial and stack-trace non-exposure for the new route.
+- Keep the mandatory security suite green: new protected `/api/v1` endpoints must be added to `PROTECTED_ROUTES` in `backend/tests/test_security_suite.py` (blueprint §31, v0.2 Scope §6.6), which then checks unauthenticated/invalid-session/disabled-user rejection, cross-organisation denial, viewer-write denial and stack-trace non-exposure for the new route.
 - Do not weaken linting, typing or tests.
 - Do not refactor unrelated code without a clear reason.
 - Do not add dependencies without documenting why (see ADRs).
