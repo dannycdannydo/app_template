@@ -12,6 +12,18 @@ This repository is a maintained template product. Changes go through a three-ste
 6. **Do not commit and do not check off boxes** until the reviewer has inspected the diff.
 7. The reviewer inspects the diff and the handoff, flags issues, and the implementer addresses them. Only then the work is applied and committed, and the §6 boxes are checked.
 
+## Branch workflow
+
+CI runs the full quality gate on every push to `main` and on every pull request (see `.github/workflows/ci.yml`). Pushes to any other branch trigger nothing. Work therefore happens on branches, and `main` only ever changes through a reviewed, merged pull request:
+
+1. Start each work unit on its own branch: `git checkout -b feature/<unit>` (the unit name from `TEMPLATE_V0_1_SCOPE.md` §6).
+2. Run the implement → review → apply-and-commit loop on that branch: implement uncommitted, have the reviewer inspect the diff (steps 1–6 above), then commit.
+3. Push the branch after the reviewed commit: `git push -u origin feature/<unit>`. This does not start a build.
+4. Open a pull request to `main` when the work unit is complete. CI runs on the PR; it must be green.
+5. Merge the PR. This single merge to `main` is the one CI run per work unit.
+
+Do not push directly to `main` and do not merge your own PR without review. Keep the branch history clean with the commit style below, and delete the branch after merge.
+
 ## Commit style
 
 Commit messages are for future readers scanning history. Rules:

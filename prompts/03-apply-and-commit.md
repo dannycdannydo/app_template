@@ -46,9 +46,11 @@ You are the **implementer**, picking up after a review.
 
    Include the attribution lines required by the project (see existing commits or the project's commit conventions).
 
-8. **Clear the handoff files.** Delete `.handoff/implementation.md` and `.handoff/review.md`. They have served their purpose and should not linger — the next cycle starts fresh.
+8. **Push and open a PR** (unless the work was already committed and merged). The work unit lives on a `feature/*` branch — never push directly to `main`. Push the branch and open a pull request to `main` so CI runs on the PR and the single merge to `main` is the gate (see `CONTRIBUTING.md` → Branch workflow).
 
-9. **Report status.** After committing, state:
+9. **Clear the handoff files.** Delete `.handoff/implementation.md` and `.handoff/review.md`. They have served their purpose and should not linger — the next cycle starts fresh.
+
+10. **Report status.** After committing, state:
    - which subsection was completed and committed;
    - whether the review was clean or changes were applied (summarise);
    - validation results;

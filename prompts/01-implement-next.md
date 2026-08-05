@@ -23,25 +23,27 @@ You are the **implementer**.
 
 ## Instructions
 
-1. Open `TEMPLATE_V0_1_SCOPE.md` §6 and find the **next unchecked subsection** in sequence (6.1, then 6.2, etc.). If some items in a subsection are already checked, complete the remaining ones. Batch closely related line items within a single subsection.
+1. Work on a **feature branch**, never `main`: `git checkout -b feature/<subsection-or-short-name>` if you are not already on one. CI runs only on pushes to `main` and on pull requests, so a branch keeps the gate quiet until the work unit is merged (see `CONTRIBUTING.md` → Branch workflow).
 
-2. Consult §7 (blueprint reference map) and read **only** the listed blueprint sections for this subsection. Follow existing patterns already in the repo. Do not invent conventions that contradict the blueprint.
+2. Open `TEMPLATE_V0_1_SCOPE.md` §6 and find the **next unchecked subsection** in sequence (6.1, then 6.2, etc.). If some items in a subsection are already checked, complete the remaining ones. Batch closely related line items within a single subsection.
 
-3. State at the start of your work:
+3. Consult §7 (blueprint reference map) and read **only** the listed blueprint sections for this subsection. Follow existing patterns already in the repo. Do not invent conventions that contradict the blueprint.
+
+4. State at the start of your work:
    - which subsection and which checkbox items you will complete;
    - which blueprint sections you read.
 
-4. Implement the work **fully and end-to-end**: real working files (no stubs, placeholders, or TODOs), configuration wired correctly, tests written where they naturally belong, imports/types/formatting clean.
+5. Implement the work **fully and end-to-end**: real working files (no stubs, placeholders, or TODOs), configuration wired correctly, tests written where they naturally belong, imports/types/formatting clean.
 
-5. Run validation immediately after your changes:
+6. Run validation immediately after your changes:
    - `make lint`
    - `make typecheck`
    - `make test`
    - any other relevant check from §4.
 
-6. Fix anything that fails before declaring the work ready.
+7. Fix anything that fails before declaring the work ready.
 
-7. **Write the handoff summary to a file.** This is required — do not skip it. Write to `.handoff/implementation.md` (this directory is gitignored). The file is what the reviewer reads in their session — they will not see your chat output. Include:
+8. **Write the handoff summary to a file.** This is required — do not skip it. Write to `.handoff/implementation.md` (this directory is gitignored). The file is what the reviewer reads in their session — they will not see your chat output. Include:
    - subsection completed;
    - files created or changed, with a one-line purpose each;
    - which §6 items should now be checked;
@@ -51,7 +53,7 @@ You are the **implementer**.
    - what the reviewer should pay closest attention to;
    - validation commands run and their results.
 
-8. **Do not commit. Do not check off boxes.** Leave the work uncommitted so the reviewer can inspect the diff cleanly. The handoff file `.handoff/implementation.md` must exist before you hand off.
+9. **Do not commit. Do not check off boxes.** Leave the work uncommitted so the reviewer can inspect the diff cleanly. The handoff file `.handoff/implementation.md` must exist before you hand off.
 
 ## Done means
 

@@ -22,6 +22,19 @@ Work proceeds through a repeating cycle:
 | --- | --- | --- | --- |
 | `04-architecture-audit.md` | On demand, or at each release gate before tagging | Auditor | Drift report against the blueprint's cross-cutting rules; CRITICAL findings block release tags |
 
+## Branching
+
+CI runs the full quality gate on every push to `main` and on every pull request (see `.github/workflows/ci.yml`); pushes to other branches trigger nothing. Work each scope subsection on its own branch and merge through a reviewed PR so `main` only changes via CI-gated merges:
+
+```
+git checkout -b feature/<unit>     # start of prompt 01
+… implement → review → apply-and-commit …
+git push -u origin feature/<unit>  # after commit; no CI run on the branch
+open PR to main → CI runs on the PR → merge (single CI run on main)
+```
+
+Prompt 01 starts work on the current branch; prompt 03 commits there. Do not push to `main` directly.
+
 The audit is **not** part of the daily loop. It reads the universal rule sections of the blueprint (§33 agent rules, §10 DB conventions, §12 API design, §13 API errors) and scans the codebase as it stands for drift and cross-cutting violations that a per-diff review cannot catch. A clean audit is a gating acceptance criterion for tagging each release (see scope §5).
 
 ## How to use them
