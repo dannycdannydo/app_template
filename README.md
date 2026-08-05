@@ -43,16 +43,22 @@ Local development follows **ADR-0008**: PostgreSQL and Redis run in Docker, whil
 # 1. Clone, then prepare the environment (single .env at the repo root)
 cp .env.example .env
 
-# 2. Start PostgreSQL + Redis in Docker, and the API + frontend natively
-#    with live reload (this is the day-to-day workflow)
-make dev
+# 2. Install dependencies (backend lockfile via uv; frontend via pnpm)
+cd backend && uv sync
+cd ../frontend && pnpm install
 
-# 3. Apply the baseline migration to the fresh database
+# 3. Start PostgreSQL + Redis in Docker, and the API + frontend natively
+#    with live reload (this is the day-to-day workflow)
+cd .. && make dev
+
+# 4. Apply the baseline migration to the fresh database
 make migrate
 
-# 4. Run the full quality gate (lint + typecheck + test + client drift)
+# 5. Run the full quality gate (lint + typecheck + test + client drift)
 make check
 ```
+
+If a port is already taken on your machine, override it in `.env` (e.g. `REDIS_PORT=6380` when a local Redis runs on 6379) — every variable is documented in `.env.example`.
 
 The API is served at `http://localhost:8000` (docs at `/docs`) and the frontend at `http://localhost:5173`, which proxies API traffic to the backend.
 
