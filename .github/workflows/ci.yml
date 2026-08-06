@@ -302,19 +302,15 @@ jobs:
   dependency-review:
     name: Dependency vulnerability scan
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      # OSV-Scanner PR diff scan (uv.lock + pnpm-lock.yaml). GitHub's
-      # dependency-review-action requires Dependency graph + GitHub Advanced
-      # Security, which are unavailable on this personal repo; OSV-Scanner
-      # keeps the same "fail on newly introduced vulnerable dependencies"
-      # gate against the public OSV database. SARIF upload is disabled for
-      # the same GHAS availability reason.
-      - name: Scan PR dependency changes for known vulnerabilities
-        uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@v2.3.8
-        with:
-          upload-sarif: false
+    # OSV-Scanner PR diff scan (uv.lock + pnpm-lock.yaml). GitHub's
+    # dependency-review-action requires Dependency graph + GitHub Advanced
+    # Security, which are unavailable on this personal repo; OSV-Scanner
+    # keeps the same "fail on newly introduced vulnerable dependencies"
+    # gate against the public OSV database. SARIF upload is disabled for
+    # the same GHAS availability reason.
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@v2.3.8
+    with:
+      upload-sarif: false
 
   container-scan:
     name: Container vulnerability scan (${{ matrix.image }})
