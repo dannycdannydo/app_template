@@ -14,7 +14,7 @@ Applications built from this template need object storage (user uploads, exports
 
 ## Decision
 
-Use a **provider-neutral storage interface** in the template (`storage/`), with adapters for S3-compatible storage and Azure Blob Storage. Signed upload URLs are part of the interface contract (v0.4). All object storage access in applications goes through the interface; provider SDKs stay behind adapters.
+Use a **provider-neutral storage interface** in the template (`storage/`), with adapters for S3-compatible storage and Azure Blob Storage. Signed upload URLs are part of the interface contract (v0.5). All object storage access in applications goes through the interface; provider SDKs stay behind adapters.
 
 ## Consequences
 

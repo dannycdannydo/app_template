@@ -266,7 +266,33 @@ TanStack Query setup
 
 At this point the starter should feel like a genuine application rather than a technical demo.
 
-## Template v0.4 — Files and Jobs
+## Template v0.4 — Platform Administration
+
+Adds:
+
+```text
+audit events (blueprint §29, pulled forward)
+bootstrap platform admin (BOOTSTRAP_PLATFORM_ADMIN_EMAIL)
+platform admin centre
+platform authorisation plane (platform_roles, platform.admin)
+WorkOS organisation mapping (organisations.workos_organisation_id)
+WorkOS Invitation API onboarding
+membership administration (suspend / reactivate / remove / roles)
+platform-controlled organisation feature flags (blueprint §27, pulled forward)
+WorkOS webhook consumer
+Vue admin pages
+```
+
+WorkOS invitations become the standard onboarding flow and user and
+organisation administration moves out of the WorkOS dashboard and into the
+application. WorkOS remains the identity provider (identities, authentication,
+sessions, invitation delivery); the application remains the source of truth
+for organisations, memberships, roles, permissions, feature flags and audit
+history. The platform plane is deliberately separate from the organisation
+permission system — no global admin bypass. Design source:
+`PLATFORM_ADMIN_WORKFLOW_PLAN.md`.
+
+## Template v0.5 — Files and Jobs
 
 Adds:
 
@@ -284,12 +310,11 @@ job progress polling
 
 This gives the core foundation for document-heavy applications.
 
-## Template v0.5 — Operations
+## Template v0.6 — Operations
 
 Adds:
 
 ```text
-audit log
 structured JSON logging
 Sentry
 email provider interface
@@ -323,6 +348,8 @@ general-purpose integration reconciliation
 ```
 
 These appear in the blueprint because the blueprint is the long-term design standard. Their absence from the first template is deliberate, not an oversight.
+
+Exception: platform-controlled organisation feature flags (blueprint §27) land in v0.4 as part of Platform Administration; the *general* database-backed feature-flag framework for application features remains deferred.
 
 ---
 

@@ -163,7 +163,10 @@ describe('client 401 handling', () => {
     const assignMock = window.location.assign as ReturnType<typeof vi.fn<(path: string) => void>>
 
     fetchMock.mockResolvedValueOnce(
-      jsonResponse({ code: 'unauthorized', message: 'Session rejected.', request_id: 'req-10' }, 401),
+      jsonResponse(
+        { code: 'unauthorized', message: 'Session rejected.', request_id: 'req-10' },
+        401,
+      ),
     )
 
     await expect(client.GET('/api/v1/me')).rejects.toMatchObject({ status: 401 })

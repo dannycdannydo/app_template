@@ -67,6 +67,7 @@ async def create_record_endpoint(
         organisation_id=membership.organisation_id,
         title=payload.title,
         body=payload.body,
+        actor_user_id=membership.user_id,
     )
     return RecordDetail.model_validate(record)
 
@@ -100,6 +101,7 @@ async def update_record_endpoint(
         record_id=record_id,
         title=payload.title,
         body=payload.body,
+        actor_user_id=membership.user_id,
     )
     return RecordDetail.model_validate(record)
 
@@ -115,4 +117,5 @@ async def delete_record_endpoint(
         session,
         organisation_id=membership.organisation_id,
         record_id=record_id,
+        actor_user_id=membership.user_id,
     )

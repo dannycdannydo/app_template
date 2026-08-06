@@ -35,6 +35,7 @@ const me: MeResponse = {
   },
   memberships: [],
   roles: ['owner'],
+  platform_roles: [],
 }
 
 const mountedWrappers: VueWrapper[] = []

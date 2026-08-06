@@ -146,7 +146,10 @@ describe('WorkOS adapter (src/features/auth/workos)', () => {
     const options = createClientMock.mock.calls[0]?.[1]
     options?.onRedirectCallback?.({ accessToken: 'token-from-exchange', state: null })
 
-    await expect(completing).resolves.toEqual({ accessToken: 'token-from-exchange', returnTo: null })
+    await expect(completing).resolves.toEqual({
+      accessToken: 'token-from-exchange',
+      returnTo: null,
+    })
   })
 
   it('completeLogin falls back to the SDK access token when no fresh exchange occurred', async () => {

@@ -15,7 +15,7 @@ The template needs durable, Redis-backed background job processing (email, impor
 
 ## Decision
 
-Use **Dramatiq** with Redis as the broker for background jobs. Long-running work must be expressed as Dramatiq tasks, never as in-process asyncio tasks. Job records that the application needs to reason about are persisted durably (v0.4).
+Use **Dramatiq** with Redis as the broker for background jobs. Long-running work must be expressed as Dramatiq tasks, never as in-process asyncio tasks. Job records that the application needs to reason about are persisted durably (v0.5).
 
 ## Consequences
 

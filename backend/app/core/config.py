@@ -97,8 +97,14 @@ class Settings(BaseSettings):
             raise ValueError("workos_api_key is required in the production environment")
         if self.app_env == "production" and not self.workos_client_id:
             raise ValueError("workos_client_id is required in the production environment")
-        if self.app_env == "production" and self.trusted_hosts == ["localhost", "127.0.0.1", "test"]:
-            raise ValueError("trusted_hosts must be explicitly configured in the production environment")
+        if self.app_env == "production" and self.trusted_hosts == [
+            "localhost",
+            "127.0.0.1",
+            "test",
+        ]:
+            raise ValueError(
+                "trusted_hosts must be explicitly configured in the production environment"
+            )
         if self.app_env == "production" and not self.redis_url.startswith("rediss://"):
             raise ValueError("redis_url must use rediss in the production environment")
         if self.app_env == "production" and any(

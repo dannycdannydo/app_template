@@ -15,6 +15,12 @@ import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError
+from app.modules.audit.service import (
+    ACTION_RECORD_CREATED,
+    ACTION_RECORD_DELETED,
+    ACTION_RECORD_UPDATED,
+    record_event,
+)
 from app.modules.records.models import Record
 from app.modules.records.queries import (
     org_records_count_statement,
@@ -38,15 +44,26 @@ async def create_record(
     organisation_id: uuid.UUID,
     title: str,
     body: str,
+    actor_user_id: uuid.UUID | None = None,
 ) -> Record:
     """Create a record inside the caller's organisation (one transaction).
 
     The organisation id comes from the validated request context, never from
     the request body (acceptance §5.4); the caller passes the membership's
-    organisation id explicitly so the provenance stays visible.
+    organisation id explicitly so the provenance stays visible. The audit row
+    commits inside the same transaction.
     """
     record = Record(organisation_id=organisation_id, title=title, body=body)
     session.add(record)
+    await session.flush()
+    await record_event(
+        session,
+        organisation_id=organisation_id,
+        actor_user_id=actor_user_id,
+        action=ACTION_RECORD_CREATED,
+        resource_type="record",
+        resource_id=str(record.id),
+    )
     await session.commit()
     await session.refresh(record)
     return record
@@ -104,6 +121,7 @@ async def update_record(
     record_id: uuid.UUID,
     title: str | None,
     body: str | None,
+    actor_user_id: uuid.UUID | None = None,
 ) -> Record:
     """Apply a partial update; unchanged fields keep their values."""
     record = await get_record(session, organisation_id=organisation_id, record_id=record_id)
@@ -111,6 +129,14 @@ async def update_record(
         record.title = title
     if body is not None:
         record.body = body
+    await record_event(
+        session,
+        organisation_id=organisation_id,
+        actor_user_id=actor_user_id,
+        action=ACTION_RECORD_UPDATED,
+        resource_type="record",
+        resource_id=str(record.id),
+    )
     await session.commit()
     await session.refresh(record)
     return record
@@ -121,8 +147,17 @@ async def delete_record(
     *,
     organisation_id: uuid.UUID,
     record_id: uuid.UUID,
+    actor_user_id: uuid.UUID | None = None,
 ) -> None:
     """Delete a record; a record outside the organisation is a 404."""
     record = await get_record(session, organisation_id=organisation_id, record_id=record_id)
     await session.delete(record)
+    await record_event(
+        session,
+        organisation_id=organisation_id,
+        actor_user_id=actor_user_id,
+        action=ACTION_RECORD_DELETED,
+        resource_type="record",
+        resource_id=str(record.id),
+    )
     await session.commit()

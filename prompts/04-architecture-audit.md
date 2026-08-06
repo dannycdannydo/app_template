@@ -48,7 +48,7 @@ Do not read other blueprint sections unless a specific finding sends you there.
 3. Be **applicability-aware**. The codebase is growing incrementally. Only check a rule where the relevant code exists. For example:
    - The foundation (v0.1) and identity/tenancy core (v0.2) are shipped, so "routers remain thin" and "business logic belongs in services" are **live** wherever routers and services exist — check them.
    - "ORM models are never API request models" applies wherever both ORM models and API request schemas coexist — check it in every module that has both.
-   - Rules for capabilities that have not landed yet — e.g. "provider SDKs stay behind adapters" and "long-running work uses Dramatiq" (v0.4) — are **not applicable yet** — note this and move on.
+   - Rules for capabilities that have not landed yet — e.g. "provider SDKs stay behind adapters" and "long-running work uses Dramatiq" (v0.5) — are **not applicable yet** — note this and move on.
    - State explicitly which rules are not yet applicable and why, so the user knows you did not skip them by accident.
 
 4. For each applicable rule, scan the codebase for violations. Common things to look for:

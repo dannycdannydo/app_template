@@ -11,10 +11,15 @@ from pathlib import Path
 
 import pytest
 
-os.environ.setdefault("APP_ENV", "test")
-os.environ.setdefault(
-    "DATABASE_URL", "postgresql+asyncpg://app:app@localhost:5432/app_template_test"
-)
+# The suite must always run in the test profile, whatever the surrounding shell
+# exports: with APP_ENV left as ``development`` the real Redis rate limiter is
+# constructed, and its asyncio client is bound to an event loop that pytest
+# closes between tests, turning every protected request into a 500. The
+# database URL is forced to the dedicated test database for the same reason —
+# a developer's exported DATABASE_URL would otherwise point the real-database
+# integration tests (which migrate and downgrade) at a development database.
+os.environ["APP_ENV"] = "test"
+os.environ["DATABASE_URL"] = "postgresql+asyncpg://app:app@localhost:5432/app_template_test"
 # WorkOS credentials are developer-shell exports that must never leak into the
 # suite: config tests assert the empty development defaults and the production
 # fail-fast validation, so drop them before any Settings model is constructed.
