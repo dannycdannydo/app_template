@@ -35,9 +35,7 @@ class RedisRateLimiter:
     async def enforce(self, *, key: str, limit: int, window_seconds: int) -> None:
         try:
             current = int(
-                await self._redis.eval(
-                    self._INCREMENT_SCRIPT, 1, key, str(window_seconds)
-                )
+                await self._redis.eval(self._INCREMENT_SCRIPT, 1, key, str(window_seconds))
             )
         except RedisError as exc:
             # Failing open would silently remove the abuse control during an
