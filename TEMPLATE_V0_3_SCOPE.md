@@ -172,10 +172,10 @@ Depends on §6.4 (query state). The reusable table every list screen uses.
 
 Depends on §6.1 (error envelope) and §6.4. The reusable form + feedback pattern every edit screen uses.
 
-- [ ] Form primitives (shadcn-vue form) with schema validation; reusable field error presentation
-- [ ] Toast integration (vue-sonner per shadcn-vue docs) wired to the error envelope and to success messages
-- [ ] Submission flow — validation errors inline, API errors as toasts, success navigates to the list (blueprint §13 mappings)
-- [ ] Vitest coverage: inline errors, API-error toast, success navigation
+- [x] Form primitives (shadcn-vue form) with schema validation; reusable field error presentation
+- [x] Toast integration (vue-sonner per shadcn-vue docs) wired to the error envelope and to success messages
+- [x] Submission flow — validation errors inline, API errors as toasts, success navigates to the list (blueprint §13 mappings)
+- [x] Vitest coverage: inline errors, API-error toast, success navigation
 
 ## 6.7 Records Feature Module (Shell Proof)
 
