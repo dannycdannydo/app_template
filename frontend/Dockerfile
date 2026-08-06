@@ -33,7 +33,7 @@ RUN VITE_API_BASE_URL=${VITE_API_BASE_URL} \
     pnpm build
 
 # --- Serve stage: static files behind nginx with API proxy ------------------
-FROM nginx:1.28-alpine AS serve
+FROM nginx:alpine AS serve
 
 # Refresh the Alpine packages shipped in the base image so the runtime is
 # patched for the latest high/critical CVEs (checked by the container scan).
