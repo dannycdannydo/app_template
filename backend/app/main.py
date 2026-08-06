@@ -21,12 +21,14 @@ from pydantic import ValidationError as PydanticValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.middleware.cors import CORSMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.responses import Response
 
 from app.api.health import router as health_router
 from app.core.config import get_settings
 from app.core.exceptions import APIError, ErrorDetail, ErrorResponse
 from app.core.logging import configure_logging, current_request_id
+from app.core.rate_limit import RateLimiter, get_rate_limiter
 from app.modules.organisations.router import router as organisations_router
 from app.modules.records.router import router as records_router
 from app.modules.users.router import router as users_router
@@ -125,6 +127,10 @@ async def _request_id_middleware(request: Request, call_next: RequestResponseEnd
         logger.exception("request_failed", method=request.method, path=request.url.path)
         raise
     response.headers["X-Request-ID"] = request_id
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Permissions-Policy"] = "camera=(), geolocation=(), microphone=()"
     duration_ms = (perf_counter() - started) * 1000
     logger.info(
         "request_finished",
@@ -137,6 +143,20 @@ async def _request_id_middleware(request: Request, call_next: RequestResponseEnd
     return response
 
 
+async def _rate_limit_middleware(request: Request, call_next: RequestResponseEndpoint) -> Response:
+    """Apply a distributed coarse API limit before request work begins."""
+    if request.url.path.startswith("/api/v1/"):
+        client_host = request.client.host if request.client else "unknown"
+        limiter: RateLimiter = get_rate_limiter()
+        try:
+            await limiter.enforce(key=f"api:ip:{client_host}", limit=300, window_seconds=60)
+        except APIError as exc:
+            # Exceptions raised by BaseHTTPMiddleware do not traverse FastAPI's
+            # endpoint exception handlers, so preserve the standard envelope.
+            return await _handle_api_error(request, exc)
+    return await call_next(request)
+
+
 def _register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(APIError, _handle_api_error)
     app.add_exception_handler(RequestValidationError, _handle_request_validation_error)
@@ -145,7 +165,9 @@ def _register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(Exception, _handle_unexpected_exception)
 
 
-def _register_middleware(app: FastAPI, *, cors_allowed_origins: list[str]) -> None:
+def _register_middleware(
+    app: FastAPI, *, cors_allowed_origins: list[str], trusted_hosts: list[str]
+) -> None:
     """Register request middleware, including the explicit browser-origin policy."""
     app.add_middleware(
         CORSMiddleware,
@@ -155,6 +177,8 @@ def _register_middleware(app: FastAPI, *, cors_allowed_origins: list[str]) -> No
         allow_headers=["Authorization", "Content-Type", "X-Org-Id", "X-Request-ID"],
         expose_headers=["X-Request-ID"],
     )
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=trusted_hosts)
+    app.add_middleware(BaseHTTPMiddleware, dispatch=_rate_limit_middleware)
     app.add_middleware(BaseHTTPMiddleware, dispatch=_request_id_middleware)
 
 
@@ -169,9 +193,21 @@ def create_app() -> FastAPI:
         yield
         logger.info("application_stopped", app=settings.app_name)
 
-    app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
+    is_production = settings.app_env == "production"
+    app = FastAPI(
+        title=settings.app_name,
+        version="0.1.0",
+        lifespan=lifespan,
+        docs_url=None if is_production else "/docs",
+        redoc_url=None if is_production else "/redoc",
+        openapi_url=None if is_production else "/openapi.json",
+    )
     _register_exception_handlers(app)
-    _register_middleware(app, cors_allowed_origins=settings.cors_allowed_origins)
+    _register_middleware(
+        app,
+        cors_allowed_origins=settings.cors_allowed_origins,
+        trusted_hosts=settings.trusted_hosts,
+    )
     app.include_router(health_router)
     app.include_router(users_router)
     app.include_router(organisations_router)

@@ -8,8 +8,9 @@ through the full ASGI stack via ``httpx.AsyncClient`` + ``ASGITransport``.
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient, Response
 from pydantic import BaseModel
+from pytest import MonkeyPatch
 
-from app.core.exceptions import ConflictError, NotFoundError
+from app.core.exceptions import ConflictError, NotFoundError, RateLimitExceeded
 from app.main import create_app
 
 
@@ -122,3 +123,36 @@ async def test_cors_allows_only_configured_browser_origins() -> None:
     assert allowed.headers["access-control-allow-origin"] == "http://localhost:5173"
     assert denied.status_code == 400
     assert "access-control-allow-origin" not in denied.headers
+
+
+async def test_api_security_headers_and_untrusted_hosts_are_rejected() -> None:
+    async with _client_for(create_app()) as client:
+        response = await client.get("/health")
+        denied = await client.get("/health", headers={"Host": "evil.example"})
+
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["referrer-policy"] == "strict-origin-when-cross-origin"
+    assert response.headers["x-frame-options"] == "DENY"
+    assert response.headers["permissions-policy"] == "camera=(), geolocation=(), microphone=()"
+    assert denied.status_code == 400
+
+
+async def test_api_requests_are_rate_limited_before_endpoint_execution(monkeypatch: MonkeyPatch) -> None:
+    calls: list[tuple[str, int, int]] = []
+
+    class RejectingLimiter:
+        async def enforce(self, *, key: str, limit: int, window_seconds: int) -> None:
+            calls.append((key, limit, window_seconds))
+            raise RateLimitExceeded(headers={"Retry-After": "60"})
+
+    monkeypatch.setattr("app.main.get_rate_limiter", lambda: RejectingLimiter())
+    app = create_app()
+    app.add_api_route("/api/v1/_test/rate-limit", lambda: {"ok": True}, methods=["GET"])
+
+    async with _client_for(app) as client:
+        response = await client.get("/api/v1/_test/rate-limit")
+
+    assert calls == [("api:ip:127.0.0.1", 300, 60)]
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == "60"
+    assert response.json()["code"] == "rate_limit_exceeded"

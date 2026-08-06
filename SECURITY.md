@@ -7,11 +7,11 @@ The practical baseline is **OWASP ASVS Level 2**. This file records the controls
 - WorkOS session validation for all authenticated routes (v0.2: `app/core/security.py`, enforced by the `get_current_user` dependency).
 - Default-deny authorisation; permissions are explicit, never implicit (v0.2 Scope §6.4: `require_permission`).
 - Tenant-scoped queries; cross-tenant access is a bug (v0.2: `X-Org-Id` context, org-scoped queries in `queries.py`).
-- Explicit CORS allowlist, no wildcard origins in production.
+- Explicit CORS allowlist and Trusted Host allowlist; neither permits wildcards.
 - CSRF protection where cookie authentication requires it.
 - Input limits on request bodies, string lengths, and upload sizes.
-- Rate limiting on public and sensitive endpoints.
-- Secure headers (HSTS, CSP, frame, MIME sniffing, referrer) at the edge.
+- Redis-backed, distributed coarse rate limiting for `/api/v1` requests (300 requests per minute per source IP); production fails closed if its TLS Redis service is unavailable.
+- Secure headers: API responses set MIME-sniffing, frame, referrer and permissions policies; the frontend edge sets CSP as well. HSTS remains the responsibility of the TLS-terminating production edge, not the local HTTP nginx container.
 - Private object storage; no public buckets.
 - Upload scanning hook on all uploaded content.
 - Restricted external URL fetching (SSRF controls, see below).
@@ -27,7 +27,8 @@ The practical baseline is **OWASP ASVS Level 2**. This file records the controls
 
 The identity and tenancy core enforces the following rules; each is covered by a mandatory security test (see below):
 
-- **Session validation**: token signature, issuer, audience and expiry are validated centrally; a disabled user is blocked with `403` even with a valid session.
+- **Session validation**: RS256 signature, exact configured issuer, client binding/audience, expiry and the required `exp`, `iat`, `iss`, `sub`, `sid`, and `client_id` claims are validated centrally; a disabled user is blocked with `403` even with a valid session. The configured issuer must exactly match a validated WorkOS token's public `iss` claim.
+- **Redirect and logout safety**: post-login state accepts only same-origin local paths, and logout uses a top-level WorkOS navigation to clear the provider session rather than a background cross-origin request.
 - **Identity fields are never trusted from the client**: email/name come from the validated WorkOS profile; request schemas use `extra="forbid"` so smuggled identity fields are rejected outright.
 - **Organisation context**: tenant-scoped routes require the `X-Org-Id` header; the organisation id is always derived from this validated context, never from a request body. Missing/malformed header is a `400`, a non-membership is a `403`, and resources outside the caller's organisation are treated as not found (`404`) where the resource model requires it.
 - **Default deny**: a caller may act only through permissions granted to the roles on their memberships; a code granted to no role is denied with `403`.
@@ -38,7 +39,7 @@ The identity and tenancy core enforces the following rules; each is covered by a
 Blueprint §31 requires a reusable security test set that runs in CI. `backend/tests/test_security_suite.py` implements it for the whole protected API surface:
 
 - unauthenticated requests rejected (`401`);
-- invalid sessions rejected — garbage tokens and tokens with tampered signatures, wrong issuer, wrong audience/client id, or expired expiry (`401`);
+- invalid sessions rejected — garbage tokens and tokens with tampered signatures, wrong issuer, wrong audience/client id, expired expiry, or omitted required claims (`401`);
 - cross-organisation access denied (`403`);
 - viewer writes denied (`403`);
 - disabled users denied (`403`);
@@ -91,4 +92,4 @@ If you find a security issue, report it privately to the maintainers before disc
 
 ## Deferred controls
 
-The following controls land with their owning capabilities in later releases and must be present before v1.0: storage/file controls (v0.4), audit logging (v0.5), and rate limiting at the edge for production profiles.
+The following controls land with their owning capabilities in later releases and must be present before v1.0: storage/file controls (v0.4), audit logging (v0.5), and rate limiting at the edge for production profiles. WorkOS event consumers remain a v0.5 capability; the existing signature verifier is retained until then.

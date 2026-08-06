@@ -19,15 +19,45 @@ const redirectUri =
 
 let clientPromise: Promise<WorkOSClient> | null = null
 let exchangedAccessToken: string | null = null
+let exchangedReturnTo: string | null = null
+
+export interface CompletedLogin {
+  accessToken: string
+  returnTo: string | null
+}
+
+function safeLocalReturnTo(value: unknown): string | null {
+  if (typeof value !== 'string' || !value.startsWith('/') || value.startsWith('//')) return null
+  try {
+    return new URL(value, window.location.origin).origin === window.location.origin ? value : null
+  } catch {
+    return null
+  }
+}
+
+function clearStaleLocalSessionHint(): void {
+  // AuthKit's browser SDK uses this cookie as a refresh hint. In localhost
+  // development it stores the actual refresh token in localStorage. A prior
+  // interrupted logout can leave only the hint, which makes SDK initialization
+  // post an invalid refresh request with no token on every page load.
+  const isLocalDevelopment =
+    window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+  const refreshTokenKey = `workos:refresh-token:${clientId}`
+  if (!isLocalDevelopment || localStorage.getItem(refreshTokenKey)) return
+
+  document.cookie = 'workos-has-session=; Max-Age=0; Path=/; SameSite=Lax'
+}
 
 function getClient(): Promise<WorkOSClient> {
   if (!clientId) {
     throw new Error('VITE_WORKOS_CLIENT_ID is not configured. See .env.example.')
   }
+  clearStaleLocalSessionHint()
   clientPromise ??= createClient(clientId, {
     redirectUri,
-    onRedirectCallback: ({ accessToken }) => {
+    onRedirectCallback: ({ accessToken, state }) => {
       exchangedAccessToken = accessToken
+      exchangedReturnTo = safeLocalReturnTo(state?.returnTo)
     },
   })
   return clientPromise
@@ -49,23 +79,58 @@ export async function startLogin(options: { returnTo?: string } = {}): Promise<v
  * Completes the authorization-code flow on the callback route and returns the
  * session access token. Throws when the flow failed or no session exists.
  */
-export async function completeLogin(): Promise<string> {
+export async function completeLogin(): Promise<CompletedLogin> {
   const client = await getClient()
   if (exchangedAccessToken) {
-    const token = exchangedAccessToken
+    const completedLogin = {
+      accessToken: exchangedAccessToken,
+      returnTo: exchangedReturnTo,
+    }
     exchangedAccessToken = null
-    return token
+    exchangedReturnTo = null
+    return completedLogin
   }
-  return client.getAccessToken()
+  return { accessToken: await client.getAccessToken(), returnTo: null }
 }
 
 /**
- * Ends the WorkOS session (local cleanup plus server-side revocation). Safe to
- * call without an active session; navigation is left to the caller.
+ * Ends the WorkOS session through a top-level WorkOS logout navigation.
+ *
+ * WorkOS owns its session cookie. A background cross-origin request cannot
+ * reliably clear that cookie in browsers with third-party-cookie protections,
+ * so normal and invalid-session logout both navigate at the top level.
  */
-export async function signOut(): Promise<void> {
-  const client = await getClient()
-  await client.signOut({ navigate: false })
+export async function signOut(): Promise<boolean> {
+  try {
+    const client = await getClient()
+    client.signOut({
+      // This is an already-registered AuthKit logout URI; keeping it queryless
+      // avoids a dashboard configuration dependency for local forks.
+      returnTo: new URL('/login', window.location.origin).toString(),
+    })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * End a rejected session through a top-level WorkOS logout navigation.
+ *
+ * A background logout request can clear this application's refresh token while
+ * the WorkOS session cookie survives as a third-party cookie. On the next app
+ * load, AuthKit then sees the cookie and attempts a refresh without a token.
+ * A browser navigation lets WorkOS clear its cookie before returning to the
+ * application's configured invalid-session logout URI.
+ */
+export async function signOutForInvalidSession(): Promise<boolean> {
+  try {
+    const client = await getClient()
+    client.signOut()
+    return true
+  } catch {
+    return false
+  }
 }
 
 /**

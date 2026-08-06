@@ -5,7 +5,7 @@ import type { Router } from 'vue-router'
 import { createMemoryHistory, createRouter } from 'vue-router'
 
 vi.mock('@/features/auth/workos', () => ({
-  completeLogin: vi.fn<() => Promise<string>>(),
+  completeLogin: vi.fn<() => Promise<{ accessToken: string; returnTo: string | null }>>(),
 }))
 
 import { completeLogin } from '@/features/auth/workos'
@@ -40,7 +40,7 @@ describe('AuthCallbackView', () => {
   })
 
   it('completes the code flow, stores the session and redirects to the shell', async () => {
-    completeLoginMock.mockResolvedValue('token-from-workos')
+    completeLoginMock.mockResolvedValue({ accessToken: 'token-from-workos', returnTo: null })
     const { router, session } = await mountCallback('?code=auth-code-123')
 
     await flushPromises()

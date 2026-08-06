@@ -36,6 +36,10 @@ class Settings(BaseSettings):
         default="",
         description="Async SQLAlchemy database URL, e.g. postgresql+asyncpg://user:pass@host:5432/db",
     )
+    redis_url: str = Field(
+        default="redis://localhost:6379/0",
+        description="Redis URL for distributed API rate limiting",
+    )
     workos_api_key: str = Field(
         default="",
         description="WorkOS secret API key; used to fetch user profiles when provisioning internal users",
@@ -46,7 +50,11 @@ class Settings(BaseSettings):
     )
     workos_api_base_url: str = Field(
         default="https://api.workos.com/",
-        description="WorkOS API base URL; session tokens must be issued by the matching issuer",
+        description="WorkOS API base URL used for the JWKS and Management API",
+    )
+    workos_jwt_issuer: str = Field(
+        default="https://api.workos.com/",
+        description="Exact trusted WorkOS access-token iss claim",
     )
     workos_jwt_leeway: float = Field(
         default=30.0,
@@ -55,6 +63,10 @@ class Settings(BaseSettings):
     cors_allowed_origins: list[str] = Field(
         default_factory=lambda: ["http://localhost:5173"],
         description="Exact browser origins allowed to call the API",
+    )
+    trusted_hosts: list[str] = Field(
+        default_factory=lambda: ["localhost", "127.0.0.1", "test"],
+        description="Host headers accepted by the API; configure real public hosts in production",
     )
 
     @field_validator("cors_allowed_origins")
@@ -66,6 +78,15 @@ class Settings(BaseSettings):
             raise ValueError("cors_allowed_origins must not contain a wildcard origin")
         return [origin.rstrip("/") for origin in origins]
 
+    @field_validator("trusted_hosts")
+    @classmethod
+    def _validate_trusted_hosts(cls, hosts: list[str]) -> list[str]:
+        if not hosts or any(not host or "://" in host for host in hosts):
+            raise ValueError("trusted_hosts must contain hostnames only")
+        if any(host == "*" for host in hosts):
+            raise ValueError("trusted_hosts must not contain a wildcard host")
+        return hosts
+
     @model_validator(mode="after")
     def _validate_config(self) -> Settings:
         if not self.database_url.startswith(("postgresql", "postgres")):
@@ -76,12 +97,18 @@ class Settings(BaseSettings):
             raise ValueError("workos_api_key is required in the production environment")
         if self.app_env == "production" and not self.workos_client_id:
             raise ValueError("workos_client_id is required in the production environment")
+        if self.app_env == "production" and self.trusted_hosts == ["localhost", "127.0.0.1", "test"]:
+            raise ValueError("trusted_hosts must be explicitly configured in the production environment")
+        if self.app_env == "production" and not self.redis_url.startswith("rediss://"):
+            raise ValueError("redis_url must use rediss in the production environment")
         if self.app_env == "production" and any(
             not origin.startswith("https://") for origin in self.cors_allowed_origins
         ):
             raise ValueError("cors_allowed_origins must use https in the production environment")
         if self.workos_api_base_url and not self.workos_api_base_url.startswith("https://"):
             raise ValueError("workos_api_base_url must use https")
+        if not self.workos_jwt_issuer:
+            raise ValueError("workos_jwt_issuer is required")
         return self
 
 

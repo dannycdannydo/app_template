@@ -19,14 +19,14 @@ import { useSessionStore } from '@/stores/session'
  */
 export async function requiresAuth(
   to: RouteLocationNormalized,
-): Promise<boolean | { name: string }> {
+): Promise<boolean | { name: string; query?: Record<string, string> }> {
   const session = useSessionStore()
   await session.waitForBootRestore()
 
   const needsAuth = to.matched.some((record) => record.meta.requiresAuth === true)
 
   if (needsAuth && !session.isAuthenticated) {
-    return { name: 'login' }
+    return { name: 'login', query: { returnTo: to.fullPath } }
   }
   if (to.name === 'login' && session.isAuthenticated) {
     return { name: 'home' }

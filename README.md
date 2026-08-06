@@ -47,14 +47,11 @@ cp .env.example .env
 cd backend && uv sync
 cd ../frontend && pnpm install
 
-# 3. Start PostgreSQL + Redis in Docker, and the API + frontend natively
-#    with live reload (this is the day-to-day workflow)
+# 3. Start PostgreSQL + Redis, apply migrations, and run the API + frontend
+#    natively with live reload (this is the day-to-day workflow)
 cd .. && make dev
 
-# 4. Apply the baseline migration to the fresh database
-make migrate
-
-# 5. Run the full quality gate (lint + typecheck + test + client drift)
+# 4. Run the full quality gate (lint + typecheck + test + client drift)
 make check
 ```
 
@@ -68,9 +65,9 @@ For CI parity, onboarding, or Dockerfile validation the **entire stack runs in c
 make dev-docker
 ```
 
-`make dev-docker` starts the same Postgres and Redis, plus the API and frontend containers (built from `backend/Dockerfile` and `frontend/Dockerfile`), and runs migrations automatically on container start. Both commands share `deploy/compose/compose.local.yml`: the default service set is infrastructure only, and the `fullstack` Compose profile adds the application containers.
+`make dev` and `make dev-docker` apply pending Alembic migrations before the API serves traffic. `make migrate` remains available for a deliberate migration-only step. The container command starts the same Postgres and Redis plus the API and frontend containers (built from `backend/Dockerfile` and `frontend/Dockerfile`). Both commands share `deploy/compose/compose.local.yml`: the default service set is infrastructure only, and the `fullstack` Compose profile adds the application containers.
 
-Verification: after `cp .env.example .env`, both `make dev` and `make dev-docker` must start the services, `make migrate` must apply the baseline migration, and `make check` must pass with zero lint errors, zero type errors, and green tests.
+Verification: after `cp .env.example .env`, both `make dev` and `make dev-docker` must start the services and `make check` must pass with zero lint errors, zero type errors, and green tests.
 
 ## Trying the demo (login flow)
 

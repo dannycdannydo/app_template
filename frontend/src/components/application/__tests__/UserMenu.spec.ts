@@ -14,7 +14,7 @@ vi.mock('@/queries/me', () => ({
 }))
 
 vi.mock('@/features/auth/workos', () => ({
-  signOut: vi.fn<() => Promise<void>>(),
+  signOut: vi.fn<() => Promise<boolean>>(),
 }))
 
 import UserMenu from '@/components/application/UserMenu.vue'
@@ -56,7 +56,7 @@ describe('UserMenu', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     signOutMock.mockReset()
-    signOutMock.mockResolvedValue(undefined)
+    signOutMock.mockResolvedValue(false)
     mockUseMeQuery.mockReset()
   })
 

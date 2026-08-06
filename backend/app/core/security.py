@@ -45,8 +45,11 @@ class InvalidSessionError(Exception):
     logging; it is never surfaced to the client as-is.
     """
 
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, *, token_issuer: str | None = None) -> None:
         self.reason = reason
+        # The issuer is a public JWT claim, retained solely for structured
+        # diagnostics. Never attach the token itself or other claims here.
+        self.token_issuer = token_issuer
         super().__init__(reason)
 
 
@@ -90,7 +93,10 @@ class WorkOSSessionValidator:
     The signature (RS256 key from the JWKS set for the client), issuer,
     audience and expiry are all verified. The JWKS client is injectable so
     tests can substitute a local signing key; the default client fetches and
-    caches the JWKS set from ``<api_base_url>sso/jwks/<client_id>``.
+    caches the JWKS set from ``<api_base_url>sso/jwks/<client_id>``. The
+    issuer is supplied independently: in WorkOS environments with multiple
+    applications, access tokens use the environment default application's
+    client ID as ``iss`` while ``client_id`` identifies the active application.
     """
 
     _ALGORITHMS: ClassVar[list[str]] = ["RS256"]
@@ -100,11 +106,12 @@ class WorkOSSessionValidator:
         *,
         client_id: str,
         api_base_url: str,
+        issuer: str,
         leeway_seconds: float,
         jwks_client: PyJWKClient | None = None,
     ) -> None:
         self._client_id = client_id
-        self._expected_issuer = api_base_url.rstrip("/")
+        self._expected_issuer = issuer
         self._leeway = leeway_seconds
         self._jwks = jwks_client or PyJWKClient(f"{api_base_url}sso/jwks/{client_id}")
 
@@ -119,21 +126,36 @@ class WorkOSSessionValidator:
                 token,
                 signing_key.key,
                 algorithms=self._ALGORITHMS,
-                options={"verify_aud": False, "verify_iss": False},
+                # PyJWT only verifies ``exp`` when it exists. Requiring the
+                # claims below prevents a token with an omitted expiry,
+                # issuer, session ID, or client binding from being accepted.
+                # Issuer and audience are compared explicitly below because
+                # WorkOS uses ``client_id`` as the primary audience binding.
+                options={
+                    "verify_aud": False,
+                    "verify_iss": False,
+                    "require": ["exp", "iat", "iss", "sub", "sid", "client_id"],
+                },
                 leeway=self._leeway,
             )
         except jwt.ExpiredSignatureError as exc:
             raise InvalidSessionError("expired") from exc
         except jwt.exceptions.InvalidSubjectError as exc:
             raise InvalidSessionError("invalid_token") from exc
-        except PyJWTError as exc:
-            # Covers bad signatures, malformed tokens and JWKS fetch failures;
-            # failing closed on any of these is the safe behaviour.
+        except jwt.InvalidSignatureError as exc:
             raise InvalidSessionError("invalid_signature") from exc
+        except PyJWTError as exc:
+            # Covers bad signatures, malformed tokens and missing/invalid
+            # standard claims. All failures are rejected without exposing JWT
+            # details to the caller.
+            raise InvalidSessionError("invalid_token") from exc
 
         issuer = claims.get("iss")
-        if not isinstance(issuer, str) or issuer.rstrip("/") != self._expected_issuer:
-            raise InvalidSessionError("invalid_issuer")
+        if not isinstance(issuer, str) or issuer != self._expected_issuer:
+            raise InvalidSessionError(
+                "invalid_issuer",
+                token_issuer=issuer if isinstance(issuer, str) else None,
+            )
 
         if claims.get("client_id") != self._client_id:
             raise InvalidSessionError("invalid_audience")
@@ -146,10 +168,13 @@ class WorkOSSessionValidator:
         sub = claims.get("sub")
         if not isinstance(sub, str) or not sub:
             raise InvalidSessionError("invalid_token")
+        session_id = claims.get("sid")
+        if not isinstance(session_id, str) or not session_id:
+            raise InvalidSessionError("invalid_token")
 
         return ValidatedSession(
             workos_user_id=sub,
-            session_id=claims.get("sid"),
+            session_id=session_id,
             organisation_id=claims.get("org_id"),
             claims=claims,
         )
@@ -250,6 +275,7 @@ def get_session_validator() -> SessionValidator:
     return WorkOSSessionValidator(
         client_id=settings.workos_client_id,
         api_base_url=settings.workos_api_base_url,
+        issuer=settings.workos_jwt_issuer,
         leeway_seconds=settings.workos_jwt_leeway,
     )
 

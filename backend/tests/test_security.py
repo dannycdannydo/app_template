@@ -95,11 +95,45 @@ async def test_token_with_invalid_signature_is_rejected(key_pair: KeyPair) -> No
     assert excinfo.value.reason == "invalid_signature"
 
 
-async def test_token_with_trailing_slash_issuer_is_accepted(key_pair: KeyPair) -> None:
-    """Issuer comparison tolerates the trailing slash present in WorkOS tokens."""
+async def test_token_with_different_issuer_is_rejected(key_pair: KeyPair) -> None:
+    """Issuer matching is exact; configuration must mirror the token claim."""
     private_key, _ = key_pair
     validator = build_validator(private_key, issuer=ISSUER)
     token = make_token(private_key, issuer="https://api.workos.com")
+
+    with pytest.raises(InvalidSessionError) as excinfo:
+        await validator.validate_token(token)
+    assert excinfo.value.reason == "invalid_issuer"
+
+
+@pytest.mark.parametrize("missing_claim", ["exp", "iat", "iss", "sub", "sid", "client_id"])
+async def test_required_session_claims_cannot_be_omitted(
+    key_pair: KeyPair, missing_claim: str
+) -> None:
+    private_key, _ = key_pair
+    validator = build_validator(private_key)
+    token = make_token(private_key, omit_claims={missing_claim})
+
+    with pytest.raises(InvalidSessionError) as excinfo:
+        await validator.validate_token(token)
+    assert excinfo.value.reason == "invalid_token"
+
+
+async def test_token_can_use_default_application_as_issuer(key_pair: KeyPair) -> None:
+    """Multiple WorkOS applications share an issuer but retain their own client_id."""
+    private_key, _ = key_pair
+    default_application_client_id = "client_environment_default"
+    environment_issuer = f"https://api.workos.com/user_management/{default_application_client_id}"
+    validator = build_validator(
+        private_key,
+        client_id=CLIENT_ID,
+        expected_issuer=environment_issuer,
+    )
+    token = make_token(
+        private_key,
+        client_id=CLIENT_ID,
+        issuer=environment_issuer,
+    )
 
     session = await validator.validate_token(token)
     assert session.workos_user_id == "user_test123"

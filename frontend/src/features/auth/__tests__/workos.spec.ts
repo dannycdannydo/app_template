@@ -5,9 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Mock } from 'vitest'
 
 interface FakeWorkOSClient {
-  getSignInUrl: Mock<() => Promise<string>>
+  getSignInUrl: Mock<(options?: unknown) => Promise<string>>
   getAccessToken: Mock<() => Promise<string>>
-  signOut: Mock<() => Promise<void>>
+  signOut: Mock<(options?: unknown) => void>
 }
 
 interface CreateClientOptionsLike {
@@ -28,10 +28,10 @@ type WorkOSModule = typeof import('@/features/auth/workos')
 function makeClient(): FakeWorkOSClient {
   return {
     getSignInUrl: vi
-      .fn<() => Promise<string>>()
+      .fn<(options?: unknown) => Promise<string>>()
       .mockResolvedValue('https://api.workos.com/user_management/authorize'),
     getAccessToken: vi.fn<() => Promise<string>>(),
-    signOut: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
+    signOut: vi.fn<(options?: unknown) => void>(),
   }
 }
 
@@ -42,6 +42,8 @@ describe('WorkOS adapter (src/features/auth/workos)', () => {
   beforeEach(async () => {
     vi.resetModules()
     createClientMock.mockReset()
+    localStorage.clear()
+    document.cookie = 'workos-has-session=; Max-Age=0; Path=/'
     vi.stubEnv('VITE_WORKOS_CLIENT_ID', 'client_test123')
     vi.stubEnv('VITE_WORKOS_REDIRECT_URI', 'https://app.example.test/auth/callback')
     // jsdom location methods are not spyable; swap in a stub we can assert on.
@@ -55,6 +57,7 @@ describe('WorkOS adapter (src/features/auth/workos)', () => {
   })
 
   afterEach(() => {
+    document.cookie = 'workos-has-session=; Max-Age=0; Path=/'
     Object.defineProperty(window, 'location', { configurable: true, value: originalLocation })
     vi.unstubAllEnvs()
   })
@@ -83,6 +86,25 @@ describe('WorkOS adapter (src/features/auth/workos)', () => {
       'client_test123',
       expect.objectContaining({ redirectUri: expected }),
     )
+  })
+
+  it('removes a stale localhost session hint when its refresh token is absent', async () => {
+    document.cookie = 'workos-has-session=client_test123; Path=/'
+    createClientMock.mockResolvedValue(makeClient())
+
+    await workos.startLogin()
+
+    expect(document.cookie).not.toContain('workos-has-session=client_test123')
+  })
+
+  it('retains the localhost session hint when its refresh token exists', async () => {
+    document.cookie = 'workos-has-session=client_test123; Path=/'
+    localStorage.setItem('workos:refresh-token:client_test123', 'refresh-token')
+    createClientMock.mockResolvedValue(makeClient())
+
+    await workos.startLogin()
+
+    expect(document.cookie).toContain('workos-has-session=client_test123')
   })
 
   it('startLogin redirects the browser to the WorkOS authorization URL', async () => {
@@ -124,7 +146,7 @@ describe('WorkOS adapter (src/features/auth/workos)', () => {
     const options = createClientMock.mock.calls[0]?.[1]
     options?.onRedirectCallback?.({ accessToken: 'token-from-exchange', state: null })
 
-    await expect(completing).resolves.toBe('token-from-exchange')
+    await expect(completing).resolves.toEqual({ accessToken: 'token-from-exchange', returnTo: null })
   })
 
   it('completeLogin falls back to the SDK access token when no fresh exchange occurred', async () => {
@@ -132,7 +154,10 @@ describe('WorkOS adapter (src/features/auth/workos)', () => {
     client.getAccessToken.mockResolvedValue('token-restored')
     createClientMock.mockResolvedValue(client)
 
-    await expect(workos.completeLogin()).resolves.toBe('token-restored')
+    await expect(workos.completeLogin()).resolves.toEqual({
+      accessToken: 'token-restored',
+      returnTo: null,
+    })
   })
 
   it('getSession returns the current access token', async () => {
@@ -161,13 +186,24 @@ describe('WorkOS adapter (src/features/auth/workos)', () => {
     expect(createClientMock).not.toHaveBeenCalled()
   })
 
-  it('signOut revokes the session in the background', async () => {
+  it('signOut uses a top-level WorkOS logout navigation', async () => {
     const client = makeClient()
     createClientMock.mockResolvedValue(client)
 
     await workos.signOut()
 
-    expect(client.signOut).toHaveBeenCalledWith({ navigate: false })
+    expect(client.signOut).toHaveBeenCalledWith({
+      returnTo: `${window.location.origin}/login`,
+    })
+  })
+
+  it('signOutForInvalidSession uses a top-level WorkOS logout navigation', async () => {
+    const client = makeClient()
+    createClientMock.mockResolvedValue(client)
+
+    await expect(workos.signOutForInvalidSession()).resolves.toBe(true)
+
+    expect(client.signOut).toHaveBeenCalledWith()
   })
 })
 

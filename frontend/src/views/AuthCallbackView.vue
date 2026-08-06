@@ -27,9 +27,9 @@ onMounted(async () => {
     return
   }
   try {
-    const token = await completeLogin()
-    session.setSession(token)
-    await router.replace('/')
+    const completedLogin = await completeLogin()
+    session.setSession(completedLogin.accessToken)
+    await router.replace(completedLogin.returnTo ?? '/')
   } catch {
     // Nothing is stored on failure; the user returns to the login page.
     fail('login_failed')

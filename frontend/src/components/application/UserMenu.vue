@@ -45,10 +45,9 @@ const initials = computed(() => {
 async function handleSignOut(): Promise<void> {
   if (isSigningOut.value) return
   isSigningOut.value = true
-  try {
-    await signOut()
-  } finally {
-    session.clearSession()
+  const logoutNavigationStarted = await signOut()
+  session.clearSession()
+  if (!logoutNavigationStarted) {
     void router.push('/login')
   }
 }

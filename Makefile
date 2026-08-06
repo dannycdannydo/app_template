@@ -35,6 +35,7 @@ endef
 ## `docker compose -f deploy/compose/compose.local.yml down`.
 dev:
 	$(COMPOSE_CMD) up -d --wait postgres redis
+	$(MAKE) migrate
 	@echo "API on http://localhost:8000 (live reload), frontend on http://localhost:5173. Ctrl-C stops the apps; Postgres/Redis stay up."
 	@$(load_env) (cd backend && uv run uvicorn app.main:app --reload --port 8000) & \
 	(cd frontend && pnpm dev) & \

@@ -70,7 +70,8 @@ WorkOS owns login and sessions; the application owns the internal user record, o
 Authorization: Bearer <session-token>
         │
         ▼
-validate signature / issuer / audience / expiry      → 401 invalid_session
+validate RS256 signature, exact configured issuer, client binding,
+and required exp / iat / iss / sub / sid claims      → 401 invalid_session
         │
         ▼
 map workos_user_id to internal user (provision on first login)
@@ -118,7 +119,8 @@ frontend/src/
 WorkOS owns login and session management end-to-end; the frontend only ever presents the session token to the backend and never submits identity fields.
 
 - `src/features/auth/workos.ts` is the only module importing the WorkOS browser SDK (`@workos-inc/authkit-js`, ADR 0011); it exposes `startLogin`, `completeLogin`, `signOut` and `getSession`.
-- `/login` starts the flow with "Continue with WorkOS"; the callback route `/auth/callback` completes the authorization-code exchange and stores the session; the router guard `requiresAuth` redirects to `/login` without a session and away from `/login` with one.
+- `/login` starts the flow with "Continue with WorkOS"; the callback route `/auth/callback` completes the authorization-code exchange and stores the session. A protected-route return target is carried in OAuth state and accepted only when it is a same-origin local path, preventing open redirects.
+- Sign-out uses a top-level WorkOS logout navigation to the registered `/login` URI. This lets WorkOS clear its own session cookie even where browsers block third-party-cookie operations; the central `401` handler uses the same path after clearing local session state.
 - The generated API client (`src/api/client.ts`) injects the session token as a Bearer `Authorization` header and the selected organisation as `X-Org-Id` on every call; a central `401` handler clears the session and returns to `/login`.
 
 ### Frontend state boundaries (blueprint §14)
@@ -133,5 +135,6 @@ WorkOS owns login and session management end-to-end; the frontend only ever pres
 - **Errors**: one structured error format with `code`, `message`, `details`, `request_id` (see `API_CONVENTIONS.md`).
 - **Database**: SQLAlchemy 2 models + Pydantic 2 schemas, Alembic migrations, shared naming/timestamp/UUIDv7 conventions (blueprint §7, §10).
 - **Configuration**: typed `pydantic-settings` model, fail-fast on invalid production config.
+- **Abuse controls**: Redis provides a distributed, fail-closed coarse `/api/v1` rate limit (ADR-0012); production uses TLS Redis (`rediss://`).
 - **Observability**: structured JSON logging with request IDs (blueprint §28).
 - **Security**: baseline controls in `SECURITY.md`, aligned with OWASP ASVS Level 2.

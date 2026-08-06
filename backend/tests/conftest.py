@@ -23,6 +23,7 @@ for _var in (
     "WORKOS_API_KEY",
     "WORKOS_CLIENT_ID",
     "WORKOS_API_BASE_URL",
+    "WORKOS_JWT_ISSUER",
     "WORKOS_JWT_LEEWAY",
 ):
     os.environ.pop(_var, None)

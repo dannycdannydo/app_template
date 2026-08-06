@@ -50,6 +50,7 @@ describe('requiresAuth router guard', () => {
     await router.isReady()
 
     expect(router.currentRoute.value.path).toBe('/login')
+    expect(router.currentRoute.value.query.returnTo).toBe('/about')
   })
 
   it('redirects an unauthenticated visitor away from the shell root to /login', async () => {

@@ -5,10 +5,10 @@ import { useOrganisationStore } from '@/stores/organisation'
 import { useSessionStore } from '@/stores/session'
 
 const fetchMock = vi.fn<(input: Request, init?: RequestInit) => Promise<Response>>()
-const signOutMock = vi.hoisted(() => vi.fn<() => Promise<void>>())
+const signOutForInvalidSessionMock = vi.hoisted(() => vi.fn<() => Promise<boolean>>())
 
 vi.mock('@/features/auth/workos', () => ({
-  signOut: signOutMock,
+  signOutForInvalidSession: signOutForInvalidSessionMock,
 }))
 
 /**
@@ -31,8 +31,8 @@ function jsonResponse(body: unknown, status = 200): Response {
 beforeEach(async () => {
   vi.resetModules()
   fetchMock.mockReset()
-  signOutMock.mockReset()
-  signOutMock.mockResolvedValue(undefined)
+  signOutForInvalidSessionMock.mockReset()
+  signOutForInvalidSessionMock.mockResolvedValue(true)
   localStorage.clear()
   setActivePinia(createPinia())
   // jsdom location methods are not spyable; swap in a stub we can assert on.
@@ -134,13 +134,11 @@ describe('client organisation-context injection', () => {
 })
 
 describe('client 401 handling', () => {
-  it('clears both session layers and redirects once on 401', async () => {
+  it('clears app state and starts a WorkOS logout navigation on 401', async () => {
     const session = useSessionStore()
     const organisation = useOrganisationStore()
     session.setSession('expired-token')
     organisation.setSelectedOrganisation('org-aaa')
-    const assignMock = window.location.assign as ReturnType<typeof vi.fn<(path: string) => void>>
-
     fetchMock.mockResolvedValueOnce(
       jsonResponse({ code: 'unauthorized', message: 'Session expired.', request_id: 'req-9' }, 401),
     )
@@ -154,14 +152,14 @@ describe('client 401 handling', () => {
     expect(session.token).toBeNull()
     expect(session.isAuthenticated).toBe(false)
     expect(organisation.selectedOrganisationId).toBeNull()
-    expect(signOutMock).toHaveBeenCalledOnce()
-    expect(assignMock).toHaveBeenCalledWith('/login?error=session_invalid')
+    expect(signOutForInvalidSessionMock).toHaveBeenCalledOnce()
+    expect(window.location.assign).not.toHaveBeenCalled()
   })
 
-  it('redirects after a WorkOS logout failure instead of retaining the rejected session', async () => {
+  it('redirects locally when a WorkOS logout navigation cannot start', async () => {
     const session = useSessionStore()
     session.setSession('rejected-token')
-    signOutMock.mockRejectedValueOnce(new Error('logout unavailable'))
+    signOutForInvalidSessionMock.mockResolvedValueOnce(false)
     const assignMock = window.location.assign as ReturnType<typeof vi.fn<(path: string) => void>>
 
     fetchMock.mockResolvedValueOnce(

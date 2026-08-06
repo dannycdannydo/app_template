@@ -82,7 +82,11 @@ async def get_current_user(
     try:
         validated = await validator.validate_token(token)
     except InvalidSessionError as exc:
-        logger.warning("session_rejected", reason=exc.reason)
+        logger.warning(
+            "session_rejected",
+            reason=exc.reason,
+            token_issuer=exc.token_issuer,
+        )
         raise UnauthorizedError(
             code="invalid_session",
             message="The session is invalid or has expired.",

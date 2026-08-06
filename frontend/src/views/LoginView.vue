@@ -16,6 +16,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   invalid_callback: 'The sign-in link is invalid or incomplete. Please sign in again.',
   login_failed: 'Sign-in failed. Please try again.',
   session_invalid: 'Your session expired or could not be validated. Please sign in again.',
+  signed_out: 'You have signed out.',
 }
 
 const errorParam = typeof route.query.error === 'string' ? route.query.error : null
@@ -28,7 +29,8 @@ async function handleStartLogin(): Promise<void> {
   isStarting.value = true
   errorMessage.value = null
   try {
-    await startLogin()
+    const returnTo = typeof route.query.returnTo === 'string' ? route.query.returnTo : undefined
+    await startLogin({ returnTo })
   } catch (error) {
     errorMessage.value =
       error instanceof Error ? error.message : 'Could not start sign-in. Please try again.'

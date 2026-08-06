@@ -47,6 +47,8 @@ def test_production_requires_workos_credentials() -> None:
         workos_api_key="sk_test",
         workos_client_id="client_1",
         cors_allowed_origins=["https://app.example.test"],
+        trusted_hosts=["api.example.test"],
+        redis_url="rediss://redis.example.test:6380/0",
     )
     assert settings.workos_api_base_url == "https://api.workos.com/"
     assert settings.workos_jwt_leeway == 30.0
@@ -79,6 +81,8 @@ def test_cors_requires_explicit_non_wildcard_origins() -> None:
             workos_api_key="sk_test",
             workos_client_id="client_1",
             cors_allowed_origins=["http://localhost:5173"],
+            trusted_hosts=["api.example.test"],
+            redis_url="rediss://redis.example.test:6380/0",
         )
 
 
@@ -88,4 +92,23 @@ def test_rejects_insecure_workos_base_url() -> None:
             app_env="development",
             database_url="postgresql+asyncpg://x",
             workos_api_base_url="http://api.workos.com/",
+        )
+
+
+def test_trusted_hosts_are_explicit_and_non_wildcard() -> None:
+    with pytest.raises(ValidationError, match="wildcard"):
+        Settings(
+            app_env="development",
+            database_url="postgresql+asyncpg://x",
+            trusted_hosts=["*"],
+        )
+
+    with pytest.raises(ValidationError, match="explicitly configured"):
+        Settings(
+            app_env="production",
+            database_url="postgresql+asyncpg://x",
+            workos_api_key="sk_test",
+            workos_client_id="client_1",
+            cors_allowed_origins=["https://app.example.test"],
+            redis_url="rediss://redis.example.test:6380/0",
         )

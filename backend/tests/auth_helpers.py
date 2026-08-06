@@ -67,12 +67,14 @@ def build_validator(
     *,
     client_id: str = CLIENT_ID,
     issuer: str = ISSUER,
+    expected_issuer: str | None = None,
     leeway_seconds: float = 30.0,
 ) -> WorkOSSessionValidator:
     """Build the real session validator backed by a local signing key."""
     return WorkOSSessionValidator(
         client_id=client_id,
         api_base_url=issuer,
+        issuer=expected_issuer or issuer,
         leeway_seconds=leeway_seconds,
         jwks_client=StubJWKSClient(private_key),
     )
@@ -88,6 +90,7 @@ def make_token(
     aud: str | list[str] | None = None,
     seconds_valid: int = 3600,
     extra: dict[str, Any] | None = None,
+    omit_claims: set[str] | None = None,
 ) -> str:
     """Mint an RS256 token with WorkOS-style claims; kwargs override defaults."""
     now = datetime.now(UTC)
@@ -103,6 +106,8 @@ def make_token(
         payload["aud"] = aud
     if extra:
         payload.update(extra)
+    for claim in omit_claims or set():
+        payload.pop(claim, None)
     return jwt.encode(payload, private_key, algorithm="RS256")
 
 
