@@ -49,6 +49,7 @@ function me(roles: string[]): MeResponse {
       },
     ],
     roles,
+    platform_roles: [],
   }
 }
 

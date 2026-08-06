@@ -277,7 +277,8 @@ async def test_me_returns_memberships_and_roles(auth_app: AuthApp) -> None:
     state.lookup_queue = [user]
     membership = _make_membership(user)
     state.memberships = [membership]
-    state.scalars_queue = [[membership], ["owner"]]  # memberships, then role codes
+    # memberships, then org role codes, then platform role codes
+    state.scalars_queue = [[membership], ["owner"], []]
 
     async with _client(app) as client:
         response = await _get_me(client, make_token(private_key))
@@ -287,6 +288,26 @@ async def test_me_returns_memberships_and_roles(auth_app: AuthApp) -> None:
     assert len(body["memberships"]) == 1
     assert body["memberships"][0]["status"] == "active"
     assert body["roles"] == ["owner"]
+    assert body["platform_roles"] == []
+
+
+async def test_me_returns_platform_roles_for_platform_admin(auth_app: AuthApp) -> None:
+    """Scope §6.2: /me surfaces platform roles so the UI can gate the admin centre."""
+    app, state, private_key = auth_app
+    user = _make_user()
+    state.users[WORKOS_USER_ID] = user
+    state.lookup_queue = [user]
+    # memberships, then org role codes, then platform role codes
+    state.scalars_queue = [[], [], ["platform_admin"]]
+
+    async with _client(app) as client:
+        response = await _get_me(client, make_token(private_key))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["memberships"] == []
+    assert body["roles"] == []
+    assert body["platform_roles"] == ["platform_admin"]
 
 
 async def test_me_handles_concurrent_provisioning_race(auth_app: AuthApp) -> None:

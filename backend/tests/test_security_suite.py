@@ -100,6 +100,8 @@ def _route(
 # The whole protected surface of v0.2, listed once so the security matrix and
 # the completeness guard stay in one place. Endpoints outside /api/v1
 # (/health, /ready, /docs) are intentionally public (acceptance §5.4).
+# Platform routes (Scope §6.2) are protected like every other route and never
+# take X-Org-Id; the non-platform-admin 403 case is parametrised below.
 PROTECTED_ROUTES: list[RouteSpec] = [
     _route("GET", "/api/v1/me", org_scoped=False),
     _route("POST", "/api/v1/organisations", org_scoped=False, request_body={"name": "Acme"}),
@@ -118,9 +120,16 @@ PROTECTED_ROUTES: list[RouteSpec] = [
         request_body={"title": "Renamed"},
     ),
     _route("DELETE", "/api/v1/records/{record_id}", org_scoped=True),
+    _route("GET", "/api/v1/platform/audit-events", org_scoped=False),
 ]
 
 _ORG_SCOPED_ROUTES = [route for route in PROTECTED_ROUTES if route.org_scoped]
+# Platform routes: every route under /api/v1/platform. They are never
+# org-scoped — the platform plane operates across organisations and takes no
+# X-Org-Id (Scope §6.2).
+_PLATFORM_ROUTES = [
+    route for route in PROTECTED_ROUTES if route.path.startswith("/api/v1/platform")
+]
 # Tenant-scoped write routes: the ones a viewer (read-only bundle) must be
 # denied from. POST /organisations is a bootstrap endpoint (auth-only) and
 # intentionally not in this set.
@@ -348,6 +357,54 @@ async def test_viewer_writes_denied(
     async with _client(app) as client:
         response = await _request(client, spec, token=make_token(_PRIVATE_KEY), org_id=org_id)
     _assert_standard_error(response, 403, "permission_denied")
+
+
+# --- Platform plane (Scope §6.2): a separate authorisation layer, not a bypass ---
+
+
+@pytest.mark.parametrize("spec", _PLATFORM_ROUTES, ids=lambda s: f"{s.method} {s.path}")
+async def test_non_platform_admin_rejected(
+    app_with_state: tuple[FastAPI, ContextState], spec: RouteSpec
+) -> None:
+    """Acceptance §5.2: an org owner without platform membership gets 403.
+
+    The granted bundle here is the organisation-owner bundle (org codes only);
+    the platform dependency must reject it with ``platform_admin_required`` —
+    org authorisation never grants platform access, even to an owner.
+    """
+    app, state = app_with_state
+    user = make_user()
+    state.users[user.workos_user_id] = user
+    state.lookup_queue = [user]
+    state.granted_permissions = {"organisation.manage", "users.manage_roles", "records.read"}
+
+    async with _client(app) as client:
+        response = await _request(client, spec, token=make_token(_PRIVATE_KEY))
+    _assert_standard_error(response, 403, "platform_admin_required")
+
+
+async def test_platform_admin_without_org_membership_denied_on_org_routes(
+    app_with_state: tuple[FastAPI, ContextState],
+) -> None:
+    """Acceptance §5.2: platform access never implies organisation access.
+
+    A platform admin with no organisation membership is rejected by an
+    org-scoped route with the standard ``not_a_member`` 403 — the platform
+    plane is not a global bypass of the organisation permission system.
+    """
+    app, state = app_with_state
+    user = make_user()
+    state.users[user.workos_user_id] = user
+    state.lookup_queue = [user, None]  # user found, no membership for the org
+    state.granted_permissions = {"platform.admin"}  # the platform bundle only
+
+    other_org_id = uuid.uuid4()
+    async with _client(app) as client:
+        response = await client.get(
+            "/api/v1/records",
+            headers=_headers(make_token(_PRIVATE_KEY), other_org_id),
+        )
+    _assert_standard_error(response, 403, "not_a_member")
 
 
 # --- Stack traces are never exposed (BP §13, acceptance §5.8) ---

@@ -38,6 +38,7 @@ const me: MeResponse = {
     },
   ],
   roles: ['owner'],
+  platform_roles: [],
 }
 
 /** Mounts the layout the way the app does: through a root RouterView. */

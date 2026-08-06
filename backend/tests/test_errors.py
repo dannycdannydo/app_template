@@ -137,7 +137,9 @@ async def test_api_security_headers_and_untrusted_hosts_are_rejected() -> None:
     assert denied.status_code == 400
 
 
-async def test_api_requests_are_rate_limited_before_endpoint_execution(monkeypatch: MonkeyPatch) -> None:
+async def test_api_requests_are_rate_limited_before_endpoint_execution(
+    monkeypatch: MonkeyPatch,
+) -> None:
     calls: list[tuple[str, int, int]] = []
 
     class RejectingLimiter:

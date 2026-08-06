@@ -28,8 +28,14 @@ class UserListItem(BaseModel):
 
 
 class MeResponse(BaseModel):
-    """The current user with their memberships and role codes."""
+    """The current user with their memberships, role codes and platform roles.
+
+    ``platform_roles`` is empty for non-admins; the frontend uses it only to
+    show or hide the Platform Admin Centre (UI awareness is cosmetic — the
+    backend remains the enforcement point).
+    """
 
     user: UserListItem
     memberships: list[MembershipListItem]
     roles: list[str]
+    platform_roles: list[str]

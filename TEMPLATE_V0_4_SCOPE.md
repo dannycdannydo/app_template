@@ -121,19 +121,19 @@ Subsections are ordered so later work builds on earlier work: audit precedes eve
 
 Prerequisite for the whole release — the bootstrap and invitation flows must be "fully audited" (§1).
 
-- [ ] `audit_events` table (blueprint §29 shape: id, organisation_id nullable, actor_user_id nullable, action, resource_type, resource_id, metadata JSONB, created_at) via Alembic migration; append-only by construction (no update column, no delete endpoint)
-- [ ] `record_event(...)` service in a new `modules/audit/` module (insert-only, request-id in metadata); existing mutating services gain audit calls
-- [ ] Platform-gated listing endpoint `GET /api/v1/platform/audit-events` (filter by org/actor/action, standard pagination envelope)
-- [ ] Tests: append-only enforcement, filtering, platform gating, audit rows for representative mutations
+- [x] `audit_events` table (blueprint §29 shape: id, organisation_id nullable, actor_user_id nullable, action, resource_type, resource_id, metadata JSONB, created_at) via Alembic migration; append-only by construction (no update column, no delete endpoint)
+- [x] `record_event(...)` service in a new `modules/audit/` module (insert-only, request-id in metadata); existing mutating services gain audit calls
+- [x] Platform-gated listing endpoint `GET /api/v1/platform/audit-events` (filter by org/actor/action, standard pagination envelope)
+- [x] Tests: append-only enforcement, filtering, platform gating, audit rows for representative mutations
 
 ## 6.2 Platform Authorisation Plane
 
 Depends on §6.1 (audit). Establishes the second, orthogonal plane.
 
-- [ ] Tables `platform_roles`, `platform_role_permissions`, `platform_memberships` (mirroring the org plane) + data migration seeding `platform_admin` role and `platform.admin` permission code in `permissions/constants.py`
-- [ ] `require_platform_permission(code)` dependency in `api/dependencies.py` — Bearer token → enabled user → platform membership → role bundles; default deny; never consults `X-Org-Id`
-- [ ] `GET /api/v1/me` response gains `platform_roles` (empty for non-admins)
-- [ ] Security suite: platform routes added to `PROTECTED_ROUTES`; cross-plane denial cases (org owner → 403 on platform routes; platform admin without org membership → 403 on org routes); no superuser boolean anywhere
+- [x] Tables `platform_roles`, `platform_role_permissions`, `platform_memberships` (mirroring the org plane) + data migration seeding `platform_admin` role and `platform.admin` permission code in `permissions/constants.py`
+- [x] `require_platform_permission(code)` dependency in `api/dependencies.py` — Bearer token → enabled user → platform membership → role bundles; default deny; never consults `X-Org-Id`
+- [x] `GET /api/v1/me` response gains `platform_roles` (empty for non-admins)
+- [x] Security suite: platform routes added to `PROTECTED_ROUTES`; cross-plane denial cases (org owner → 403 on platform routes; platform admin without org membership → 403 on org routes); no superuser boolean anywhere
 
 ## 6.3 WorkOS Organisation Mapping
 

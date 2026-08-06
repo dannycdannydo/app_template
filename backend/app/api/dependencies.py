@@ -29,6 +29,7 @@ from app.core.security import (
 from app.db.session import async_session_factory
 from app.modules.organisations.models import MembershipStatus, OrganisationMembership
 from app.modules.permissions.queries import permission_codes_for_membership
+from app.modules.platform_admin.queries import platform_permission_codes_for_user
 from app.modules.users.models import User
 from app.modules.users.service import get_or_provision_user
 
@@ -181,3 +182,35 @@ def require_permission(permission_code: str):
         return membership
 
     return _require_permission
+
+
+def require_platform_permission(permission_code: str):
+    """Return a dependency requiring the caller to hold a platform permission.
+
+    The platform plane is a dedicated authorisation layer (Scope §6.2): the
+    caller must be an authenticated, enabled user (via ``get_current_user``)
+    and the requested permission must be granted by one of the caller's
+    platform role bundles. It never consults ``X-Org-Id`` and never falls back
+    to organisation membership — a caller with no platform membership is
+    rejected with 403 ``platform_admin_required`` even if they own
+    organisations. Default deny, mirroring the org-plane rule (BP §9).
+    """
+
+    async def _require_platform_permission(
+        session: Annotated[AsyncSession, Depends(get_db)],
+        user: Annotated[User, Depends(get_current_user)],
+    ) -> User:
+        granted = await platform_permission_codes_for_user(session, user.id)
+        if permission_code not in granted:
+            logger.warning(
+                "platform_permission_denied",
+                user_id=str(user.id),
+                permission=permission_code,
+            )
+            raise PermissionDenied(
+                code="platform_admin_required",
+                message="You are not a platform administrator.",
+            )
+        return user
+
+    return _require_platform_permission

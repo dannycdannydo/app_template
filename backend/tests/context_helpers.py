@@ -29,6 +29,7 @@ from app.core.security import (
     get_user_profile_client,
 )
 from app.main import create_app
+from app.modules.audit.models import AuditEvent
 from app.modules.organisations.models import (
     MembershipStatus,
     Organisation,
@@ -51,6 +52,7 @@ class ContextState:
     memberships: list[OrganisationMembership] = field(default_factory=list[OrganisationMembership])
     membership_roles: list[MembershipRole] = field(default_factory=list[MembershipRole])
     records: list[Record] = field(default_factory=list[Record])
+    audit_events: list[AuditEvent] = field(default_factory=list[AuditEvent])
     owner_role: Role | None = None
     granted_permissions: set[str] = field(  # consumed by scalars() (permission checks)
         default_factory=set[str]
@@ -101,6 +103,28 @@ def make_record(
     return record
 
 
+def make_audit_event(
+    *,
+    organisation_id: uuid.UUID | None = None,
+    actor_user_id: uuid.UUID | None = None,
+    action: str = "organisation.created",
+    resource_type: str = "organisation",
+    resource_id: str = "resource-1",
+    metadata: dict[str, Any] | None = None,
+) -> AuditEvent:
+    event = AuditEvent(
+        organisation_id=organisation_id,
+        actor_user_id=actor_user_id,
+        action=action,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        event_metadata=metadata or {},
+    )
+    event.id = uuid.uuid4()
+    event.created_at = datetime.now(UTC)
+    return event
+
+
 class _ScalarsResult:
     """Stand-in for an async ``ScalarResult``: carries rows and exposes .all()."""
 
@@ -127,10 +151,16 @@ class FakeSession:
         # The permission check queries permission codes for a membership; the
         # fake answers from the granted set the test configures. The records
         # list query selects the Record entity; the fake answers from the
-        # records the test staged. Anything else falls back to the granted set.
+        # records the test staged. The audit listing selects the AuditEvent
+        # entity; the fake answers from the staged events (filters are proven
+        # by the query-construction and real-database tests). Anything else
+        # falls back to the granted set.
         descriptions = getattr(statement, "column_descriptions", None)
-        if descriptions and descriptions[0].get("entity") is Record:
+        entity = descriptions[0].get("entity") if descriptions else None
+        if entity is Record:
             return _ScalarsResult(list(self._state.records))
+        if entity is AuditEvent:
+            return _ScalarsResult(list(self._state.audit_events))
         return _ScalarsResult(sorted(self._state.granted_permissions))
 
     def add(self, instance: Any) -> None:
@@ -143,7 +173,9 @@ class FakeSession:
                 obj.id = uuid.uuid4()
             if obj.created_at is None:
                 obj.created_at = now
-            if obj.updated_at is None:
+            # AuditEvent has no updated_at column (append-only by design), so
+            # only touch the timestamp when the model carries it.
+            if getattr(obj, "updated_at", None) is None and hasattr(obj, "updated_at"):
                 obj.updated_at = now
 
     async def commit(self) -> None:
@@ -159,6 +191,10 @@ class FakeSession:
                 # Updates reuse the staged instance, so never append twice.
                 if all(existing is not obj for existing in self._state.records):
                     self._state.records.append(obj)
+            elif isinstance(obj, AuditEvent):
+                # Append-only: never modify or remove an existing event.
+                if all(existing is not obj for existing in self._state.audit_events):
+                    self._state.audit_events.append(obj)
             elif isinstance(obj, User):
                 # Mirrors the model's ``is_active`` default applied at flush time;
                 # provisioned users are always created active.

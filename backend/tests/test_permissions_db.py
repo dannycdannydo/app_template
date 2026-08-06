@@ -28,7 +28,7 @@ from app.modules.organisations.models import (
     Organisation,
     OrganisationMembership,
 )
-from app.modules.permissions.constants import PERMISSIONS, ROLE_PERMISSION_MAP
+from app.modules.permissions.constants import PERMISSIONS, PLATFORM_PERMISSIONS, ROLE_PERMISSION_MAP
 from app.modules.permissions.models import Permission, Role, RolePermission
 from app.modules.permissions.queries import permission_codes_for_membership
 from app.modules.permissions.service import assign_role, list_membership_roles, remove_role
@@ -94,7 +94,9 @@ async def test_seed_migration_creates_catalogue_and_grants(migrated_database: st
             assert role_count == 5
 
             permission_count = await session.scalar(select(func.count()).select_from(Permission))
-            assert permission_count == len(PERMISSIONS)
+            # The org-plane catalogue plus the platform-plane permission seeded
+            # by the platform authorisation plane migration (Scope §6.2).
+            assert permission_count == len(PERMISSIONS) + len(PLATFORM_PERMISSIONS)
 
             for role_code, expected in ROLE_PERMISSION_MAP.items():
                 assert await _permission_codes_for_role(session, role_code) == set(expected)
@@ -180,8 +182,9 @@ async def test_assign_and_remove_role_changes_grants(migrated_database: str) -> 
             # rollback expired the earlier instance.
             user_row = await session.get(User, user_id)
             assert user_row is not None
-            _memberships, me_roles = await get_me_payload(session, user_row)
+            _memberships, me_roles, me_platform_roles = await get_me_payload(session, user_row)
             assert me_roles == ["viewer"]
+            assert me_platform_roles == []  # no platform memberships in this flow
 
             await remove_role(session, membership_id=membership_id, role_code="viewer")
             assert await permission_codes_for_membership(session, membership_id) == set()

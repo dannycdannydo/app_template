@@ -16,6 +16,7 @@ from app.core.exceptions import ServiceUnavailableError
 from app.core.security import UserProfileClient, ValidatedSession
 from app.modules.organisations.models import OrganisationMembership
 from app.modules.permissions.models import MembershipRole, Role
+from app.modules.platform_admin.queries import platform_role_codes_statement
 from app.modules.users.models import User
 
 
@@ -54,11 +55,13 @@ async def get_or_provision_user(
 async def get_me_payload(
     session: AsyncSession,
     user: User,
-) -> tuple[list[OrganisationMembership], list[str]]:
-    """Return the current user's memberships and role codes for the /me route.
+) -> tuple[list[OrganisationMembership], list[str], list[str]]:
+    """Return the current user's memberships, role codes and platform role codes.
 
     Roles are the distinct role codes across all of the user's memberships,
-    ordered by code; a user with no roles yields an empty list.
+    ordered by code; platform roles are the distinct codes of the user's
+    platform memberships (empty for non-admins). A user with no roles yields
+    empty lists.
     """
     memberships = (
         await session.scalars(
@@ -80,4 +83,5 @@ async def get_me_payload(
             .order_by(Role.code)
         )
     ).all()
-    return list(memberships), list(roles)
+    platform_roles = (await session.scalars(platform_role_codes_statement(user.id))).all()
+    return list(memberships), list(roles), list(platform_roles)

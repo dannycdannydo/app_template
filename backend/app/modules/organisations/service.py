@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import APIError
+from app.modules.audit.service import ACTION_ORGANISATION_CREATED, record_event
 from app.modules.organisations.models import (
     MembershipStatus,
     Organisation,
@@ -31,7 +32,8 @@ async def create_organisation(
 
     The owner role row comes from the seed data migration; its absence means
     the migrations are out of order, which is a server-side failure rather
-    than a client mistake.
+    than a client mistake. The audit row commits inside the same transaction,
+    so a failed creation leaves no orphan audit trail either.
     """
     owner_role = await session.scalar(select(Role).where(Role.code == OWNER_ROLE_CODE))
     if owner_role is None:
@@ -53,6 +55,14 @@ async def create_organisation(
     await session.flush()
 
     session.add(MembershipRole(membership_id=membership.id, role_id=owner_role.id))
+    await record_event(
+        session,
+        organisation_id=organisation.id,
+        actor_user_id=creator.id,
+        action=ACTION_ORGANISATION_CREATED,
+        resource_type="organisation",
+        resource_id=str(organisation.id),
+    )
     await session.commit()
     await session.refresh(organisation)
     return organisation

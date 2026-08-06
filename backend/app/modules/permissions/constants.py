@@ -35,6 +35,21 @@ PERMISSIONS: tuple[tuple[str, str], ...] = (
 
 ALL_PERMISSION_CODES: tuple[str, ...] = tuple(code for code, _ in PERMISSIONS)
 
+# The stable code of the platform-admin role seeded into ``platform_roles``.
+# A platform membership holding this role is what makes a user a platform
+# administrator; kept in sync with the seeded row in the platform-plane
+# migration (Scope §6.2).
+PLATFORM_ADMIN_ROLE_CODE = "platform_admin"
+
+# Platform-plane permission codes. Kept in a separate catalogue on purpose:
+# ``ALL_PERMISSION_CODES`` feeds ``ROLE_PERMISSION_MAP``, and the org-plane
+# role bundles must never include platform permissions — the platform plane is
+# a dedicated authorisation layer (Scope §6.2), never a global bypass of the
+# organisation permission system, so an organisation owner holds no platform
+# permission even though the owner bundle includes every org code.
+PLATFORM_PERMISSIONS: tuple[tuple[str, str], ...] = (("platform.admin", "Platform administration"),)
+PLATFORM_ALL_PERMISSION_CODES: tuple[str, ...] = tuple(code for code, _ in PLATFORM_PERMISSIONS)
+
 # Role code -> permission codes granted by the seed. ``owner`` holds
 # everything; ``administrator`` everything except ``organisation.manage`` so
 # the owner keeps the organisation-level authority; the remaining roles are
