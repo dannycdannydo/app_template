@@ -35,6 +35,10 @@ RUN VITE_API_BASE_URL=${VITE_API_BASE_URL} \
 # --- Serve stage: static files behind nginx with API proxy ------------------
 FROM nginx:1.28-alpine AS serve
 
+# Refresh the Alpine packages shipped in the base image so the runtime is
+# patched for the latest high/critical CVEs (checked by the container scan).
+RUN apk upgrade --no-cache
+
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /app/dist /usr/share/nginx/html
 
