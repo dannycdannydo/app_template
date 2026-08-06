@@ -28,6 +28,11 @@ from app.core.security import (
     get_session_validator,
     get_user_profile_client,
 )
+from app.integrations.workos.organizations import (
+    WorkOSOrganisation,
+    WorkOSOrganizationsProvider,
+    get_workos_organizations_client,
+)
 from app.main import create_app
 from app.modules.audit.models import AuditEvent
 from app.modules.organisations.models import (
@@ -56,6 +61,11 @@ class ContextState:
     owner_role: Role | None = None
     granted_permissions: set[str] = field(  # consumed by scalars() (permission checks)
         default_factory=set[str]
+    )
+    # WorkOS organisations created by the fake provider, keyed by external id;
+    # drives the mapping round-trip and the lazy-backfill assertions.
+    workos_organisations: dict[str, WorkOSOrganisation] = field(
+        default_factory=dict[str, WorkOSOrganisation]
     )
 
 
@@ -88,6 +98,19 @@ def make_membership(
     membership.id = uuid.uuid4()
     membership.created_at = datetime.now(UTC)
     return membership
+
+
+def make_organisation(
+    *,
+    name: str = "Acme Ltd",
+    workos_organisation_id: str | None = None,
+) -> Organisation:
+    """Build a standalone organisation row (existing org or pre-mapping)."""
+    organisation = Organisation(name=name, workos_organisation_id=workos_organisation_id)
+    organisation.id = uuid.uuid4()
+    organisation.created_at = datetime.now(UTC)
+    organisation.updated_at = datetime.now(UTC)
+    return organisation
 
 
 def make_record(
@@ -221,6 +244,49 @@ class FakeProfileClient(UserProfileClient):
         return UserProfile(email="ada@example.com", name="Ada Lovelace")
 
 
+class FakeWorkOSOrganizationsProvider(WorkOSOrganizationsProvider):
+    """In-memory stand-in for the WorkOS organisations adapter.
+
+    Creates organisations with deterministic fake WorkOS ids and records them
+    by external id, so tests can assert the mapping round-trip and the
+    lazy-backfill behaviour without a network or an API key. Without a
+    ``ContextState`` the provider keeps its own private record of created
+    organisations (used by the real-database tests).
+    """
+
+    def __init__(self, state: ContextState | None = None) -> None:
+        self._state = state
+        self._counter = 0
+        self.created: dict[str, WorkOSOrganisation] = {}
+
+    async def create_workos_organisation(
+        self, *, name: str, external_id: str
+    ) -> WorkOSOrganisation:
+        organisation = WorkOSOrganisation(
+            # Unique per provider instance so the real-database tests (which
+            # share one migrated database) never collide on the unique mapping
+            # column.
+            id=f"org_workos_{uuid.uuid4().hex[:12]}",
+            name=name,
+            external_id=external_id,
+        )
+        self.created[external_id] = organisation
+        if self._state is not None:
+            self._state.workos_organisations[external_id] = organisation
+        return organisation
+
+    async def get_workos_organisation(self, workos_organisation_id: str) -> WorkOSOrganisation:
+        for organisation in self.created.values():
+            if organisation.id == workos_organisation_id:
+                return organisation
+        raise AssertionError(f"no fake WorkOS organisation with id {workos_organisation_id!r}")
+
+    async def get_workos_organisation_by_external_id(
+        self, external_id: str
+    ) -> WorkOSOrganisation | None:
+        return self.created.get(external_id)
+
+
 def build_context_app(
     *,
     private_key: rsa.RSAPrivateKey,
@@ -242,6 +308,9 @@ def build_context_app(
     app.dependency_overrides[get_db] = override_db
     app.dependency_overrides[get_session_validator] = lambda: build_validator(private_key)
     app.dependency_overrides[get_user_profile_client] = lambda: FakeProfileClient(state)
+    app.dependency_overrides[get_workos_organizations_client] = lambda: (
+        FakeWorkOSOrganizationsProvider(state)
+    )
     return app
 
 

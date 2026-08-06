@@ -139,10 +139,10 @@ Depends on §6.1 (audit). Establishes the second, orthogonal plane.
 
 Depends on §6.2 (platform plane gates the org-management endpoints). Satisfies ADR-0001's mapping requirement.
 
-- [ ] `organisations.workos_organisation_id` (nullable, unique) via Alembic migration
-- [ ] `integrations/workos/organizations.py` adapter — create/get WorkOS organisation; name from the internal org; `WORKOS_API_KEY` stays inside the adapter
-- [ ] Platform org create (`POST /api/v1/platform/organisations`) creates internal org + WorkOS org + mapping transactionally; lazy backfill for pre-existing organisations at first invite; orphan-org reconciliation documented
-- [ ] Tests: mapping round-trip, uniqueness, lazy backfill, no client-writable mapping field
+- [x] `organisations.workos_organisation_id` (nullable, unique) via Alembic migration
+- [x] `integrations/workos/organizations.py` adapter — create/get WorkOS organisation; name from the internal org; `WORKOS_API_KEY` stays inside the adapter
+- [x] Platform org create (`POST /api/v1/platform/organisations`) creates internal org + WorkOS org + mapping transactionally; lazy backfill for pre-existing organisations at first invite; orphan-org reconciliation documented
+- [x] Tests: mapping round-trip, uniqueness, lazy backfill, no client-writable mapping field
 
 ## 6.4 Bootstrap Platform Admin
 
