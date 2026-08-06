@@ -181,6 +181,54 @@ export interface paths {
     patch?: never
     trace?: never
   }
+  '/api/v1/platform/organisations/{organisation_id}/invitations': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /**
+     * List Invitations Endpoint
+     * @description List an organisation's invitations, newest first, paginated.
+     */
+    get: operations['list_invitations_endpoint_api_v1_platform_organisations__organisation_id__invitations_get']
+    put?: never
+    /**
+     * Invite User Endpoint
+     * @description Invite a user into an organisation through the WorkOS Invitation API.
+     *
+     *     The caller must be a platform administrator. No membership row is created
+     *     here; the invitee gains their membership when they accept and sign in
+     *     (login-time linking, acceptance §5.6).
+     */
+    post: operations['invite_user_endpoint_api_v1_platform_organisations__organisation_id__invitations_post']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/api/v1/platform/organisations/{organisation_id}/invitations/{invitation_id}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    post?: never
+    /**
+     * Revoke Invitation Endpoint
+     * @description Revoke a pending invitation at WorkOS and locally (audited).
+     */
+    delete: operations['revoke_invitation_endpoint_api_v1_platform_organisations__organisation_id__invitations__invitation_id__delete']
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
 }
 export type webhooks = Record<string, never>
 export interface components {
@@ -272,6 +320,79 @@ export interface components {
        */
       status: string
     }
+    /**
+     * InvitationCreate
+     * @description Request payload for inviting a user into an organisation.
+     */
+    InvitationCreate: {
+      /** Email */
+      email: string
+      /** Role Code */
+      role_code: string
+    }
+    /**
+     * InvitationListItem
+     * @description One invitation in a list context on the platform plane.
+     */
+    InvitationListItem: {
+      /**
+       * Id
+       * Format: uuid
+       */
+      id: string
+      /**
+       * Organisation Id
+       * Format: uuid
+       */
+      organisation_id: string
+      /** Email */
+      email: string
+      /** Role Code */
+      role_code: string
+      /** Workos Invitation Id */
+      workos_invitation_id: string | null
+      /**
+       * Invited By User Id
+       * Format: uuid
+       */
+      invited_by_user_id: string
+      status: components['schemas']['InvitationStatus']
+      /**
+       * Expires At
+       * Format: date-time
+       */
+      expires_at: string
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string
+      /**
+       * Updated At
+       * Format: date-time
+       */
+      updated_at: string
+    }
+    /**
+     * InvitationListResponse
+     * @description The pagination envelope for the invitation listing.
+     */
+    InvitationListResponse: {
+      /** Items */
+      items: components['schemas']['InvitationListItem'][]
+      /** Page */
+      page: number
+      /** Page Size */
+      page_size: number
+      /** Total */
+      total: number
+    }
+    /**
+     * InvitationStatus
+     * @description Lifecycle state of an invitation (WorkOS states mirrored locally).
+     * @enum {string}
+     */
+    InvitationStatus: 'sent' | 'accepted' | 'revoked' | 'expired'
     /**
      * MeResponse
      * @description The current user with their memberships, role codes and platform roles.
@@ -873,6 +994,113 @@ export interface operations {
         }
         content: {
           'application/json': components['schemas']['AuditEventListResponse']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  list_invitations_endpoint_api_v1_platform_organisations__organisation_id__invitations_get: {
+    parameters: {
+      query?: {
+        page?: number
+        page_size?: number
+      }
+      header?: {
+        authorization?: string | null
+      }
+      path: {
+        organisation_id: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['InvitationListResponse']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  invite_user_endpoint_api_v1_platform_organisations__organisation_id__invitations_post: {
+    parameters: {
+      query?: never
+      header?: {
+        authorization?: string | null
+      }
+      path: {
+        organisation_id: string
+      }
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['InvitationCreate']
+      }
+    }
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['InvitationListItem']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  revoke_invitation_endpoint_api_v1_platform_organisations__organisation_id__invitations__invitation_id__delete: {
+    parameters: {
+      query?: never
+      header?: {
+        authorization?: string | null
+      }
+      path: {
+        organisation_id: string
+        invitation_id: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['InvitationListItem']
         }
       }
       /** @description Validation Error */

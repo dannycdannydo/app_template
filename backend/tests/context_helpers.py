@@ -13,7 +13,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -29,6 +29,11 @@ from app.core.security import (
     get_session_validator,
     get_user_profile_client,
 )
+from app.integrations.workos.invitations import (
+    WorkOSInvitation,
+    WorkOSInvitationsProvider,
+    get_workos_invitations_client,
+)
 from app.integrations.workos.organizations import (
     WorkOSOrganisation,
     WorkOSOrganizationsProvider,
@@ -36,6 +41,7 @@ from app.integrations.workos.organizations import (
 )
 from app.main import create_app
 from app.modules.audit.models import AuditEvent
+from app.modules.invitations.models import Invitation, InvitationStatus
 from app.modules.organisations.models import (
     MembershipStatus,
     Organisation,
@@ -64,6 +70,11 @@ class ContextState:
     membership_roles: list[MembershipRole] = field(default_factory=list[MembershipRole])
     records: list[Record] = field(default_factory=list[Record])
     audit_events: list[AuditEvent] = field(default_factory=list[AuditEvent])
+    # Invitations (Scope §6.5): the local invite rows staged or created by the
+    # fake session; the pending-invitation query in the login-time linking
+    # service returns these and the service's own status/email/expiry guards
+    # decide which can grant.
+    invitations: list[Invitation] = field(default_factory=list[Invitation])
     owner_role: Role | None = None
     # Platform plane (Scope §6.2/§6.4): seeded platform roles, the memberships
     # granted by the bootstrap hook, and the single bootstrap record when the
@@ -87,11 +98,21 @@ class ContextState:
     workos_organisations: dict[str, WorkOSOrganisation] = field(
         default_factory=dict[str, WorkOSOrganisation]
     )
+    # WorkOS invitations sent by the fake provider; drives the send/revoke
+    # assertions of the invitation endpoints.
+    workos_invitations: list[WorkOSInvitation] = field(default_factory=list[WorkOSInvitation])
+    # WorkOS invitation ids revoked through the fake provider.
+    revoked_workos_invitations: list[str] = field(default_factory=list[str])
 
 
 def make_owner_role() -> Role:
     """Build the seeded owner role row the organisation service looks up."""
-    role = Role(code="owner", name="Owner")
+    return make_role(code="owner", name="Owner")
+
+
+def make_role(code: str, name: str) -> Role:
+    """Build a role row with a deterministic id (catalogue roles for invites)."""
+    role = Role(code=code, name=name)
     role.id = uuid.uuid4()
     return role
 
@@ -177,6 +198,32 @@ def make_audit_event(
     return event
 
 
+def make_invitation(
+    organisation_id: uuid.UUID,
+    invited_by_user_id: uuid.UUID,
+    *,
+    email: str = "invitee@example.com",
+    role_code: str = "member",
+    workos_invitation_id: str | None = None,
+    status: InvitationStatus = InvitationStatus.SENT,
+    expires_at: datetime | None = None,
+) -> Invitation:
+    """Build a standalone invitation row for the request-flow tests."""
+    invitation = Invitation(
+        organisation_id=organisation_id,
+        email=email,
+        role_code=role_code,
+        workos_invitation_id=workos_invitation_id,
+        invited_by_user_id=invited_by_user_id,
+        status=status,
+        expires_at=expires_at or (datetime.now(UTC) + timedelta(days=7)),
+    )
+    invitation.id = uuid.uuid4()
+    invitation.created_at = datetime.now(UTC)
+    invitation.updated_at = datetime.now(UTC)
+    return invitation
+
+
 class _ScalarsResult:
     """Stand-in for an async ``ScalarResult``: carries rows and exposes .all()."""
 
@@ -193,30 +240,50 @@ class FakeSession:
     def __init__(self, state: ContextState) -> None:
         self._state = state
         self._added: list[Any] = []
+        # Status of every staged invitation after the last successful commit;
+        # a simulated lost race restores from this, like a database rollback
+        # would (the losing transaction's status flips never persisted).
+        self._last_committed_statuses: dict[uuid.UUID, InvitationStatus] = {
+            invitation.id: invitation.status for invitation in state.invitations
+        }
 
     async def scalar(self, statement: object) -> Any:
+        self._track_invitation_statuses()
         if self._state.lookup_queue:
             return self._state.lookup_queue.pop(0)
         return None
 
     async def scalars(self, statement: object) -> _ScalarsResult:
-        # The /me payload and other multi-query paths queue explicit rows; the
-        # permission check queries permission codes for a membership; the
-        # fake answers from the granted set the test configures. The records
-        # list query selects the Record entity; the fake answers from the
-        # records the test staged. The audit listing selects the AuditEvent
-        # entity; the fake answers from the staged events (filters are proven
-        # by the query-construction and real-database tests). Anything else
-        # falls back to the granted set.
-        if self._state.scalars_queue:
-            return _ScalarsResult(self._state.scalars_queue.pop(0))
+        # The invitation queries (pending-at-login and the platform listing)
+        # answer from the staged invitations before the scalars_queue: the
+        # login-time linking service runs inside get_current_user, i.e.
+        # before the /me payload queries that consume the queue, and its
+        # own status/email/expiry guards decide which staged rows can grant
+        # (the WHERE clauses are proven by the query-construction and
+        # real-database tests). Anything else falls back to the queue, then
+        # to the entity-based answers below.
+        self._track_invitation_statuses()
         descriptions = getattr(statement, "column_descriptions", None)
         entity = descriptions[0].get("entity") if descriptions else None
+        if entity is Invitation:
+            return _ScalarsResult(list(self._state.invitations))
+        if self._state.scalars_queue:
+            return _ScalarsResult(self._state.scalars_queue.pop(0))
         if entity is Record:
             return _ScalarsResult(list(self._state.records))
         if entity is AuditEvent:
             return _ScalarsResult(list(self._state.audit_events))
         return _ScalarsResult(sorted(self._state.granted_permissions))
+
+    def _track_invitation_statuses(self) -> None:
+        """Baseline any staged invitation status not yet tracked.
+
+        Service flows read an invitation before they mutate its status, so the
+        status at first read is the pre-transaction state a simulated lost
+        race must roll back to.
+        """
+        for invitation in self._state.invitations:
+            self._last_committed_statuses.setdefault(invitation.id, invitation.status)
 
     def add(self, instance: Any) -> None:
         self._added.append(instance)
@@ -237,9 +304,17 @@ class FakeSession:
     async def commit(self) -> None:
         await self.flush()
         if self._state.fail_commits:
-            # Simulate a lost race (e.g. the bootstrap sentinel constraint):
-            # nothing is persisted and the caller's rollback discards it.
+            # Simulate a lost race (e.g. the bootstrap sentinel constraint or
+            # the membership unique constraint): nothing is persisted and the
+            # caller's rollback discards it. Statuses flipped on staged
+            # invitation rows this transaction are restored to their last
+            # committed values, exactly like a real database rollback, so a
+            # losing linking pass re-runs against the pre-race state.
             self._state.fail_commits -= 1
+            for invitation in self._state.invitations:
+                invitation.status = self._last_committed_statuses.get(
+                    invitation.id, invitation.status
+                )
             raise IntegrityError("insert", {}, Exception("duplicate key value"))
         for obj in self._added:
             if isinstance(obj, Organisation):
@@ -256,6 +331,8 @@ class FakeSession:
                 # Append-only: never modify or remove an existing event.
                 if all(existing is not obj for existing in self._state.audit_events):
                     self._state.audit_events.append(obj)
+            elif isinstance(obj, Invitation):
+                self._state.invitations.append(obj)
             elif isinstance(obj, PlatformRole):
                 self._state.platform_roles.append(obj)
             elif isinstance(obj, PlatformMembership):
@@ -268,6 +345,11 @@ class FakeSession:
                 obj.is_active = True
                 self._state.users[obj.workos_user_id] = obj
         self._added.clear()
+        # The transaction committed: staged invitation statuses are now the
+        # rollback baseline for any later simulated lost race.
+        self._last_committed_statuses = {
+            invitation.id: invitation.status for invitation in self._state.invitations
+        }
 
     async def delete(self, instance: Any) -> None:
         self._state.records = [record for record in self._state.records if record.id != instance.id]
@@ -333,6 +415,41 @@ class FakeWorkOSOrganizationsProvider(WorkOSOrganizationsProvider):
         return self.created.get(external_id)
 
 
+class FakeWorkOSInvitationsProvider(WorkOSInvitationsProvider):
+    """In-memory stand-in for the WorkOS invitations adapter.
+
+    Records sent invitations so tests can assert the send/revoke round-trip
+    without a network or an API key; with a ``ContextState`` the sent
+    invitations are also recorded on the state for the endpoint tests.
+    """
+
+    def __init__(self, state: ContextState | None = None) -> None:
+        self._state = state
+        self._counter = 0
+        self.sent: dict[str, WorkOSInvitation] = {}
+        self.revoked: list[str] = []
+
+    async def send_invitation(self, *, email: str, organisation_id: str) -> WorkOSInvitation:
+        self._counter += 1
+        invitation = WorkOSInvitation(
+            id=f"inv_workos_{uuid.uuid4().hex[:12]}",
+            email=email,
+            expires_at=datetime.now(UTC) + timedelta(days=7),
+        )
+        self.sent[invitation.id] = invitation
+        if self._state is not None:
+            self._state.workos_invitations.append(invitation)
+        return invitation
+
+    async def revoke_invitation(self, workos_invitation_id: str) -> None:
+        self.revoked.append(workos_invitation_id)
+        if self._state is not None:
+            self._state.revoked_workos_invitations.append(workos_invitation_id)
+
+    async def get_invitation(self, workos_invitation_id: str) -> WorkOSInvitation | None:
+        return self.sent.get(workos_invitation_id)
+
+
 def build_context_app(
     *,
     private_key: rsa.RSAPrivateKey,
@@ -356,6 +473,9 @@ def build_context_app(
     app.dependency_overrides[get_user_profile_client] = lambda: FakeProfileClient(state)
     app.dependency_overrides[get_workos_organizations_client] = lambda: (
         FakeWorkOSOrganizationsProvider(state)
+    )
+    app.dependency_overrides[get_workos_invitations_client] = lambda: FakeWorkOSInvitationsProvider(
+        state
     )
     return app
 

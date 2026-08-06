@@ -35,6 +35,16 @@ ACTION_RECORD_DELETED = "record.deleted"
 # audit trail always mirrors the grant.
 ACTION_PLATFORM_BOOTSTRAP_GRANTED = "platform.bootstrap_granted"
 
+# Invitation lifecycle (Scope §6.5, blueprint §29 examples ``user.invited``):
+# sent at the platform invite endpoint, revoked at the platform revoke
+# endpoint, accepted at login-time linking — when the membership grant that
+# follows it is written, ``membership.role_changed`` (blueprint §29) records
+# the intended role assignment.
+ACTION_INVITATION_SENT = "invitation.sent"
+ACTION_INVITATION_REVOKED = "invitation.revoked"
+ACTION_INVITATION_ACCEPTED = "invitation.accepted"
+ACTION_MEMBERSHIP_ROLE_CHANGED = "membership.role_changed"
+
 
 async def record_event(
     session: AsyncSession,

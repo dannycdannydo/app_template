@@ -157,11 +157,11 @@ Depends on §6.2 (platform membership machinery) and §6.1 (audit). The one-time
 
 Depends on §6.3 (org mapping) and §6.2 (platform gate). WorkOS Invitation API becomes the standard onboarding flow.
 
-- [ ] `invitations` table (organisation_id, email, role_code, workos_invitation_id unique nullable, invited_by_user_id, status sent/accepted/revoked/expired, expires_at) via Alembic migration
-- [ ] `integrations/workos/invitations.py` adapter — send (returns id + expiry), revoke, get; SDK stays behind the adapter
-- [ ] Platform endpoints: `POST /organisations/{id}/invitations`, `GET .../invitations`, `DELETE .../invitations/{id}` — validate permission → ensure WorkOS org → WorkOS send → insert row → audit `invitation.sent`
-- [ ] Login-time linking service (`link_invitation_on_login`): after provisioning, match `sent` invitations by email (case-insensitive, not expired), verify authenticated WorkOS email and `email_verified`, create active membership + intended role, mark accepted, audit `invitation.accepted` + `membership.role_changed`; idempotent and race-safe
-- [ ] Tests: full invite→accept journey, revocation/expiry never grant, no membership before acceptance, email mismatch rejected, audit rows
+- [x] `invitations` table (organisation_id, email, role_code, workos_invitation_id unique nullable, invited_by_user_id, status sent/accepted/revoked/expired, expires_at) via Alembic migration
+- [x] `integrations/workos/invitations.py` adapter — send (returns id + expiry), revoke, get; SDK stays behind the adapter
+- [x] Platform endpoints: `POST /organisations/{id}/invitations`, `GET .../invitations`, `DELETE .../invitations/{id}` — validate permission → ensure WorkOS org → WorkOS send → insert row → audit `invitation.sent`
+- [x] Login-time linking service (`link_invitation_on_login`): after provisioning, match `sent` invitations by email (case-insensitive, not expired), verify authenticated WorkOS email and `email_verified`, create active membership + intended role, mark accepted, audit `invitation.accepted` + `membership.role_changed`; idempotent and race-safe
+- [x] Tests: full invite→accept journey, revocation/expiry never grant, no membership before acceptance, email mismatch rejected, audit rows
 
 ## 6.6 Membership Administration
 

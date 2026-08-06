@@ -24,6 +24,7 @@ class Base(DeclarativeBase):
 # registered on Base.metadata for Alembic autogenerate. They cannot be imported
 # at the top of this file: every model subclasses Base.
 import app.modules.audit.models  # pyright: ignore[reportUnusedImport]
+import app.modules.invitations.models  # pyright: ignore[reportUnusedImport]
 import app.modules.organisations.models  # pyright: ignore[reportUnusedImport]
 import app.modules.permissions.models  # pyright: ignore[reportUnusedImport]
 import app.modules.platform_admin.models  # pyright: ignore[reportUnusedImport]

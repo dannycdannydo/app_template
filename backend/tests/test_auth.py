@@ -30,6 +30,7 @@ from app.core.security import (
     get_user_profile_client,
 )
 from app.main import create_app
+from app.modules.invitations.models import Invitation
 from app.modules.organisations.models import MembershipStatus, OrganisationMembership
 from app.modules.users.models import User
 
@@ -73,6 +74,14 @@ class FakeSession:
         return None
 
     async def scalars(self, statement: object) -> _ScalarsResult:
+        # The login-time invitation query (Scope §6.5) runs inside
+        # get_current_user, before the /me payload queries that consume the
+        # queue; with no staged invitations it must answer empty rather than
+        # consume a queued payload row.
+        descriptions = getattr(statement, "column_descriptions", None)
+        entity = descriptions[0].get("entity") if descriptions else None
+        if entity is Invitation:
+            return _ScalarsResult([])
         if self._state.scalars_queue:
             return _ScalarsResult(self._state.scalars_queue.pop(0))
         return _ScalarsResult(self._state.memberships)
