@@ -1,4 +1,4 @@
-"""Reusable org-scoped record queries (Scope §6.5, blueprint §12).
+"""Reusable org-scoped record queries (v0.2 Scope §6.5, blueprint §12).
 
 Every records query filters on ``organisation_id`` first; the two statements
 here are the single source of that scoping so a future endpoint cannot forget

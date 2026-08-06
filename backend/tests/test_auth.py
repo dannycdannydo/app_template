@@ -1,4 +1,4 @@
-"""Integration tests for the auth dependency and /me endpoint (Scope §6.2).
+"""Integration tests for the auth dependency and /me endpoint (v0.2 Scope §6.2).
 
 Exercises the full ASGI stack with the real WorkOS session validator backed
 by a local signing key. The database session and the WorkOS profile client

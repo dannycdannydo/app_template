@@ -45,7 +45,7 @@ const validValues: RecordFormValues = { title: 'New record', body: 'Notes' }
 
 /**
  * Test harness: the form under test plus the app's `Toaster`, so toast
- * feedback (the API-error and success paths of Scope §6.6) is asserted against
+ * feedback (the API-error and success paths of v0.3 Scope §6.6) is asserted against
  * the rendered DOM rather than against mock internals. Sonner portals to
  * `document.body`, so the wrapper is attached to the body.
  */
@@ -123,7 +123,7 @@ function formEmits(wrapper: ReturnType<typeof mount>, event: 'created' | 'update
   return wrapper.findComponent(RecordForm).emitted(event)
 }
 
-describe('RecordForm (Scope §6.6 standard form + toast)', () => {
+describe('RecordForm (v0.3 Scope §6.6 standard form + toast)', () => {
   beforeEach(() => {
     localStorage.clear()
     postMock.mockReset()

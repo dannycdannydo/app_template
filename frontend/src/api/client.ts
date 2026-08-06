@@ -34,7 +34,7 @@ const sessionMiddleware: Middleware = {
     if (token && !request.headers.has('Authorization')) {
       request.headers.set('Authorization', `Bearer ${token}`)
     }
-    // Tenant context (Scope §6.3, acceptance §5.6): the selected organisation
+    // Tenant context (v0.3 Scope §6.3, acceptance §5.6): the selected organisation
     // is client state owned by Pinia and attached as X-Org-Id on every
     // request. The backend resolves the caller's membership from it.
     const organisation = useOrganisationStore()

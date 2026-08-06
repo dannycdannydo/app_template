@@ -8,10 +8,10 @@ import {
 } from './helpers'
 
 /**
- * Authentication journeys (Scope §6.7, acceptance §5.4).
+ * Authentication journeys (v0.3 Scope §6.7, acceptance §5.4).
  *
  * 1. An unauthenticated visit to any protected route lands on `/login`.
- * 2. The successful callback round-trip is covered explicitly (per §6.2
+ * 2. The successful callback round-trip is covered explicitly (per v0.3 Scope §6.2
  *    review feedback on the boot-restore × history-snapshot coupling):
  *    `/auth/callback?code=…` → code exchange → session stored → redirect
  *    to the shell. The WorkOS token endpoint is stubbed at the network

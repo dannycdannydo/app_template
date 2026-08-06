@@ -4,7 +4,7 @@ import AppShellLayout from '@/layouts/AppShellLayout.vue'
 import { useSessionStore } from '@/stores/session'
 
 /**
- * Authentication guard (Scope §6.3, acceptance §5.4).
+ * Authentication guard (v0.3 Scope §6.3, acceptance §5.4).
  *
  * - A route whose matched records carry `meta.requiresAuth` is reachable only
  *   with a session; otherwise the user is sent to `/login`.

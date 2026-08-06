@@ -1,4 +1,4 @@
-"""Integration tests for the tenant-scoped records module (Scope §6.5).
+"""Integration tests for the tenant-scoped records module (v0.2 Scope §6.5).
 
 The full ASGI stack runs with the fakes from ``context_helpers.py`` so the
 suite needs neither PostgreSQL nor a network connection; the real-database

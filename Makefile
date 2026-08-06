@@ -27,7 +27,7 @@ define load_env
 	set -a; [ -f .env ] && . ./.env; set +a;
 endef
 
-.PHONY: dev dev-docker migrate lint typecheck test format generate-client check
+.PHONY: dev dev-docker migrate lint typecheck test e2e format generate-client check
 
 ## Start PostgreSQL + Redis in Docker, then run the API and frontend natively
 ## with live reload (ADR-0008). Infra stays up after Ctrl-C so `make migrate`
@@ -63,6 +63,15 @@ typecheck:
 test:
 	cd backend && uv run pytest
 	cd frontend && pnpm vitest run
+
+## Playwright end-to-end journeys against the local stack (blueprint §31,
+## §37). The specs mock the WorkOS token endpoint and the `/api/v1/**` surface
+## at the browser network boundary, so no backend is required; the frontend
+## dev server is started by Playwright itself. Authenticated journeys need
+## `VITE_WORKOS_CLIENT_ID` in the repo-root `.env` (or the environment) or
+## they skip, so copy `.env.example` first.
+e2e:
+	cd frontend && pnpm test:e2e
 
 ## Ruff format (backend) + Prettier (frontend).
 format:

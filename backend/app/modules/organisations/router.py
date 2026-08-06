@@ -1,4 +1,4 @@
-"""Organisation endpoints (Scope §6.3, blueprint §5, §6).
+"""Organisation endpoints (v0.2 Scope §6.3, blueprint §5, §6).
 
 The router stays thin: it parses the request body, resolves the authenticated
 user through the shared dependency, and delegates to the service. Creating an

@@ -2,7 +2,7 @@ import { ref } from 'vue'
 import { defineStore } from 'pinia'
 
 /**
- * Selected-organisation state (blueprint §14 client-state boundary, Scope §6.3).
+ * Selected-organisation state (blueprint §14 client-state boundary, v0.3 Scope §6.3).
  *
  * Holds only the id of the organisation the user acts within. The memberships
  * the selector lists are server data and live in TanStack Vue Query

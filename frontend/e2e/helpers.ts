@@ -1,7 +1,7 @@
 import type { Page } from '@playwright/test'
 
 /**
- * Shared session-injection helpers for the Playwright journeys (Scope §6.7).
+ * Shared session-injection helpers for the Playwright journeys (v0.3 Scope §6.7).
  *
  * The journeys exercise the real frontend shell end-to-end, but the shell's
  * two external dependencies are stubbed at the network boundary the browser
@@ -243,7 +243,7 @@ export async function mockBackendApi(
 /**
  * Full journey setup: injected session + mocked WorkOS token endpoint +
  * mocked backend API. Returns the captured request headers so tests can
- * assert the Bearer token and `X-Org-Id` were attached (Scope §6.3).
+ * assert the Bearer token and `X-Org-Id` were attached (v0.3 Scope §6.3).
  */
 export async function setupAuthenticatedJourney(page: Page, clientId: string) {
   const fixture = createRecordFixture()

@@ -1,4 +1,4 @@
-"""Shared helpers for authentication tests (Scope §6.2).
+"""Shared helpers for authentication tests (v0.2 Scope §6.2).
 
 Token minting and the stub JWKS client let tests exercise the real
 :class:`WorkOSSessionValidator` against a local RSA key with no network

@@ -1,8 +1,8 @@
-"""Integration tests for the organisation context dependency (Scope §6.3).
+"""Integration tests for the organisation context dependency (v0.2 Scope §6.3).
 
 Exercises ``get_current_membership`` through the full ASGI stack against a
 probe route, covering the standard context failures and the active-membership
-acceptance path (Scope §6.3 checklist, acceptance §5.4).
+acceptance path (v0.2 Scope §6.3 checklist, acceptance §5.4).
 """
 
 from __future__ import annotations

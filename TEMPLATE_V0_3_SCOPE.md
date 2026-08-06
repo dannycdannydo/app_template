@@ -190,15 +190,15 @@ Depends on §6.3–§6.6. Proves the shell end-to-end on the v0.2 tenant-scoped 
 
 Depends on §6.7 (exercises the shell). Closes the release.
 
-- [ ] Vitest component/unit tests consolidated; Playwright smoke journeys wired into CI (blueprint §31, §37)
-- [ ] `make e2e` target added to the root Makefile and documented (blueprint §32 shared commands)
-- [ ] ADR(s) documenting new frontend dependencies (WorkOS browser SDK, `@tanstack/vue-table`, `vue-sonner`, form/validation packages) — repo rule: no dependency without documentation
-- [ ] `.env.example` documents `VITE_WORKOS_CLIENT_ID` and any auth-callback variables
-- [ ] Docs updated: `ARCHITECTURE.md` (frontend shell, auth flow, state boundaries), `README.md` (login to try the demo), `AGENTS.md` if frontend rules change
-- [ ] Stale `Scope §6.x` citations disambiguated under the v0.3 numbering (review 00b): `AGENTS.md` security-suite citation repointed to `v0.2 Scope §6.6`; `API_CONVENTIONS.md` (§6.4, §6.6) and `SECURITY.md` (§6.4) citations repointed; project convention recorded — bare `Scope §6.x` in v0.2-era backend code/docstrings refers to `TEMPLATE_V0_2_SCOPE.md`, and new code prefixes the version (e.g. `v0.2 Scope §6.3`) so the daily loop never greps the wrong subsection
-- [ ] `make check` green from a clean checkout; generated-client drift clean; CI green including the Playwright job
-- [ ] Human review recorded for auth-flow changes and any public-API breaks (blueprint §33)
-- [ ] Architecture audit (`prompts/04-architecture-audit.md`) clean — no CRITICAL or MAJOR findings
+- [x] Vitest component/unit tests consolidated; Playwright smoke journeys wired into CI (blueprint §31, §37)
+- [x] `make e2e` target added to the root Makefile and documented (blueprint §32 shared commands)
+- [x] ADR(s) documenting new frontend dependencies (WorkOS browser SDK, `@tanstack/vue-table`, `vue-sonner`, form/validation packages) — repo rule: no dependency without documentation
+- [x] `.env.example` documents `VITE_WORKOS_CLIENT_ID` and any auth-callback variables
+- [x] Docs updated: `ARCHITECTURE.md` (frontend shell, auth flow, state boundaries), `README.md` (login to try the demo), `AGENTS.md` if frontend rules change
+- [x] Stale `Scope §6.x` citations disambiguated under the v0.3 numbering (review 00b): `AGENTS.md` security-suite citation repointed to `v0.2 Scope §6.6`; `API_CONVENTIONS.md` (§6.4, §6.6) and `SECURITY.md` (§6.4) citations repointed; project convention recorded — bare `Scope §6.x` in v0.2-era backend code/docstrings refers to `TEMPLATE_V0_2_SCOPE.md`, and new code prefixes the version (e.g. `v0.2 Scope §6.3`) so the daily loop never greps the wrong subsection
+- [x] `make check` green from a clean checkout; generated-client drift clean; CI green including the Playwright job
+- [x] Human review recorded for auth-flow changes and any public-API breaks (blueprint §33)
+- [x] Architecture audit (`prompts/04-architecture-audit.md`) clean — no CRITICAL or MAJOR findings
 
 ---
 

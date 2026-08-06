@@ -1,4 +1,4 @@
-"""Real-database integration tests for organisation creation (Scope §6.3).
+"""Real-database integration tests for organisation creation (v0.2 Scope §6.3).
 
 The fakes in ``context_helpers.py`` prove the request-flow contract (wiring,
 status codes, error mapping) but never execute SQL, so the enum-persistence bug
@@ -82,7 +82,7 @@ async def test_create_organisation_end_to_end_persists_owner_membership(
 ) -> None:
     """Acceptance §5.3 against real PostgreSQL: creator becomes the owner.
 
-    Exercises the SQL path the §6.3 fakes cannot: a real INSERT of an
+    Exercises the SQL path the v0.2 §6.3 fakes cannot: a real INSERT of an
     organisation, an active membership, and the owner role link, then reads the
     raw ``status`` value back to prove the enum fix holds against the check
     constraint.

@@ -4,7 +4,7 @@ import { useMeQuery } from '@/queries/me'
 
 /**
  * Record write capabilities derived from the role codes returned by `/me`
- * (Scope §6.7, blueprint §14).
+ * (v0.3 Scope §6.7, blueprint §14).
  *
  * The backend remains the enforcement point: `require_permission` gates every
  * records route with default deny (blueprint §9), so a viewer who somehow
@@ -86,7 +86,7 @@ export function isReadOnlyRoles(roles: readonly string[] | undefined): boolean {
 }
 
 /**
- * Reactive record permissions for the current user (Scope §6.7).
+ * Reactive record permissions for the current user (v0.3 Scope §6.7).
  *
  * Reads the roles from `useMeQuery` and exposes a single computed object so
  * views can gate write actions in one place. The query layer already owns

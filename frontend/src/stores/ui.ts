@@ -7,7 +7,7 @@ import { defineStore } from 'pinia'
  * Pinia holds client state only: sidebar state, UI preferences, temporary
  * wizard state. Server state belongs to TanStack Vue Query.
  *
- * The sidebar collapsed state is persisted to localStorage (Scope §6.3,
+ * The sidebar collapsed state is persisted to localStorage (v0.3 Scope §6.3,
  * acceptance §5.5: the collapsed state survives reloads) and hydrated on store
  * creation. Storage access is guarded so the store stays testable outside a
  * full browser environment.

@@ -3,7 +3,7 @@
 Routers stay thin and receive their dependencies here: the database session,
 the current request ID, the authenticated user resolved from a validated
 WorkOS session token, and the caller's organisation membership resolved from
-the ``X-Org-Id`` header (Scope §6.3).
+the ``X-Org-Id`` header (v0.2 Scope §6.3).
 """
 
 from __future__ import annotations
@@ -127,7 +127,7 @@ async def get_current_membership(
     Missing token → 401 (from ``get_current_user``); missing or malformed
     ``X-Org-Id`` → 400; an organisation the user does not belong to, or a
     non-active membership → 403. Only active memberships establish an
-    organisation context (Scope §6.3).
+    organisation context (v0.2 Scope §6.3).
     """
     org_id = _org_context_id(x_org_id)
     membership = await session.scalar(
@@ -155,7 +155,7 @@ def require_permission(permission_code: str):
     Composes ``get_current_membership`` so the caller must first be an active
     member of the organisation in ``X-Org-Id``, then checks the permission
     against the role bundles of that membership. Default deny: a code not
-    granted to any of the caller's roles is rejected with 403 (Scope §6.4,
+    granted to any of the caller's roles is rejected with 403 (v0.2 Scope §6.4,
     blueprint §9 rules).
     """
 

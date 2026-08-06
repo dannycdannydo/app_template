@@ -1,4 +1,4 @@
-"""Role-assignment service (Scope §6.4, blueprint §9).
+"""Role-assignment service (v0.2 Scope §6.4, blueprint §9).
 
 Assigning and removing roles on a membership is the mechanism by which
 ``owner``/``administrator`` members manage who can do what inside an

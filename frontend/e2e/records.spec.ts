@@ -3,7 +3,7 @@ import { expect, test } from '@playwright/test'
 import { readWorkOsClientId, setupAuthenticatedJourney } from './helpers'
 
 /**
- * Records feature-module journey (Scope §6.7, acceptance §5.9).
+ * Records feature-module journey (v0.3 Scope §6.7, acceptance §5.9).
  *
  * An authenticated shell (session injected per the helper contract) walks
  * the full records CRUD surface through the generated client: navigate to
@@ -14,7 +14,7 @@ import { readWorkOsClientId, setupAuthenticatedJourney } from './helpers'
  * DataTable, form, toasts — is the production code under test.
  *
  * The captured request headers also prove the Bearer session token and
- * `X-Org-Id` header ride along on every call (Scope §6.3, acceptance §5.2,
+ * `X-Org-Id` header ride along on every call (v0.3 Scope §6.3, acceptance §5.2,
  * §5.6).
  */
 test('lists, creates, edits and deletes records in the authenticated shell', async ({ page }) => {

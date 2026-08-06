@@ -1,4 +1,4 @@
-"""Shared in-memory fakes for request-context and organisation tests (Scope §6.3).
+"""Shared in-memory fakes for request-context and organisation tests (v0.2 Scope §6.3).
 
 Mirrors the philosophy of ``tests/auth_helpers.py`` and the fakes in
 ``tests/test_auth.py``: the full ASGI stack runs with the real WorkOS session

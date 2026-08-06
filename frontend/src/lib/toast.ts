@@ -4,7 +4,7 @@ import { isApiError } from '@/api/errors'
 import type { ApiError } from '@/api/errors'
 
 /**
- * Toast helpers wired to the standard API error envelope (Scope §6.6,
+ * Toast helpers wired to the standard API error envelope (v0.3 Scope §6.6,
  * blueprint §13).
  *
  * Every API failure reaches the user as one consistent toast: the envelope's

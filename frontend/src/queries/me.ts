@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/vue-query'
 import { client } from '@/api/client'
 
 /**
- * Server-state composable for the current user (blueprint §14, §15, Scope §6.3).
+ * Server-state composable for the current user (blueprint §14, §15, v0.3 Scope §6.3).
  *
  * Drives the user menu (name, email) and the organisation selector
  * (memberships). All API calls live behind query composables; visual

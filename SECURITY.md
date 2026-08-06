@@ -5,7 +5,7 @@ The practical baseline is **OWASP ASVS Level 2**. This file records the controls
 ## Baseline controls
 
 - WorkOS session validation for all authenticated routes (v0.2: `app/core/security.py`, enforced by the `get_current_user` dependency).
-- Default-deny authorisation; permissions are explicit, never implicit (v0.2: `require_permission`, Scope §6.4).
+- Default-deny authorisation; permissions are explicit, never implicit (v0.2 Scope §6.4: `require_permission`).
 - Tenant-scoped queries; cross-tenant access is a bug (v0.2: `X-Org-Id` context, org-scoped queries in `queries.py`).
 - Explicit CORS allowlist, no wildcard origins in production.
 - CSRF protection where cookie authentication requires it.

@@ -37,7 +37,7 @@ export default defineConfigWithVueTs(
     rules: {
       // Conditional skips are the deliberate graceful-degradation path for
       // the authenticated journeys when VITE_WORKOS_CLIENT_ID is not
-      // configured (CI without WorkOS secrets, Scope §6.7).
+      // configured (CI without WorkOS secrets, v0.3 Scope §6.7).
       'playwright/no-skipped-test': 'off',
     },
   },

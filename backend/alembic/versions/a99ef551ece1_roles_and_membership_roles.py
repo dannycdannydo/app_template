@@ -20,8 +20,8 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 # The five default roles from blueprint §9. The organisation creation flow
-# (Scope §6.3) assigns the creator the ``owner`` role, so the seed ships with
-# the tables rather than waiting for the roles work unit (Scope §6.4).
+# (v0.2 Scope §6.3) assigns the creator the ``owner`` role, so the seed ships with
+# the tables rather than waiting for the roles work unit (v0.2 Scope §6.4).
 DEFAULT_ROLES = (
     ("owner", "Owner"),
     ("administrator", "Administrator"),
