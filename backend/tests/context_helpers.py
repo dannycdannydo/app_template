@@ -19,6 +19,7 @@ from typing import Annotated, Any
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import Depends, FastAPI
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy.exc import IntegrityError
 from tests.auth_helpers import build_validator, generate_key_pair
 
 from app.api.dependencies import get_current_membership, get_db
@@ -41,6 +42,11 @@ from app.modules.organisations.models import (
     OrganisationMembership,
 )
 from app.modules.permissions.models import MembershipRole, Role
+from app.modules.platform_admin.models import (
+    BootstrapState,
+    PlatformMembership,
+    PlatformRole,
+)
 from app.modules.records.models import Record
 from app.modules.users.models import User
 
@@ -59,9 +65,23 @@ class ContextState:
     records: list[Record] = field(default_factory=list[Record])
     audit_events: list[AuditEvent] = field(default_factory=list[AuditEvent])
     owner_role: Role | None = None
+    # Platform plane (Scope §6.2/§6.4): seeded platform roles, the memberships
+    # granted by the bootstrap hook, and the single bootstrap record when the
+    # one-time grant has been consumed.
+    platform_roles: list[PlatformRole] = field(default_factory=list[PlatformRole])
+    platform_memberships: list[PlatformMembership] = field(default_factory=list[PlatformMembership])
+    bootstrap_states: list[BootstrapState] = field(default_factory=list[BootstrapState])
+    # scalars() falls back to entity-based answers below unless the test queues
+    # explicit rows in call order (used by the /me payload paths).
+    scalars_queue: list[list[Any]] = field(default_factory=list[list[Any]])
     granted_permissions: set[str] = field(  # consumed by scalars() (permission checks)
         default_factory=set[str]
     )
+    # The next commit raises an IntegrityError (bootstrap race simulation).
+    fail_commits: int = 0
+    # Optional profile the fake profile client returns (bootstrap grant tests);
+    # defaults to the verified ada@example.com profile.
+    profile: UserProfile | None = None
     # WorkOS organisations created by the fake provider, keyed by external id;
     # drives the mapping round-trip and the lazy-backfill assertions.
     workos_organisations: dict[str, WorkOSOrganisation] = field(
@@ -72,6 +92,15 @@ class ContextState:
 def make_owner_role() -> Role:
     """Build the seeded owner role row the organisation service looks up."""
     role = Role(code="owner", name="Owner")
+    role.id = uuid.uuid4()
+    return role
+
+
+def make_platform_admin_role() -> PlatformRole:
+    """Build the seeded platform_admin role row the bootstrap hook looks up."""
+    from app.modules.permissions.constants import PLATFORM_ADMIN_ROLE_CODE
+
+    role = PlatformRole(code=PLATFORM_ADMIN_ROLE_CODE, name="Platform Admin")
     role.id = uuid.uuid4()
     return role
 
@@ -171,13 +200,16 @@ class FakeSession:
         return None
 
     async def scalars(self, statement: object) -> _ScalarsResult:
-        # The permission check queries permission codes for a membership; the
+        # The /me payload and other multi-query paths queue explicit rows; the
+        # permission check queries permission codes for a membership; the
         # fake answers from the granted set the test configures. The records
         # list query selects the Record entity; the fake answers from the
         # records the test staged. The audit listing selects the AuditEvent
         # entity; the fake answers from the staged events (filters are proven
         # by the query-construction and real-database tests). Anything else
         # falls back to the granted set.
+        if self._state.scalars_queue:
+            return _ScalarsResult(self._state.scalars_queue.pop(0))
         descriptions = getattr(statement, "column_descriptions", None)
         entity = descriptions[0].get("entity") if descriptions else None
         if entity is Record:
@@ -194,15 +226,21 @@ class FakeSession:
         for obj in self._added:
             if obj.id is None:
                 obj.id = uuid.uuid4()
-            if obj.created_at is None:
+            if getattr(obj, "created_at", None) is None and hasattr(obj, "created_at"):
                 obj.created_at = now
-            # AuditEvent has no updated_at column (append-only by design), so
-            # only touch the timestamp when the model carries it.
+            # AuditEvent and BootstrapState have no updated_at column
+            # (append-only / single-write by design), so only touch the
+            # timestamp when the model carries it.
             if getattr(obj, "updated_at", None) is None and hasattr(obj, "updated_at"):
                 obj.updated_at = now
 
     async def commit(self) -> None:
         await self.flush()
+        if self._state.fail_commits:
+            # Simulate a lost race (e.g. the bootstrap sentinel constraint):
+            # nothing is persisted and the caller's rollback discards it.
+            self._state.fail_commits -= 1
+            raise IntegrityError("insert", {}, Exception("duplicate key value"))
         for obj in self._added:
             if isinstance(obj, Organisation):
                 self._state.organisations.append(obj)
@@ -218,6 +256,12 @@ class FakeSession:
                 # Append-only: never modify or remove an existing event.
                 if all(existing is not obj for existing in self._state.audit_events):
                     self._state.audit_events.append(obj)
+            elif isinstance(obj, PlatformRole):
+                self._state.platform_roles.append(obj)
+            elif isinstance(obj, PlatformMembership):
+                self._state.platform_memberships.append(obj)
+            elif isinstance(obj, BootstrapState):
+                self._state.bootstrap_states.append(obj)
             elif isinstance(obj, User):
                 # Mirrors the model's ``is_active`` default applied at flush time;
                 # provisioned users are always created active.
@@ -241,7 +285,9 @@ class FakeProfileClient(UserProfileClient):
         self._state = state
 
     async def get_profile(self, workos_user_id: str) -> UserProfile:
-        return UserProfile(email="ada@example.com", name="Ada Lovelace")
+        return self._state.profile or UserProfile(
+            email="ada@example.com", name="Ada Lovelace", email_verified=True
+        )
 
 
 class FakeWorkOSOrganizationsProvider(WorkOSOrganizationsProvider):

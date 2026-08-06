@@ -19,11 +19,27 @@ orphan; it is reconciled by the documented operational step in
 
 from __future__ import annotations
 
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
+from app.core.exceptions import ServiceUnavailableError
+from app.core.security import UserProfileClient
 from app.integrations.workos.organizations import WorkOSOrganizationsProvider
-from app.modules.audit.service import ACTION_ORGANISATION_CREATED, record_event
+from app.modules.audit.service import (
+    ACTION_ORGANISATION_CREATED,
+    ACTION_PLATFORM_BOOTSTRAP_GRANTED,
+    record_event,
+)
 from app.modules.organisations.models import Organisation
+from app.modules.permissions.constants import PLATFORM_ADMIN_ROLE_CODE
+from app.modules.platform_admin.models import (
+    BOOTSTRAP_SINGLETON_ID,
+    BootstrapState,
+    PlatformMembership,
+    PlatformRole,
+)
 from app.modules.users.models import User
 
 # The lazy-backfill event is a platform-only write: the mapping changes without
@@ -104,3 +120,89 @@ async def ensure_workos_organisation(
         metadata={"workos_organisation_id": workos_organisation.id},
     )
     return organisation
+
+
+async def maybe_grant_bootstrap_platform_admin(
+    session: AsyncSession,
+    user: User,
+    profiles: UserProfileClient,
+) -> PlatformMembership | None:
+    """Grant ``platform_admin`` to the configured bootstrap email, exactly once.
+
+    This is the one-time bootstrap hook (Scope §6.4, acceptance §5.5): it runs
+    on every successful authentication and is a no-op unless all of the
+    following hold:
+
+    - ``BOOTSTRAP_PLATFORM_ADMIN_EMAIL`` is configured;
+    - the ``bootstrap_state`` row does not exist yet (unconsumed);
+    - the WorkOS profile behind the session reports the configured email and
+      ``email_verified`` (the profile is fetched server-side, so the email and
+      its verification state never come from client input — BP §8).
+
+    When the grant fires, the platform membership, the bootstrap record and
+    the ``platform.bootstrap_granted`` audit event are written in one
+    transaction and committed together. The bootstrap record's id is a fixed
+    sentinel guarded by a check constraint, so a concurrent first login loses
+    the race with an ``IntegrityError``: the transaction is rolled back and
+    the hook re-checks, then treats the bootstrap as already consumed — no
+    second grant, no second audit row. Any other ``IntegrityError`` (e.g. the
+    seeded ``platform_admin`` role is missing) surfaces as a 503 rather than a
+    silent no-op, so a broken deployment cannot swallow the bootstrap.
+    """
+
+    configured = get_settings().bootstrap_platform_admin_email
+    if not configured:
+        return None
+
+    bootstrap = await session.scalar(
+        select(BootstrapState).where(BootstrapState.id == BOOTSTRAP_SINGLETON_ID)
+    )
+    if bootstrap is not None:
+        return None
+
+    profile = await profiles.get_profile(user.workos_user_id)
+    if profile.email.strip().lower() != configured:
+        return None
+    if not profile.email_verified:
+        return None
+
+    role = await session.scalar(
+        select(PlatformRole).where(PlatformRole.code == PLATFORM_ADMIN_ROLE_CODE)
+    )
+    if role is None:
+        raise ServiceUnavailableError(
+            code="platform_bootstrap_failed",
+            message="The platform bootstrap could not be completed. Please try again.",
+        )
+
+    membership = PlatformMembership(user_id=user.id, platform_role_id=role.id)
+    bootstrap_state = BootstrapState(email=profile.email, consumed_by_user_id=user.id)
+    session.add(membership)
+    session.add(bootstrap_state)
+    try:
+        # record_event flushes, which is where the sentinel-constraint
+        # violation actually surfaces in a lost race, so the whole insert unit
+        # must sit inside the try.
+        await record_event(
+            session,
+            actor_user_id=user.id,
+            action=ACTION_PLATFORM_BOOTSTRAP_GRANTED,
+            resource_type="user",
+            resource_id=str(user.id),
+            metadata={"email": profile.email, "role": PLATFORM_ADMIN_ROLE_CODE},
+        )
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        bootstrap = await session.scalar(
+            select(BootstrapState).where(BootstrapState.id == BOOTSTRAP_SINGLETON_ID)
+        )
+        if bootstrap is not None:
+            # A concurrent first login consumed the bootstrap first; our
+            # grant was rolled back with the losing transaction.
+            return None
+        raise ServiceUnavailableError(
+            code="platform_bootstrap_failed",
+            message="The platform bootstrap could not be completed. Please try again.",
+        ) from None
+    return membership

@@ -30,6 +30,11 @@ ACTION_RECORD_CREATED = "record.created"
 ACTION_RECORD_UPDATED = "record.updated"
 ACTION_RECORD_DELETED = "record.deleted"
 
+# The one-time platform bootstrap grant (Scope §6.4, acceptance §5.5): written
+# exactly once, in the same transaction as the platform membership, so the
+# audit trail always mirrors the grant.
+ACTION_PLATFORM_BOOTSTRAP_GRANTED = "platform.bootstrap_granted"
+
 
 async def record_event(
     session: AsyncSession,

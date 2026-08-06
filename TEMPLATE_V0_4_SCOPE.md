@@ -148,10 +148,10 @@ Depends on §6.2 (platform plane gates the org-management endpoints). Satisfies 
 
 Depends on §6.2 (platform membership machinery) and §6.1 (audit). The one-time bootstrap.
 
-- [ ] `BOOTSTRAP_PLATFORM_ADMIN_EMAIL` in `core/config.py` (fail-fast production validation) and `.env.example`
-- [ ] `bootstrap_state` single-row table (email, consumed_by_user_id, consumed_at); `UserProfile` gains `email_verified` from the WorkOS profile
-- [ ] Grant hook inside the `get_current_user` provisioning chain: configured email + profile `email_verified` + bootstrap unconsumed → platform membership + `bootstrap_state` in one transaction (IntegrityError = already consumed), audit `platform.bootstrap_granted`
-- [ ] Tests: once-only (repeat logins no-op), wrong/unverified email never grants, concurrent first-login race, audit row written
+- [x] `BOOTSTRAP_PLATFORM_ADMIN_EMAIL` in `core/config.py` (fail-fast production validation) and `.env.example`
+- [x] `bootstrap_state` single-row table (email, consumed_by_user_id, consumed_at); `UserProfile` gains `email_verified` from the WorkOS profile
+- [x] Grant hook inside the `get_current_user` provisioning chain: configured email + profile `email_verified` + bootstrap unconsumed → platform membership + `bootstrap_state` in one transaction (IntegrityError = already consumed), audit `platform.bootstrap_granted`
+- [x] Tests: once-only (repeat logins no-op), wrong/unverified email never grants, concurrent first-login race, audit row written
 
 ## 6.5 Invitations
 
