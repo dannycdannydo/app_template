@@ -31,6 +31,7 @@ from app.core.logging import configure_logging, current_request_id
 from app.core.rate_limit import RateLimiter, get_rate_limiter
 from app.modules.audit.router import router as audit_router
 from app.modules.organisations.router import router as organisations_router
+from app.modules.platform_admin.router import router as platform_admin_router
 from app.modules.records.router import router as records_router
 from app.modules.users.router import router as users_router
 
@@ -212,6 +213,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router)
     app.include_router(users_router)
     app.include_router(organisations_router)
+    app.include_router(platform_admin_router)
     app.include_router(records_router)
     app.include_router(audit_router)
     return app

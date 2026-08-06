@@ -84,6 +84,31 @@ export interface paths {
     patch?: never
     trace?: never
   }
+  '/api/v1/platform/organisations': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    /**
+     * Create Platform Organisation Endpoint
+     * @description Create an organisation with its WorkOS mapping, then return it.
+     *
+     *     The caller must be a platform administrator; the organisation is created
+     *     without any membership because platform admins administer organisations
+     *     they do not belong to. The response includes the server-assigned
+     *     ``workos_organisation_id`` mapping.
+     */
+    post: operations['create_platform_organisation_endpoint_api_v1_platform_organisations_post']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
   '/api/v1/records': {
     parameters: {
       query?: never
@@ -334,6 +359,43 @@ export interface components {
       updated_at: string
     }
     /**
+     * PlatformOrganisationCreate
+     * @description Request payload for creating an organisation on the platform plane.
+     *
+     *     Only the name is client-supplied; the internal id, timestamps and the
+     *     WorkOS mapping are all server-controlled, so any attempt to smuggle them
+     *     in is rejected outright.
+     */
+    PlatformOrganisationCreate: {
+      /** Name */
+      name: string
+    }
+    /**
+     * PlatformOrganisationResponse
+     * @description Response payload for an organisation on the platform plane.
+     */
+    PlatformOrganisationResponse: {
+      /**
+       * Id
+       * Format: uuid
+       */
+      id: string
+      /** Name */
+      name: string
+      /** Workos Organisation Id */
+      workos_organisation_id: string | null
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string
+      /**
+       * Updated At
+       * Format: date-time
+       */
+      updated_at: string
+    }
+    /**
      * RecordCreate
      * @description Request payload for creating a record.
      */
@@ -564,6 +626,41 @@ export interface operations {
         }
         content: {
           'application/json': components['schemas']['OrganisationResponse']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  create_platform_organisation_endpoint_api_v1_platform_organisations_post: {
+    parameters: {
+      query?: never
+      header?: {
+        authorization?: string | null
+      }
+      path?: never
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['PlatformOrganisationCreate']
+      }
+    }
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['PlatformOrganisationResponse']
         }
       }
       /** @description Validation Error */

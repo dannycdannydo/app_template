@@ -37,12 +37,25 @@ def _membership_status_values(enum_class: type[MembershipStatus]) -> list[str]:
 
 
 class Organisation(Base, TimestampMixin):
-    """A tenant boundary; all tenant-scoped data hangs off this table."""
+    """A tenant boundary; all tenant-scoped data hangs off this table.
+
+    ``workos_organisation_id`` is the 1:1 mapping to the WorkOS
+    organisation created for this internal organisation (ADR-0001, Scope
+    §6.3). It is nullable because pre-existing organisations have no
+    mapping until one is created (eagerly at platform creation, lazily as a
+    backfill at first invite); unique because the mapping is 1:1 and the
+    internal id stays the application primary key everywhere. The field is
+    server-controlled: it is populated only by the WorkOS adapter/service
+    layer and never accepted from a request body.
+    """
 
     __tablename__ = "organisations"
 
     id: Mapped[uuid.UUID] = mapped_column(UuidV7, primary_key=True, default=uuid7)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
+    workos_organisation_id: Mapped[str | None] = mapped_column(
+        String(255), unique=True, nullable=True, default=None
+    )
 
     memberships: Mapped[list[OrganisationMembership]] = relationship(
         back_populates="organisation", cascade="all, delete-orphan"

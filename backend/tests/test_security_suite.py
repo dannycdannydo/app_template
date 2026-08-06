@@ -121,6 +121,12 @@ PROTECTED_ROUTES: list[RouteSpec] = [
     ),
     _route("DELETE", "/api/v1/records/{record_id}", org_scoped=True),
     _route("GET", "/api/v1/platform/audit-events", org_scoped=False),
+    _route(
+        "POST",
+        "/api/v1/platform/organisations",
+        org_scoped=False,
+        request_body={"name": "Acme"},
+    ),
 ]
 
 _ORG_SCOPED_ROUTES = [route for route in PROTECTED_ROUTES if route.org_scoped]
