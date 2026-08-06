@@ -65,10 +65,17 @@ class ValidatedSession:
 
 @dataclass(frozen=True)
 class UserProfile:
-    """Profile data needed to provision the internal user record."""
+    """Profile data needed to provision the internal user record.
+
+    ``email_verified`` comes from the WorkOS profile and gates the privileged
+    platform bootstrap grant (Scope §6.4): a user is only ever granted
+    platform_admin when WorkOS reports their email as verified, never on the
+    strength of the email alone.
+    """
 
     email: str
     name: str
+    email_verified: bool
 
 
 class SessionValidator(Protocol):
@@ -210,7 +217,11 @@ class WorkOSUserProfileClient:
                 message="Authentication could not be completed. Please try again.",
             ) from exc
         name = user.name or " ".join(p for p in (user.first_name, user.last_name) if p).strip()
-        return UserProfile(email=user.email, name=name or user.email)
+        return UserProfile(
+            email=user.email,
+            name=name or user.email,
+            email_verified=bool(user.email_verified),
+        )
 
 
 _WEBHOOK_TOLERANCE_SECONDS = 300

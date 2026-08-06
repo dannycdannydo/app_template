@@ -13,12 +13,26 @@ platform role at most once, mirroring the org-plane membership invariant.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
-from sqlalchemy import ForeignKey, String, UniqueConstraint
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
 from app.db.conventions import TimestampMixin, UuidV7, uuid7
+
+# The bootstrap_state table holds exactly one row; the id is a fixed sentinel
+# enforced by a check constraint, so the primary key itself prevents a second
+# grant (Scope §6.4).
+BOOTSTRAP_SINGLETON_ID = 1
 
 
 class PlatformRole(Base, TimestampMixin):
@@ -79,4 +93,35 @@ class PlatformMembership(Base, TimestampMixin):
         ForeignKey("platform_roles.id", ondelete="CASCADE"),
         index=True,
         nullable=False,
+    )
+
+
+class BootstrapState(Base):
+    """The one-time platform bootstrap record (Scope §6.4).
+
+    A single row records which verified WorkOS email consumed the bootstrap
+    and when. The id is a fixed sentinel (``BOOTSTRAP_SINGLETON_ID``) enforced
+    by a check constraint, so the primary key is what makes a concurrent
+    double first-login impossible: the second transaction to insert the
+    sentinel row violates the constraint and is treated as an already-consumed
+    bootstrap. The row is written in the same transaction as the platform
+    membership and its audit event, so a grant either fully happens or not at
+    all. There is deliberately no ``updated_at``: once consumed, the bootstrap
+    is never modified.
+    """
+
+    __tablename__ = "bootstrap_state"
+    # The naming convention renders this as ``ck_bootstrap_state_single_row``
+    # (ck_<table>_<constraint_name>), matching the migration's op.f() name.
+    __table_args__ = (CheckConstraint("id = 1", name="single_row"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=BOOTSTRAP_SINGLETON_ID)
+    email: Mapped[str] = mapped_column(String(320), nullable=False)
+    consumed_by_user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    consumed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
     )

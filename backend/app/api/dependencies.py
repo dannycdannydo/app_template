@@ -30,6 +30,7 @@ from app.db.session import async_session_factory
 from app.modules.organisations.models import MembershipStatus, OrganisationMembership
 from app.modules.permissions.queries import permission_codes_for_membership
 from app.modules.platform_admin.queries import platform_permission_codes_for_user
+from app.modules.platform_admin.service import maybe_grant_bootstrap_platform_admin
 from app.modules.users.models import User
 from app.modules.users.service import get_or_provision_user
 
@@ -99,6 +100,13 @@ async def get_current_user(
             code="user_disabled",
             message="Your account is disabled.",
         )
+    # The one-time platform bootstrap (Scope §6.4) runs inside the
+    # provisioning chain: after the user is resolved and confirmed enabled,
+    # the configured bootstrap email's first verified login is granted
+    # platform_admin. It is a fast no-op once consumed (and on every login of
+    # any other user), so running it on every successful authentication is
+    # cheap and keeps the grant attached to the auth path itself.
+    await maybe_grant_bootstrap_platform_admin(session, user, profiles)
     return user
 
 

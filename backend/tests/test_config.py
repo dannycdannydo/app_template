@@ -112,3 +112,46 @@ def test_trusted_hosts_are_explicit_and_non_wildcard() -> None:
             cors_allowed_origins=["https://app.example.test"],
             redis_url="rediss://redis.example.test:6380/0",
         )
+
+
+def test_bootstrap_email_defaults_to_disabled() -> None:
+    settings = Settings(app_env="development", database_url="postgresql+asyncpg://x")
+    assert settings.bootstrap_platform_admin_email == ""
+
+
+def test_bootstrap_email_is_normalised() -> None:
+    """Scope §6.4: whitespace and case are folded so the login match is stable."""
+    settings = Settings(
+        app_env="development",
+        database_url="postgresql+asyncpg://x",
+        bootstrap_platform_admin_email="  Admin@Example.COM ",
+    )
+    assert settings.bootstrap_platform_admin_email == "admin@example.com"
+
+
+@pytest.mark.parametrize(
+    "email",
+    ["not-an-email", "with space@example.com", "@example.com", "admin@", "admin@@example.com"],
+)
+def test_bootstrap_email_rejects_malformed_values(email: str) -> None:
+    """A malformed bootstrap email fails fast in every environment."""
+    with pytest.raises(ValidationError, match="valid email"):
+        Settings(
+            app_env="development",
+            database_url="postgresql+asyncpg://x",
+            bootstrap_platform_admin_email=email,
+        )
+
+
+def test_production_accepts_a_valid_bootstrap_email() -> None:
+    settings = Settings(
+        app_env="production",
+        database_url="postgresql+asyncpg://x",
+        workos_api_key="sk_test",
+        workos_client_id="client_1",
+        cors_allowed_origins=["https://app.example.test"],
+        trusted_hosts=["api.example.test"],
+        redis_url="rediss://redis.example.test:6380/0",
+        bootstrap_platform_admin_email="admin@example.com",
+    )
+    assert settings.bootstrap_platform_admin_email == "admin@example.com"

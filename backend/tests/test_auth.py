@@ -103,7 +103,7 @@ class FakeProfileClient(UserProfileClient):
 
     async def get_profile(self, workos_user_id: str) -> UserProfile:
         self._state.profile_calls.append(workos_user_id)
-        return UserProfile(email="ada@example.com", name="Ada Lovelace")
+        return UserProfile(email="ada@example.com", name="Ada Lovelace", email_verified=True)
 
 
 class FailingProfileClient(UserProfileClient):

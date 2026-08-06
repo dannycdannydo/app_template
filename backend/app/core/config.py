@@ -60,6 +60,13 @@ class Settings(BaseSettings):
         default=30.0,
         description="Clock-skew leeway in seconds when validating WorkOS session tokens",
     )
+    bootstrap_platform_admin_email: str = Field(
+        default="",
+        description=(
+            "Email of the user the platform bootstrap grants platform_admin to on first "
+            "verified login; empty disables the bootstrap (Scope §6.4)"
+        ),
+    )
     cors_allowed_origins: list[str] = Field(
         default_factory=lambda: ["http://localhost:5173"],
         description="Exact browser origins allowed to call the API",
@@ -86,6 +93,24 @@ class Settings(BaseSettings):
         if any(host == "*" for host in hosts):
             raise ValueError("trusted_hosts must not contain a wildcard host")
         return hosts
+
+    @field_validator("bootstrap_platform_admin_email")
+    @classmethod
+    def _validate_bootstrap_platform_admin_email(cls, email: str) -> str:
+        """Normalise and validate the bootstrap email when one is configured.
+
+        The value is trimmed and lower-cased so the login-time comparison is
+        stable; a malformed value fails fast in every environment, and
+        production is never left with a bootstrap email the code cannot act
+        on. An empty value (bootstrap disabled) is always allowed.
+        """
+        value = email.strip().lower()
+        if not value:
+            return ""
+        local, separator, domain = value.partition("@")
+        if not separator or not local or not domain or "@" in domain or " " in value:
+            raise ValueError("bootstrap_platform_admin_email must be a valid email address")
+        return value
 
     @model_validator(mode="after")
     def _validate_config(self) -> Settings:
