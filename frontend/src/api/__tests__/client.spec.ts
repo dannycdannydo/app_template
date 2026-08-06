@@ -5,6 +5,11 @@ import { useOrganisationStore } from '@/stores/organisation'
 import { useSessionStore } from '@/stores/session'
 
 const fetchMock = vi.fn<(input: Request, init?: RequestInit) => Promise<Response>>()
+const signOutMock = vi.hoisted(() => vi.fn<() => Promise<void>>())
+
+vi.mock('@/features/auth/workos', () => ({
+  signOut: signOutMock,
+}))
 
 /**
  * Stub `fetch` before the client module evaluates: openapi-fetch captures the
@@ -26,6 +31,8 @@ function jsonResponse(body: unknown, status = 200): Response {
 beforeEach(async () => {
   vi.resetModules()
   fetchMock.mockReset()
+  signOutMock.mockReset()
+  signOutMock.mockResolvedValue(undefined)
   localStorage.clear()
   setActivePinia(createPinia())
   // jsdom location methods are not spyable; swap in a stub we can assert on.
@@ -127,9 +134,11 @@ describe('client organisation-context injection', () => {
 })
 
 describe('client 401 handling', () => {
-  it('clears the session store and redirects to /login on 401', async () => {
+  it('clears both session layers and redirects once on 401', async () => {
     const session = useSessionStore()
+    const organisation = useOrganisationStore()
     session.setSession('expired-token')
+    organisation.setSelectedOrganisation('org-aaa')
     const assignMock = window.location.assign as ReturnType<typeof vi.fn<(path: string) => void>>
 
     fetchMock.mockResolvedValueOnce(
@@ -144,7 +153,25 @@ describe('client 401 handling', () => {
 
     expect(session.token).toBeNull()
     expect(session.isAuthenticated).toBe(false)
-    expect(assignMock).toHaveBeenCalledWith('/login')
+    expect(organisation.selectedOrganisationId).toBeNull()
+    expect(signOutMock).toHaveBeenCalledOnce()
+    expect(assignMock).toHaveBeenCalledWith('/login?error=session_invalid')
+  })
+
+  it('redirects after a WorkOS logout failure instead of retaining the rejected session', async () => {
+    const session = useSessionStore()
+    session.setSession('rejected-token')
+    signOutMock.mockRejectedValueOnce(new Error('logout unavailable'))
+    const assignMock = window.location.assign as ReturnType<typeof vi.fn<(path: string) => void>>
+
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ code: 'unauthorized', message: 'Session rejected.', request_id: 'req-10' }, 401),
+    )
+
+    await expect(client.GET('/api/v1/me')).rejects.toMatchObject({ status: 401 })
+
+    expect(session.token).toBeNull()
+    expect(assignMock).toHaveBeenCalledWith('/login?error=session_invalid')
   })
 
   it('normalizes non-2xx responses into the typed error envelope', async () => {

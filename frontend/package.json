@@ -13,8 +13,8 @@
     "type-check": "vue-tsc --build",
     "generate:client": "node ./scripts/generate-client.mjs",
     "lint": "run-s \"lint:*\"",
-    "lint:oxlint": "oxlint . --fix",
-    "lint:eslint": "eslint . --fix --cache",
+    "lint:oxlint": "oxlint .",
+    "lint:eslint": "eslint . --cache",
     "format": "prettier --write --experimental-cli ."
   },
   "dependencies": {

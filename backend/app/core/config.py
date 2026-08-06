@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -52,6 +52,19 @@ class Settings(BaseSettings):
         default=30.0,
         description="Clock-skew leeway in seconds when validating WorkOS session tokens",
     )
+    cors_allowed_origins: list[str] = Field(
+        default_factory=lambda: ["http://localhost:5173"],
+        description="Exact browser origins allowed to call the API",
+    )
+
+    @field_validator("cors_allowed_origins")
+    @classmethod
+    def _validate_cors_allowed_origins(cls, origins: list[str]) -> list[str]:
+        if not origins or any(not origin for origin in origins):
+            raise ValueError("cors_allowed_origins must contain at least one origin")
+        if any(origin == "*" for origin in origins):
+            raise ValueError("cors_allowed_origins must not contain a wildcard origin")
+        return [origin.rstrip("/") for origin in origins]
 
     @model_validator(mode="after")
     def _validate_config(self) -> Settings:
@@ -63,6 +76,10 @@ class Settings(BaseSettings):
             raise ValueError("workos_api_key is required in the production environment")
         if self.app_env == "production" and not self.workos_client_id:
             raise ValueError("workos_client_id is required in the production environment")
+        if self.app_env == "production" and any(
+            not origin.startswith("https://") for origin in self.cors_allowed_origins
+        ):
+            raise ValueError("cors_allowed_origins must use https in the production environment")
         if self.workos_api_base_url and not self.workos_api_base_url.startswith("https://"):
             raise ValueError("workos_api_base_url must use https")
         return self

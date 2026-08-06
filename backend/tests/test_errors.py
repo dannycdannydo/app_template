@@ -99,3 +99,26 @@ async def test_unknown_route_returns_standard_error_format() -> None:
         body = response.json()
         assert body["code"] == "not_found"
         assert body["request_id"]
+
+
+async def test_cors_allows_only_configured_browser_origins() -> None:
+    async with _client_for(create_app()) as client:
+        allowed = await client.options(
+            "/api/v1/me",
+            headers={
+                "Origin": "http://localhost:5173",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        denied = await client.options(
+            "/api/v1/me",
+            headers={
+                "Origin": "https://evil.example",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+
+    assert allowed.status_code == 200
+    assert allowed.headers["access-control-allow-origin"] == "http://localhost:5173"
+    assert denied.status_code == 400
+    assert "access-control-allow-origin" not in denied.headers

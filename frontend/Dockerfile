@@ -22,8 +22,15 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile --registry=${NPM_REGISTRY}
 
 COPY . .
+# Vite substitutes these public values while compiling the static bundle. They
+# must be build arguments; runtime environment variables cannot change them.
 ARG VITE_API_BASE_URL=
-RUN VITE_API_BASE_URL=${VITE_API_BASE_URL} pnpm build
+ARG VITE_WORKOS_CLIENT_ID=
+ARG VITE_WORKOS_REDIRECT_URI=
+RUN VITE_API_BASE_URL=${VITE_API_BASE_URL} \
+    VITE_WORKOS_CLIENT_ID=${VITE_WORKOS_CLIENT_ID} \
+    VITE_WORKOS_REDIRECT_URI=${VITE_WORKOS_REDIRECT_URI} \
+    pnpm build
 
 # --- Serve stage: static files behind nginx with API proxy ------------------
 FROM nginx:1.28-alpine AS serve

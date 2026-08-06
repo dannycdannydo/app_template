@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError as PydanticValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import Response
 
 from app.api.health import router as health_router
@@ -144,7 +145,16 @@ def _register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(Exception, _handle_unexpected_exception)
 
 
-def _register_middleware(app: FastAPI) -> None:
+def _register_middleware(app: FastAPI, *, cors_allowed_origins: list[str]) -> None:
+    """Register request middleware, including the explicit browser-origin policy."""
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_allowed_origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "PATCH", "DELETE"],
+        allow_headers=["Authorization", "Content-Type", "X-Org-Id", "X-Request-ID"],
+        expose_headers=["X-Request-ID"],
+    )
     app.add_middleware(BaseHTTPMiddleware, dispatch=_request_id_middleware)
 
 
@@ -161,7 +171,7 @@ def create_app() -> FastAPI:
 
     app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
     _register_exception_handlers(app)
-    _register_middleware(app)
+    _register_middleware(app, cors_allowed_origins=settings.cors_allowed_origins)
     app.include_router(health_router)
     app.include_router(users_router)
     app.include_router(organisations_router)

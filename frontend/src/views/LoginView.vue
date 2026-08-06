@@ -15,6 +15,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   access_denied: 'Sign-in was not completed. Please try again.',
   invalid_callback: 'The sign-in link is invalid or incomplete. Please sign in again.',
   login_failed: 'Sign-in failed. Please try again.',
+  session_invalid: 'Your session expired or could not be validated. Please sign in again.',
 }
 
 const errorParam = typeof route.query.error === 'string' ? route.query.error : null

@@ -22,6 +22,7 @@ from sqlalchemy.exc import IntegrityError
 from tests.auth_helpers import build_validator, generate_key_pair, make_token
 
 from app.api.dependencies import get_db
+from app.core.exceptions import ExternalServiceError
 from app.core.security import (
     UserProfile,
     UserProfileClient,
@@ -105,6 +106,14 @@ class FakeProfileClient(UserProfileClient):
         return UserProfile(email="ada@example.com", name="Ada Lovelace")
 
 
+class FailingProfileClient(UserProfileClient):
+    async def get_profile(self, workos_user_id: str) -> UserProfile:
+        raise ExternalServiceError(
+            code="workos_profile_unavailable",
+            message="Authentication could not be completed. Please try again.",
+        )
+
+
 def _make_user(*, is_active: bool = True, workos_user_id: str = WORKOS_USER_ID) -> User:
     user = User(workos_user_id=workos_user_id, email="ada@example.com", name="Ada Lovelace")
     user.id = uuid.uuid4()
@@ -124,7 +133,9 @@ def _make_membership(user: User) -> OrganisationMembership:
     return membership
 
 
-def _build_app(*, private_key: rsa.RSAPrivateKey, state: AuthState) -> FastAPI:
+def _build_app(
+    *, private_key: rsa.RSAPrivateKey, state: AuthState, profiles: UserProfileClient | None = None
+) -> FastAPI:
     """Build the app with fakes for the session, validator and profile client."""
     app = create_app()
 
@@ -133,7 +144,7 @@ def _build_app(*, private_key: rsa.RSAPrivateKey, state: AuthState) -> FastAPI:
 
     app.dependency_overrides[get_db] = override_db
     app.dependency_overrides[get_session_validator] = lambda: build_validator(private_key)
-    app.dependency_overrides[get_user_profile_client] = lambda: FakeProfileClient(state)
+    app.dependency_overrides[get_user_profile_client] = lambda: profiles or FakeProfileClient(state)
     return app
 
 
@@ -293,3 +304,19 @@ async def test_me_handles_concurrent_provisioning_race(auth_app: AuthApp) -> Non
     assert response.json()["user"]["id"] == str(winner.id)
     assert state.users[WORKOS_USER_ID].id == winner.id
     assert state.profile_calls == [WORKOS_USER_ID]
+
+
+async def test_me_surfaces_profile_provider_failure_as_safe_upstream_error() -> None:
+    private_key, _ = generate_key_pair()
+    app = _build_app(
+        private_key=private_key,
+        state=AuthState(),
+        profiles=FailingProfileClient(),
+    )
+
+    async with _client(app) as client:
+        response = await _get_me(client, make_token(private_key))
+
+    assert response.status_code == 502
+    assert response.json()["code"] == "workos_profile_unavailable"
+    assert response.json()["message"] == "Authentication could not be completed. Please try again."

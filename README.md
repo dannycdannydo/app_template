@@ -76,7 +76,7 @@ Verification: after `cp .env.example .env`, both `make dev` and `make dev-docker
 
 Login goes through **WorkOS** end-to-end: the browser never submits identity fields, only the session token the backend validates. To try it:
 
-1. Set `VITE_WORKOS_CLIENT_ID` in `.env` to the client id of your WorkOS application (it is public, not a secret), and register `http://localhost:5173/auth/callback` as a Redirect URI in the WorkOS dashboard.
+1. Set `VITE_WORKOS_CLIENT_ID` in `.env` to the client id of your WorkOS application (it is public, not a secret). In the WorkOS dashboard, register `http://localhost:5173/auth/callback` as a Redirect URI (Applications → your app → Redirects) **and** add `http://localhost:5173` to the allowed origins under Authentication → Cross-Origin Resource Sharing (CORS) → Configure CORS, in the same environment as the client id. The browser exchanges the auth code directly with `api.workos.com` (ADR 0011), so WorkOS only answers that exchange when your origin is allowlisted; without it the callback fails with a CORS error ("Access-Control-Allow-Origin missing").
 2. Run `make dev` and open `http://localhost:5173`. Without a session every route redirects to `/login`; click **Continue with WorkOS** and complete the flow on the WorkOS-hosted page.
 3. You land in the application shell: sidebar, user menu (identity from `GET /api/v1/me`) and organisation selector. Pick an organisation and the records example module is ready in the selected tenant.
 

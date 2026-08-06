@@ -32,9 +32,10 @@ from typing import Any, ClassVar, Protocol, cast
 
 import jwt
 from jwt import PyJWKClient, PyJWTError
-from workos import WorkOSClient
+from workos import WorkOSClient, WorkOSError
 
 from app.core.config import get_settings
+from app.core.exceptions import ExternalServiceError
 
 
 class InvalidSessionError(Exception):
@@ -176,7 +177,13 @@ class WorkOSUserProfileClient:
 
     async def get_profile(self, workos_user_id: str) -> UserProfile:
         """Fetch the WorkOS user record for a validated identity."""
-        user = await asyncio.to_thread(self._client.user_management.get_user, workos_user_id)
+        try:
+            user = await asyncio.to_thread(self._client.user_management.get_user, workos_user_id)
+        except WorkOSError as exc:
+            raise ExternalServiceError(
+                code="workos_profile_unavailable",
+                message="Authentication could not be completed. Please try again.",
+            ) from exc
         name = user.name or " ".join(p for p in (user.first_name, user.last_name) if p).strip()
         return UserProfile(email=user.email, name=name or user.email)
 

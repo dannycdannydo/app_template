@@ -15,11 +15,18 @@ Applications built from this template need authentication with social login, ent
 
 ## Decision
 
-Use **WorkOS** for authentication and organisation management. Sessions are validated against WorkOS; the template's own user, organisation, and membership records remain in the application database, with WorkOS as the source of truth for credentials and SSO.
+Use **WorkOS** for authentication and identity-provider integrations. Sessions are
+validated against WorkOS; the template's own user, organisation, membership,
+role and permission records remain in the application database. WorkOS is the
+source of truth for credentials and SSO, while the application is the source of
+truth for its tenant boundaries and shared-data access rules.
 
 ## Consequences
 
 - Applications avoid owning credentials, password resets, SSO configuration, and directory sync.
+- A WorkOS Organization is not automatically an application organisation. A
+  product that deliberately adopts WorkOS Organizations must add and document
+  an explicit mapping and synchronisation design first.
 - WorkOS is an external dependency for authentication; the integration must be kept behind an adapter so the auth surface is testable and swappable.
 - Cost depends on active users, which is acceptable for the target deployments.
 - Authentication changes remain in the human-review list (see `AGENTS.md`).
