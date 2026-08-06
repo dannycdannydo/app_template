@@ -16,6 +16,7 @@ import {
   LoaderCircleIcon,
 } from '@lucide/vue'
 import { computed, ref, watch } from 'vue'
+import type { VNode } from 'vue'
 
 import type { ApiError } from '@/api/errors'
 import { Button } from '@/components/ui/button'
@@ -34,14 +35,17 @@ import { cn } from '@/lib/utils'
  * Column definition for the standard `DataTable` (Scope §6.5, blueprint §16
  * data grids). `key` addresses the property on each row object (dot paths are
  * supported by TanStack Table); `cell` is an optional formatter for values
- * that are not plain display text.
+ * that are not plain display text. A formatter may return a `VNode` (e.g. a
+ * `RouterLink` or action button), which TanStack's `FlexRender` renders
+ * directly — that is how row actions stay inside the standard table instead
+ * of hand-built layouts (Scope §6.7).
  */
 export interface DataTableColumn<T> {
   key: string
   header: string
   align?: 'left' | 'center' | 'right'
   className?: string
-  cell?: (row: T) => string | number
+  cell?: (row: T) => string | number | VNode
 }
 
 const props = withDefaults(

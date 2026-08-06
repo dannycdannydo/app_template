@@ -34,6 +34,12 @@ export default defineConfigWithVueTs(
   {
     ...pluginPlaywright.configs['flat/recommended'],
     files: ['e2e/**/*.{test,spec}.{js,ts,jsx,tsx}'],
+    rules: {
+      // Conditional skips are the deliberate graceful-degradation path for
+      // the authenticated journeys when VITE_WORKOS_CLIENT_ID is not
+      // configured (CI without WorkOS secrets, Scope §6.7).
+      'playwright/no-skipped-test': 'off',
+    },
   },
 
   {

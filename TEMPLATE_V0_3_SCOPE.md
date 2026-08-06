@@ -181,10 +181,10 @@ Depends on §6.1 (error envelope) and §6.4. The reusable form + feedback patter
 
 Depends on §6.3–§6.6. Proves the shell end-to-end on the v0.2 tenant-scoped module.
 
-- [ ] Records list view — `DataTable` + `useRecordsQuery` + org selector context; viewer sees read-only UI (no write actions)
-- [ ] Record create form — standard form + toast; round-trips through the generated client
-- [ ] Record edit form and delete action with confirmation; permission-aware visibility derived from `/me`
-- [ ] Playwright journeys — authenticated shell (injected test-profile session): navigate to records, create a record, see it in the list, edit and delete it; unauthenticated visit redirects to login; **the successful callback round-trip is explicitly covered** (`/auth/callback?code=…` → session stored → redirect to `/`), per §6.2 review feedback on the boot-restore × history-snapshot coupling
+- [x] Records list view — `DataTable` + `useRecordsQuery` + org selector context; viewer sees read-only UI (no write actions)
+- [x] Record create form — standard form + toast; round-trips through the generated client
+- [x] Record edit form and delete action with confirmation; permission-aware visibility derived from `/me`
+- [x] Playwright journeys — authenticated shell (injected test-profile session): navigate to records, create a record, see it in the list, edit and delete it; unauthenticated visit redirects to login; **the successful callback round-trip is explicitly covered** (`/auth/callback?code=…` → session stored → redirect to `/`), per §6.2 review feedback on the boot-restore × history-snapshot coupling
 
 ## 6.8 Tests, Docs & Release Governance
 

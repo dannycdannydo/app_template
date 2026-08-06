@@ -52,6 +52,22 @@ const router = createRouter({
           name: 'about',
           component: () => import('@/views/AboutView.vue'),
         },
+        {
+          path: 'records',
+          name: 'records',
+          component: () => import('@/views/RecordsListView.vue'),
+        },
+        {
+          path: 'records/new',
+          name: 'record-create',
+          component: () => import('@/views/RecordCreateView.vue'),
+        },
+        {
+          path: 'records/:recordId/edit',
+          name: 'record-edit',
+          component: () => import('@/views/RecordEditView.vue'),
+          props: true,
+        },
       ],
     },
     {
