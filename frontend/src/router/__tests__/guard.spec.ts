@@ -7,7 +7,7 @@ import { requiresAuth } from '@/router'
 import { useSessionStore } from '@/stores/session'
 
 /**
- * Router-guard tests (Scope §6.3, acceptance §5.4). The guard is exercised
+ * Router-guard tests (v0.3 Scope §6.3, acceptance §5.4). The guard is exercised
  * against a fresh memory-history router with stub components; the session
  * store drives both sides of the decision. Boot-restore is marked immediately
  * in setup so the guard never waits on the app's bootstrap latch.

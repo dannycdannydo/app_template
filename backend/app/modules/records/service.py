@@ -1,4 +1,4 @@
-"""Record CRUD service (Scope §6.5, blueprint §11, §12).
+"""Record CRUD service (v0.2 Scope §6.5, blueprint §11, §12).
 
 The service owns transaction boundaries: each function is one atomic
 operation that commits itself, and the router never commits (BP §11). Every

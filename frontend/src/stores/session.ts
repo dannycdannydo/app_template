@@ -8,7 +8,7 @@ import { defineStore } from 'pinia'
  * latch. Client state only: server data (user, memberships, roles) belongs to
  * TanStack Vue Query, never to this store.
  *
- * Boot-restore (Scope §6.3): the router guard must not decide between `/login`
+ * Boot-restore (v0.3 Scope §6.3): the router guard must not decide between `/login`
  * and the shell until the WorkOS session has been restored on app boot, or an
  * authenticated reload would bounce to `/login`. `bootstrap()` in main.ts calls
  * `markBootRestored()` after restoring; the guard awaits `waitForBootRestore()`

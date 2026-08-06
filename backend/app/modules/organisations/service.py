@@ -1,4 +1,4 @@
-"""Organisation creation service (Scope §6.3, BP §9, §11).
+"""Organisation creation service (v0.2 Scope §6.3, BP §9, §11).
 
 Creation is one transaction: the organisation, the creator's active membership
 and the owner role assignment either all succeed or all fail. The creator

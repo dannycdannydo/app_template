@@ -4,8 +4,8 @@ import { computed, inject } from 'vue'
 import { FORM_ITEM_INJECTION_KEY } from './injectionKeys'
 
 /**
- * Shared field context for the vendored shadcn-vue form primitives (Scope
- * §6.6, blueprint §16). Must be used inside a `<FormField>` (vee-validate
+ * Shared field context for the vendored shadcn-vue form primitives (v0.3
+ * Scope §6.6, blueprint §16). Must be used inside a `<FormField>` (vee-validate
  * `Field`): it reads vee-validate's injected field context and the parent
  * `FormItem`'s generated id, and derives the `for`/`aria-describedby`/`id`
  * wiring the field label, control, description and message share. This is the

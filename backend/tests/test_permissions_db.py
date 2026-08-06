@@ -1,4 +1,4 @@
-"""Real-database integration tests for roles and permissions (Scope §6.4).
+"""Real-database integration tests for roles and permissions (v0.2 Scope §6.4).
 
 The fakes in ``test_permissions.py`` prove the request-flow contract but never
 execute SQL, so the seed data migration and the role-assignment SQL could
@@ -175,7 +175,7 @@ async def test_assign_and_remove_role_changes_grants(migrated_database: str) -> 
             roles = await list_membership_roles(session, membership_id)
             assert [role.code for role in roles] == ["viewer"]
 
-            # /me (Scope §6.4) surfaces the same role codes the permission
+            # /me (v0.2 Scope §6.4) surfaces the same role codes the permission
             # checks enforce. Re-fetch the user because the conflict-path
             # rollback expired the earlier instance.
             user_row = await session.get(User, user_id)

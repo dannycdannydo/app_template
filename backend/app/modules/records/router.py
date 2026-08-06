@@ -1,4 +1,4 @@
-"""Record endpoints (Scope §6.5, blueprint §5, §6, §12).
+"""Record endpoints (v0.2 Scope §6.5, blueprint §5, §6, §12).
 
 The router stays thin: it parses the request body and query parameters,
 resolves the caller's organisation membership through the shared dependency,

@@ -22,7 +22,7 @@ The authoritative design standard is `Internal_Custom_Application_Starter_Archit
 backend/                 FastAPI application (app/, alembic/, pyproject.toml)
 frontend/                Vue 3 + Vite application (src/, Dockerfile, nginx.conf)
 deploy/compose/          Compose files (compose.local.yml = local development)
-docs/decisions/          Architecture decision records (ADR 0001-0008)
+docs/decisions/          Architecture decision records (ADR 0001-0011)
 .github/workflows/       CI pipeline
 Makefile                 Command surface for development and quality gates
 .env.example             Documented environment variables
@@ -72,6 +72,16 @@ make dev-docker
 
 Verification: after `cp .env.example .env`, both `make dev` and `make dev-docker` must start the services, `make migrate` must apply the baseline migration, and `make check` must pass with zero lint errors, zero type errors, and green tests.
 
+## Trying the demo (login flow)
+
+Login goes through **WorkOS** end-to-end: the browser never submits identity fields, only the session token the backend validates. To try it:
+
+1. Set `VITE_WORKOS_CLIENT_ID` in `.env` to the client id of your WorkOS application (it is public, not a secret), and register `http://localhost:5173/auth/callback` as a Redirect URI in the WorkOS dashboard.
+2. Run `make dev` and open `http://localhost:5173`. Without a session every route redirects to `/login`; click **Continue with WorkOS** and complete the flow on the WorkOS-hosted page.
+3. You land in the application shell: sidebar, user menu (identity from `GET /api/v1/me`) and organisation selector. Pick an organisation and the records example module is ready in the selected tenant.
+
+Signing out returns to `/login`. The WorkOS integration is confined to `frontend/src/features/auth/workos.ts` (ADR 0011); the unauthenticated-redirect journeys run without any configuration, and `make e2e` runs the full authenticated journeys with a stubbed WorkOS session (see the command reference below).
+
 ## Command reference
 
 | Command | What it does |
@@ -81,6 +91,7 @@ Verification: after `cp .env.example .env`, both `make dev` and `make dev-docker
 | `make lint` | Ruff (backend) + ESLint (frontend) |
 | `make typecheck` | Pyright (backend) + vue-tsc (frontend) |
 | `make test` | pytest (backend) + Vitest (frontend) |
+| `make e2e` | Playwright journeys against the local stack (stubbed WorkOS + API, no backend needed; authenticated journeys need `VITE_WORKOS_CLIENT_ID` set) |
 | `make format` | Ruff format + Prettier |
 | `make generate-client` | Export OpenAPI from FastAPI and generate the TypeScript client |
 | `make check` | Full local quality gate: lint + typecheck + test + generated-client drift |

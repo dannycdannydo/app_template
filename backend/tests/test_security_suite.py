@@ -1,4 +1,4 @@
-"""Mandatory reusable security tests (blueprint §31, Scope §6.6).
+"""Mandatory reusable security tests (blueprint §31, v0.2 Scope §6.6).
 
 One table-driven suite encodes the security properties every protected
 endpoint must satisfy: unauthenticated requests rejected, invalid sessions

@@ -1,4 +1,4 @@
-"""Record API schemas (Scope §6.5, blueprint §7, §12).
+"""Record API schemas (v0.2 Scope §6.5, blueprint §7, §12).
 
 ORM models are never API request models. The create and update schemas are the
 only client-supplied inputs; every other schema is an explicit response shape

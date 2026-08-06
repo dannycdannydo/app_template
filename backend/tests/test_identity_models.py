@@ -1,4 +1,4 @@
-"""Tests for the identity and tenancy data model (Scope §6.1, BP §7, §9, §10).
+"""Tests for the identity and tenancy data model (v0.2 Scope §6.1, BP §7, §9, §10).
 
 Metadata checks are pure Python and run everywhere; the migration smoke test in
 ``test_db.py`` exercises the new migration against PostgreSQL when reachable.

@@ -1,4 +1,4 @@
-"""Record ORM model (Scope §6.5, blueprint §7, §10, §12).
+"""Record ORM model (v0.2 Scope §6.5, blueprint §7, §10, §12).
 
 A record is the tenant-scoped example entity: every row hangs off exactly one
 organisation, and every query in the module filters on ``organisation_id``

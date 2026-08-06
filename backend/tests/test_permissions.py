@@ -1,4 +1,4 @@
-"""Tests for the roles and permissions model (Scope §6.4, BP §9, §10).
+"""Tests for the roles and permissions model (v0.2 Scope §6.4, BP §9, §10).
 
 Metadata checks are pure Python and run everywhere; permission enforcement and
 the role-assignment service run against the in-memory fakes from
@@ -89,7 +89,7 @@ def test_role_permission_unique_pair_and_foreign_keys() -> None:
     }
 
 
-# --- Seed catalogue (Scope §6.4 checklist: data migration seed) ---
+# --- Seed catalogue (v0.2 Scope §6.4 checklist: data migration seed) ---
 
 
 def test_permission_codes_are_unique_in_catalogue() -> None:
@@ -113,7 +113,7 @@ def test_owner_holds_every_permission() -> None:
 
 
 def test_manage_roles_reserved_for_owner_and_administrator() -> None:
-    """Scope §6.4: role assignment is gated on ``users.manage_roles``."""
+    """v0.2 Scope §6.4: role assignment is gated on ``users.manage_roles``."""
     holders = {
         role for role, granted in ROLE_PERMISSION_MAP.items() if "users.manage_roles" in granted
     }
@@ -127,7 +127,7 @@ def test_viewer_can_read_records_but_not_write() -> None:
     assert granted & {"records.create", "records.update", "records.delete"} == set()
 
 
-# --- Default-deny enforcement (Scope §6.4 checklist: require_permission) ---
+# --- Default-deny enforcement (v0.2 Scope §6.4 checklist: require_permission) ---
 
 
 async def _get_permission_probe(client: AsyncClient, token: str, org_id: uuid.UUID) -> Response:
@@ -172,7 +172,7 @@ async def test_require_permission_allows_granted_permission(context_app: Context
     assert response.json()["organisation_id"] == str(membership.organisation_id)
 
 
-# --- Role-assignment service (Scope §6.4 checklist) ---
+# --- Role-assignment service (v0.2 Scope §6.4 checklist) ---
 
 
 async def test_assign_role_links_membership_and_role(context_app: ContextApp) -> None:

@@ -3,7 +3,7 @@
 The permission codes come from blueprint §9's example permission set
 (``properties.*``, ``documents.*``, ``users.invite``, ``users.manage_roles``,
 ``organisation.manage``) plus the ``records.*`` permissions the tenant-scoped
-example module (Scope §6.5) gates on. ``ROLE_PERMISSION_MAP`` is the seed data
+example module (v0.2 Scope §6.5) gates on. ``ROLE_PERMISSION_MAP`` is the seed data
 the data migration applies; the exact bundle each role carries is this
 template's decision, because the blueprint defines roles as permission bundles
 but does not specify the bundle contents.

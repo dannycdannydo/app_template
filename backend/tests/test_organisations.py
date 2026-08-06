@@ -1,4 +1,4 @@
-"""Integration tests for organisation creation (Scope §6.3, acceptance §5.3).
+"""Integration tests for organisation creation (v0.2 Scope §6.3, acceptance §5.3).
 
 Proves the creator's membership is created active and assigned the ``owner``
 role in one transaction, and that identity fields smuggled into the request

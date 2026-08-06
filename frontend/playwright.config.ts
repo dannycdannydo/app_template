@@ -7,7 +7,7 @@ import { defineConfig, devices } from '@playwright/test'
  * `frontend/`, so the file is loaded explicitly; existing environment
  * variables win (CI injects its own values) and a missing file is a no-op.
  * Without this, `VITE_WORKOS_CLIENT_ID` would be invisible both to the test
- * process and to the Vite web server (Scope §6.7 journeys).
+ * process and to the Vite web server (v0.3 Scope §6.7 journeys).
  */
 try {
   process.loadEnvFile(new URL('../.env', import.meta.url))

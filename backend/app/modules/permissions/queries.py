@@ -1,4 +1,4 @@
-"""Reusable permission queries (blueprint §9, Scope §6.4).
+"""Reusable permission queries (blueprint §9, v0.2 Scope §6.4).
 
 The default-deny permission check is one join over the role graph of a
 membership; it is shared by the ``require_permission`` dependency and the

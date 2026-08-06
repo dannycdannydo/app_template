@@ -1,10 +1,11 @@
-# CI workflow (blueprint §37, Scope §6.9).
+# CI workflow (blueprint §37, v0.3 Scope §6.8).
 #
-# One shared workflow runs the v0.1 quality gate on every push to main and on
-# every pull request. Jobs map one-to-one to the Scope §6.9 checklist items:
-# backend format/lint, backend typecheck, backend tests, frontend
-# format/lint, frontend typecheck, frontend tests, generated-client drift,
-# migration validity, and container build.
+# One shared workflow runs the quality gate on every push to main and on
+# every pull request. Jobs map to the release checklist items: backend
+# format/lint, backend typecheck, backend tests, frontend format/lint,
+# frontend typecheck, frontend tests, generated-client drift, migration
+# validity, container build, and the Playwright smoke journeys (v0.3
+# Scope §6.8: "Playwright smoke journeys wired into CI").
 #
 # Local `make lint` auto-fixes; CI runs the same checks in check-only mode
 # (no --fix) so formatting and lint failures fail the build instead of being
@@ -213,7 +214,7 @@ jobs:
         working-directory: frontend
       # The exported openapi.json is a gitignored build artifact; only the
       # generated TypeScript client is committed, so drift means the diff is
-      # non-empty (blueprint §15, Scope §6.6).
+      # non-empty (blueprint §15, v0.1 Scope §6.6).
       - name: Regenerate client and fail on drift
         run: |
           make generate-client
@@ -281,3 +282,38 @@ jobs:
           push: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # Playwright smoke journeys (blueprint §31, §37; v0.3 Scope §6.8). The
+  # specs stub the WorkOS token endpoint and the `/api/v1/**` surface at the
+  # browser network boundary (see frontend/e2e/helpers.ts), so no backend or
+  # real WorkOS credentials are needed. CI runs the production preview build
+  # served on port 4173. A dummy client id keeps the authenticated journeys
+  # active: the injected test-profile session is mocked end-to-end and the
+  # id is never validated against a real WorkOS application.
+  playwright-smoke:
+    name: Playwright smoke journeys
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      VITE_WORKOS_CLIENT_ID: ci_dummy_client_id
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/setup@v2.0.0
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          runtime: node@${{ env.NODE_VERSION }}
+          install: false
+          cache: true
+          package-json-file: frontend/package.json
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Install dependencies from lockfile
+        run: pnpm install --frozen-lockfile
+      - name: Build the production bundle (served by `pnpm preview`)
+        run: pnpm build
+      - name: Install the Playwright Chromium browser
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Run the smoke journeys (Chromium)
+        run: pnpm exec playwright test --project=chromium

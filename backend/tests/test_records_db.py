@@ -1,4 +1,4 @@
-"""Real-database integration tests for the records module (Scope §6.5).
+"""Real-database integration tests for the records module (v0.2 Scope §6.5).
 
 The fakes in ``test_records.py`` prove the request-flow contract but never
 execute SQL, so the org-scoping (cross-organisation access must return 404,

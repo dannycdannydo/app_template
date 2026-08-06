@@ -99,7 +99,33 @@ the caller's organisation behave as not found (404)
 
 ## Frontend structure
 
-Vue 3 + TypeScript SPA. Directory layout, conventions, and state-management split follow blueprint §14; UI follows the design system in blueprint §16. API types are generated, never hand-written (blueprint §15).
+Vue 3 + TypeScript SPA. Directory layout, conventions, and state-management split follow blueprint §14; UI follows the design system in blueprint §16 (reusable application components above shadcn-vue primitives). API types are generated, never hand-written (blueprint §15).
+
+```text
+frontend/src/
+├── api/                 generated client (client.ts) + typed error envelope
+├── queries/             TanStack Query composables — the only place HTTP happens
+├── stores/              Pinia client state (session, ui, organisation)
+├── features/            feature modules; auth/ is the WorkOS adapter seam
+├── router/              routes + requiresAuth guard
+├── layouts/             application shell (sidebar, header, user menu)
+├── components/          reusable application components (DataTable, forms, ...)
+└── views/               route-level screens (login, callback, records, ...)
+```
+
+### Frontend auth flow (v0.3)
+
+WorkOS owns login and session management end-to-end; the frontend only ever presents the session token to the backend and never submits identity fields.
+
+- `src/features/auth/workos.ts` is the only module importing the WorkOS browser SDK (`@workos-inc/authkit-js`, ADR 0011); it exposes `startLogin`, `completeLogin`, `signOut` and `getSession`.
+- `/login` starts the flow with "Continue with WorkOS"; the callback route `/auth/callback` completes the authorization-code exchange and stores the session; the router guard `requiresAuth` redirects to `/login` without a session and away from `/login` with one.
+- The generated API client (`src/api/client.ts`) injects the session token as a Bearer `Authorization` header and the selected organisation as `X-Org-Id` on every call; a central `401` handler clears the session and returns to `/login`.
+
+### Frontend state boundaries (blueprint §14)
+
+- **Server state** (fetched, cached, invalidated data) belongs to TanStack Query and lives in `src/queries/` composables built on the generated client. No Vue component or Pinia store imports `src/api/client.ts` directly.
+- **Client state** (session, sidebar collapsed state, selected organisation) lives in Pinia stores (`stores/session.ts`, `stores/ui.ts`, `stores/organisation.ts`) and is persisted client-side only. The selected organisation is client state: it is not fetched server data, but it drives the `X-Org-Id` header and invalidates org-scoped queries on switch.
+- API errors arrive in the standard envelope (`code`, `message`, `details`, `request_id`, blueprint §13) and are normalized into a typed client error used by toasts and forms.
 
 ## Cross-cutting conventions
 

@@ -1,4 +1,4 @@
-"""Unit tests for the centralised security helpers (Scope §6.2, BP §8, §30).
+"""Unit tests for the centralised security helpers (v0.2 Scope §6.2, BP §8, §30).
 
 The real :class:`WorkOSSessionValidator` is exercised against tokens minted
 with a local RSA key served through a stub JWKS client, so no network is

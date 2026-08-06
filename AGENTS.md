@@ -16,6 +16,8 @@ Instructions for human and AI contributors working in this repository. The canon
 - Long-running work uses Dramatiq.
 - Provider SDKs stay behind adapters.
 - Frontend API types are generated.
+- Frontend HTTP calls happen only in `src/queries/` composables: no Vue component or Pinia store imports `src/api/client.ts` directly; Pinia stores hold client state only (server state belongs to TanStack Query).
+- Scope citations are version-prefixed (`v0.2 Scope §6.3`, `v0.3 Scope §6.7`). A bare `Scope §6.x` found in v0.2-era backend code or docstrings refers to `TEMPLATE_V0_2_SCOPE.md`; new code always prefixes the release version so the daily loop never greps the wrong subsection.
 - Tests accompany behavioural changes.
 - Keep the mandatory security suite green: new protected `/api/v1` endpoints must be added to `PROTECTED_ROUTES` in `backend/tests/test_security_suite.py` (blueprint §31, v0.2 Scope §6.6), which then checks unauthenticated/invalid-session/disabled-user rejection, cross-organisation denial, viewer-write denial and stack-trace non-exposure for the new route.
 - Do not weaken linting, typing or tests.
