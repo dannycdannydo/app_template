@@ -27,6 +27,7 @@ from app.core.security import (
     get_user_profile_client,
 )
 from app.db.session import async_session_factory
+from app.modules.invitations.service import link_invitation_on_login
 from app.modules.organisations.models import MembershipStatus, OrganisationMembership
 from app.modules.permissions.queries import permission_codes_for_membership
 from app.modules.platform_admin.queries import platform_permission_codes_for_user
@@ -107,6 +108,12 @@ async def get_current_user(
     # any other user), so running it on every successful authentication is
     # cheap and keeps the grant attached to the auth path itself.
     await maybe_grant_bootstrap_platform_admin(session, user, profiles)
+    # Login-time invitation linking (Scope §6.5, acceptance §5.6) runs on the
+    # same chain: pending invitations for the user's verified email are
+    # granted an active membership with the intended role. It is a fast no-op
+    # when no grantable invitation exists (one indexed query, no WorkOS call),
+    # so it is safe to run on every successful authentication.
+    await link_invitation_on_login(session, user, profiles)
     return user
 
 

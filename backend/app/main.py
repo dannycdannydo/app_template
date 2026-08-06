@@ -30,6 +30,7 @@ from app.core.exceptions import APIError, ErrorDetail, ErrorResponse
 from app.core.logging import configure_logging, current_request_id
 from app.core.rate_limit import RateLimiter, get_rate_limiter
 from app.modules.audit.router import router as audit_router
+from app.modules.invitations.router import router as invitations_router
 from app.modules.organisations.router import router as organisations_router
 from app.modules.platform_admin.router import router as platform_admin_router
 from app.modules.records.router import router as records_router
@@ -216,6 +217,7 @@ def create_app() -> FastAPI:
     app.include_router(platform_admin_router)
     app.include_router(records_router)
     app.include_router(audit_router)
+    app.include_router(invitations_router)
     return app
 
 

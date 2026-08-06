@@ -51,6 +51,8 @@ from app.modules.organisations.models import OrganisationMembership
 _TRACEBACK_MARKERS = ("Traceback", 'File "', "line ", "internal secret detail")
 
 _RECORD_ID = str(uuid.uuid4())
+_ORG_ID = str(uuid.uuid4())
+_INVITATION_ID = str(uuid.uuid4())
 
 _PRIVATE_KEY, _ = generate_key_pair()
 _OTHER_KEY, _ = generate_key_pair()
@@ -126,6 +128,27 @@ PROTECTED_ROUTES: list[RouteSpec] = [
         "/api/v1/platform/organisations",
         org_scoped=False,
         request_body={"name": "Acme"},
+    ),
+    # Invitation endpoints (Scope §6.5): platform-gated, never org-scoped;
+    # the organisation and invitation ids come from the path.
+    _route(
+        "POST",
+        "/api/v1/platform/organisations/{organisation_id}/invitations",
+        org_scoped=False,
+        request_body={"email": "invitee@example.com", "role_code": "member"},
+        path_values={"organisation_id": _ORG_ID},
+    ),
+    _route(
+        "GET",
+        "/api/v1/platform/organisations/{organisation_id}/invitations",
+        org_scoped=False,
+        path_values={"organisation_id": _ORG_ID},
+    ),
+    _route(
+        "DELETE",
+        "/api/v1/platform/organisations/{organisation_id}/invitations/{invitation_id}",
+        org_scoped=False,
+        path_values={"organisation_id": _ORG_ID, "invitation_id": _INVITATION_ID},
     ),
 ]
 
