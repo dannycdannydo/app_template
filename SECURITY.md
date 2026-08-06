@@ -15,7 +15,7 @@ The practical baseline is **OWASP ASVS Level 2**. This file records the controls
 - Private object storage; no public buckets.
 - Upload scanning hook on all uploaded content.
 - Restricted external URL fetching (SSRF controls, see below).
-- Webhook signature verification for inbound webhooks (v0.2: `verify_webhook_signature` in `app/core/security.py`; no consumer until v0.5).
+- Webhook signature verification for inbound webhooks (v0.2: `verify_webhook_signature` in `app/core/security.py`; the first consumer is the v0.4 platform release's `POST /api/v1/webhooks/workos`).
 - Non-public PostgreSQL and Redis; no exposed database ports.
 - Least-privilege database credentials per role.
 - Encrypted backups; off-site copies.
@@ -45,7 +45,7 @@ Blueprint §31 requires a reusable security test set that runs in CI. `backend/t
 - disabled users denied (`403`);
 - stack traces not exposed — every error response is the standard envelope and never leaks tracebacks or internals.
 
-The suite is table-driven: `PROTECTED_ROUTES` in that file lists every protected route once, and a completeness guard test fails when a new `/api/v1` route is registered without being added to the table. **Adding an endpoint to the table is a mandatory part of adding the endpoint itself.** Webhook-signature rejection is covered in `backend/tests/test_security.py`; oversized-upload rejection is not applicable until the storage capability lands (v0.4).
+The suite is table-driven: `PROTECTED_ROUTES` in that file lists every protected route once, and a completeness guard test fails when a new `/api/v1` route is registered without being added to the table. **Adding an endpoint to the table is a mandatory part of adding the endpoint itself.** Webhook-signature rejection is covered in `backend/tests/test_security.py`; oversized-upload rejection is not applicable until the storage capability lands (v0.5).
 
 ## File security
 
@@ -92,4 +92,4 @@ If you find a security issue, report it privately to the maintainers before disc
 
 ## Deferred controls
 
-The following controls land with their owning capabilities in later releases and must be present before v1.0: storage/file controls (v0.4), audit logging (v0.5), and rate limiting at the edge for production profiles. WorkOS event consumers remain a v0.5 capability; the existing signature verifier is retained until then.
+The following controls land with their owning capabilities in later releases and must be present before v1.0: storage/file controls (v0.5) and rate limiting at the edge for production profiles. Audit logging and the WorkOS event consumer land in v0.4 (Platform Administration); the existing signature verifier is retained until then.
