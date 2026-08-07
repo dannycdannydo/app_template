@@ -21,6 +21,9 @@ type AuditEventListResponse = components['schemas']['AuditEventListResponse']
 type PlatformFeatureFlagListResponse = components['schemas']['PlatformFeatureFlagListResponse']
 type PlatformFeatureFlagItem = components['schemas']['PlatformFeatureFlagItem']
 type PlatformFeatureFlagUpdate = components['schemas']['PlatformFeatureFlagUpdate']
+type PlatformAdminListItem = components['schemas']['PlatformAdminListItem']
+type PlatformAdminListResponse = components['schemas']['PlatformAdminListResponse']
+type PlatformUserListResponse = components['schemas']['PlatformUserListResponse']
 
 /**
  * Pagination parameters accepted by the platform query layer (Scope §6.9).
@@ -54,6 +57,9 @@ export interface PlatformAuditParams extends PlatformListParams {
 export const platformQueryKeys = {
   all: ['platform'] as const,
   organisations: ['platform', 'organisations'] as const,
+  admins: ['platform', 'admins'] as const,
+  adminsList: (params: PlatformListParams) => ['platform', 'admins', 'list', params] as const,
+  usersList: (params: PlatformListParams) => ['platform', 'users', 'list', params] as const,
   organisationsList: (params: PlatformListParams) =>
     ['platform', 'organisations', 'list', params] as const,
   organisation: (organisationId: string) =>
@@ -94,6 +100,89 @@ export function usePlatformOrganisationsQuery(params: MaybeRefOrGetter<PlatformL
     },
     retry: false,
     staleTime: 30_000,
+  })
+}
+
+/** Paginated list of explicit platform administrators. */
+export function usePlatformAdminsQuery(params: MaybeRefOrGetter<PlatformListParams>) {
+  const resolvedParams = computed(() => toValue(params))
+  return useQuery({
+    queryKey: computed(() => platformQueryKeys.adminsList(resolvedParams.value)),
+    queryFn: async () => {
+      const { data, error } = await client.GET('/api/v1/platform/admins', {
+        params: {
+          query: { page: resolvedParams.value.page, page_size: resolvedParams.value.pageSize },
+        },
+      })
+      if (error) throw error
+      if (!data) throw new Error('Empty platform administrators response')
+      return data as PlatformAdminListResponse
+    },
+    retry: false,
+    staleTime: 30_000,
+  })
+}
+
+/** Enabled users that a platform admin may select for a platform-role grant. */
+export function usePlatformUsersQuery(params: MaybeRefOrGetter<PlatformListParams>) {
+  const resolvedParams = computed(() => toValue(params))
+  return useQuery({
+    queryKey: computed(() => platformQueryKeys.usersList(resolvedParams.value)),
+    queryFn: async () => {
+      const { data, error } = await client.GET('/api/v1/platform/users', {
+        params: {
+          query: { page: resolvedParams.value.page, page_size: resolvedParams.value.pageSize },
+        },
+      })
+      if (error) throw error
+      if (!data) throw new Error('Empty platform users response')
+      return data as PlatformUserListResponse
+    },
+    retry: false,
+    staleTime: 30_000,
+  })
+}
+
+/** Grant the platform-admin role to an existing enabled user. */
+export function useGrantPlatformAdminMutation(options?: {
+  onSuccess?: (admin: PlatformAdminListItem) => void
+}) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (userId: string) => {
+      const { data, error } = await client.POST('/api/v1/platform/admins', {
+        body: { user_id: userId },
+      })
+      if (error) throw error
+      if (!data) throw new Error('Empty platform administrator response')
+      return data as PlatformAdminListItem
+    },
+    onSuccess: (admin) => {
+      void queryClient.invalidateQueries({ queryKey: platformQueryKeys.admins })
+      options?.onSuccess?.(admin)
+    },
+  })
+}
+
+/** Revoke one platform-admin membership. The backend protects the final admin. */
+export function useRevokePlatformAdminMutation(options?: {
+  onSuccess?: (admin: PlatformAdminListItem) => void
+}) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (platformMembershipId: string) => {
+      const { data, error } = await client.DELETE(
+        '/api/v1/platform/admins/{platform_membership_id}',
+        { params: { path: { platform_membership_id: platformMembershipId } } },
+      )
+      if (error) throw error
+      if (!data) throw new Error('Empty revoked platform administrator response')
+      return data as PlatformAdminListItem
+    },
+    onSuccess: (admin) => {
+      void queryClient.invalidateQueries({ queryKey: platformQueryKeys.admins })
+      options?.onSuccess?.(admin)
+    },
   })
 }
 

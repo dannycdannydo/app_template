@@ -156,6 +156,12 @@ const router = createRouter({
           meta: { requiresPlatformAdmin: true },
         },
         {
+          path: 'platform/admins',
+          name: 'platform-admins',
+          component: () => import('@/views/PlatformAdminsView.vue'),
+          meta: { requiresPlatformAdmin: true },
+        },
+        {
           path: 'platform/audit',
           name: 'platform-audit',
           component: () => import('@/views/PlatformAuditView.vue'),

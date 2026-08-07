@@ -84,6 +84,70 @@ export interface paths {
     patch?: never
     trace?: never
   }
+  '/api/v1/platform/admins': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /**
+     * List Platform Admins Endpoint
+     * @description List the explicit administrators of the dedicated platform plane.
+     */
+    get: operations['list_platform_admins_endpoint_api_v1_platform_admins_get']
+    put?: never
+    /**
+     * Grant Platform Admin Endpoint
+     * @description Grant platform_admin to an existing enabled user (audited).
+     */
+    post: operations['grant_platform_admin_endpoint_api_v1_platform_admins_post']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/api/v1/platform/users': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /**
+     * List Platform Users Endpoint
+     * @description List enabled users by readable identity for platform-role assignment.
+     */
+    get: operations['list_platform_users_endpoint_api_v1_platform_users_get']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/api/v1/platform/admins/{platform_membership_id}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    post?: never
+    /**
+     * Revoke Platform Admin Endpoint
+     * @description Revoke platform_admin without allowing the final admin to be removed.
+     */
+    delete: operations['revoke_platform_admin_endpoint_api_v1_platform_admins__platform_membership_id__delete']
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
   '/api/v1/platform/organisations': {
     parameters: {
       query?: never
@@ -685,6 +749,63 @@ export interface components {
       updated_at: string
     }
     /**
+     * PlatformAdminGrant
+     * @description Grant the seeded platform-admin role to an existing enabled user.
+     */
+    PlatformAdminGrant: {
+      /**
+       * User Id
+       * Format: uuid
+       */
+      user_id: string
+    }
+    /**
+     * PlatformAdminListItem
+     * @description One platform-role membership, including safe operator-facing identity data.
+     */
+    PlatformAdminListItem: {
+      /**
+       * Id
+       * Format: uuid
+       */
+      id: string
+      /**
+       * User Id
+       * Format: uuid
+       */
+      user_id: string
+      /** User Name */
+      user_name: string
+      /** User Email */
+      user_email: string
+      /** Role Code */
+      role_code: string
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string
+      /**
+       * Updated At
+       * Format: date-time
+       */
+      updated_at: string
+    }
+    /**
+     * PlatformAdminListResponse
+     * @description Paginated platform-admin membership listing.
+     */
+    PlatformAdminListResponse: {
+      /** Items */
+      items: components['schemas']['PlatformAdminListItem'][]
+      /** Page */
+      page: number
+      /** Page Size */
+      page_size: number
+      /** Total */
+      total: number
+    }
+    /**
      * PlatformFeatureFlagItem
      * @description One catalogue entry with its optional per-organisation override state.
      *
@@ -879,6 +1000,35 @@ export interface components {
     PlatformOrganisationUpdate: {
       /** Name */
       name: string
+    }
+    /**
+     * PlatformUserListItem
+     * @description Safe identity fields shown only to platform administrators for role grants.
+     */
+    PlatformUserListItem: {
+      /**
+       * Id
+       * Format: uuid
+       */
+      id: string
+      /** Name */
+      name: string
+      /** Email */
+      email: string
+    }
+    /**
+     * PlatformUserListResponse
+     * @description Paginated enabled-user catalogue for platform-admin assignment.
+     */
+    PlatformUserListResponse: {
+      /** Items */
+      items: components['schemas']['PlatformUserListItem'][]
+      /** Page */
+      page: number
+      /** Page Size */
+      page_size: number
+      /** Total */
+      total: number
     }
     /**
      * RecordCreate
@@ -1127,6 +1277,143 @@ export interface operations {
         }
         content: {
           'application/json': components['schemas']['OrganisationResponse']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  list_platform_admins_endpoint_api_v1_platform_admins_get: {
+    parameters: {
+      query?: {
+        page?: number
+        page_size?: number
+      }
+      header?: {
+        authorization?: string | null
+      }
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['PlatformAdminListResponse']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  grant_platform_admin_endpoint_api_v1_platform_admins_post: {
+    parameters: {
+      query?: never
+      header?: {
+        authorization?: string | null
+      }
+      path?: never
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['PlatformAdminGrant']
+      }
+    }
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['PlatformAdminListItem']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  list_platform_users_endpoint_api_v1_platform_users_get: {
+    parameters: {
+      query?: {
+        page?: number
+        page_size?: number
+        search?: string | null
+      }
+      header?: {
+        authorization?: string | null
+      }
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['PlatformUserListResponse']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  revoke_platform_admin_endpoint_api_v1_platform_admins__platform_membership_id__delete: {
+    parameters: {
+      query?: never
+      header?: {
+        authorization?: string | null
+      }
+      path: {
+        platform_membership_id: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['PlatformAdminListItem']
         }
       }
       /** @description Validation Error */

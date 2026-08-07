@@ -128,6 +128,20 @@ PROTECTED_ROUTES: list[RouteSpec] = [
     ),
     _route("DELETE", "/api/v1/records/{record_id}", org_scoped=True),
     _route("GET", "/api/v1/platform/audit-events", org_scoped=False),
+    _route("GET", "/api/v1/platform/admins", org_scoped=False),
+    _route("GET", "/api/v1/platform/users", org_scoped=False),
+    _route(
+        "POST",
+        "/api/v1/platform/admins",
+        org_scoped=False,
+        request_body={"user_id": str(uuid.uuid4())},
+    ),
+    _route(
+        "DELETE",
+        "/api/v1/platform/admins/{platform_membership_id}",
+        org_scoped=False,
+        path_values={"platform_membership_id": _MEMBERSHIP_ID},
+    ),
     _route(
         "POST",
         "/api/v1/platform/organisations",

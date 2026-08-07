@@ -8,7 +8,11 @@ import DataTable from '@/components/application/DataTable.vue'
 import type { DataTableColumn } from '@/components/application/DataTable.vue'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
-import { usePlatformAuditEventsQuery, usePlatformOrganisationsQuery } from '@/queries/platform'
+import {
+  usePlatformAdminsQuery,
+  usePlatformAuditEventsQuery,
+  usePlatformOrganisationsQuery,
+} from '@/queries/platform'
 
 type AuditEventListItem = components['schemas']['AuditEventListItem']
 
@@ -35,6 +39,11 @@ const {
 } = usePlatformAuditEventsQuery(computed(() => ({ page: 1, pageSize: 8 })))
 
 const organisationCount = computed(() => organisationsData.value?.total ?? 0)
+
+const { data: adminsData, isPending: adminsPending } = usePlatformAdminsQuery(
+  computed(() => ({ page: 1, pageSize: 1 })),
+)
+const adminCount = computed(() => adminsData.value?.total ?? 0)
 
 const auditEvents = computed(() => auditData.value?.items ?? [])
 
@@ -87,7 +96,7 @@ const auditColumns: DataTableColumn<AuditEventListItem>[] = [
       </p>
     </div>
 
-    <div class="grid gap-4 sm:grid-cols-2">
+    <div class="grid gap-4 sm:grid-cols-3">
       <RouterLink
         :to="{ name: 'platform-organisations' }"
         class="focus-visible:ring-ring/50 rounded-xl outline-none focus-visible:ring-3"
@@ -103,6 +112,21 @@ const auditColumns: DataTableColumn<AuditEventListItem>[] = [
                 Counting…
               </span>
               <span v-else class="text-3xl font-semibold">{{ organisationCount }}</span>
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      </RouterLink>
+
+      <RouterLink
+        :to="{ name: 'platform-admins' }"
+        class="focus-visible:ring-ring/50 rounded-xl outline-none focus-visible:ring-3"
+      >
+        <Card class="hover:bg-muted/50 transition-colors" data-testid="platform-dashboard-admins">
+          <CardHeader>
+            <CardTitle>Administrators</CardTitle>
+            <CardDescription>
+              <span v-if="adminsPending" class="text-muted-foreground text-sm">Loading…</span>
+              <span v-else class="text-3xl font-semibold">{{ adminCount }}</span>
             </CardDescription>
           </CardHeader>
         </Card>

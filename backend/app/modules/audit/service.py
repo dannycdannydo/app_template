@@ -35,6 +35,8 @@ ACTION_RECORD_DELETED = "record.deleted"
 # exactly once, in the same transaction as the platform membership, so the
 # audit trail always mirrors the grant.
 ACTION_PLATFORM_BOOTSTRAP_GRANTED = "platform.bootstrap_granted"
+ACTION_PLATFORM_ADMIN_GRANTED = "platform.admin_granted"
+ACTION_PLATFORM_ADMIN_REVOKED = "platform.admin_revoked"
 
 # Invitation lifecycle (Scope §6.5, blueprint §29 examples ``user.invited``):
 # sent at the platform invite endpoint, revoked at the platform revoke

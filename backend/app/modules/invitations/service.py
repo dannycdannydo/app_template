@@ -141,10 +141,16 @@ async def invite_user(
             message="The invitation could not be sent. Please try again.",
         )
 
-    workos_invitation = await workos_invitations.send_invitation(
-        email=normalised_email,
-        organisation_id=workos_organisation_id,
-    )
+    try:
+        workos_invitation = await workos_invitations.send_invitation(
+            email=normalised_email,
+            organisation_id=workos_organisation_id,
+        )
+    except Exception:
+        # The caller's request session can otherwise retain the lazy mapping
+        # assignment after a failed external delivery.
+        await session.rollback()
+        raise
 
     invitation = Invitation(
         organisation_id=organisation.id,
@@ -172,7 +178,17 @@ async def invite_user(
             "workos_invitation_id": workos_invitation.id,
         },
     )
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        # A concurrent request may have committed the partial-unique pending
+        # invitation first. The provider delivery cannot be rolled back, so
+        # surface the stable conflict rather than leaking an integrity error.
+        raise ConflictError(
+            code="invitation_pending_exists",
+            message="This user already has a pending invitation to this organisation.",
+        ) from None
     await session.refresh(invitation)
     return invitation
 
@@ -271,17 +287,12 @@ async def link_invitation_on_login(
     """Link the user's pending invitations at login; idempotent and race-safe.
 
     Called from the ``get_current_user`` provisioning chain after the user is
-    resolved. The pending-invitation query is the cheap early exit: when the
-    user has no grantable invitation (the steady state), nothing else runs.
-    Only when candidates exist is the WorkOS profile fetched server-side
-    (BP §8 — the email and its verification state never come from client
-    input) and the invitation accepted when the authenticated email matches
-    and WorkOS reports it verified (acceptance §5.6, mirroring the bootstrap
-    gate, Scope §6.4). Note the candidate query keys off ``user.email``,
-    which is frozen at provisioning time, while the authoritative match below
-    uses the freshly-fetched ``profile.email`` — the query is an optimisation
-    that assumes ``user.email`` tracks the WorkOS email; refreshing it on
-    profile changes is outside this work unit.
+    resolved. The WorkOS profile is fetched server-side before the candidate
+    query, so both verification and the email lookup use current provider
+    identity rather than a stale local profile field (BP §8). This makes a
+    provider-email change safe even when a best-effort webhook is delayed or
+    missed. The invitation is accepted only when that verified email matches
+    (acceptance §5.6, mirroring the bootstrap gate, Scope §6.4).
 
     A membership is created (active, with the intended role) only when the
     user is not already a member of the organisation; an existing membership
@@ -295,12 +306,14 @@ async def link_invitation_on_login(
     second pass sees the winning membership and only marks the invitation
     accepted — no duplicate membership, no duplicate grant.
     """
-    candidates = (await session.scalars(pending_invitations_statement(user.email))).all()
-    if not candidates:
-        return []
-
     profile = await profiles.get_profile(user.workos_user_id)
     if not profile.email_verified:
+        return []
+    # Use the current validated WorkOS address for the candidate query. The
+    # internal copy is deliberately not the authority: a user may change
+    # their provider email between invitations and their next login.
+    candidates = (await session.scalars(pending_invitations_statement(profile.email))).all()
+    if not candidates:
         return []
     matched = [
         invitation
