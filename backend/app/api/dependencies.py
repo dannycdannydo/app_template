@@ -13,10 +13,11 @@ from collections.abc import AsyncIterator
 from typing import Annotated
 
 import structlog
-from fastapi import Depends, Header
+from fastapi import Depends, Header, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.exceptions import BadRequestError, PermissionDenied, UnauthorizedError
 from app.core.logging import current_request_id
 from app.core.security import (
@@ -25,6 +26,7 @@ from app.core.security import (
     UserProfileClient,
     get_session_validator,
     get_user_profile_client,
+    verify_webhook_signature,
 )
 from app.db.session import async_session_factory
 from app.modules.invitations.service import link_invitation_on_login
@@ -34,6 +36,7 @@ from app.modules.platform_admin.queries import platform_permission_codes_for_use
 from app.modules.platform_admin.service import maybe_grant_bootstrap_platform_admin
 from app.modules.users.models import User
 from app.modules.users.service import get_or_provision_user
+from app.modules.webhooks.schemas import MAX_WEBHOOK_PAYLOAD_BYTES
 
 logger = structlog.get_logger()
 
@@ -229,3 +232,46 @@ def require_platform_permission(permission_code: str):
         return user
 
     return _require_platform_permission
+
+
+async def require_workos_webhook_signature(
+    request: Request,
+    workos_signature: Annotated[str | None, Header()] = None,
+) -> bytes:
+    """Verify a WorkOS webhook signature and return the raw, verified body.
+
+    The webhook route is the API's one signature-gated surface (Scope §6.8):
+    it is protected by the HMAC-SHA256 ``workos-signature`` header verified
+    against ``WORKOS_WEBHOOK_SECRET`` (``verify_webhook_signature``, 300s
+    tolerance, constant-time compare), never by a session token. An unset
+    secret, a missing/malformed header or a failed verification is a 401 with
+    the standard envelope; an empty or oversized payload is a 400 (BP §30
+    "input limits"). The raw body is read once and handed to the caller
+    unparsed, so verification and parsing share one payload (a replay of a
+    signed body still fails the tolerance check).
+    """
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            declared_size = int(content_length)
+        except ValueError:
+            declared_size = 0
+        if declared_size > MAX_WEBHOOK_PAYLOAD_BYTES:
+            raise BadRequestError(
+                code="webhook_payload_invalid",
+                message="The webhook payload is empty or too large.",
+            )
+    payload = await request.body()
+    if not payload or len(payload) > MAX_WEBHOOK_PAYLOAD_BYTES:
+        raise BadRequestError(
+            code="webhook_payload_invalid",
+            message="The webhook payload is empty or too large.",
+        )
+    secret = get_settings().workos_webhook_secret
+    if not secret or not verify_webhook_signature(payload, workos_signature or "", secret):
+        logger.warning("webhook_signature_rejected", path=request.url.path)
+        raise UnauthorizedError(
+            code="invalid_webhook_signature",
+            message="The webhook signature is invalid.",
+        )
+    return payload

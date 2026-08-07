@@ -184,9 +184,9 @@ Depends on §6.2 (platform gate). Platform-controlled organisation flags (bluepr
 
 Depends on §6.5 (invitation state to refresh). Pulled forward from the v0.5 backlog; best-effort only.
 
-- [ ] `WORKOS_WEBHOOK_SECRET` setting; `POST /api/v1/webhooks/workos` gated by `verify_webhook_signature` (HMAC-SHA256, 300s tolerance)
-- [ ] Consumer refreshes best-effort invitation status (revoked/expired) and user-lifecycle state; never authoritative for grants — login-time reconciliation (§6.5) decides
-- [ ] Tests: bad signature rejected, unknown event tolerated, webhook-delivery failure does not break the login-time invite link
+- [x] `WORKOS_WEBHOOK_SECRET` setting; `POST /api/v1/webhooks/workos` gated by `verify_webhook_signature` (HMAC-SHA256, 300s tolerance)
+- [x] Consumer refreshes best-effort invitation status (revoked/expired) and user-lifecycle state; never authoritative for grants — login-time reconciliation (§6.5) decides
+- [x] Tests: bad signature rejected, unknown event tolerated, webhook-delivery failure does not break the login-time invite link
 
 ## 6.9 Platform Admin Centre UI
 

@@ -155,3 +155,32 @@ def test_production_accepts_a_valid_bootstrap_email() -> None:
         bootstrap_platform_admin_email="admin@example.com",
     )
     assert settings.bootstrap_platform_admin_email == "admin@example.com"
+
+
+def test_webhook_secret_defaults_to_disabled() -> None:
+    """Scope §6.8: unset means webhook processing is off (fail-closed)."""
+    settings = Settings(app_env="development", database_url="postgresql+asyncpg://x")
+    assert settings.workos_webhook_secret == ""
+
+
+def test_webhook_secret_loads_from_environment() -> None:
+    settings = Settings(
+        app_env="development",
+        database_url="postgresql+asyncpg://x",
+        workos_webhook_secret="whsec_test",
+    )
+    assert settings.workos_webhook_secret == "whsec_test"
+
+
+def test_production_accepts_a_webhook_secret() -> None:
+    settings = Settings(
+        app_env="production",
+        database_url="postgresql+asyncpg://x",
+        workos_api_key="sk_test",
+        workos_client_id="client_1",
+        cors_allowed_origins=["https://app.example.test"],
+        trusted_hosts=["api.example.test"],
+        redis_url="rediss://redis.example.test:6380/0",
+        workos_webhook_secret="whsec_prod",
+    )
+    assert settings.workos_webhook_secret == "whsec_prod"

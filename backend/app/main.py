@@ -36,6 +36,7 @@ from app.modules.organisations.router import router as organisations_router
 from app.modules.platform_admin.router import router as platform_admin_router
 from app.modules.records.router import router as records_router
 from app.modules.users.router import router as users_router
+from app.modules.webhooks.router import router as webhooks_router
 
 logger = structlog.get_logger()
 
@@ -220,6 +221,7 @@ def create_app() -> FastAPI:
     app.include_router(audit_router)
     app.include_router(invitations_router)
     app.include_router(feature_flags_router)
+    app.include_router(webhooks_router)
     return app
 
 

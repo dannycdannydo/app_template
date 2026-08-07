@@ -60,6 +60,12 @@ ACTION_MEMBERSHIP_REMOVED = "membership.removed"
 # metadata.
 ACTION_FEATURE_FLAG_CHANGED = "feature_flag.changed"
 
+# User lifecycle sync (Scope §6.8): written when the best-effort webhook
+# consumer deactivates an internal user whose WorkOS account was deleted. The
+# actor is the webhook (null actor_user_id); the trail records that the
+# deactivation was system-driven, not admin-initiated.
+ACTION_USER_DEACTIVATED = "user.deactivated"
+
 
 async def record_event(
     session: AsyncSession,
