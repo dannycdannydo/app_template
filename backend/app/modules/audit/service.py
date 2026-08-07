@@ -45,6 +45,15 @@ ACTION_INVITATION_REVOKED = "invitation.revoked"
 ACTION_INVITATION_ACCEPTED = "invitation.accepted"
 ACTION_MEMBERSHIP_ROLE_CHANGED = "membership.role_changed"
 
+# Membership administration (Scope §6.6, design plan §5): role assignment and
+# removal both record ``membership.role_changed`` with the role and direction
+# in metadata; suspension and reactivation are distinct actions; removal
+# records ``membership.removed`` alongside the ``invitation.revoked`` rows for
+# any pending invitations it cleaned up.
+ACTION_MEMBERSHIP_SUSPENDED = "membership.suspended"
+ACTION_MEMBERSHIP_REACTIVATED = "membership.reactivated"
+ACTION_MEMBERSHIP_REMOVED = "membership.removed"
+
 
 async def record_event(
     session: AsyncSession,

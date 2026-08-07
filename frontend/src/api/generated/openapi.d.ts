@@ -109,6 +109,109 @@ export interface paths {
     patch?: never
     trace?: never
   }
+  '/api/v1/platform/organisations/{organisation_id}/memberships': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /**
+     * List Memberships Endpoint
+     * @description List an organisation's memberships with user context and roles.
+     *
+     *     Newest first, paginated; the caller must be a platform administrator and
+     *     the organisation id comes from the path, never from a request body.
+     */
+    get: operations['list_memberships_endpoint_api_v1_platform_organisations__organisation_id__memberships_get']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/api/v1/platform/organisations/{organisation_id}/memberships/{membership_id}/roles': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    /**
+     * Assign Membership Role Endpoint
+     * @description Assign one organisation role to a membership (audited).
+     */
+    post: operations['assign_membership_role_endpoint_api_v1_platform_organisations__organisation_id__memberships__membership_id__roles_post']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/api/v1/platform/organisations/{organisation_id}/memberships/{membership_id}/roles/{role_code}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    post?: never
+    /**
+     * Remove Membership Role Endpoint
+     * @description Remove one organisation role from a membership (audited).
+     */
+    delete: operations['remove_membership_role_endpoint_api_v1_platform_organisations__organisation_id__memberships__membership_id__roles__role_code__delete']
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/api/v1/platform/organisations/{organisation_id}/memberships/{membership_id}/status': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    /**
+     * Set Membership Status Endpoint
+     * @description Suspend or reactivate a membership; suspension revokes its invitations.
+     */
+    patch: operations['set_membership_status_endpoint_api_v1_platform_organisations__organisation_id__memberships__membership_id__status_patch']
+    trace?: never
+  }
+  '/api/v1/platform/organisations/{organisation_id}/memberships/{membership_id}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    post?: never
+    /**
+     * Remove Membership Endpoint
+     * @description Remove a membership and revoke its pending invitations (audited).
+     */
+    delete: operations['remove_membership_endpoint_api_v1_platform_organisations__organisation_id__memberships__membership_id__delete']
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
   '/api/v1/records': {
     parameters: {
       query?: never
@@ -480,6 +583,81 @@ export interface components {
       updated_at: string
     }
     /**
+     * PlatformMembershipListItem
+     * @description One membership in a platform listing or mutation response.
+     *
+     *     Carries the member's name and email and the membership's role codes so the
+     *     admin centre can render a memberships table without further round trips;
+     *     ``roles`` is ordered by code for stable display.
+     */
+    PlatformMembershipListItem: {
+      /**
+       * Id
+       * Format: uuid
+       */
+      id: string
+      /**
+       * Organisation Id
+       * Format: uuid
+       */
+      organisation_id: string
+      /**
+       * User Id
+       * Format: uuid
+       */
+      user_id: string
+      /** User Name */
+      user_name: string
+      /** User Email */
+      user_email: string
+      status: components['schemas']['MembershipStatus']
+      /** Roles */
+      roles: string[]
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string
+      /**
+       * Updated At
+       * Format: date-time
+       */
+      updated_at: string
+    }
+    /**
+     * PlatformMembershipListResponse
+     * @description The pagination envelope for the membership listing.
+     */
+    PlatformMembershipListResponse: {
+      /** Items */
+      items: components['schemas']['PlatformMembershipListItem'][]
+      /** Page */
+      page: number
+      /** Page Size */
+      page_size: number
+      /** Total */
+      total: number
+    }
+    /**
+     * PlatformMembershipRoleAssign
+     * @description Request payload for assigning one organisation role to a membership.
+     */
+    PlatformMembershipRoleAssign: {
+      /** Role Code */
+      role_code: string
+    }
+    /**
+     * PlatformMembershipStatusUpdate
+     * @description Request payload for suspending or reactivating a membership.
+     *
+     *     Only the two platform-settable statuses are accepted; ``invited`` and
+     *     ``left`` are lifecycle states owned by the invite and removal flows, so a
+     *     client can never set them directly.
+     */
+    PlatformMembershipStatusUpdate: {
+      status: components['schemas']['MembershipStatus']
+    }
+    /**
      * PlatformOrganisationCreate
      * @description Request payload for creating an organisation on the platform plane.
      *
@@ -782,6 +960,187 @@ export interface operations {
         }
         content: {
           'application/json': components['schemas']['PlatformOrganisationResponse']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  list_memberships_endpoint_api_v1_platform_organisations__organisation_id__memberships_get: {
+    parameters: {
+      query?: {
+        page?: number
+        page_size?: number
+      }
+      header?: {
+        authorization?: string | null
+      }
+      path: {
+        organisation_id: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['PlatformMembershipListResponse']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  assign_membership_role_endpoint_api_v1_platform_organisations__organisation_id__memberships__membership_id__roles_post: {
+    parameters: {
+      query?: never
+      header?: {
+        authorization?: string | null
+      }
+      path: {
+        organisation_id: string
+        membership_id: string
+      }
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['PlatformMembershipRoleAssign']
+      }
+    }
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['PlatformMembershipListItem']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  remove_membership_role_endpoint_api_v1_platform_organisations__organisation_id__memberships__membership_id__roles__role_code__delete: {
+    parameters: {
+      query?: never
+      header?: {
+        authorization?: string | null
+      }
+      path: {
+        organisation_id: string
+        membership_id: string
+        role_code: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['PlatformMembershipListItem']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  set_membership_status_endpoint_api_v1_platform_organisations__organisation_id__memberships__membership_id__status_patch: {
+    parameters: {
+      query?: never
+      header?: {
+        authorization?: string | null
+      }
+      path: {
+        organisation_id: string
+        membership_id: string
+      }
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['PlatformMembershipStatusUpdate']
+      }
+    }
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['PlatformMembershipListItem']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  remove_membership_endpoint_api_v1_platform_organisations__organisation_id__memberships__membership_id__delete: {
+    parameters: {
+      query?: never
+      header?: {
+        authorization?: string | null
+      }
+      path: {
+        organisation_id: string
+        membership_id: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['PlatformMembershipListItem']
         }
       }
       /** @description Validation Error */
