@@ -70,11 +70,11 @@ If `.handoff/scope.md` exists, a scope-plan review is waiting to happen (00b). I
 The architecture blueprint (`Internal_Custom_Application_Starter_Architecture_v2.md`) is ~2150 lines. Reading it in full on every step would waste context and dilute focus. The prompts are designed to avoid this:
 
 - **Prompt 01 (implement):** Reads the scope file, which contains a **blueprint reference map** (§7) mapping each checklist subsection to the specific blueprint sections that govern it. The implementer reads only those sections — typically 2–4 short sections, not the whole document.
-- **Prompt 02 (review):** Reads only the blueprint sections the implementer referenced in their handoff summary. No blanket read.
+- **Prompt 02 (review):** Reads only the blueprint sections the implementer referenced in their handoff summary, plus the current scope contract/dependency chain needed for an independent interface-closure check. No blanket read.
 - **Prompt 03 (apply-and-commit):** Does **not** read the blueprint or implementation guide at all. It is a mechanical step — apply fixes, validate, tick boxes, commit. It needs only the review feedback and the scope checklist.
 - **Prompt 04 (audit):** Reads four cross-cutting rule sections of the blueprint (§33, §10, §12, §13) regardless of task, because it checks the whole codebase against universal rules. These sections are compact — together they are under 150 lines.
 
-The `IMPLEMENTATION_GUIDE.md` is referenced in prompt 01 as optional broader context and in prompt 00 as the authoritative source for the next release's capability list. It is not required for day-to-day review and apply steps.
+The `IMPLEMENTATION_GUIDE.md` is referenced in prompt 01 as optional broader context and in prompt 00 as the authoritative source for the next release's capability list. Release-specific design sources named by the guide or scope (such as a workflow plan) are also authoritative for interface coverage during scope planning and scope review. They are not required for ordinary day-to-day code review unless the scope itself is incomplete or ambiguous.
 
 ## Project documents
 

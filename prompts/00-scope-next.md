@@ -35,6 +35,12 @@ You are the **scope planner**. You produce the contract the daily loop will exec
    - `# 7. Blueprint Reference Map` — map each §6 subsection to the specific blueprint sections that govern it, with **line ranges you verified** from the blueprint's table of contents. Use the exact format of the previous scope file's §7 (two-column table, "What to extract").
    - `# 8. Status` — release name, state, started/completed dates.
 
+   If the release has a design source in addition to the implementation guide
+   (for example a `*_WORKFLOW_PLAN.md` named by the guide or the prior scope),
+   read its deliverable, API-surface and frontend-route sections too. The scope
+   file is allowed to be more concise than that source, but it must not silently
+   omit a required behaviour.
+
 3. For each capability in the guide's section, locate the governing blueprint sections:
 
    - Use `grep -n "^# \|^## "` on the blueprint to get its table of contents with line numbers.
@@ -49,6 +55,17 @@ You are the **scope planner**. You produce the contract the daily loop will exec
    - Anything deferred must appear in §3 — never silently dropped.
    - Every §5 criterion must be objectively verifiable by an agent (a command to run, a response code, a diff-free regeneration).
    - Every §7 mapping must point at real, verified line ranges.
+   - Build a **capability traceability matrix** before writing the scope. For
+     every externally observable capability, record: source requirement,
+     §5 acceptance criterion, §6 checkbox/work unit, backend operation
+     (method + path, where applicable), frontend consumer (route/view, where
+     applicable), and test evidence. A capability is not covered merely
+     because a nearby create or mutation endpoint exists: list, detail, edit,
+     delete, pagination and filtering are distinct operations when the source
+     calls for them.
+   - Turn that matrix into explicit §6 checkbox text. Do not leave an endpoint
+     implied by a later UI item or a broad phrase such as "organisation
+     administration". Include the method and path for new API operations.
 
 6. **Write the scope file** as `TEMPLATE_V0_N_SCOPE.md` in the repo root.
 
@@ -58,6 +75,8 @@ You are the **scope planner**. You produce the contract the daily loop will exec
    - the §6 subsections and their ordering rationale;
    - which blueprint sections you mapped and how you verified their line ranges;
    - decisions made where the guide or blueprint was silent;
+   - the capability traceability matrix (or a path to it) and any source
+     requirement deliberately deferred, with its justification;
    - open questions for the reviewer.
 
 8. **Do not commit. Do not implement anything.** Leave the scope file uncommitted so the reviewer can inspect it.

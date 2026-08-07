@@ -14,7 +14,10 @@ Read, in this order:
 2. The drafted scope file (the newest `TEMPLATE_V0_N_SCOPE.md` in the repo root).
 3. The corresponding `Template v0.N — <Title>` section in `IMPLEMENTATION_GUIDE.md`.
 4. The previous scope file (for structural and convention comparison).
-5. The specific blueprint sections the planner mapped — verify their line ranges are accurate.
+5. Every release-specific design source named by the draft, guide or planner
+   handoff (for example `*_WORKFLOW_PLAN.md`) — especially its API-surface and
+   frontend-route tables.
+6. The specific blueprint sections the planner mapped — verify their line ranges are accurate.
 
 The architecture blueprint (`Internal_Custom_Application_Starter_Architecture_v2.md`) is large. **Do not read the whole file.** Read only the sections referenced in the draft's §7 map.
 
@@ -28,11 +31,26 @@ You are the **scope reviewer**. You did not write this plan. Your job is to find
 
 2. Review the draft against these lenses, in priority order:
 
-   **Completeness** — Does §2 cover every capability in the guide's section for this release? Is anything deferred in §3 that should ship now (or shipped now that the guide defers)? Does every §6 subsection appear in §5 and §7?
+   **Completeness** — Independently make a capability traceability matrix:
+   source requirement → §5 acceptance criterion → §6 checkbox → backend
+   method/path → frontend route/view → test evidence. Compare it with the
+   planner's matrix. Does §2 cover every capability in the guide *and every
+   release-specific design source*? Is anything deferred in §3 that should
+   ship now (or shipped now that the guide defers)? Does every §6 subsection
+   appear in §5 and §7? Treat each HTTP operation as separately required:
+   create does not cover list/detail/edit/delete, and an UI view does not prove
+   its required API exists. A missing operation required by a source is a
+   **must-fix**, even if a later work unit could discover it.
 
    **Structure** — Does it mirror the previous scope file's eight sections? Are §6 subsections coherent, correctly ordered (dependencies first), and granular enough to be one work unit each for the daily loop?
 
    **Measurability** — Is every §5 acceptance criterion objectively verifiable by an agent (a command to run, a response code, a diff-free regeneration)? Flag any criterion that cannot be checked.
+
+   **Interface closure** — For every planned frontend view/action, identify
+   the exact backend operation it needs. For every new backend operation,
+   identify its owning §6 work unit, explicit response schema and test. Flag
+   operations that are only implied, missing from `PROTECTED_ROUTES`, or have
+   no testable acceptance criterion.
 
    **Reference-map accuracy** — Spot-check at least half of the §7 mappings against the blueprint: do the line ranges exist and cover the stated content? Anything mapped that should not be, or missing?
 
@@ -61,6 +79,10 @@ You are the **scope reviewer**. You did not write this plan. Your job is to find
 
    Subsections confirmed ready for the daily loop:
    - (specific §6.x items)
+
+   Capability traceability checked:
+   - (source requirement → §6 checkbox → method/path → view/test, including
+     any deliberate deferral)
    ```
 
 4. If the verdict is CHANGES REQUESTED: **do not commit and do not edit the scope file.** The planner re-runs `00-scope-next` with your findings.
