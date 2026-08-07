@@ -206,8 +206,8 @@ def test_delete_removes_the_workos_user_and_the_internal_row() -> None:
     result = asyncio.run(
         delete_bootstrap_admin(
             provisioner,
-            session,
-            email="admin@example.com",  # type: ignore[arg-type]
+            session,  # type: ignore[arg-type]
+            email="admin@example.com",
         )
     )
 
@@ -225,8 +225,8 @@ def test_delete_is_idempotent_when_nothing_exists() -> None:
     result = asyncio.run(
         delete_bootstrap_admin(
             provisioner,
-            session,
-            email="admin@example.com",  # type: ignore[arg-type]
+            session,  # type: ignore[arg-type]
+            email="admin@example.com",
         )
     )
 
