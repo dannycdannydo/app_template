@@ -53,6 +53,7 @@ _TRACEBACK_MARKERS = ("Traceback", 'File "', "line ", "internal secret detail")
 _RECORD_ID = str(uuid.uuid4())
 _ORG_ID = str(uuid.uuid4())
 _INVITATION_ID = str(uuid.uuid4())
+_MEMBERSHIP_ID = str(uuid.uuid4())
 
 _PRIVATE_KEY, _ = generate_key_pair()
 _OTHER_KEY, _ = generate_key_pair()
@@ -149,6 +150,44 @@ PROTECTED_ROUTES: list[RouteSpec] = [
         "/api/v1/platform/organisations/{organisation_id}/invitations/{invitation_id}",
         org_scoped=False,
         path_values={"organisation_id": _ORG_ID, "invitation_id": _INVITATION_ID},
+    ),
+    # Membership administration (Scope §6.6): platform-gated, never org-scoped;
+    # the organisation, membership and role ids come from the path.
+    _route(
+        "GET",
+        "/api/v1/platform/organisations/{organisation_id}/memberships",
+        org_scoped=False,
+        path_values={"organisation_id": _ORG_ID},
+    ),
+    _route(
+        "POST",
+        "/api/v1/platform/organisations/{organisation_id}/memberships/{membership_id}/roles",
+        org_scoped=False,
+        request_body={"role_code": "member"},
+        path_values={"organisation_id": _ORG_ID, "membership_id": _MEMBERSHIP_ID},
+    ),
+    _route(
+        "DELETE",
+        "/api/v1/platform/organisations/{organisation_id}/memberships/{membership_id}/roles/{role_code}",
+        org_scoped=False,
+        path_values={
+            "organisation_id": _ORG_ID,
+            "membership_id": _MEMBERSHIP_ID,
+            "role_code": "member",
+        },
+    ),
+    _route(
+        "PATCH",
+        "/api/v1/platform/organisations/{organisation_id}/memberships/{membership_id}/status",
+        org_scoped=False,
+        request_body={"status": "suspended"},
+        path_values={"organisation_id": _ORG_ID, "membership_id": _MEMBERSHIP_ID},
+    ),
+    _route(
+        "DELETE",
+        "/api/v1/platform/organisations/{organisation_id}/memberships/{membership_id}",
+        org_scoped=False,
+        path_values={"organisation_id": _ORG_ID, "membership_id": _MEMBERSHIP_ID},
     ),
 ]
 

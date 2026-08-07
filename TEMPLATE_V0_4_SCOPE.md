@@ -167,9 +167,9 @@ Depends on §6.3 (org mapping) and §6.2 (platform gate). WorkOS Invitation API 
 
 Depends on §6.5 (memberships created at acceptance). Completes the platform administration of organisations.
 
-- [ ] Platform endpoints: list memberships; assign/remove organisation role; suspend/reactivate (`PATCH .../status`); remove membership — all audited
-- [ ] Enforcement: suspended memberships rejected by org routes through the existing active-membership check; removing a membership also revokes its pending invitations
-- [ ] Tests: role round-trip, suspend → 403 on org routes, reactivate → access restored, removal cascades, audit rows
+- [x] Platform endpoints: list memberships; assign/remove organisation role; suspend/reactivate (`PATCH .../status`); remove membership — all audited
+- [x] Enforcement: suspended memberships rejected by org routes through the existing active-membership check; removing a membership also revokes its pending invitations
+- [x] Tests: role round-trip, suspend → 403 on org routes, reactivate → access restored, removal cascades, audit rows
 
 ## 6.7 Feature Flags
 

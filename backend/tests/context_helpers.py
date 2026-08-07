@@ -68,6 +68,10 @@ class ContextState:
     organisations: list[Organisation] = field(default_factory=list[Organisation])
     memberships: list[OrganisationMembership] = field(default_factory=list[OrganisationMembership])
     membership_roles: list[MembershipRole] = field(default_factory=list[MembershipRole])
+    # Role catalogue rows staged for the membership-administration tests; the
+    # fake answers ``select(Role)`` from here (the real WHERE/join filtering is
+    # proven by the query-construction and real-database tests).
+    roles: list[Role] = field(default_factory=list[Role])
     records: list[Record] = field(default_factory=list[Record])
     audit_events: list[AuditEvent] = field(default_factory=list[AuditEvent])
     # Invitations (Scope §6.5): the local invite rows staged or created by the
@@ -147,7 +151,16 @@ def make_membership(
     )
     membership.id = uuid.uuid4()
     membership.created_at = datetime.now(UTC)
+    membership.updated_at = datetime.now(UTC)
     return membership
+
+
+def make_membership_role(membership_id: uuid.UUID, role_id: uuid.UUID) -> MembershipRole:
+    """Build a membership-role grant row for the role round-trip tests."""
+    membership_role = MembershipRole(membership_id=membership_id, role_id=role_id)
+    membership_role.id = uuid.uuid4()
+    membership_role.created_at = datetime.now(UTC)
+    return membership_role
 
 
 def make_organisation(
@@ -269,6 +282,18 @@ class FakeSession:
             return _ScalarsResult(list(self._state.invitations))
         if self._state.scalars_queue:
             return _ScalarsResult(self._state.scalars_queue.pop(0))
+        # Membership administration (Scope §6.6): the fake answers membership,
+        # membership-role and role queries from the staged state; the services
+        # re-filter in Python because the WHERE/join clauses are not applied
+        # here (they are proven by the query-construction and real-database
+        # tests). These branches sit after the scalars_queue on purpose: the
+        # /me payload paths still consume queued rows first.
+        if entity is OrganisationMembership:
+            return _ScalarsResult(list(self._state.memberships))
+        if entity is MembershipRole:
+            return _ScalarsResult(list(self._state.membership_roles))
+        if entity is Role:
+            return _ScalarsResult(list(self._state.roles))
         if entity is Record:
             return _ScalarsResult(list(self._state.records))
         if entity is AuditEvent:
@@ -352,7 +377,29 @@ class FakeSession:
         }
 
     async def delete(self, instance: Any) -> None:
-        self._state.records = [record for record in self._state.records if record.id != instance.id]
+        # Membership administration (Scope §6.6): role removal deletes a
+        # MembershipRole, membership removal deletes the membership and drops
+        # its role grants, mirroring the database-level CASCADE. Everything
+        # else keeps the original record behaviour.
+        if isinstance(instance, MembershipRole):
+            self._state.membership_roles = [
+                membership_role
+                for membership_role in self._state.membership_roles
+                if membership_role.id != instance.id
+            ]
+        elif isinstance(instance, OrganisationMembership):
+            self._state.memberships = [
+                membership for membership in self._state.memberships if membership.id != instance.id
+            ]
+            self._state.membership_roles = [
+                membership_role
+                for membership_role in self._state.membership_roles
+                if membership_role.membership_id != instance.id
+            ]
+        else:
+            self._state.records = [
+                record for record in self._state.records if record.id != instance.id
+            ]
 
     async def rollback(self) -> None:
         self._added.clear()

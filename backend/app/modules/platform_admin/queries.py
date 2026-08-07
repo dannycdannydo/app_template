@@ -1,19 +1,24 @@
-"""Reusable platform-plane queries (Scope §6.2, blueprint §9).
+"""Reusable platform-plane queries (Scope §6.2/§6.6, blueprint §9).
 
 The platform permission check is one join over the platform role graph of a
 user; it is shared by the ``require_platform_permission`` dependency and the
 service tests, so it lives here rather than being inlined in either. The
 default-deny rule is identical to the org plane: a permission code not granted
 to any of the user's platform roles is denied.
+
+The membership statements (Scope §6.6) are the platform listing's approved
+filter — one organisation, newest first — shared by the service and the tests
+so the filter column is named in exactly one place.
 """
 
 from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.modules.organisations.models import OrganisationMembership
 from app.modules.permissions.models import Permission
 from app.modules.platform_admin.models import (
     PlatformMembership,
@@ -62,4 +67,18 @@ def platform_role_codes_statement(user_id: uuid.UUID) -> Select[tuple[str]]:
         .where(PlatformMembership.user_id == user_id)
         .distinct()
         .order_by(PlatformRole.code)
+    )
+
+
+def memberships_statement(*, organisation_id: uuid.UUID) -> Select[tuple[OrganisationMembership]]:
+    """Return a statement selecting the memberships of one organisation."""
+    return select(OrganisationMembership).where(
+        OrganisationMembership.organisation_id == organisation_id
+    )
+
+
+def memberships_count_statement(*, organisation_id: uuid.UUID) -> Select[tuple[int]]:
+    """Return a statement counting the memberships of one organisation."""
+    return select(func.count()).select_from(
+        memberships_statement(organisation_id=organisation_id).subquery()
     )
