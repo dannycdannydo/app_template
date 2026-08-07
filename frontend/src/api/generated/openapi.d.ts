@@ -380,6 +380,99 @@ export interface paths {
     patch?: never
     trace?: never
   }
+  '/api/v1/files': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /**
+     * List Files Endpoint
+     * @description List the caller's organisation's files, newest first, paginated.
+     */
+    get: operations['list_files_endpoint_api_v1_files_get']
+    put?: never
+    /**
+     * Create Upload Intent Endpoint
+     * @description Start a direct upload: validate, create the pending record, sign a URL.
+     */
+    post: operations['create_upload_intent_endpoint_api_v1_files_post']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/api/v1/files/{file_id}/complete': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    /**
+     * Complete Upload Endpoint
+     * @description Verify the stored object and mark the file uploaded.
+     *
+     *     The request body is entirely optional (the only field is ``checksum``), so
+     *     a client may POST with no body at all. On verification failure the file is
+     *     marked ``failed`` and the request is rejected with 422 so the client knows
+     *     the upload was not accepted.
+     */
+    post: operations['complete_upload_endpoint_api_v1_files__file_id__complete_post']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/api/v1/files/{file_id}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /**
+     * Get File Endpoint
+     * @description Return one file; a file outside the organisation is a 404.
+     */
+    get: operations['get_file_endpoint_api_v1_files__file_id__get']
+    put?: never
+    post?: never
+    /**
+     * Delete File Endpoint
+     * @description Soft-delete a file: remove the object, mark the row deleted, audit.
+     */
+    delete: operations['delete_file_endpoint_api_v1_files__file_id__delete']
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/api/v1/files/{file_id}/download-url': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /**
+     * Create Download Url Endpoint
+     * @description Return a short-lived signed GET URL for one stored object.
+     */
+    get: operations['create_download_url_endpoint_api_v1_files__file_id__download_url_get']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
   '/api/v1/platform/organisations/{organisation_id}/invitations': {
     parameters: {
       query?: never
@@ -572,6 +665,182 @@ export interface components {
        * @default
        */
       request_id: string
+    }
+    /**
+     * FileCompleteRequest
+     * @description Request payload for the upload-completion step.
+     *
+     *     ``checksum`` is optional: when the client can supply one (e.g. a digest it
+     *     computed while reading the bytes), the service compares it for equality
+     *     with the provider's checksum. The checksum is opaque — the service never
+     *     interprets its format, only compares (Scope §6.3).
+     */
+    FileCompleteRequest: {
+      /** Checksum */
+      checksum?: string | null
+    }
+    /**
+     * FileCompleteResponse
+     * @description The upload-completion response: the uploaded file plus the job to poll.
+     *
+     *     ``processing_job_id`` is the durable job the client polls via
+     *     ``GET /api/v1/jobs/{job_id}``. It is optional because the job foundation
+     *     (Scope §6.4/§6.5) lands after this subsection: once the file-processing job
+     *     exists, the completion step enqueues it and returns its id here.
+     */
+    FileCompleteResponse: {
+      /**
+       * Id
+       * Format: uuid
+       */
+      id: string
+      /** Original Filename */
+      original_filename: string
+      /** Content Type */
+      content_type: string
+      /** Size Bytes */
+      size_bytes: number
+      /** Status */
+      status: string
+      /** Created By User Id */
+      created_by_user_id: string | null
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string
+      /** Checksum */
+      checksum: string | null
+      /**
+       * Updated At
+       * Format: date-time
+       */
+      updated_at: string
+      /** Processing Job Id */
+      processing_job_id?: string | null
+    }
+    /**
+     * FileDetail
+     * @description Full file detail, including the checksum when one is known.
+     */
+    FileDetail: {
+      /**
+       * Id
+       * Format: uuid
+       */
+      id: string
+      /** Original Filename */
+      original_filename: string
+      /** Content Type */
+      content_type: string
+      /** Size Bytes */
+      size_bytes: number
+      /** Status */
+      status: string
+      /** Created By User Id */
+      created_by_user_id: string | null
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string
+      /** Checksum */
+      checksum: string | null
+      /**
+       * Updated At
+       * Format: date-time
+       */
+      updated_at: string
+    }
+    /**
+     * FileDownloadUrlResponse
+     * @description A short-lived signed GET URL for one stored object.
+     */
+    FileDownloadUrlResponse: {
+      /** Download Url */
+      download_url: string
+      /**
+       * Expires At
+       * Format: date-time
+       */
+      expires_at: string
+    }
+    /**
+     * FileListItem
+     * @description A file in list contexts; summary fields only.
+     */
+    FileListItem: {
+      /**
+       * Id
+       * Format: uuid
+       */
+      id: string
+      /** Original Filename */
+      original_filename: string
+      /** Content Type */
+      content_type: string
+      /** Size Bytes */
+      size_bytes: number
+      /** Status */
+      status: string
+      /** Created By User Id */
+      created_by_user_id: string | null
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string
+    }
+    /**
+     * FileListResponse
+     * @description The pagination envelope documented in API_CONVENTIONS.md (BP §12).
+     */
+    FileListResponse: {
+      /** Items */
+      items: components['schemas']['FileListItem'][]
+      /** Page */
+      page: number
+      /** Page Size */
+      page_size: number
+      /** Total */
+      total: number
+    }
+    /**
+     * FileStatus
+     * @description Lifecycle state of a stored file (blueprint §17 lifecycle).
+     * @enum {string}
+     */
+    FileStatus:
+      'pending' | 'uploaded' | 'processing' | 'ready' | 'failed' | 'quarantined' | 'deleted'
+    /**
+     * FileUploadIntent
+     * @description Request payload for the upload-intent step (direct upload flow).
+     */
+    FileUploadIntent: {
+      /** Original Filename */
+      original_filename: string
+      /** Content Type */
+      content_type: string
+      /** Size Bytes */
+      size_bytes: number
+    }
+    /**
+     * FileUploadIntentResponse
+     * @description The signed PUT URL the browser uploads to directly (Scope §6.3).
+     */
+    FileUploadIntentResponse: {
+      /**
+       * File Id
+       * Format: uuid
+       */
+      file_id: string
+      /** Upload Url */
+      upload_url: string
+      /**
+       * Expires At
+       * Format: date-time
+       */
+      expires_at: string
     }
     /** HTTPValidationError */
     HTTPValidationError: {
@@ -1946,6 +2215,216 @@ export interface operations {
         }
         content: {
           'application/json': components['schemas']['AuditEventListResponse']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  list_files_endpoint_api_v1_files_get: {
+    parameters: {
+      query?: {
+        page?: number
+        page_size?: number
+        status?: components['schemas']['FileStatus'] | null
+      }
+      header?: {
+        'x-org-id'?: string | null
+        authorization?: string | null
+      }
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['FileListResponse']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  create_upload_intent_endpoint_api_v1_files_post: {
+    parameters: {
+      query?: never
+      header?: {
+        'x-org-id'?: string | null
+        authorization?: string | null
+      }
+      path?: never
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['FileUploadIntent']
+      }
+    }
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['FileUploadIntentResponse']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  complete_upload_endpoint_api_v1_files__file_id__complete_post: {
+    parameters: {
+      query?: never
+      header?: {
+        'x-org-id'?: string | null
+        authorization?: string | null
+      }
+      path: {
+        file_id: string
+      }
+      cookie?: never
+    }
+    requestBody?: {
+      content: {
+        'application/json': components['schemas']['FileCompleteRequest'] | null
+      }
+    }
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['FileCompleteResponse']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  get_file_endpoint_api_v1_files__file_id__get: {
+    parameters: {
+      query?: never
+      header?: {
+        'x-org-id'?: string | null
+        authorization?: string | null
+      }
+      path: {
+        file_id: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['FileDetail']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  delete_file_endpoint_api_v1_files__file_id__delete: {
+    parameters: {
+      query?: never
+      header?: {
+        'x-org-id'?: string | null
+        authorization?: string | null
+      }
+      path: {
+        file_id: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      204: {
+        headers: {
+          [name: string]: unknown
+        }
+        content?: never
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  create_download_url_endpoint_api_v1_files__file_id__download_url_get: {
+    parameters: {
+      query?: never
+      header?: {
+        'x-org-id'?: string | null
+        authorization?: string | null
+      }
+      path: {
+        file_id: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['FileDownloadUrlResponse']
         }
       }
       /** @description Validation Error */

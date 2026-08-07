@@ -58,6 +58,7 @@ _ORG_ID = str(uuid.uuid4())
 _INVITATION_ID = str(uuid.uuid4())
 _MEMBERSHIP_ID = str(uuid.uuid4())
 _FEATURE_FLAG_ORG_ID = str(uuid.uuid4())
+_FILE_ID = str(uuid.uuid4())
 
 _PRIVATE_KEY, _ = generate_key_pair()
 _OTHER_KEY, _ = generate_key_pair()
@@ -127,6 +128,44 @@ PROTECTED_ROUTES: list[RouteSpec] = [
         request_body={"title": "Renamed"},
     ),
     _route("DELETE", "/api/v1/records/{record_id}", org_scoped=True),
+    # Files (Scope §6.3): the direct-upload surface. Intent and completion are
+    # gated by documents.upload, list/detail/download-url by documents.read and
+    # delete by documents.delete; every route is org-scoped (X-Org-Id).
+    _route(
+        "POST",
+        "/api/v1/files",
+        org_scoped=True,
+        request_body={
+            "original_filename": "report.pdf",
+            "content_type": "application/pdf",
+            "size_bytes": 1024,
+        },
+    ),
+    _route(
+        "POST",
+        "/api/v1/files/{file_id}/complete",
+        org_scoped=True,
+        path_values={"file_id": _FILE_ID},
+    ),
+    _route("GET", "/api/v1/files", org_scoped=True),
+    _route(
+        "GET",
+        "/api/v1/files/{file_id}",
+        org_scoped=True,
+        path_values={"file_id": _FILE_ID},
+    ),
+    _route(
+        "GET",
+        "/api/v1/files/{file_id}/download-url",
+        org_scoped=True,
+        path_values={"file_id": _FILE_ID},
+    ),
+    _route(
+        "DELETE",
+        "/api/v1/files/{file_id}",
+        org_scoped=True,
+        path_values={"file_id": _FILE_ID},
+    ),
     _route("GET", "/api/v1/platform/audit-events", org_scoped=False),
     _route("GET", "/api/v1/platform/admins", org_scoped=False),
     _route("GET", "/api/v1/platform/users", org_scoped=False),

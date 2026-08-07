@@ -42,6 +42,7 @@ from app.integrations.workos.organizations import (
 from app.main import create_app
 from app.modules.audit.models import AuditEvent
 from app.modules.feature_flags.models import OrganisationFeature
+from app.modules.files.models import File, FileStatus
 from app.modules.invitations.models import Invitation, InvitationStatus
 from app.modules.organisations.models import (
     MembershipStatus,
@@ -75,6 +76,12 @@ class ContextState:
     roles: list[Role] = field(default_factory=list[Role])
     records: list[Record] = field(default_factory=list[Record])
     audit_events: list[AuditEvent] = field(default_factory=list[AuditEvent])
+    # Files (Scope §6.3): the metadata records staged or created by the files
+    # module; the fake answers the org-scoped listing from here and re-applies
+    # the org/deleted/status filters in the service tests when needed (the
+    # WHERE clauses are proven by the query-construction and real-database
+    # tests).
+    files: list[File] = field(default_factory=list[File])
     # Invitations (Scope §6.5): the local invite rows staged or created by the
     # fake session; the pending-invitation query in the login-time linking
     # service returns these and the service's own status/email/expiry guards
@@ -191,6 +198,37 @@ def make_record(
     record.created_at = datetime.now(UTC)
     record.updated_at = datetime.now(UTC)
     return record
+
+
+def make_file(
+    organisation_id: uuid.UUID,
+    *,
+    original_filename: str = "report.pdf",
+    content_type: str = "application/pdf",
+    size_bytes: int = 1024,
+    status: FileStatus = FileStatus.PENDING,
+    object_key: str | None = None,
+) -> File:
+    """Build a standalone file metadata row for the request-flow tests.
+
+    The object key defaults to the server-generated format the service uses;
+    ``created_by_user_id`` stays unset unless the test needs a creator.
+    """
+    file = File(
+        organisation_id=organisation_id,
+        storage_provider="fake",
+        storage_bucket="test-bucket",
+        object_key=object_key
+        or f"organisations/{organisation_id}/documents/{uuid.uuid4()}/original",
+        original_filename=original_filename,
+        content_type=content_type,
+        size_bytes=size_bytes,
+        status=status,
+    )
+    file.id = uuid.uuid4()
+    file.created_at = datetime.now(UTC)
+    file.updated_at = datetime.now(UTC)
+    return file
 
 
 def make_audit_event(
@@ -336,6 +374,8 @@ class FakeSession:
             return _ScalarsResult(list(self._state.feature_flags))
         if entity is Record:
             return _ScalarsResult(list(self._state.records))
+        if entity is File:
+            return _ScalarsResult(list(self._state.files))
         if entity is AuditEvent:
             return _ScalarsResult(list(self._state.audit_events))
         return _ScalarsResult(sorted(self._state.granted_permissions))
@@ -392,6 +432,10 @@ class FakeSession:
                 # Updates reuse the staged instance, so never append twice.
                 if all(existing is not obj for existing in self._state.records):
                     self._state.records.append(obj)
+            elif isinstance(obj, File):
+                # Updates reuse the staged instance, so never append twice.
+                if all(existing is not obj for existing in self._state.files):
+                    self._state.files.append(obj)
             elif isinstance(obj, AuditEvent):
                 # Append-only: never modify or remove an existing event.
                 if all(existing is not obj for existing in self._state.audit_events):
