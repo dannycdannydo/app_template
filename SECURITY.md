@@ -15,7 +15,7 @@ The practical baseline is **OWASP ASVS Level 2**. This file records the controls
 - Private object storage; no public buckets.
 - Upload scanning hook on all uploaded content.
 - Restricted external URL fetching (SSRF controls, see below).
-- Webhook signature verification for inbound webhooks (v0.2: `verify_webhook_signature` in `app/core/security.py`; the first consumer is the v0.4 platform release's `POST /api/v1/webhooks/workos`).
+- Webhook signature verification for inbound webhooks (v0.2: `verify_webhook_signature` in `app/core/security.py`; consumed since v0.4 by `POST /api/v1/webhooks/workos`).
 - Non-public PostgreSQL and Redis; no exposed database ports.
 - Least-privilege database credentials per role.
 - Encrypted backups; off-site copies.
@@ -29,10 +29,20 @@ The identity and tenancy core enforces the following rules; each is covered by a
 
 - **Session validation**: RS256 signature, exact configured issuer, client binding/audience, expiry and the required `exp`, `iat`, `iss`, `sub`, `sid`, and `client_id` claims are validated centrally; a disabled user is blocked with `403` even with a valid session. The configured issuer must exactly match a validated WorkOS token's public `iss` claim.
 - **Redirect and logout safety**: post-login state accepts only same-origin local paths, and logout uses a top-level WorkOS navigation to clear the provider session rather than a background cross-origin request.
-- **Identity fields are never trusted from the client**: email/name come from the validated WorkOS profile; request schemas use `extra="forbid"` so smuggled identity fields are rejected outright.
+- **Identity fields are never trusted from the client**: email/name/`email_verified` come from the validated WorkOS profile; request schemas use `extra="forbid"` so smuggled identity fields are rejected outright.
 - **Organisation context**: tenant-scoped routes require the `X-Org-Id` header; the organisation id is always derived from this validated context, never from a request body. Missing/malformed header is a `400`, a non-membership is a `403`, and resources outside the caller's organisation are treated as not found (`404`) where the resource model requires it.
 - **Default deny**: a caller may act only through permissions granted to the roles on their memberships; a code granted to no role is denied with `403`.
 - **No universal bypass**: cross-organisation support or impersonation must be explicit, limited, visible and fully audited.
+
+## Platform plane (v0.4)
+
+The platform administration plane (ADR-0013) is a separate authorisation plane, never a bypass of the organisation permission system:
+
+- **Separate plane**: `require_platform_permission("platform.admin")` resolves the caller through platform memberships and role bundles only; platform routes under `/api/v1/platform/*` take no `X-Org-Id` header. A caller with no granting platform membership is rejected with `403 platform_admin_required`.
+- **Cross-plane denial**: an organisation `owner` cannot call platform routes, and a platform admin without an organisation membership cannot call organisation routes; both cases are proven by the mandatory security suite. No `is_admin`/superuser boolean exists anywhere in the model or services.
+- **One-time bootstrap**: `BOOTSTRAP_PLATFORM_ADMIN_EMAIL` grants `platform_admin` exactly once, on the first verified login of that exact WorkOS email, inside the provisioning chain, audited (`platform.bootstrap_granted`); a concurrent double first-login cannot double-grant.
+- **Invitation safety**: membership is created only at login-time linking (authenticated verified email matches a sent, non-expired invitation); revoked or expired invitations never grant; webhook delivery (`POST /api/v1/webhooks/workos`, HMAC-SHA256 signature with 300s tolerance) is best-effort and never authoritative for grants. The WorkOS Management API key and webhook secret are server-side only.
+- **Append-only audit**: every platform lifecycle action (bootstrap, organisation create/update, invitation sent/accepted/revoked, membership role change/suspend/reactivate/remove, feature-flag change) writes an `audit_events` row; there is no update or delete path for audit rows.
 
 ## Mandatory reusable security test suite
 
@@ -45,7 +55,7 @@ Blueprint §31 requires a reusable security test set that runs in CI. `backend/t
 - disabled users denied (`403`);
 - stack traces not exposed — every error response is the standard envelope and never leaks tracebacks or internals.
 
-The suite is table-driven: `PROTECTED_ROUTES` in that file lists every protected route once, and a completeness guard test fails when a new `/api/v1` route is registered without being added to the table. **Adding an endpoint to the table is a mandatory part of adding the endpoint itself.** Webhook-signature rejection is covered in `backend/tests/test_security.py`; oversized-upload rejection is not applicable until the storage capability lands (v0.5).
+The suite is table-driven: `PROTECTED_ROUTES` in that file lists every protected route once, and a completeness guard test fails when a new `/api/v1` route is registered without being added to the table. **Adding an endpoint to the table is a mandatory part of adding the endpoint itself.** Webhook-signature rejection is covered in `backend/tests/test_security.py`; oversized-upload rejection is not applicable until the storage capability lands (v0.5). Platform routes join the same table with the non-platform-admin `403` case and a cross-plane denial check (org `owner` → `403` on platform routes; platform admin without org membership → `403` on org routes).
 
 ## File security
 
@@ -92,4 +102,4 @@ If you find a security issue, report it privately to the maintainers before disc
 
 ## Deferred controls
 
-The following controls land with their owning capabilities in later releases and must be present before v1.0: storage/file controls (v0.5) and rate limiting at the edge for production profiles. Audit logging and the WorkOS event consumer land in v0.4 (Platform Administration); the existing signature verifier is retained until then.
+The following controls land with their owning capabilities in later releases and must be present before v1.0: storage/file controls and Dramatiq job records (v0.5) and rate limiting at the edge for production profiles (v0.6). The v0.4 platform release shipped append-only audit logging, the signature-verified WorkOS webhook consumer, and the platform plane (see above).

@@ -147,6 +147,16 @@ WorkOS owns login and sessions; the application resolves a validated identity to
   - `GET /api/v1/me` — returns the current user and their memberships (used to pick an organisation).
   - `POST /api/v1/organisations` — creates an organisation; the creator's membership is assigned the `owner` role.
 
+### Platform plane (v0.4)
+
+The platform administration plane is a separate authorisation plane (ADR-0013, v0.4 Scope §6.2) that administers organisations, memberships, invitations, feature flags and audit history across tenants:
+
+- Platform routes live under `/api/v1/platform/*` and take **no** `X-Org-Id` header: the caller acts as a platform administrator, not as a member of the organisation they administer.
+- Every platform route is gated by `require_platform_permission("platform.admin")` (v0.4 Scope §6.2), which resolves the caller through platform memberships and role bundles only; a caller with no granting platform membership is rejected with `403` and code `platform_admin_required`.
+- The two planes never grant across each other: an organisation `owner` without a platform membership is `403` on platform routes, and a platform admin without an organisation membership is `403` (`not_a_member`) on organisation routes. There is no `is_admin`/superuser boolean anywhere.
+- Organisations are identified by their internal id in the path (`/api/v1/platform/organisations/{organisation_id}`), never by the server-side `workos_organisation_id` mapping, which is never client-writable (`extra="forbid"`).
+- Platform listing endpoints use the same pagination envelope as tenant-scoped listings (blueprint §12).
+
 ### Authorisation
 
 - Default deny: a caller may act only through permissions granted to the roles on their memberships.

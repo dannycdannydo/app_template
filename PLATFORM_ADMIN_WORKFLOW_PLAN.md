@@ -1,7 +1,7 @@
 # Platform Administration & Invitation Workflow — Implementation Plan
 
 Status: Draft (awaiting review per `CONTRIBUTING.md`)
-Relates to: `Internal_Custom_Application_Starter_Architecture_v2.md` (blueprint), `IMPLEMENTATION_GUIDE.md`, `TEMPLATE_V0_3_SCOPE.md`, ADR-0001
+Relates to: `Internal_Custom_Application_Starter_Architecture_v2.md` (blueprint), `IMPLEMENTATION_GUIDE.md`, `TEMPLATE_V0_4_SCOPE.md`, ADR-0001, ADR-0013
 
 ## 0. Context and goals
 

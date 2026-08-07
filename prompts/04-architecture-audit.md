@@ -18,9 +18,9 @@ This audit reads the universal rule sections of the blueprint and scans the **wh
 
 You are auditing work on a reusable full-stack application starter template: FastAPI + SQLAlchemy 2 + Pydantic 2 + PostgreSQL + Vue 3 + TypeScript + Tailwind + shadcn-vue.
 
-The build is **stage by stage**. The current release is v0.3 (frontend application shell). One local file tracks progress:
+The build is **stage by stage**. The current release is v0.4 (platform administration). One local file tracks progress:
 
-- `TEMPLATE_V0_3_SCOPE.md` — §2 deliverables, §3 exclusions, §6 progress checklist.
+- `TEMPLATE_V0_4_SCOPE.md` — §2 deliverables, §3 exclusions, §6 progress checklist.
 
 The architecture blueprint (`Internal_Custom_Application_Starter_Architecture_v2.md`) is large. **You do not read the whole file.** You read only the cross-cutting, universal rule sections listed below. These are the conventions that apply to every task, not just one.
 
@@ -109,7 +109,7 @@ Do not read other blueprint sections unless a specific finding sends you there.
 ## When to use this prompt
 
 - **On demand**, when you suspect drift or want a health check.
-- **At the end of each release**, before tagging. For the current release (v0.3), this means after the final §6 subsection is complete and before tagging `v0.3.0` — a clean audit is a gating acceptance criterion (see scope §5).
+- **At the end of each release**, before tagging. For the current release (v0.4), this means after the final §6 subsection is complete and before tagging `v0.4.0` — a clean audit is a gating acceptance criterion (see scope §5).
 - **After a cluster of related subsections**, if you want an early sweep before the release gate.
 
 ## How findings are handled
