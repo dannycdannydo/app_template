@@ -27,7 +27,7 @@ define load_env
 	set -a; [ -f .env ] && . ./.env; set +a;
 endef
 
-.PHONY: dev dev-docker migrate lint typecheck test e2e format generate-client check
+.PHONY: dev dev-docker migrate provision-admin provision-admin-delete lint typecheck test e2e format generate-client check
 
 ## Start PostgreSQL + Redis in Docker, then run the API and frontend natively
 ## with live reload (ADR-0008). Infra stays up after Ctrl-C so `make migrate`
@@ -49,6 +49,20 @@ dev-docker:
 ## Apply Alembic migrations to the database in DATABASE_URL.
 migrate:
 	@$(load_env) cd backend && uv run alembic upgrade head
+
+## Create the bootstrap platform admin in WorkOS (email + password; idempotent).
+## Reads BOOTSTRAP_PLATFORM_ADMIN_EMAIL / BOOTSTRAP_PLATFORM_ADMIN_PASSWORD from
+## the repo-root .env. Run once after the app is created, before the first
+## login, when WorkOS signups are disabled.
+provision-admin:
+	@$(load_env) cd backend && uv run python -m scripts.provision_bootstrap_admin
+
+## Delete the bootstrap platform admin again (WorkOS user + internal users row,
+## which resets the one-time bootstrap so a fresh admin can be provisioned).
+## Uses BOOTSTRAP_PLATFORM_ADMIN_EMAIL from the repo-root .env by default;
+## override with EMAIL=someone@example.com. Needs the database reachable.
+provision-admin-delete:
+	@$(load_env) cd backend && uv run python -m scripts.provision_bootstrap_admin --delete $(if $(EMAIL),--email $(EMAIL),)
 
 ## Ruff (backend) + ESLint/oxlint (frontend).
 lint:

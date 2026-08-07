@@ -67,6 +67,15 @@ class Settings(BaseSettings):
             "verified login; empty disables the bootstrap (Scope §6.4)"
         ),
     )
+    bootstrap_platform_admin_password: str = Field(
+        default="",
+        description=(
+            "Password for the bootstrap platform admin, used only by the "
+            "scripts.provision_bootstrap_admin command to pre-create the WorkOS "
+            "user (signups disabled). Empty means the command refuses to run; never "
+            "shared with the frontend"
+        ),
+    )
     workos_webhook_secret: str = Field(
         default="",
         description=(

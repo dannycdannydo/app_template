@@ -79,12 +79,26 @@ Login goes through **WorkOS** end-to-end: the browser never submits identity fie
 
 Signing out returns to `/login`. The WorkOS integration is confined to `frontend/src/features/auth/workos.ts` (ADR 0011); the unauthenticated-redirect journeys run without any configuration, and `make e2e` runs the full authenticated journeys with a stubbed WorkOS session (see the command reference below).
 
+## Creating the first platform admin
+
+When WorkOS signups are disabled, the bootstrap admin cannot self-register: the operator pre-creates the account (email + password, verified email) through the WorkOS User Management API. This template ships a small command for exactly that, run once after the app is created and before the first login:
+
+1. Set `BOOTSTRAP_PLATFORM_ADMIN_EMAIL` and `BOOTSTRAP_PLATFORM_ADMIN_PASSWORD` in `.env` (the password must clear the WorkOS password policy and blocklist; it is never printed or logged).
+2. Run `make provision-admin` (idempotent — re-running reports the user already exists and never resets the password).
+3. Sign in on the WorkOS page with that email + password; the first verified login grants `platform_admin` exactly once (`bootstrap_state` row), and the Platform Admin Centre appears in the sidebar.
+
+`make provision-admin` needs `WORKOS_API_KEY` (already required by the backend) and works with or without `.env` via `--email`/`--password` flags: `uv --directory backend run python -m scripts.provision_bootstrap_admin --email a@b.co --password '...'`.
+
+To tear the test admin down again (e.g. to provision a different one and re-test the bootstrap), run `make provision-admin-delete` (uses the `.env` email) or `make provision-admin-delete EMAIL=a@b.co`: it deletes the WorkOS user and the internal `users` row, which cascades to the `bootstrap_state` row and resets the one-time bootstrap. Then update `BOOTSTRAP_PLATFORM_ADMIN_EMAIL`/`PASSWORD` in `.env` and re-run `make provision-admin`.
+
 ## Command reference
 
 | Command | What it does |
 | --- | --- |
 | `make dev` | Start Postgres, Redis, API, and frontend |
 | `make migrate` | Run Alembic migrations |
+| `make provision-admin` | Pre-create the bootstrap platform admin in WorkOS (email + password; idempotent) |
+| `make provision-admin-delete` | Tear down the bootstrap admin (WorkOS + internal user, resets the one-time bootstrap); `EMAIL=...` to override |
 | `make lint` | Ruff (backend) + ESLint (frontend) |
 | `make typecheck` | Pyright (backend) + vue-tsc (frontend) |
 | `make test` | pytest (backend) + Vitest (frontend) |
