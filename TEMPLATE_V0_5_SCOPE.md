@@ -126,10 +126,10 @@ Subsections are ordered so later work builds on earlier work: the storage interf
 
 The foundation for the whole release (ADR-0006). No provider SDK outside `app/storage/`.
 
-- [ ] `app/storage/` package: `ObjectStorage` interface — `create_upload_url(file_id, object_key, content_type, size) -> SignedUrl`, `create_download_url(object_key)`, `head_object(object_key) -> ObjectInfo` (size/checksum/content-type), `delete_object(object_key)`, `ensure_bucket()` — plus `FakeObjectStorage` (in-memory, deterministic expiry, test-only)
-- [ ] Settings in `core/config.py`: `storage_provider` (`s3` default / `fake`), `storage_bucket`, `storage_endpoint_url`, `storage_public_endpoint_url` (defaults to endpoint_url; used for presigning when the browser cannot reach the API's storage host, e.g. dev-docker), `storage_region`, `storage_access_key_id`, `storage_secret_access_key`, `storage_max_upload_size`, `storage_allowed_content_types`; production fail-fast validation (no `fake` provider, S3 credentials/bucket/endpoint required)
-- [ ] `get_storage()` factory wired from settings (lru_cache singleton like `get_settings`); pytest conftest pins `storage_provider=fake`
-- [ ] Tests: interface contract against `FakeObjectStorage` (round-trip upload URL → put → head → delete, expiry, bucket ensure)
+- [x] `app/storage/` package: `ObjectStorage` interface — `create_upload_url(file_id, object_key, content_type, size) -> SignedUrl`, `create_download_url(object_key)`, `head_object(object_key) -> ObjectInfo` (size/checksum/content-type), `delete_object(object_key)`, `ensure_bucket()` — plus `FakeObjectStorage` (in-memory, deterministic expiry, test-only)
+- [x] Settings in `core/config.py`: `storage_provider` (`s3` default / `fake`), `storage_bucket`, `storage_endpoint_url`, `storage_public_endpoint_url` (defaults to endpoint_url; used for presigning when the browser cannot reach the API's storage host, e.g. dev-docker), `storage_region`, `storage_access_key_id`, `storage_secret_access_key`, `storage_max_upload_size`, `storage_allowed_content_types`; production fail-fast validation (no `fake` provider, S3 credentials/bucket/endpoint required)
+- [x] `get_storage()` factory wired from settings (lru_cache singleton like `get_settings`); pytest conftest pins `storage_provider=fake`
+- [x] Tests: interface contract against `FakeObjectStorage` (round-trip upload URL → put → head → delete, expiry, bucket ensure)
 
 ## 6.2 S3-Compatible Adapter + MinIO Local Development
 
@@ -146,7 +146,7 @@ Depends on §6.1 and §6.2 (storage), §6.1's audit foundation from v0.4 (audit 
 
 - [ ] `files` table (BP §17 shape: id, organisation_id, storage_provider, storage_bucket, object_key, original_filename, content_type, size_bytes, checksum nullable, status, created_by_user_id, created_at, deleted_at) via Alembic migration; `modules/files/` models/queries/service/schemas/router registered in `db/base.py` and `main.py`
 - [ ] `POST /api/v1/files` (documents.upload): validate filename/content-type/size against `storage_allowed_content_types` and `storage_max_upload_size`; create `pending` record with server-generated key `organisations/{organisation_id}/documents/{file_id}/original`; return `{file_id, upload_url, expires_at}`; audit `file.upload_started`
-- [ ] `POST /api/v1/files/{file_id}/complete` (documents.upload): head the object, verify existence + size (+ checksum when supplied), transition uploaded → enqueue processing job (see §6.5); mismatch → `failed`/`quarantined` + audit; audit `file.uploaded`
+- [ ] `POST /api/v1/files/{file_id}/complete` (documents.upload): head the object, verify existence + size (+ checksum when supplied), transition uploaded → enqueue processing job (see §6.5); returns `200` with an explicit response schema — `FileDetail` (the file record with `status: uploaded`) plus `processing_job_id` (UUID of the durable job the client polls via `GET /api/v1/jobs/{job_id}`); mismatch → `failed`/`quarantined` + audit; audit `file.uploaded`
 - [ ] `GET /api/v1/files` (documents.read, paginated, status filter, standard envelope), `GET /api/v1/files/{file_id}` (documents.read), `GET /api/v1/files/{file_id}/download-url` (documents.read, short-lived signed GET URL), `DELETE /api/v1/files/{file_id}` (documents.delete: soft delete + object removal + audit `document.deleted`); cross-org file id → 404
 - [ ] Security suite: all files routes in `PROTECTED_ROUTES` with the full matrix (unauth 401, invalid session 401, disabled 403, viewer-write 403, cross-org 404, no stack traces); oversized-upload and disallowed-content-type cases
 

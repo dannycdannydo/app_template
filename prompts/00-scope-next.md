@@ -8,12 +8,12 @@ Paste this prompt once per release, before the daily implement → review → ap
 
 You are planning the next release of a reusable full-stack application starter template: FastAPI + SQLAlchemy 2 + Pydantic 2 + PostgreSQL + Vue 3 + TypeScript + Tailwind + shadcn-vue, modular monolith, WorkOS auth, Dramatiq jobs, provider-neutral storage.
 
-The build is **stage by stage** (v0.1 and v0.2 shipped: foundation, then identity and tenancy; v0.3 is next). The release sequence and each release's capability list are defined in `IMPLEMENTATION_GUIDE.md`. Each release gets its own contract file, `TEMPLATE_V0_N_SCOPE.md`, following the structure of the previous release's scope file.
+The build is **stage by stage** (v0.1–v0.5 shipped: foundation, identity and tenancy, frontend application shell, platform administration, then files and jobs; v0.6 is next). The release sequence and each release's capability list are defined in `IMPLEMENTATION_GUIDE.md`. Each release gets its own contract file, `TEMPLATE_V0_N_SCOPE.md`, following the structure of the previous release's scope file.
 
 Read, in this order:
 
 1. `IMPLEMENTATION_GUIDE.md` — find the section titled `Template v0.N — <Title>` for the next unshipped release (the lowest-numbered release without a `TEMPLATE_V0_N_SCOPE.md`).
-2. The most recent scope file (highest-numbered `TEMPLATE_V0_N_SCOPE.md` in the repo root, currently `TEMPLATE_V0_2_SCOPE.md`) — this is your structural template, section by section.
+2. The most recent scope file (highest-numbered `TEMPLATE_V0_N_SCOPE.md` in the repo root, currently `TEMPLATE_V0_5_SCOPE.md`) — this is your structural template, section by section.
 3. `Internal_Custom_Application_Starter_Architecture_v2.md` — the design standard. **Do not read the whole file.** Read its table of contents to locate sections relevant to the next release's capabilities, then read only those sections.
 
 ## Your Role

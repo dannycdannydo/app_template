@@ -49,6 +49,11 @@ def test_production_requires_workos_credentials() -> None:
         cors_allowed_origins=["https://app.example.test"],
         trusted_hosts=["api.example.test"],
         redis_url="rediss://redis.example.test:6380/0",
+        storage_provider="s3",
+        storage_access_key_id="ak_test",
+        storage_secret_access_key="sk_storage_test",
+        storage_bucket="files",
+        storage_endpoint_url="https://s3.example.test",
     )
     assert settings.workos_api_base_url == "https://api.workos.com/"
     assert settings.workos_jwt_leeway == 30.0
@@ -152,6 +157,11 @@ def test_production_accepts_a_valid_bootstrap_email() -> None:
         cors_allowed_origins=["https://app.example.test"],
         trusted_hosts=["api.example.test"],
         redis_url="rediss://redis.example.test:6380/0",
+        storage_provider="s3",
+        storage_access_key_id="ak_test",
+        storage_secret_access_key="sk_storage_test",
+        storage_bucket="files",
+        storage_endpoint_url="https://s3.example.test",
         bootstrap_platform_admin_email="admin@example.com",
     )
     assert settings.bootstrap_platform_admin_email == "admin@example.com"
@@ -181,6 +191,149 @@ def test_production_accepts_a_webhook_secret() -> None:
         cors_allowed_origins=["https://app.example.test"],
         trusted_hosts=["api.example.test"],
         redis_url="rediss://redis.example.test:6380/0",
+        storage_provider="s3",
+        storage_access_key_id="ak_test",
+        storage_secret_access_key="sk_storage_test",
+        storage_bucket="files",
+        storage_endpoint_url="https://s3.example.test",
         workos_webhook_secret="whsec_prod",
     )
     assert settings.workos_webhook_secret == "whsec_prod"
+
+
+# --- Object storage settings (Scope §6.1, blueprint §17) ---
+
+
+def test_storage_defaults_are_s3_with_dev_sensible_limits() -> None:
+    """Scope §6.1: the provider defaults to s3; limits are dev-friendly."""
+    settings = Settings(
+        app_env="development",
+        database_url="postgresql+asyncpg://x",
+        storage_provider="s3",  # explicit: conftest pins STORAGE_PROVIDER=fake for the suite
+        storage_bucket="",  # explicit: conftest pins STORAGE_BUCKET=test-bucket for the suite
+    )
+    assert settings.storage_provider == "s3"
+    assert settings.storage_bucket == ""
+    assert settings.storage_endpoint_url == ""
+    assert settings.storage_public_endpoint_url == ""
+    assert settings.storage_region == ""
+    assert settings.storage_max_upload_size == 25 * 1024 * 1024
+    assert "application/pdf" in settings.storage_allowed_content_types
+
+
+def test_storage_public_endpoint_defaults_to_endpoint() -> None:
+    settings = Settings(
+        app_env="development",
+        database_url="postgresql+asyncpg://x",
+        storage_endpoint_url="http://localhost:9000",
+    )
+    assert settings.storage_public_endpoint_url == "http://localhost:9000"
+
+
+def test_storage_public_endpoint_can_be_set_explicitly() -> None:
+    settings = Settings(
+        app_env="development",
+        database_url="postgresql+asyncpg://x",
+        storage_endpoint_url="http://localhost:9000",
+        storage_public_endpoint_url="http://minio:9000",
+    )
+    assert settings.storage_public_endpoint_url == "http://minio:9000"
+
+
+def test_storage_provider_rejects_unknown_values() -> None:
+    with pytest.raises(ValidationError, match="storage_provider"):
+        Settings(
+            app_env="development",
+            database_url="postgresql+asyncpg://x",
+            storage_provider="gcs",
+        )
+
+
+def test_storage_max_upload_size_must_be_positive() -> None:
+    with pytest.raises(ValidationError, match="storage_max_upload_size"):
+        Settings(
+            app_env="development",
+            database_url="postgresql+asyncpg://x",
+            storage_max_upload_size=0,
+        )
+
+
+def test_storage_allowed_content_types_must_be_non_empty_and_valid() -> None:
+    with pytest.raises(ValidationError, match="must not be empty"):
+        Settings(
+            app_env="development",
+            database_url="postgresql+asyncpg://x",
+            storage_allowed_content_types=[],
+        )
+    with pytest.raises(ValidationError, match="valid MIME types"):
+        Settings(
+            app_env="development",
+            database_url="postgresql+asyncpg://x",
+            storage_allowed_content_types=["application/pdf", "not-a-mime"],
+        )
+
+
+def test_production_rejects_fake_provider() -> None:
+    with pytest.raises(ValidationError, match="'fake'"):
+        Settings(
+            app_env="production",
+            database_url="postgresql+asyncpg://x",
+            workos_api_key="sk_test",
+            workos_client_id="client_1",
+            cors_allowed_origins=["https://app.example.test"],
+            trusted_hosts=["api.example.test"],
+            redis_url="rediss://redis.example.test:6380/0",
+            storage_provider="fake",
+        )
+
+
+def test_production_requires_explicit_s3_configuration() -> None:
+    """Scope §4: production with storage_provider=s3 must set credentials/bucket/endpoint."""
+    with pytest.raises(ValidationError, match="storage_access_key_id"):
+        Settings(
+            app_env="production",
+            database_url="postgresql+asyncpg://x",
+            workos_api_key="sk_test",
+            workos_client_id="client_1",
+            cors_allowed_origins=["https://app.example.test"],
+            trusted_hosts=["api.example.test"],
+            redis_url="rediss://redis.example.test:6380/0",
+            storage_provider="s3",
+            storage_secret_access_key="sk_storage_test",
+            storage_bucket="files",
+            storage_endpoint_url="https://s3.example.test",
+        )
+
+    with pytest.raises(ValidationError, match="storage_endpoint_url"):
+        Settings(
+            app_env="production",
+            database_url="postgresql+asyncpg://x",
+            workos_api_key="sk_test",
+            workos_client_id="client_1",
+            cors_allowed_origins=["https://app.example.test"],
+            trusted_hosts=["api.example.test"],
+            redis_url="rediss://redis.example.test:6380/0",
+            storage_provider="s3",
+            storage_access_key_id="ak_test",
+            storage_secret_access_key="sk_storage_test",
+            storage_bucket="files",
+        )
+
+
+def test_production_accepts_complete_s3_configuration() -> None:
+    settings = Settings(
+        app_env="production",
+        database_url="postgresql+asyncpg://x",
+        workos_api_key="sk_test",
+        workos_client_id="client_1",
+        cors_allowed_origins=["https://app.example.test"],
+        trusted_hosts=["api.example.test"],
+        redis_url="rediss://redis.example.test:6380/0",
+        storage_provider="s3",
+        storage_access_key_id="ak_test",
+        storage_secret_access_key="sk_storage_test",
+        storage_bucket="files",
+        storage_endpoint_url="https://s3.example.test",
+    )
+    assert settings.storage_provider == "s3"
+    assert settings.storage_public_endpoint_url == "https://s3.example.test"

@@ -93,6 +93,56 @@ class Settings(BaseSettings):
         default_factory=lambda: ["localhost", "127.0.0.1", "test"],
         description="Host headers accepted by the API; configure real public hosts in production",
     )
+    storage_provider: str = Field(
+        default="s3",
+        description=(
+            "Object storage adapter: 's3' (S3-compatible, the default) or 'fake' "
+            "(in-memory, test-only). The 'fake' provider is rejected in production."
+        ),
+    )
+    storage_bucket: str = Field(
+        default="",
+        description="Object storage bucket name; required when storage_provider=s3",
+    )
+    storage_endpoint_url: str = Field(
+        default="",
+        description="S3-compatible endpoint (e.g. MinIO); required in production",
+    )
+    storage_public_endpoint_url: str = Field(
+        default="",
+        description=(
+            "Storage endpoint used when presigning URLs, for deployments where the "
+            "browser cannot reach the API's storage host (e.g. dev-docker). "
+            "Defaults to storage_endpoint_url."
+        ),
+    )
+    storage_region: str = Field(
+        default="",
+        description="S3 region; the adapter falls back to us-east-1 when empty",
+    )
+    storage_access_key_id: str = Field(
+        default="",
+        description="S3 access key id (secret, backend-only)",
+    )
+    storage_secret_access_key: str = Field(
+        default="",
+        description="S3 secret access key (secret, backend-only)",
+    )
+    storage_max_upload_size: int = Field(
+        default=25 * 1024 * 1024,
+        description="Maximum accepted upload size in bytes (blueprint §30)",
+    )
+    storage_allowed_content_types: list[str] = Field(
+        default_factory=lambda: [
+            "application/pdf",
+            "application/json",
+            "text/plain",
+            "text/csv",
+            "image/png",
+            "image/jpeg",
+        ],
+        description="Content types accepted for uploads (blueprint §30)",
+    )
 
     @field_validator("cors_allowed_origins")
     @classmethod
@@ -111,6 +161,29 @@ class Settings(BaseSettings):
         if any(host == "*" for host in hosts):
             raise ValueError("trusted_hosts must not contain a wildcard host")
         return hosts
+
+    @field_validator("storage_provider")
+    @classmethod
+    def _validate_storage_provider(cls, provider: str) -> str:
+        if provider not in {"s3", "fake"}:
+            raise ValueError("storage_provider must be 's3' or 'fake'")
+        return provider
+
+    @field_validator("storage_max_upload_size")
+    @classmethod
+    def _validate_storage_max_upload_size(cls, size: int) -> int:
+        if size <= 0:
+            raise ValueError("storage_max_upload_size must be positive")
+        return size
+
+    @field_validator("storage_allowed_content_types")
+    @classmethod
+    def _validate_storage_allowed_content_types(cls, content_types: list[str]) -> list[str]:
+        if not content_types:
+            raise ValueError("storage_allowed_content_types must not be empty")
+        if any("/" not in value or " " in value for value in content_types):
+            raise ValueError("storage_allowed_content_types must contain valid MIME types")
+        return content_types
 
     @field_validator("bootstrap_platform_admin_email")
     @classmethod
@@ -158,6 +231,29 @@ class Settings(BaseSettings):
             raise ValueError("workos_api_base_url must use https")
         if not self.workos_jwt_issuer:
             raise ValueError("workos_jwt_issuer is required")
+        if not self.storage_public_endpoint_url:
+            self.storage_public_endpoint_url = self.storage_endpoint_url
+        if self.app_env == "production":
+            if self.storage_provider == "fake":
+                raise ValueError(
+                    "storage_provider must not be 'fake' in the production environment"
+                )
+            if self.storage_provider == "s3":
+                missing = [
+                    name
+                    for name, value in (
+                        ("storage_access_key_id", self.storage_access_key_id),
+                        ("storage_secret_access_key", self.storage_secret_access_key),
+                        ("storage_bucket", self.storage_bucket),
+                        ("storage_endpoint_url", self.storage_endpoint_url),
+                    )
+                    if not value
+                ]
+                if missing:
+                    raise ValueError(
+                        "storage_provider=s3 requires explicit storage configuration "
+                        f"in the production environment: {', '.join(missing)}"
+                    )
         return self
 
 

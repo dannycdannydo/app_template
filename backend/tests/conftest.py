@@ -20,6 +20,12 @@ import pytest
 # integration tests (which migrate and downgrade) at a development database.
 os.environ["APP_ENV"] = "test"
 os.environ["DATABASE_URL"] = "postgresql+asyncpg://app:app@localhost:5432/app_template_test"
+# The storage adapter must never touch a real provider in the suite: pin the
+# in-memory fake and an explicit test bucket (Scope §6.1) so ``make check``
+# needs no MinIO. STORAGE_* credentials a developer exported are harmless here
+# because the fake ignores them.
+os.environ["STORAGE_PROVIDER"] = "fake"
+os.environ["STORAGE_BUCKET"] = "test-bucket"
 # WorkOS credentials are developer-shell exports that must never leak into the
 # suite: config tests assert the empty development defaults and the production
 # fail-fast validation, so drop them before any Settings model is constructed.
