@@ -202,10 +202,10 @@ Depends on §6.2–§6.8 (the full platform API surface). The Vue admin pages.
 
 Depends on §6.9 (exercises the platform). Closes the release.
 
-- [ ] Blueprint amendments applied (`Internal_Custom_Application_Starter_Architecture_v2.md` §8, §9, §27, §29, §31, §33 — see §7 of this file); ADR recording the WorkOS Organization adoption decision and the platform-plane decision
-- [ ] `ARCHITECTURE.md` (platform plane, request flow for `/api/v1/platform/*`, invitation flow), `API_CONVENTIONS.md`, `SECURITY.md` and `README.md` updated; `.env.example` documents new settings
-- [ ] `make check` green from a clean checkout; generated-client drift clean; CI green including the Playwright job
-- [ ] Human review recorded for auth-flow, permission-model, tenant-isolation, secret-handling and public-API changes (blueprint §33); architecture audit clean (no CRITICAL/MAJOR)
+- [x] Blueprint amendments applied (`Internal_Custom_Application_Starter_Architecture_v2.md` §8, §9, §27, §29, §31, §33 — see §7 of this file); ADR recording the WorkOS Organization adoption decision and the platform-plane decision
+- [x] `ARCHITECTURE.md` (platform plane, request flow for `/api/v1/platform/*`, invitation flow), `API_CONVENTIONS.md`, `SECURITY.md` and `README.md` updated; `.env.example` documents new settings
+- [x] `make check` green from a clean checkout; generated-client drift clean; CI green including the Playwright job
+- [x] Human review recorded for auth-flow, permission-model, tenant-isolation, secret-handling and public-API changes (blueprint §33); architecture audit clean (no CRITICAL/MAJOR)
 
 ---
 

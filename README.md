@@ -14,7 +14,7 @@ This repository is a **template**, not an application. New projects start from a
 - CI that runs the same gate on every push to `main` and on pull requests
 - Governance docs and architecture decision records (ADRs)
 
-The authoritative design standard is `Internal_Custom_Application_Starter_Architecture_v2.md`. The scoped contract and progress log for the current release is `TEMPLATE_V0_3_SCOPE.md`. Agents read the architecture documentation before structural changes (see `AGENTS.md`).
+The authoritative design standard is `Internal_Custom_Application_Starter_Architecture_v2.md`. The scoped contract and progress log for the current release is `TEMPLATE_V0_4_SCOPE.md`. Agents read the architecture documentation before structural changes (see `AGENTS.md`).
 
 ## Repository layout
 
@@ -22,7 +22,7 @@ The authoritative design standard is `Internal_Custom_Application_Starter_Archit
 backend/                 FastAPI application (app/, alembic/, pyproject.toml)
 frontend/                Vue 3 + Vite application (src/, Dockerfile, nginx.conf)
 deploy/compose/          Compose files (compose.local.yml = local development)
-docs/decisions/          Architecture decision records (ADR 0001-0011)
+docs/decisions/          Architecture decision records (ADR 0001-0013)
 .github/workflows/       CI pipeline
 Makefile                 Command surface for development and quality gates
 .env.example             Documented environment variables
@@ -107,8 +107,19 @@ To tear the test admin down again (e.g. to provision a different one and re-test
 | `make generate-client` | Export OpenAPI from FastAPI and generate the TypeScript client |
 | `make check` | Full local quality gate: lint + typecheck + test + generated-client drift |
 
+## Platform Admin Centre
+
+v0.4 adds platform administration (see `PLATFORM_ADMIN_WORKFLOW_PLAN.md` and ADR-0013): a dedicated platform authorisation plane — separate from organisation roles — gates the `/platform` section of the app, which is served only to users whose `GET /api/v1/me` reports `platform_roles`. From there a platform admin can:
+
+- create and edit organisations (each mapped 1:1 to a WorkOS Organization for invitations; the mapping is server-side only),
+- view an organisation's memberships, invite users through the WorkOS Invitation API (standard onboarding: the membership is created at the invitee's first verified login), assign/remove roles, suspend/reactivate/remove memberships,
+- control platform feature flags per organisation,
+- read the append-only audit history.
+
+The backend remains the enforcement point: every `/api/v1/platform/*` endpoint requires `platform.admin`, the UI gating is cosmetic, and an organisation owner without a platform membership is rejected with `403 platform_admin_required`. Invitation and membership changes are all audited.
+
 ## Releases
 
-The template is versioned and tagged. `make check` passing is the gate for a release. Current release: v0.3 (frontend application shell). See `TEMPLATE_V0_3_SCOPE.md` §6 for the progress log.
+The template is versioned and tagged. `make check` passing is the gate for a release. Current release: v0.4 (platform administration). See `TEMPLATE_V0_4_SCOPE.md` §6 for the progress log.
 
 Development follows the branch workflow in `CONTRIBUTING.md`: work units live on `feature/*` branches and reach `main` only through reviewed pull requests, so CI runs once per merged unit rather than on every push.

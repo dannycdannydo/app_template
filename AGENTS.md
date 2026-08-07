@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Instructions for human and AI contributors working in this repository. The canonical design standard is `Internal_Custom_Application_Starter_Architecture_v2.md`; the release contract is `TEMPLATE_V0_3_SCOPE.md` (see its §7 reference map for which blueprint sections apply to each work unit).
+Instructions for human and AI contributors working in this repository. The canonical design standard is `Internal_Custom_Application_Starter_Architecture_v2.md`; the release contract is `TEMPLATE_V0_4_SCOPE.md` (see its §7 reference map for which blueprint sections apply to each work unit).
 
 ## Mandatory agent rules
 
@@ -19,7 +19,7 @@ Instructions for human and AI contributors working in this repository. The canon
 - Frontend HTTP calls happen only in `src/queries/` composables: no Vue component or Pinia store imports `src/api/client.ts` directly; Pinia stores hold client state only (server state belongs to TanStack Query).
 - Scope citations are version-prefixed (`v0.2 Scope §6.3`, `v0.3 Scope §6.7`). A bare `Scope §6.x` found in v0.2-era backend code or docstrings refers to `TEMPLATE_V0_2_SCOPE.md`; new code always prefixes the release version so the daily loop never greps the wrong subsection.
 - Tests accompany behavioural changes.
-- Keep the mandatory security suite green: new protected `/api/v1` endpoints must be added to `PROTECTED_ROUTES` in `backend/tests/test_security_suite.py` (blueprint §31, v0.2 Scope §6.6), which then checks unauthenticated/invalid-session/disabled-user rejection, cross-organisation denial, viewer-write denial and stack-trace non-exposure for the new route.
+- Keep the mandatory security suite green: new protected `/api/v1` endpoints must be added to `PROTECTED_ROUTES` in `backend/tests/test_security_suite.py` (blueprint §31, v0.2 Scope §6.6), which then checks unauthenticated/invalid-session/disabled-user rejection, cross-organisation denial, viewer-write denial and stack-trace non-exposure for the new route. Platform routes (v0.4 Scope §6.2) additionally get the non-platform-admin `403` case and the cross-plane denial checks; they take no `X-Org-Id`.
 - Do not weaken linting, typing or tests.
 - Do not refactor unrelated code without a clear reason.
 - Do not add dependencies without documenting why (see ADRs).

@@ -369,10 +369,16 @@ The application should store the WorkOS user identifier, not passwords.
 ## Backend rules
 
 - Validate token signature, issuer, audience and expiry.
-- Never trust identity fields submitted by the frontend.
+- Never trust identity fields submitted by the frontend. Identity fields,
+  including `email_verified`, come from the validated WorkOS profile only.
 - Disabled users must be blocked even with an otherwise valid session.
 - Session and webhook validation must be centralised.
 - Authentication is not authorisation.
+- A configured `BOOTSTRAP_PLATFORM_ADMIN_EMAIL` grants the `platform_admin`
+  role once, on the first verified login of that exact WorkOS email, audited
+  as `platform.bootstrap_granted`; a second login is a no-op (v0.4, Scope
+  §6.4). The grant is a documented provisioning step, not a route a caller
+  can invoke.
 
 ---
 
@@ -417,7 +423,14 @@ roles
 permissions
 role_permissions
 membership_roles
+invitations
 ```
+
+`organisations.workos_organisation_id` (nullable, unique) is the 1:1 mapping
+to a WorkOS Organization when the application deliberately adopts WorkOS
+Organizations for invitations (ADR-0013, v0.4). The internal organisation id
+remains the primary key; the mapping is server-side only and never
+client-writable.
 
 ## Default roles
 
@@ -457,6 +470,26 @@ organisation.manage
 - Organisation IDs are derived from validated context where possible.
 - Cross-organisation tests are mandatory.
 - Team-specific permissions are added only when required.
+
+## Platform Admin Centre (v0.4)
+
+Cross-tenant administration lives in a dedicated **platform authorisation
+plane**, never in the organisation plane and never behind a superuser flag:
+
+- `platform_roles`, `platform_role_permissions` and `platform_memberships`
+  mirror the organisation plane; a seeded `platform_admin` role carries the
+  `platform.admin` permission code.
+- `require_platform_permission(code)` resolves the caller through platform
+  memberships and role bundles only; it never consults `X-Org-Id`. Platform
+  routes under `/api/v1/platform/*` take no organisation header.
+- The planes are orthogonal: an organisation `owner` without a platform
+  membership is rejected on platform routes (`403 platform_admin_required`),
+  and a platform admin without an organisation membership is rejected on
+  organisation routes (`403 not_a_member`). No `is_admin`/superuser boolean
+  exists anywhere.
+- The platform plane is a separate plane, not a bypass: it grants explicit
+  cross-tenant administration to configured platform admins while the
+  organisation permission system keeps enforcing every org-scoped action.
 
 ---
 
@@ -1365,7 +1398,8 @@ The application must fail fast on invalid production configuration.
 Support:
 
 1. deployment-level flags;
-2. optional organisation-level database flags.
+2. database-backed organisation-level flags (the default for
+   platform-controlled organisation flags, v0.4).
 
 Example table:
 
@@ -1378,7 +1412,10 @@ enabled
 configuration_json
 ```
 
-Feature state must be enforced by the backend.
+Feature state must be enforced by the backend. For platform-controlled
+organisation flags, management endpoints are platform-gated
+(`require_platform_permission`, v0.4) and enforcement happens in services via
+the `is_feature_enabled` helper — default off, never in routers.
 
 ---
 
@@ -1450,6 +1487,23 @@ document.deleted
 membership.role_changed
 user.invited
 export.generated
+```
+
+Platform lifecycle events (v0.4) are audited through the same append-only
+service:
+
+```text
+platform.bootstrap_granted
+organisation.created
+organisation.updated
+invitation.sent
+invitation.accepted
+invitation.revoked
+membership.role_changed
+membership.suspended
+membership.reactivated
+membership.removed
+feature_flag.changed
 ```
 
 Audit events are append-only from the application's point of view.
@@ -1571,6 +1625,12 @@ Do not test every visual detail through Playwright.
 - invalid webhook signatures rejected;
 - stack traces not exposed.
 
+Platform routes (v0.4) join the same `PROTECTED_ROUTES` matrix and add a
+**cross-plane** case: an organisation `owner` without a platform membership is
+rejected on platform routes (`403 platform_admin_required`), and a platform
+admin without an organisation membership is rejected on organisation routes
+(`403 not_a_member`). The two planes never grant across each other.
+
 ---
 
 # 32. Developer Tooling
@@ -1667,6 +1727,13 @@ docs/decisions/
 - infrastructure changes;
 - backup and recovery changes;
 - major dependency additions.
+
+The v0.4 platform plane (ADR-0013) touches authentication (bootstrap,
+webhooks), the permission model (a second authorisation plane), tenant
+isolation (cross-tenant platform routes) and secret handling (WorkOS org
+mapping and webhook secret); all such work units are reviewed through the
+implement → review → apply-and-commit loop with the review recorded per
+`CONTRIBUTING.md` before it is applied.
 
 ---
 

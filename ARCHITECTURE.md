@@ -30,7 +30,7 @@ backend/app/
 ├── core/                config, exceptions, logging, security, feature flags
 ├── db/                  declarative base, session, conventions, migrations
 ├── modules/             domain modules (users, organisations, teams, ...)
-├── integrations/        provider adapters
+├── integrations/        provider adapters (workos: organizations, invitations)
 ├── storage/             provider-neutral storage interface + adapters
 ├── email/               email interface + adapters
 ├── events/              domain events / outbox
@@ -38,7 +38,7 @@ backend/app/
 └── observability/       logging, tracing, metrics
 ```
 
-Each domain module normally uses: `models.py`, `schemas.py`, `router.py`, `service.py`, `queries.py` (optional), `permissions.py`, `tests/`. A mandatory repository class is not part of the architecture.
+Each domain module normally uses: `models.py`, `schemas.py`, `router.py`, `service.py`, `queries.py` (optional), `permissions.py`, `tests/`. A mandatory repository class is not part of the architecture. The platform plane lives in `modules/platform_admin` (organisation/membership administration), `modules/invitations`, `modules/feature_flags`, `modules/audit` and `modules/webhooks`, all gated by `require_platform_permission` in `api/dependencies.py`.
 
 ## Request flow
 
@@ -98,6 +98,63 @@ the caller's organisation behave as not found (404)
 - The organisation id is always derived from the validated header context, never from a request body; request schemas use `extra="forbid"` so identity fields cannot be smuggled in.
 - The security properties of this flow are enforced by the mandatory reusable security suite in `backend/tests/test_security_suite.py` (blueprint §31), which parametrises over the whole protected surface.
 
+## Platform plane and request flow (v0.4)
+
+The platform administration plane is a second, orthogonal authorisation plane (ADR-0013, blueprint §9). It exists to administer organisations, memberships, invitations, feature flags and audit history across tenants without ever bypassing the organisation permission system.
+
+```text
+Authorization: Bearer <session-token>
+        │
+        ▼
+validate RS256 signature, exact configured issuer, client binding,
+and required exp / iat / iss / sub / sid claims      → 401 invalid_session
+        │
+        ▼
+map workos_user_id to internal user (provision on first login;
+bootstrap hook may grant platform_admin for the configured email)
+        │   (email/name/email_verified from the WorkOS profile, never the client)
+        │
+        ▼
+user disabled?                                         → 403 user_disabled
+        │
+        ▼
+require_platform_permission("platform.admin"): active platform membership
+whose role bundles grant the code? (default deny; no X-Org-Id consulted)
+                                                        → 403 platform_admin_required
+        │
+        ▼
+service call — platform routes operate across organisations
+(organisation id comes from the path, never a request body)
+```
+
+- Platform routes live under `/api/v1/platform/*` and take no `X-Org-Id` header: the caller acts as a platform administrator, not as a member of the organisation they administer.
+- The two planes never grant across each other: an organisation `owner` without a platform membership gets `403 platform_admin_required` on platform routes, and a platform admin without an organisation membership gets `403 not_a_member` on organisation routes. No `is_admin`/superuser boolean exists anywhere.
+- `GET /api/v1/me` returns `platform_roles` (empty for non-admins); the frontend uses it only for UI gating — the backend remains the enforcement point.
+- Every platform mutation is audited through the append-only `record_event` service (`platform.bootstrap_granted`, `organisation.created`, `invitation.sent`, `membership.role_changed`, `feature_flag.changed`, ...).
+
+## Invitation flow (v0.4)
+
+The WorkOS Invitation API is the standard onboarding path; WorkOS owns invitation delivery and expiry, the application owns the membership grant.
+
+```text
+Platform admin invites → POST /api/v1/platform/organisations/{id}/invitations
+        │   validates platform.admin, ensures/lazily backfills the WorkOS org
+        │   mapping, calls the WorkOS Invitation API through the adapter
+        ▼
+invitations row (status=sent, expiry, workos_invitation_id) + audit invitation.sent
+        │   — no membership row exists yet
+        ▼
+Invitee accepts and signs in → get_current_user provisioning chain
+        │   links invitation by authenticated (verified) WorkOS email
+        ▼
+link_invitation_on_login: active membership with the intended role,
+invitation marked accepted, audit invitation.accepted + membership.role_changed
+```
+
+- Acceptance is authoritative and happens at login time: revoked or expired invitations never grant, an email mismatch never grants, and a login without any webhook delivery still links the invitation.
+- `POST /api/v1/webhooks/workos` (signature-verified, HMAC-SHA256, 300s tolerance) refreshes best-effort invitation state only; it never grants membership.
+- WorkOS invitations are sent into the mapped WorkOS org; `organisations.workos_organisation_id` is created eagerly at platform org creation and lazily backfilled at first invite. The mapping is never client-writable.
+
 ## Frontend structure
 
 Vue 3 + TypeScript SPA. Directory layout, conventions, and state-management split follow blueprint §14; UI follows the design system in blueprint §16 (reusable application components above shadcn-vue primitives). API types are generated, never hand-written (blueprint §15).
@@ -108,11 +165,15 @@ frontend/src/
 ├── queries/             TanStack Query composables — the only place HTTP happens
 ├── stores/              Pinia client state (session, ui, organisation)
 ├── features/            feature modules; auth/ is the WorkOS adapter seam
-├── router/              routes + requiresAuth guard
+├── router/              routes + requiresAuth + requiresPlatformAdmin guards
 ├── layouts/             application shell (sidebar, header, user menu)
 ├── components/          reusable application components (DataTable, forms, ...)
-└── views/               route-level screens (login, callback, records, ...)
+└── views/               route-level screens (login, callback, records, Platform*View.vue)
 ```
+
+### Platform Admin Centre (v0.4)
+
+The `/platform` route section (dashboard, organisations, org detail with memberships/invitations/feature flags, invite form, feature-flag catalogue, audit view) is served by `Platform*View.vue` screens gated by a `requiresPlatformAdmin` router guard that reads `platform_roles` from `GET /api/v1/me`; the `SidebarNav` entry appears only for platform admins. This is UI awareness only — every platform endpoint is enforced server-side by `require_platform_permission`. Platform queries live in `src/queries/platform.ts` keyed `['platform', ...]` as cross-org server state.
 
 ### Frontend auth flow (v0.3)
 
