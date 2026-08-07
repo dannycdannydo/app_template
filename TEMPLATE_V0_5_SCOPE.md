@@ -154,11 +154,11 @@ Depends on §6.1 and §6.2 (storage), §6.1's audit foundation from v0.4 (audit 
 
 Depends on Redis (already in the stack) and the v0.4 audit service. Independent of §6.1–§6.3, sequenced here so §6.5 can unify files and jobs.
 
-- [ ] `dramatiq` dependency (redis broker on `REDIS_URL`); `app/workers.py` entrypoint importing all task modules; broker/worker configuration (concurrency from settings, structured logging context)
-- [ ] `jobs` table (BP §18 shape: id, organisation_id, job_type, status queued/running/succeeded/failed/cancelled, progress, input_reference, result_reference, error_code, error_message, attempt_count, created_by_user_id, created_at, started_at, completed_at) via Alembic migration; `modules/jobs/` models/service/schemas
-- [ ] Job service: `create_and_enqueue(organisation_id, job_type, input_reference, actor_user_id)` writes the durable row first, then enqueues; `mark_running` / `update_progress` / `succeed` / `fail(error_code, error_message)` helpers used by tasks; `MAX_ATTEMPTS` bounded retry policy (transient retried, permanent not)
-- [ ] CI infrastructure (human review required, BP §33): `redis` service added to the backend-test job so the durable-jobs integration test runs against a real broker; worker image covered by the existing container-build/scan matrix (backend image already carries the worker command)
-- [ ] Tests: job-record lifecycle (queued → running → succeeded, failure records error_code/error_message, attempt_count, terminal states), retry policy, idempotent `succeed`, audit row written on job completion/failure
+- [x] `dramatiq` dependency (redis broker on `REDIS_URL`); `app/workers.py` entrypoint importing all task modules; broker/worker configuration (concurrency from settings, structured logging context)
+- [x] `jobs` table (BP §18 shape: id, organisation_id, job_type, status queued/running/succeeded/failed/cancelled, progress, input_reference, result_reference, error_code, error_message, attempt_count, created_by_user_id, created_at, started_at, completed_at) via Alembic migration; `modules/jobs/` models/service/schemas
+- [x] Job service: `create_and_enqueue(organisation_id, job_type, input_reference, actor_user_id)` writes the durable row first, then enqueues; `mark_running` / `update_progress` / `succeed` / `fail(error_code, error_message)` helpers used by tasks; `MAX_ATTEMPTS` bounded retry policy (transient retried, permanent not)
+- [x] CI infrastructure (human review required, BP §33): `redis` service added to the backend-test job so the durable-jobs integration test runs against a real broker; worker image covered by the existing container-build/scan matrix (backend image already carries the worker command)
+- [x] Tests: job-record lifecycle (queued → running → succeeded, failure records error_code/error_message, attempt_count, terminal states), retry policy, idempotent `succeed`, audit row written on job completion/failure
 
 ## 6.5 File Processing Job and Job Progress Polling
 

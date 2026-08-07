@@ -79,6 +79,14 @@ ACTION_FILE_UPLOADED = "file.uploaded"
 ACTION_FILE_UPLOAD_FAILED = "file.upload_failed"
 ACTION_FILE_DELETED = "document.deleted"
 
+# Durable job lifecycle (Scope §6.4, blueprint §18): ``job.succeeded`` on
+# completion, ``job.failed`` on permanent failure or when transient retries
+# are exhausted. Both are written inside the worker-side service helpers
+# (``succeed`` / ``fail``) in the same transaction as the status transition.
+# Resource type is ``job`` for both; the actor is the job's requester.
+ACTION_JOB_SUCCEEDED = "job.succeeded"
+ACTION_JOB_FAILED = "job.failed"
+
 
 async def record_event(
     session: AsyncSession,
