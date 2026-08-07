@@ -123,10 +123,7 @@ class WorkOSUserManagementClient:
             code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
             raise ExternalServiceError(
                 code="workos_user_delete_failed",
-                message=(
-                    "The WorkOS user could not be deleted. "
-                    f"WorkOS error: {code}."
-                ),
+                message=(f"The WorkOS user could not be deleted. WorkOS error: {code}."),
             ) from exc
 
 
