@@ -69,6 +69,16 @@ ACTION_FEATURE_FLAG_CHANGED = "feature_flag.changed"
 # deactivation was system-driven, not admin-initiated.
 ACTION_USER_DEACTIVATED = "user.deactivated"
 
+# File lifecycle (Scope §6.3, blueprint §29 examples ``document.deleted``):
+# ``file.upload_started`` at intent time, ``file.uploaded`` after the stored
+# object is verified, ``file.upload_failed`` when verification rejects the
+# upload, and ``document.deleted`` (the blueprint's own example action) on soft
+# delete. Resource type is ``file`` for all four.
+ACTION_FILE_UPLOAD_STARTED = "file.upload_started"
+ACTION_FILE_UPLOADED = "file.uploaded"
+ACTION_FILE_UPLOAD_FAILED = "file.upload_failed"
+ACTION_FILE_DELETED = "document.deleted"
+
 
 async def record_event(
     session: AsyncSession,

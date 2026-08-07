@@ -25,6 +25,7 @@ class Base(DeclarativeBase):
 # at the top of this file: every model subclasses Base.
 import app.modules.audit.models  # pyright: ignore[reportUnusedImport]
 import app.modules.feature_flags.models  # pyright: ignore[reportUnusedImport]
+import app.modules.files.models  # pyright: ignore[reportUnusedImport]
 import app.modules.invitations.models  # pyright: ignore[reportUnusedImport]
 import app.modules.organisations.models  # pyright: ignore[reportUnusedImport]
 import app.modules.permissions.models  # pyright: ignore[reportUnusedImport]
