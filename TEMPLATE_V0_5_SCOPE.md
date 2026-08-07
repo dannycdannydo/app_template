@@ -135,10 +135,10 @@ The foundation for the whole release (ADR-0006). No provider SDK outside `app/st
 
 Depends on §6.1 (interface). Makes the storage real, locally.
 
-- [ ] `S3Storage` adapter (boto3): signed PUT/GET URLs (presign host = `storage_public_endpoint_url`), `head_object`, `delete_object`, `ensure_bucket`; SDK import confined to the adapter
-- [ ] `minio` service in `deploy/compose/compose.local.yml` (infra set, so `make dev` starts it) + fullstack profile; dev defaults `minioadmin`/`minioadmin`, published `9000:9000`, volume; `STORAGE_*` dev defaults documented in `.env.example`
-- [ ] Worker wiring: `make worker` target (`uv run dramatiq app.workers`); `make dev` starts Postgres + Redis + MinIO and the API + frontend + worker natively; `dev-docker` fullstack profile gains a `worker` service (same backend image, `dramatiq app.workers` command, BP §36)
-- [ ] Tests: S3 adapter against MinIO (`pytest -m storage_integration` or dedicated marker, MinIO via compose or CI service); private-bucket proof (unsigned GET → 403); fake adapter used by the default suite
+- [x] `S3Storage` adapter (boto3): signed PUT/GET URLs (presign host = `storage_public_endpoint_url`), `head_object`, `delete_object`, `ensure_bucket`; SDK import confined to the adapter
+- [x] `minio` service in `deploy/compose/compose.local.yml` (infra set, so `make dev` starts it) + fullstack profile; dev defaults `minioadmin`/`minioadmin`, published `9000:9000`, volume; `STORAGE_*` dev defaults documented in `.env.example`
+- [x] Worker wiring: `make worker` target (`uv run dramatiq app.workers`); `make dev` starts Postgres + Redis + MinIO and the API + frontend + worker natively; `dev-docker` fullstack profile gains a `worker` service (same backend image, `dramatiq app.workers` command, BP §36)
+- [x] Tests: S3 adapter against MinIO (`pytest -m storage_integration` or dedicated marker, MinIO via compose or CI service); private-bucket proof (unsigned GET → 403); fake adapter used by the default suite
 
 ## 6.3 File Metadata Records and Files API
 

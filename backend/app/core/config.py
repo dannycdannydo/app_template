@@ -143,6 +143,14 @@ class Settings(BaseSettings):
         ],
         description="Content types accepted for uploads (blueprint §30)",
     )
+    worker_concurrency: int = Field(
+        default=8,
+        description=(
+            "Dramatiq worker threads per process (blueprint §18: worker "
+            "concurrency must be configurable); passed to the worker CLI by "
+            "`make worker` and the dev-docker worker service"
+        ),
+    )
 
     @field_validator("cors_allowed_origins")
     @classmethod
@@ -184,6 +192,13 @@ class Settings(BaseSettings):
         if any("/" not in value or " " in value for value in content_types):
             raise ValueError("storage_allowed_content_types must contain valid MIME types")
         return content_types
+
+    @field_validator("worker_concurrency")
+    @classmethod
+    def _validate_worker_concurrency(cls, concurrency: int) -> int:
+        if concurrency < 1:
+            raise ValueError("worker_concurrency must be at least 1")
+        return concurrency
 
     @field_validator("bootstrap_platform_admin_email")
     @classmethod

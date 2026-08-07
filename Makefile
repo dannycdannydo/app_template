@@ -1,9 +1,10 @@
 # Root Makefile — v0.1 command surface (blueprint §32, Scope §4).
 #
 # Two dev entry points per ADR-0008: native app code with containerised
-# infrastructure (`make dev`) and the full-container path for CI parity and
-# onboarding (`make dev-docker`). `make check` is the complete local quality
-# gate (lint + typecheck + test + generated-client drift).
+# infrastructure (`make dev`, including the Dramatiq worker natively) and the
+# full-container path for CI parity and onboarding (`make dev-docker`).
+# `make check` is the complete local quality gate (lint + typecheck + test +
+# generated-client drift).
 #
 # Native backend commands load the repo-root `.env` by sourcing it in the
 # recipe shell (see `load_env`), which parses dotenv syntax correctly (inline
@@ -27,17 +28,18 @@ define load_env
 	set -a; [ -f .env ] && . ./.env; set +a;
 endef
 
-.PHONY: dev dev-docker migrate provision-admin provision-admin-delete lint typecheck test e2e format generate-client check
+.PHONY: dev dev-docker worker migrate provision-admin provision-admin-delete lint typecheck test e2e format generate-client check
 
-## Start PostgreSQL + Redis in Docker, then run the API and frontend natively
-## with live reload (ADR-0008). Infra stays up after Ctrl-C so `make migrate`
-## and repeat `make dev` runs keep working; stop it with
-## `docker compose -f deploy/compose/compose.local.yml down`.
+## Start PostgreSQL + Redis + MinIO in Docker, then run the API, the Dramatiq
+## worker and the frontend natively with live reload (ADR-0008). Infra stays
+## up after Ctrl-C so `make migrate` and repeat `make dev` runs keep working;
+## stop it with `docker compose -f deploy/compose/compose.local.yml down`.
 dev:
-	$(COMPOSE_CMD) up -d --wait postgres redis
+	$(COMPOSE_CMD) up -d --wait postgres redis minio
 	$(MAKE) migrate
-	@echo "API on http://localhost:8000 (live reload), frontend on http://localhost:5173. Ctrl-C stops the apps; Postgres/Redis stay up."
+	@echo "API on http://localhost:8000 (live reload), worker native, frontend on http://localhost:5173, MinIO console on http://localhost:9001. Ctrl-C stops the apps; Postgres/Redis/MinIO stay up."
 	@$(load_env) (cd backend && uv run uvicorn app.main:app --reload --port 8000) & \
+	(cd backend && uv run dramatiq app.workers --threads $${WORKER_CONCURRENCY:-8}) & \
 	(cd frontend && pnpm dev) & \
 	wait
 
@@ -49,6 +51,11 @@ dev-docker:
 ## Apply Alembic migrations to the database in DATABASE_URL.
 migrate:
 	@$(load_env) cd backend && uv run alembic upgrade head
+
+## Run the Dramatiq worker natively (blueprint §36, ADR-0004, Scope §6.2).
+## Concurrency comes from WORKER_CONCURRENCY in the repo-root .env (default 8).
+worker:
+	@$(load_env) cd backend && uv run dramatiq app.workers --threads $${WORKER_CONCURRENCY:-8}
 
 ## Create the bootstrap platform admin in WorkOS (email + password; idempotent).
 ## Reads BOOTSTRAP_PLATFORM_ADMIN_EMAIL / BOOTSTRAP_PLATFORM_ADMIN_PASSWORD from

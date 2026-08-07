@@ -1,10 +1,10 @@
 # Local development Compose file (blueprint §36, ADR-0008).
 #
-# The default service set is infrastructure only: PostgreSQL and Redis, which
-# the host-native applications connect to under `make dev`. The `fullstack`
-# profile adds the API and frontend containers for `make dev-docker` (CI
-# parity, onboarding, Dockerfile validation), so one file serves both commands
-# without adding a fourth Compose file.
+# The default service set is infrastructure only: PostgreSQL, Redis and MinIO,
+# which the host-native applications connect to under `make dev`. The
+# `fullstack` profile adds the API, worker and frontend containers for
+# `make dev-docker` (CI parity, onboarding, Dockerfile validation), so one
+# file serves both commands without adding a fourth Compose file.
 
 name: app-template
 
@@ -40,6 +40,30 @@ services:
       timeout: 3s
       retries: 10
 
+  # S3-compatible object storage for local development (Scope §6.2, ADR-0006).
+  # Private bucket model: the API issues short-lived signed URLs and the
+  # browser uploads/downloads directly; nothing here is ever public. The S3
+  # API is published on MINIO_PORT (9000) and the admin console on
+  # MINIO_CONSOLE_PORT (9001). The dev defaults below match the STORAGE_*
+  # defaults in `.env.example` (minioadmin/minioadmin).
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
   # Full-container path (`make dev-docker`): the same image that serves CI and
   # production profiles. Migrations run on container start so a fresh clone
   # works with a single command; the host-native `make migrate` targets the
@@ -53,6 +77,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      minio:
+        condition: service_healthy
     environment:
       APP_ENV: development
       DEBUG: "true"
@@ -65,6 +91,18 @@ services:
       WORKOS_JWT_LEEWAY: ${WORKOS_JWT_LEEWAY:-30}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-["http://localhost:5173"]}
       TRUSTED_HOSTS: ${TRUSTED_HOSTS:-["localhost","127.0.0.1","test"]}
+      # In the container stack the API reaches MinIO on the compose network
+      # (minio:9000), while the browser pre-signs against the published port
+      # (localhost:9000) via STORAGE_PUBLIC_ENDPOINT_URL.
+      STORAGE_PROVIDER: ${STORAGE_PROVIDER:-s3}
+      STORAGE_BUCKET: ${STORAGE_BUCKET:-app-files}
+      STORAGE_ENDPOINT_URL: ${STORAGE_ENDPOINT_URL:-http://minio:9000}
+      STORAGE_PUBLIC_ENDPOINT_URL: ${STORAGE_PUBLIC_ENDPOINT_URL:-http://localhost:9000}
+      STORAGE_REGION: ${STORAGE_REGION:-us-east-1}
+      STORAGE_ACCESS_KEY_ID: ${STORAGE_ACCESS_KEY_ID:-minioadmin}
+      STORAGE_SECRET_ACCESS_KEY: ${STORAGE_SECRET_ACCESS_KEY:-minioadmin}
+      STORAGE_MAX_UPLOAD_SIZE: ${STORAGE_MAX_UPLOAD_SIZE:-26214400}
+      STORAGE_ALLOWED_CONTENT_TYPES: ${STORAGE_ALLOWED_CONTENT_TYPES:-'["application/pdf","application/json","text/plain","text/csv","image/png","image/jpeg"]'}
     ports:
       - "8000:8000"
     command: >
@@ -83,6 +121,37 @@ services:
       retries: 5
       start_period: 10s
 
+  # Dramatiq worker (Scope §6.2, blueprint §36): the same backend image with
+  # a different runtime command. It shares the API's database, Redis broker
+  # and storage configuration; the worker will read and write durable job
+  # records once the job service lands (Scope §6.4).
+  worker:
+    profiles: ["fullstack"]
+    build:
+      context: ../../backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      APP_ENV: development
+      DEBUG: "true"
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/${POSTGRES_DB:-app}
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_PROVIDER: ${STORAGE_PROVIDER:-s3}
+      STORAGE_BUCKET: ${STORAGE_BUCKET:-app-files}
+      STORAGE_ENDPOINT_URL: ${STORAGE_ENDPOINT_URL:-http://minio:9000}
+      STORAGE_PUBLIC_ENDPOINT_URL: ${STORAGE_PUBLIC_ENDPOINT_URL:-http://localhost:9000}
+      STORAGE_REGION: ${STORAGE_REGION:-us-east-1}
+      STORAGE_ACCESS_KEY_ID: ${STORAGE_ACCESS_KEY_ID:-minioadmin}
+      STORAGE_SECRET_ACCESS_KEY: ${STORAGE_SECRET_ACCESS_KEY:-minioadmin}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-8}
+    command: >
+      sh -c "dramatiq app.workers --threads $${WORKER_CONCURRENCY:-8}"
+
   frontend:
     profiles: ["fullstack"]
     build:
@@ -99,3 +168,4 @@ services:
 
 volumes:
   postgres_data:
+  minio_data:

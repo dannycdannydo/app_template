@@ -219,6 +219,23 @@ def test_storage_defaults_are_s3_with_dev_sensible_limits() -> None:
     assert settings.storage_region == ""
     assert settings.storage_max_upload_size == 25 * 1024 * 1024
     assert "application/pdf" in settings.storage_allowed_content_types
+    assert settings.worker_concurrency == 8
+
+
+def test_worker_concurrency_must_be_at_least_one() -> None:
+    """Scope §6.2: blueprint §18 worker concurrency is configurable and sane."""
+    settings = Settings(
+        app_env="development",
+        database_url="postgresql+asyncpg://x",
+        worker_concurrency=4,
+    )
+    assert settings.worker_concurrency == 4
+    with pytest.raises(ValidationError, match="worker_concurrency"):
+        Settings(
+            app_env="development",
+            database_url="postgresql+asyncpg://x",
+            worker_concurrency=0,
+        )
 
 
 def test_storage_public_endpoint_defaults_to_endpoint() -> None:
