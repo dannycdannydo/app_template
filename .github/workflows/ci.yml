@@ -99,6 +99,20 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
+      # Durable-jobs integration tests (Scope §6.4, blueprint §18): the job
+      # lifecycle and retry policy run against a real broker here, the same
+      # Redis every environment uses. The tests probe localhost:6379 and skip
+      # when the service is missing, so local `make test` without Redis stays
+      # green.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     # conftest.py falls back to this same URL, so a PostgreSQL service turns
     # the migration smoke test into a real upgrade/downgrade run.
     env:
