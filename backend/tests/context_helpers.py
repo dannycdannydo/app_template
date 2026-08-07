@@ -41,6 +41,7 @@ from app.integrations.workos.organizations import (
 )
 from app.main import create_app
 from app.modules.audit.models import AuditEvent
+from app.modules.feature_flags.models import OrganisationFeature
 from app.modules.invitations.models import Invitation, InvitationStatus
 from app.modules.organisations.models import (
     MembershipStatus,
@@ -79,6 +80,9 @@ class ContextState:
     # service returns these and the service's own status/email/expiry guards
     # decide which can grant.
     invitations: list[Invitation] = field(default_factory=list[Invitation])
+    # Feature flags (Scope §6.7): the organisation override rows staged or
+    # created by the fake session; the enforcement helper answers from here.
+    feature_flags: list[OrganisationFeature] = field(default_factory=list[OrganisationFeature])
     owner_role: Role | None = None
     # Platform plane (Scope §6.2/§6.4): seeded platform roles, the memberships
     # granted by the bootstrap hook, and the single bootstrap record when the
@@ -237,6 +241,26 @@ def make_invitation(
     return invitation
 
 
+def make_organisation_feature(
+    organisation_id: uuid.UUID,
+    *,
+    feature_key: str = "records.deletion",
+    enabled: bool = True,
+    configuration_json: dict[str, Any] | None = None,
+) -> OrganisationFeature:
+    """Build a standalone feature-flag override row for the request-flow tests."""
+    feature = OrganisationFeature(
+        organisation_id=organisation_id,
+        feature_key=feature_key,
+        enabled=enabled,
+        configuration_json=configuration_json or {},
+    )
+    feature.id = uuid.uuid4()
+    feature.created_at = datetime.now(UTC)
+    feature.updated_at = datetime.now(UTC)
+    return feature
+
+
 class _ScalarsResult:
     """Stand-in for an async ``ScalarResult``: carries rows and exposes .all()."""
 
@@ -253,6 +277,9 @@ class FakeSession:
     def __init__(self, state: ContextState) -> None:
         self._state = state
         self._added: list[Any] = []
+        # Mirrors AsyncSession.info so the feature-flag helper's per-session
+        # memo (core/feature_flags.py) works against the fake.
+        self.info: dict[Any, Any] = {}
         # Status of every staged invitation after the last successful commit;
         # a simulated lost race restores from this, like a database rollback
         # would (the losing transaction's status flips never persisted).
@@ -294,6 +321,13 @@ class FakeSession:
             return _ScalarsResult(list(self._state.membership_roles))
         if entity is Role:
             return _ScalarsResult(list(self._state.roles))
+        if entity is OrganisationFeature:
+            # Scope §6.7: the feature-flag queries answer from the staged
+            # overrides; the enforcement helper and the management service
+            # re-filter in Python because the WHERE clauses are not applied
+            # here (they are proven by the query-construction and
+            # real-database tests).
+            return _ScalarsResult(list(self._state.feature_flags))
         if entity is Record:
             return _ScalarsResult(list(self._state.records))
         if entity is AuditEvent:
@@ -358,6 +392,10 @@ class FakeSession:
                     self._state.audit_events.append(obj)
             elif isinstance(obj, Invitation):
                 self._state.invitations.append(obj)
+            elif isinstance(obj, OrganisationFeature):
+                # Updates reuse the staged instance, so never append twice.
+                if all(existing is not obj for existing in self._state.feature_flags):
+                    self._state.feature_flags.append(obj)
             elif isinstance(obj, PlatformRole):
                 self._state.platform_roles.append(obj)
             elif isinstance(obj, PlatformMembership):

@@ -14,7 +14,8 @@ import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import NotFoundError
+from app.core.exceptions import NotFoundError, PermissionDenied
+from app.core.feature_flags import FEATURE_RECORDS_DELETION, is_feature_enabled
 from app.modules.audit.service import (
     ACTION_RECORD_CREATED,
     ACTION_RECORD_DELETED,
@@ -149,8 +150,26 @@ async def delete_record(
     record_id: uuid.UUID,
     actor_user_id: uuid.UUID | None = None,
 ) -> None:
-    """Delete a record; a record outside the organisation is a 404."""
+    """Delete a record; a record outside the organisation is a 404.
+
+    Deletion is gated by the platform-controlled ``records.deletion`` feature
+    flag (Scope §6.7, blueprint §27): it is off by default, so an organisation
+    keeps the destructive operation unavailable until a platform administrator
+    enables it. The flag is enforced here in the service, never in a router,
+    and the permission check runs first — a caller without ``records.delete``
+    is still denied by the route's permission dependency, and a missing or
+    cross-organisation record is still a 404 before the flag is consulted.
+    """
     record = await get_record(session, organisation_id=organisation_id, record_id=record_id)
+    if not await is_feature_enabled(
+        session,
+        organisation_id=organisation_id,
+        feature_key=FEATURE_RECORDS_DELETION,
+    ):
+        raise PermissionDenied(
+            code="feature_disabled",
+            message="Record deletion is not enabled for this organisation.",
+        )
     await session.delete(record)
     await record_event(
         session,

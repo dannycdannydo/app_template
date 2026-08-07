@@ -175,10 +175,10 @@ Depends on §6.5 (memberships created at acceptance). Completes the platform adm
 
 Depends on §6.2 (platform gate). Platform-controlled organisation flags (blueprint §27).
 
-- [ ] `organisation_features` table (organisation_id, feature_key, enabled, configuration_json, unique pair) via Alembic migration
-- [ ] `core/feature_flags.py` enforcement helper (`is_feature_enabled`, default off, cache-friendly); used by services, not routers
-- [ ] Platform endpoints: `GET /api/v1/platform/feature-flags` (catalogue + org overrides), `PUT /api/v1/platform/feature-flags/{feature_key}` — audited
-- [ ] Tests: default-off enforcement, org isolation, platform gating
+- [x] `organisation_features` table (organisation_id, feature_key, enabled, configuration_json, unique pair) via Alembic migration
+- [x] `core/feature_flags.py` enforcement helper (`is_feature_enabled`, default off, cache-friendly); used by services, not routers
+- [x] Platform endpoints: `GET /api/v1/platform/feature-flags` (catalogue + org overrides), `PUT /api/v1/platform/feature-flags/{feature_key}` — audited
+- [x] Tests: default-off enforcement, org isolation, platform gating
 
 ## 6.8 WorkOS Webhooks
 

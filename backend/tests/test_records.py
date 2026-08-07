@@ -23,6 +23,7 @@ from tests.context_helpers import (
     build_context_app_fixture,
     context_client,
     make_membership,
+    make_organisation_feature,
     make_record,
     make_user,
 )
@@ -312,6 +313,10 @@ async def test_delete_record_removes_it(context_app: ContextApp) -> None:
     membership = make_membership(user, org_id)
     record = make_record(org_id)
     state.records = [record]
+    # Deletion is gated by the platform-controlled records.deletion flag
+    # (Scope §6.7); the override row makes the test organisation able to
+    # delete records.
+    state.feature_flags = [make_organisation_feature(org_id)]
     state.lookup_queue = [user, membership, record]
     state.granted_permissions = {"records.read", "records.delete"}
 
