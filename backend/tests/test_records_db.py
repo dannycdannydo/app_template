@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import NullPool
 
 from app.core.exceptions import NotFoundError
+from app.modules.feature_flags.models import OrganisationFeature
 from app.modules.organisations.models import Organisation
 from app.modules.records import service
 from app.modules.records.models import Record
@@ -94,6 +95,17 @@ async def test_records_crud_within_org(migrated_database: str) -> None:
             organisation, record = await _create_org_and_record(
                 session, org_name="Records CRUD Ltd", title="First"
             )
+            # Deletion is gated by the records.deletion feature flag
+            # (Scope §6.7); enable it for this organisation so the CRUD
+            # round-trip can reach the delete path.
+            session.add(
+                OrganisationFeature(
+                    organisation_id=organisation.id,
+                    feature_key="records.deletion",
+                    enabled=True,
+                )
+            )
+            await session.commit()
 
             fetched = await service.get_record(
                 session,

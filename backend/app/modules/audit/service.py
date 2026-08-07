@@ -54,6 +54,12 @@ ACTION_MEMBERSHIP_SUSPENDED = "membership.suspended"
 ACTION_MEMBERSHIP_REACTIVATED = "membership.reactivated"
 ACTION_MEMBERSHIP_REMOVED = "membership.removed"
 
+# Feature-flag management (Scope §6.7, blueprint §29 / design plan §3.2):
+# written whenever a platform administrator sets an organisation's override
+# for a known flag, with the feature key, organisation and new state in the
+# metadata.
+ACTION_FEATURE_FLAG_CHANGED = "feature_flag.changed"
+
 
 async def record_event(
     session: AsyncSession,

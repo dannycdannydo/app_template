@@ -54,6 +54,7 @@ _RECORD_ID = str(uuid.uuid4())
 _ORG_ID = str(uuid.uuid4())
 _INVITATION_ID = str(uuid.uuid4())
 _MEMBERSHIP_ID = str(uuid.uuid4())
+_FEATURE_FLAG_ORG_ID = str(uuid.uuid4())
 
 _PRIVATE_KEY, _ = generate_key_pair()
 _OTHER_KEY, _ = generate_key_pair()
@@ -188,6 +189,17 @@ PROTECTED_ROUTES: list[RouteSpec] = [
         "/api/v1/platform/organisations/{organisation_id}/memberships/{membership_id}",
         org_scoped=False,
         path_values={"organisation_id": _ORG_ID, "membership_id": _MEMBERSHIP_ID},
+    ),
+    # Feature flags (Scope §6.7): platform-gated, never org-scoped; the
+    # feature key comes from the path and the organisation id from the PUT body
+    # (the platform plane has no X-Org-Id).
+    _route("GET", "/api/v1/platform/feature-flags", org_scoped=False),
+    _route(
+        "PUT",
+        "/api/v1/platform/feature-flags/{feature_key}",
+        org_scoped=False,
+        request_body={"organisation_id": _FEATURE_FLAG_ORG_ID, "enabled": True},
+        path_values={"feature_key": "records.deletion"},
     ),
 ]
 

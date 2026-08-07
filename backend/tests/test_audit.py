@@ -25,6 +25,7 @@ from tests.context_helpers import (
     build_context_app_fixture,
     context_client,
     make_audit_event,
+    make_organisation_feature,
     make_user,
 )
 
@@ -395,6 +396,9 @@ async def test_record_mutations_write_audit_events() -> None:
     session: AsyncSession = cast(AsyncSession, FakeSession(state))
     org_id = uuid.uuid4()
     actor_id = uuid.uuid4()
+    # Deletion is gated by the records.deletion feature flag (Scope §6.7);
+    # the override row lets this flow exercise the delete path.
+    state.feature_flags = [make_organisation_feature(org_id)]
 
     record = await records_service.create_record(
         session,

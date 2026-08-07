@@ -332,6 +332,50 @@ export interface paths {
     patch?: never
     trace?: never
   }
+  '/api/v1/platform/feature-flags': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /**
+     * List Feature Flags Endpoint
+     * @description List the feature-flag catalogue, optionally merged with one org's overrides.
+     *
+     *     Without ``organisation_id`` every flag is shown at its catalogue default;
+     *     with one, each entry carries the organisation's effective state. The
+     *     caller must be a platform administrator (Scope §6.2).
+     */
+    get: operations['list_feature_flags_endpoint_api_v1_platform_feature_flags_get']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/api/v1/platform/feature-flags/{feature_key}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    /**
+     * Set Feature Flag Endpoint
+     * @description Set an organisation's override for one feature flag (audited).
+     */
+    put: operations['set_feature_flag_endpoint_api_v1_platform_feature_flags__feature_key__put']
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
 }
 export type webhooks = Record<string, never>
 export interface components {
@@ -581,6 +625,63 @@ export interface components {
        * Format: date-time
        */
       updated_at: string
+    }
+    /**
+     * PlatformFeatureFlagItem
+     * @description One catalogue entry with its optional per-organisation override state.
+     *
+     *     ``enabled`` is always the *effective* state (override value, or the
+     *     catalogue default when the organisation has no override row);
+     *     ``overridden`` tells the admin centre whether an explicit override exists
+     *     (so the UI can show "using default" vs "explicitly set").
+     */
+    PlatformFeatureFlagItem: {
+      /** Feature Key */
+      feature_key: string
+      /** Name */
+      name: string
+      /** Description */
+      description: string
+      /** Default Enabled */
+      default_enabled: boolean
+      /** Enabled */
+      enabled: boolean
+      /** Overridden */
+      overridden: boolean
+      /** Configuration Json */
+      configuration_json?: {
+        [key: string]: unknown
+      } | null
+    }
+    /**
+     * PlatformFeatureFlagListResponse
+     * @description The envelope for the catalogue listing (optionally org-filtered).
+     */
+    PlatformFeatureFlagListResponse: {
+      /** Items */
+      items: components['schemas']['PlatformFeatureFlagItem'][]
+    }
+    /**
+     * PlatformFeatureFlagUpdate
+     * @description Request payload for setting one organisation's override for a flag.
+     *
+     *     ``enabled`` is the effective switch; ``configuration_json`` is optional
+     *     per-flag configuration that is opaque to the enforcement helper. Writing
+     *     the row with ``enabled=false`` is how an override is turned off — the
+     *     helper still consults the row and the audit trail keeps the change.
+     */
+    PlatformFeatureFlagUpdate: {
+      /**
+       * Organisation Id
+       * Format: uuid
+       */
+      organisation_id: string
+      /** Enabled */
+      enabled: boolean
+      /** Configuration Json */
+      configuration_json?: {
+        [key: string]: unknown
+      } | null
     }
     /**
      * PlatformMembershipListItem
@@ -1460,6 +1561,76 @@ export interface operations {
         }
         content: {
           'application/json': components['schemas']['InvitationListItem']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  list_feature_flags_endpoint_api_v1_platform_feature_flags_get: {
+    parameters: {
+      query?: {
+        organisation_id?: string | null
+      }
+      header?: {
+        authorization?: string | null
+      }
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['PlatformFeatureFlagListResponse']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  set_feature_flag_endpoint_api_v1_platform_feature_flags__feature_key__put: {
+    parameters: {
+      query?: never
+      header?: {
+        authorization?: string | null
+      }
+      path: {
+        feature_key: string
+      }
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['PlatformFeatureFlagUpdate']
+      }
+    }
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['PlatformFeatureFlagItem']
         }
       }
       /** @description Validation Error */
