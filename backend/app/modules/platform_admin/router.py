@@ -35,7 +35,9 @@ from app.modules.platform_admin.schemas import (
     PlatformMembershipRoleAssign,
     PlatformMembershipStatusUpdate,
     PlatformOrganisationCreate,
+    PlatformOrganisationListResponse,
     PlatformOrganisationResponse,
+    PlatformOrganisationUpdate,
 )
 from app.modules.users.models import User
 
@@ -80,6 +82,75 @@ async def create_platform_organisation_endpoint(
         actor=_user,
         name=payload.name,
         workos=workos,
+    )
+    return PlatformOrganisationResponse.model_validate(organisation)
+
+
+@router.get(
+    "/organisations",
+    response_model=PlatformOrganisationListResponse,
+)
+async def list_platform_organisations_endpoint(
+    session: Annotated[AsyncSession, Depends(get_db)],
+    _user: Annotated[User, Depends(require_platform_permission("platform.admin"))],
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=service.MAX_PAGE_SIZE)] = service.DEFAULT_PAGE_SIZE,
+) -> PlatformOrganisationListResponse:
+    """List every organisation, newest first, paginated.
+
+    The admin centre's catalogue over the whole tenant fleet. The caller must
+    be a platform administrator; the pagination envelope matches the other
+    platform listings (blueprint §12).
+    """
+    organisations, total = await service.list_organisations(
+        session,
+        page=page,
+        page_size=page_size,
+    )
+    return PlatformOrganisationListResponse(
+        items=[
+            PlatformOrganisationResponse.model_validate(organisation)
+            for organisation in organisations
+        ],
+        page=page,
+        page_size=page_size,
+        total=total,
+    )
+
+
+@router.get(
+    "/organisations/{organisation_id}",
+    response_model=PlatformOrganisationResponse,
+)
+async def get_platform_organisation_endpoint(
+    organisation_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_db)],
+    _user: Annotated[User, Depends(require_platform_permission("platform.admin"))],
+) -> PlatformOrganisationResponse:
+    """View one organisation, including its WorkOS mapping."""
+    organisation = await service.get_organisation(
+        session,
+        organisation_id=organisation_id,
+    )
+    return PlatformOrganisationResponse.model_validate(organisation)
+
+
+@router.patch(
+    "/organisations/{organisation_id}",
+    response_model=PlatformOrganisationResponse,
+)
+async def update_platform_organisation_endpoint(
+    organisation_id: uuid.UUID,
+    payload: PlatformOrganisationUpdate,
+    session: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(require_platform_permission("platform.admin"))],
+) -> PlatformOrganisationResponse:
+    """Rename one organisation (audited)."""
+    organisation = await service.update_organisation(
+        session,
+        actor=user,
+        organisation_id=organisation_id,
+        name=payload.name,
     )
     return PlatformOrganisationResponse.model_validate(organisation)
 

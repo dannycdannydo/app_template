@@ -49,6 +49,22 @@ const NO_RECORD_PERMISSIONS: RecordPermissions = {
 }
 
 /**
+ * Organisation role codes offered by the platform admin centre (Scope §6.9).
+ *
+ * Mirrors the seeded `ROLE_PERMISSION_MAP` keys in
+ * `backend/app/modules/permissions/constants.py`; the backend is the
+ * enforcement point and rejects unknown role codes, so this list only shapes
+ * the role select in the invite form and the memberships table.
+ */
+export const ORGANISATION_ROLE_CODES: readonly string[] = [
+  'owner',
+  'administrator',
+  'manager',
+  'member',
+  'viewer',
+]
+
+/**
  * Union of record write permissions across the caller's role codes.
  *
  * `/me` returns the distinct role codes across all of the caller's

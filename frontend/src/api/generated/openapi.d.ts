@@ -91,7 +91,15 @@ export interface paths {
       path?: never
       cookie?: never
     }
-    get?: never
+    /**
+     * List Platform Organisations Endpoint
+     * @description List every organisation, newest first, paginated.
+     *
+     *     The admin centre's catalogue over the whole tenant fleet. The caller must
+     *     be a platform administrator; the pagination envelope matches the other
+     *     platform listings (blueprint §12).
+     */
+    get: operations['list_platform_organisations_endpoint_api_v1_platform_organisations_get']
     put?: never
     /**
      * Create Platform Organisation Endpoint
@@ -107,6 +115,30 @@ export interface paths {
     options?: never
     head?: never
     patch?: never
+    trace?: never
+  }
+  '/api/v1/platform/organisations/{organisation_id}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /**
+     * Get Platform Organisation Endpoint
+     * @description View one organisation, including its WorkOS mapping.
+     */
+    get: operations['get_platform_organisation_endpoint_api_v1_platform_organisations__organisation_id__get']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    /**
+     * Update Platform Organisation Endpoint
+     * @description Rename one organisation (audited).
+     */
+    patch: operations['update_platform_organisation_endpoint_api_v1_platform_organisations__organisation_id__patch']
     trace?: never
   }
   '/api/v1/platform/organisations/{organisation_id}/memberships': {
@@ -797,6 +829,20 @@ export interface components {
       name: string
     }
     /**
+     * PlatformOrganisationListResponse
+     * @description The pagination envelope for the platform organisations listing.
+     */
+    PlatformOrganisationListResponse: {
+      /** Items */
+      items: components['schemas']['PlatformOrganisationResponse'][]
+      /** Page */
+      page: number
+      /** Page Size */
+      page_size: number
+      /** Total */
+      total: number
+    }
+    /**
      * PlatformOrganisationResponse
      * @description Response payload for an organisation on the platform plane.
      */
@@ -820,6 +866,19 @@ export interface components {
        * Format: date-time
        */
       updated_at: string
+    }
+    /**
+     * PlatformOrganisationUpdate
+     * @description Request payload for editing an organisation's name on the platform plane.
+     *
+     *     Mirrors ``PlatformOrganisationCreate``: only the name is client-supplied
+     *     and every server-controlled field is rejected. The WorkOS mapping is never
+     *     editable through the API (it is written only by the services), so the
+     *     response to a successful edit carries the unchanged mapping.
+     */
+    PlatformOrganisationUpdate: {
+      /** Name */
+      name: string
     }
     /**
      * RecordCreate
@@ -1081,6 +1140,40 @@ export interface operations {
       }
     }
   }
+  list_platform_organisations_endpoint_api_v1_platform_organisations_get: {
+    parameters: {
+      query?: {
+        page?: number
+        page_size?: number
+      }
+      header?: {
+        authorization?: string | null
+      }
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['PlatformOrganisationListResponse']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
   create_platform_organisation_endpoint_api_v1_platform_organisations_post: {
     parameters: {
       query?: never
@@ -1098,6 +1191,76 @@ export interface operations {
     responses: {
       /** @description Successful Response */
       201: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['PlatformOrganisationResponse']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  get_platform_organisation_endpoint_api_v1_platform_organisations__organisation_id__get: {
+    parameters: {
+      query?: never
+      header?: {
+        authorization?: string | null
+      }
+      path: {
+        organisation_id: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['PlatformOrganisationResponse']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  update_platform_organisation_endpoint_api_v1_platform_organisations__organisation_id__patch: {
+    parameters: {
+      query?: never
+      header?: {
+        authorization?: string | null
+      }
+      path: {
+        organisation_id: string
+      }
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['PlatformOrganisationUpdate']
+      }
+    }
+    responses: {
+      /** @description Successful Response */
+      200: {
         headers: {
           [name: string]: unknown
         }

@@ -9,13 +9,42 @@ composables → components).
 
 ## Composables
 
-| Composable                                                                        | Scope                               | Source                   |
-| --------------------------------------------------------------------------------- | ----------------------------------- | ------------------------ |
-| `useMeQuery`                                                                      | global identity (`/api/v1/me`)      | `src/queries/me.ts`      |
-| `useHealthQuery`                                                                  | health probe (`/health`)            | `src/queries/health.ts`  |
-| `useRecordsQuery(params)`                                                         | org-scoped paginated list           | `src/queries/records.ts` |
-| `useRecordQuery(recordId)`                                                        | org-scoped detail                   | `src/queries/records.ts` |
-| `useCreateRecordMutation` / `useUpdateRecordMutation` / `useDeleteRecordMutation` | org-scoped writes with invalidation | `src/queries/records.ts` |
+| Composable                                                                        | Scope                                          | Source                    |
+| --------------------------------------------------------------------------------- | ---------------------------------------------- | ------------------------- |
+| `useMeQuery`                                                                      | global identity (`/api/v1/me`)                 | `src/queries/me.ts`       |
+| `useHealthQuery`                                                                  | health probe (`/health`)                       | `src/queries/health.ts`   |
+| `useRecordsQuery(params)`                                                         | org-scoped paginated list                      | `src/queries/records.ts`  |
+| `useRecordQuery(recordId)`                                                        | org-scoped detail                              | `src/queries/records.ts`  |
+| `useCreateRecordMutation` / `useUpdateRecordMutation` / `useDeleteRecordMutation` | org-scoped writes with invalidation            | `src/queries/records.ts`  |
+| `usePlatformOrganisationsQuery` / `usePlatformOrganisationQuery`                  | platform org list/detail                       | `src/queries/platform.ts` |
+| `useCreatePlatformOrganisationMutation` / `useUpdatePlatformOrganisationMutation` | platform org writes                            | `src/queries/platform.ts` |
+| `usePlatformMembershipsQuery` + role/status/removal mutations                     | platform membership administration             | `src/queries/platform.ts` |
+| `usePlatformInvitationsQuery` + invite/revoke mutations                           | platform invitations                           | `src/queries/platform.ts` |
+| `usePlatformFeatureFlagsQuery` + `useSetFeatureFlagMutation`                      | platform feature flags                         | `src/queries/platform.ts` |
+| `usePlatformAuditEventsQuery(params)`                                             | platform audit trail (read-only)               | `src/queries/platform.ts` |
+| `usePlatformAdminStatus`                                                          | `platform_roles` from `/me` (nav/guard gating) | `src/queries/platform.ts` |
+
+## Platform-plane keys
+
+Keys are cross-organisation server state and live under the `platform` root:
+
+```text
+['platform', 'organisations', 'list', { page, pageSize }]
+['platform', 'organisations', 'detail', <orgId>]
+['platform', 'organisations', <orgId>, 'memberships', 'list', { page, pageSize }]
+['platform', 'organisations', <orgId>, 'invitations', 'list', { page, pageSize }]
+['platform', 'feature-flags', <orgId>?]
+['platform', 'audit', 'list', { page, pageSize, organisationId?, actorUserId?, action? }]
+```
+
+Rules:
+
+- The platform plane administers organisations the caller does not belong to,
+  so its keys never sit under `['organisations', <orgId>]` and the
+  organisation-switch invalidator must not touch them (the invalidation
+  predicate keys on the `organisations` root, which platform keys avoid).
+- Pagination follows the same params-object convention as the org-scoped
+  lists.
 
 ## Query-key convention
 

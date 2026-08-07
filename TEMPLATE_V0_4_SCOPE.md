@@ -192,11 +192,11 @@ Depends on §6.5 (invitation state to refresh). Pulled forward from the v0.5 bac
 
 Depends on §6.2–§6.8 (the full platform API surface). The Vue admin pages.
 
-- [ ] `make generate-client` regenerates types for all platform endpoints; drift gate stays in `make check`
-- [ ] `src/queries/platform.ts` composables keyed `['platform', ...]` (cross-org server state); no component/store imports `src/api/client.ts` directly
-- [ ] Router section `/platform` with a `requiresPlatformAdmin` guard; `SidebarNav` entry only when `useMeQuery` reports `platform_roles` (UI-only; backend enforces)
-- [ ] Views: dashboard, organisations list/create/edit, org detail (memberships table with role select + suspend/reactivate/remove, invitations list, feature-flag toggles, org audit events), invite form (email + role), feature-flag catalogue, audit view — standard `DataTable`/form/toast building blocks
-- [ ] Vitest: guard, nav gating, invite form, audit table; Playwright journey: platform-admin invites a user who then appears in memberships (test-profile session)
+- [x] `make generate-client` regenerates types for all platform endpoints; drift gate stays in `make check`
+- [x] `src/queries/platform.ts` composables keyed `['platform', ...]` (cross-org server state); no component/store imports `src/api/client.ts` directly
+- [x] Router section `/platform` with a `requiresPlatformAdmin` guard; `SidebarNav` entry only when `useMeQuery` reports `platform_roles` (UI-only; backend enforces)
+- [x] Views: dashboard, organisations list/create/edit, org detail (memberships table with role select + suspend/reactivate/remove, invitations list, feature-flag toggles, org audit events), invite form (email + role), feature-flag catalogue, audit view — standard `DataTable`/form/toast building blocks
+- [x] Vitest: guard, nav gating, invite form, audit table; Playwright journey: platform-admin invites a user who then appears in memberships (test-profile session)
 
 ## 6.10 Docs, ADR & Release Governance
 

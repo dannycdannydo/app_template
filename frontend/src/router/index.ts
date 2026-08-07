@@ -1,6 +1,8 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import type { RouteLocationNormalized } from 'vue-router'
 import AppShellLayout from '@/layouts/AppShellLayout.vue'
+import { meQueryOptions } from '@/queries/me'
+import { queryClient } from '@/queries/queryClient'
 import { useSessionStore } from '@/stores/session'
 
 /**
@@ -32,6 +34,49 @@ export async function requiresAuth(
     return { name: 'home' }
   }
   return true
+}
+
+/**
+ * Platform Admin Centre guard (Scope §6.9, acceptance §5.10).
+ *
+ * A route whose matched records carry `meta.requiresPlatformAdmin` is
+ * reachable only by a user whose `/me` payload reports at least one
+ * `platform_roles` entry (Scope §6.2 — the platform authorisation plane).
+ *
+ * The `/me` payload is fetched through the shared query client using
+ * `meQueryOptions`, the same query definition `useMeQuery` consumes, so this
+ * guard and the `useMeQuery` components read one `['me']` cache entry and the
+ * guard never performs its own HTTP call once the payload is cached. Failure
+ * modes are conservative:
+ *
+ * - unauthenticated → `/login` (with returnTo, like `requiresAuth`);
+ * - authenticated without platform roles → `/home` (the centre is invisible);
+ * - `/me` request failure → `/home` (never a hard block on the shell).
+ *
+ * The backend remains the enforcement point (blueprint §9): every platform
+ * route is gated server-side by `require_platform_permission("platform.admin")`,
+ * so this guard only shapes navigation, it grants nothing.
+ */
+export async function requiresPlatformAdmin(
+  to: RouteLocationNormalized,
+): Promise<boolean | { name: string; query?: Record<string, string> }> {
+  if (!to.matched.some((record) => record.meta.requiresPlatformAdmin === true)) {
+    return true
+  }
+
+  const session = useSessionStore()
+  await session.waitForBootRestore()
+  if (!session.isAuthenticated) {
+    return { name: 'login', query: { returnTo: to.fullPath } }
+  }
+
+  try {
+    const me = await queryClient.fetchQuery(meQueryOptions)
+    const isPlatformAdmin = (me.platform_roles ?? []).length > 0
+    return isPlatformAdmin ? true : { name: 'home' }
+  } catch {
+    return { name: 'home' }
+  }
 }
 
 const router = createRouter({
@@ -68,6 +113,54 @@ const router = createRouter({
           component: () => import('@/views/RecordEditView.vue'),
           props: true,
         },
+        // Platform Admin Centre (Scope §6.9): gated by the platform
+        // authorisation plane (Scope §6.2). Every route carries
+        // `requiresPlatformAdmin`; the backend still enforces each one
+        // server-side.
+        {
+          path: 'platform',
+          name: 'platform',
+          component: () => import('@/views/PlatformDashboardView.vue'),
+          meta: { requiresPlatformAdmin: true },
+        },
+        {
+          path: 'platform/organisations',
+          name: 'platform-organisations',
+          component: () => import('@/views/PlatformOrganisationsView.vue'),
+          meta: { requiresPlatformAdmin: true },
+        },
+        {
+          path: 'platform/organisations/new',
+          name: 'platform-organisation-new',
+          component: () => import('@/views/PlatformOrganisationFormView.vue'),
+          meta: { requiresPlatformAdmin: true },
+        },
+        {
+          path: 'platform/organisations/:organisationId',
+          name: 'platform-organisation-detail',
+          component: () => import('@/views/PlatformOrganisationDetailView.vue'),
+          props: true,
+          meta: { requiresPlatformAdmin: true },
+        },
+        {
+          path: 'platform/organisations/:organisationId/invite',
+          name: 'platform-invite-user',
+          component: () => import('@/views/PlatformInviteUserView.vue'),
+          props: true,
+          meta: { requiresPlatformAdmin: true },
+        },
+        {
+          path: 'platform/feature-flags',
+          name: 'platform-feature-flags',
+          component: () => import('@/views/PlatformFeatureFlagsView.vue'),
+          meta: { requiresPlatformAdmin: true },
+        },
+        {
+          path: 'platform/audit',
+          name: 'platform-audit',
+          component: () => import('@/views/PlatformAuditView.vue'),
+          meta: { requiresPlatformAdmin: true },
+        },
       ],
     },
     {
@@ -84,5 +177,6 @@ const router = createRouter({
 })
 
 router.beforeEach(requiresAuth)
+router.beforeEach(requiresPlatformAdmin)
 
 export default router
