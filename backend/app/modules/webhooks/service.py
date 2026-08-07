@@ -9,16 +9,16 @@ legitimate invitation. Two best-effort refreshes exist:
 - ``invitation.revoked`` mirrors a WorkOS-side revocation onto the local
   ``invitations`` row (``sent`` → ``revoked``) and audits it; an already
   terminal invitation is left untouched.
+- ``user.updated`` refreshes the local email used for invitation matching.
 - ``user.deleted`` deactivates the internal user defensively — their WorkOS
   sessions are already gone, and the deactivated flag additionally blocks any
   still-valid cached session (BP §8 "disabled users must be blocked").
 
-``invitation.created`` / ``invitation.accepted`` and ``user.created`` /
-``user.updated`` are deliberate no-ops: the local invitation row is created
-authoritatively at invite time, the local ``accepted`` status is written only
-by the grant path (flipping it on a webhook would silently prevent the grant),
-and user profiles are fetched fresh from WorkOS at every login. Unknown event
-types are tolerated and ignored (acceptance §5.9).
+``invitation.created`` / ``invitation.accepted`` and ``user.created`` are
+deliberate no-ops: the local invitation row is created authoritatively at
+invite time and the local ``accepted`` status is written only by the grant
+path (flipping it on a webhook would silently prevent the grant). Unknown
+event types are tolerated and ignored (acceptance §5.9).
 """
 
 from __future__ import annotations
@@ -69,6 +69,8 @@ async def process_webhook_event(session: AsyncSession, event: WorkOSWebhookEvent
         return await _refresh_revoked_invitation(session, event)
     if event.event == "user.deleted":
         return await _deactivate_deleted_user(session, event)
+    if event.event == "user.updated":
+        return await _refresh_updated_user(session, event)
     logger.info(
         "webhook_event_ignored",
         event_type=event.event,
@@ -138,4 +140,18 @@ async def _deactivate_deleted_user(session: AsyncSession, event: WorkOSWebhookEv
     )
     await session.commit()
     logger.warning("webhook_user_deactivated", user_id=str(user.id))
+    return True
+
+
+async def _refresh_updated_user(session: AsyncSession, event: WorkOSWebhookEvent) -> bool:
+    """Refresh a changed WorkOS email so login-time invitation matching stays correct."""
+    data = _lenient_data(event, UserEventData)
+    if data is None or not data.id or not data.email:
+        return False
+    user = await session.scalar(select(User).where(User.workos_user_id == data.id))
+    if user is None or user.email.strip().lower() == data.email.strip().lower():
+        return False
+    user.email = data.email.strip().lower()
+    await session.commit()
+    logger.info("webhook_user_email_refreshed", user_id=str(user.id))
     return True

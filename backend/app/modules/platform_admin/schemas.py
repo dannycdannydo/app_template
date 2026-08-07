@@ -120,3 +120,49 @@ class PlatformOrganisationListResponse(BaseModel):
     page: int
     page_size: int
     total: int
+
+
+class PlatformAdminGrant(BaseModel):
+    """Grant the seeded platform-admin role to an existing enabled user."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: uuid.UUID
+
+
+class PlatformAdminListItem(BaseModel):
+    """One platform-role membership, including safe operator-facing identity data."""
+
+    id: uuid.UUID
+    user_id: uuid.UUID
+    user_name: str
+    user_email: str
+    role_code: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class PlatformAdminListResponse(BaseModel):
+    """Paginated platform-admin membership listing."""
+
+    items: list[PlatformAdminListItem]
+    page: int
+    page_size: int
+    total: int
+
+
+class PlatformUserListItem(BaseModel):
+    """Safe identity fields shown only to platform administrators for role grants."""
+
+    id: uuid.UUID
+    name: str
+    email: str
+
+
+class PlatformUserListResponse(BaseModel):
+    """Paginated enabled-user catalogue for platform-admin assignment."""
+
+    items: list[PlatformUserListItem]
+    page: int
+    page_size: int
+    total: int

@@ -155,6 +155,8 @@ The platform administration plane is a separate authorisation plane (ADR-0013, v
 - Every platform route is gated by `require_platform_permission("platform.admin")` (v0.4 Scope §6.2), which resolves the caller through platform memberships and role bundles only; a caller with no granting platform membership is rejected with `403` and code `platform_admin_required`.
 - The two planes never grant across each other: an organisation `owner` without a platform membership is `403` on platform routes, and a platform admin without an organisation membership is `403` (`not_a_member`) on organisation routes. There is no `is_admin`/superuser boolean anywhere.
 - Organisations are identified by their internal id in the path (`/api/v1/platform/organisations/{organisation_id}`), never by the server-side `workos_organisation_id` mapping, which is never client-writable (`extra="forbid"`).
+- `GET`/`POST /api/v1/platform/admins` and `DELETE /api/v1/platform/admins/{platform_membership_id}` administer explicit `platform_admin` memberships. All are platform-gated, audited, and revocation rejects removal of the final administrator.
+- `GET /api/v1/platform/users` is platform-gated and returns only enabled users' internal IDs, names and emails for the administrator assignment picker; it accepts standard pagination and an optional bounded name/email search.
 - Platform listing endpoints use the same pagination envelope as tenant-scoped listings (blueprint §12).
 
 ### Authorisation

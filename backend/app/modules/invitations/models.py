@@ -26,8 +26,10 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    Index,
     String,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -61,6 +63,13 @@ class Invitation(Base, TimestampMixin):
         CheckConstraint(
             "status IN ('sent', 'accepted', 'revoked', 'expired')",
             name="invitation_status",
+        ),
+        Index(
+            "uq_invitations_pending_organisation_email",
+            "organisation_id",
+            text("lower(email)"),
+            unique=True,
+            postgresql_where=text("status = 'sent'"),
         ),
     )
 

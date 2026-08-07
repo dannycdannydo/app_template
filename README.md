@@ -114,6 +114,7 @@ v0.4 adds platform administration (see `PLATFORM_ADMIN_WORKFLOW_PLAN.md` and ADR
 - create and edit organisations (each mapped 1:1 to a WorkOS Organization for invitations; the mapping is server-side only),
 - view an organisation's memberships, invite users through the WorkOS Invitation API (standard onboarding: the membership is created at the invitee's first verified login), assign/remove roles, suspend/reactivate/remove memberships,
 - control platform feature flags per organisation,
+- manage the explicit platform-administrator membership list (the final administrator cannot be revoked),
 - read the append-only audit history.
 
 The backend remains the enforcement point: every `/api/v1/platform/*` endpoint requires `platform.admin`, the UI gating is cosmetic, and an organisation owner without a platform membership is rejected with `403 platform_admin_required`. Invitation and membership changes are all audited.

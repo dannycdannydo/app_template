@@ -49,6 +49,8 @@ from app.modules.audit.service import (
     ACTION_MEMBERSHIP_SUSPENDED,
     ACTION_ORGANISATION_CREATED,
     ACTION_ORGANISATION_UPDATED,
+    ACTION_PLATFORM_ADMIN_GRANTED,
+    ACTION_PLATFORM_ADMIN_REVOKED,
     ACTION_PLATFORM_BOOTSTRAP_GRANTED,
     record_event,
 )
@@ -312,6 +314,177 @@ async def maybe_grant_bootstrap_platform_admin(
 
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 100
+
+
+@dataclass
+class PlatformAdminDetail:
+    """A platform-role grant joined to the user needed by the admin centre."""
+
+    membership: PlatformMembership
+    user_name: str
+    user_email: str
+    role_code: str
+
+
+async def _platform_admin_role_or_503(session: AsyncSession) -> PlatformRole:
+    role = await session.scalar(
+        select(PlatformRole).where(PlatformRole.code == PLATFORM_ADMIN_ROLE_CODE)
+    )
+    if role is None:
+        raise ServiceUnavailableError(
+            code="platform_role_missing",
+            message="Platform administration is not configured correctly.",
+        )
+    return role
+
+
+async def _platform_admin_detail(
+    session: AsyncSession, membership: PlatformMembership
+) -> PlatformAdminDetail:
+    user = await session.scalar(select(User).where(User.id == membership.user_id))
+    role = await session.scalar(
+        select(PlatformRole).where(PlatformRole.id == membership.platform_role_id)
+    )
+    if user is None or role is None:
+        raise ServiceUnavailableError(
+            code="platform_membership_invalid",
+            message="Platform administration is not configured correctly.",
+        )
+    return PlatformAdminDetail(
+        membership=membership,
+        user_name=user.name,
+        user_email=user.email,
+        role_code=role.code,
+    )
+
+
+async def list_platform_admins(
+    session: AsyncSession, *, page: int, page_size: int
+) -> tuple[list[PlatformAdminDetail], int]:
+    """List platform administrators; only the seeded admin role is exposed."""
+    role = await _platform_admin_role_or_503(session)
+    page = max(page, 1)
+    page_size = min(max(page_size, 1), MAX_PAGE_SIZE)
+    statement = select(PlatformMembership).where(PlatformMembership.platform_role_id == role.id)
+    total = await session.scalar(select(func.count()).select_from(statement.subquery()))
+    memberships = await session.scalars(
+        statement.order_by(PlatformMembership.created_at.desc(), PlatformMembership.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    return [await _platform_admin_detail(session, row) for row in memberships.all()], total or 0
+
+
+async def list_enabled_users(
+    session: AsyncSession, *, page: int, page_size: int, search: str | None
+) -> tuple[list[User], int]:
+    """List enabled users for explicit platform-admin selection.
+
+    This cross-tenant identity catalogue is deliberately available only from
+    platform-gated routes. The optional bounded search applies to name and
+    email, while a stable name/id order keeps pages repeatable.
+    """
+    page = max(page, 1)
+    page_size = min(max(page_size, 1), MAX_PAGE_SIZE)
+    statement = select(User).where(User.is_active.is_(True))
+    if search:
+        pattern = f"%{search.strip()}%"
+        statement = statement.where(User.name.ilike(pattern) | User.email.ilike(pattern))
+    total = await session.scalar(select(func.count()).select_from(statement.subquery()))
+    users = await session.scalars(
+        statement.order_by(User.name.asc(), User.id.asc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    return list(users.all()), total or 0
+
+
+async def grant_platform_admin(
+    session: AsyncSession, *, actor: User, user_id: uuid.UUID
+) -> PlatformAdminDetail:
+    """Grant platform_admin once to an enabled provisioned user and audit it."""
+    user = await session.scalar(select(User).where(User.id == user_id))
+    if user is None:
+        raise NotFoundError(code="user_not_found", message="The user could not be found.")
+    if not user.is_active:
+        raise BadRequestError(
+            code="user_disabled", message="A disabled user cannot be a platform administrator."
+        )
+    role = await _platform_admin_role_or_503(session)
+    membership = await session.scalar(
+        select(PlatformMembership).where(
+            PlatformMembership.user_id == user.id,
+            PlatformMembership.platform_role_id == role.id,
+        )
+    )
+    if membership is None:
+        membership = PlatformMembership(user_id=user.id, platform_role_id=role.id)
+        session.add(membership)
+        await session.flush()
+        await record_event(
+            session,
+            actor_user_id=actor.id,
+            action=ACTION_PLATFORM_ADMIN_GRANTED,
+            resource_type="platform_membership",
+            resource_id=str(membership.id),
+            metadata={"user_id": str(user.id), "role": role.code},
+        )
+        try:
+            await session.commit()
+        except IntegrityError:
+            await session.rollback()
+            membership = await session.scalar(
+                select(PlatformMembership).where(
+                    PlatformMembership.user_id == user.id,
+                    PlatformMembership.platform_role_id == role.id,
+                )
+            )
+            if membership is None:
+                raise ServiceUnavailableError(
+                    code="platform_admin_grant_failed",
+                    message="The platform administrator could not be granted. Please try again.",
+                ) from None
+    return await _platform_admin_detail(session, membership)
+
+
+async def revoke_platform_admin(
+    session: AsyncSession, *, actor: User, platform_membership_id: uuid.UUID
+) -> PlatformAdminDetail:
+    """Revoke platform_admin while preserving at least one recovery administrator."""
+    role = await _platform_admin_role_or_503(session)
+    membership = await session.scalar(
+        select(PlatformMembership).where(
+            PlatformMembership.id == platform_membership_id,
+            PlatformMembership.platform_role_id == role.id,
+        )
+    )
+    if membership is None:
+        raise NotFoundError(
+            code="platform_membership_not_found",
+            message="The platform administrator could not be found.",
+        )
+    total = await session.scalar(
+        select(func.count())
+        .select_from(PlatformMembership)
+        .where(PlatformMembership.platform_role_id == role.id)
+    )
+    if (total or 0) <= 1:
+        raise BadRequestError(
+            code="last_platform_admin",
+            message="At least one platform administrator must remain.",
+        )
+    detail = await _platform_admin_detail(session, membership)
+    await record_event(
+        session,
+        actor_user_id=actor.id,
+        action=ACTION_PLATFORM_ADMIN_REVOKED,
+        resource_type="platform_membership",
+        resource_id=str(membership.id),
+        metadata={"user_id": str(membership.user_id), "role": role.code},
+    )
+    await session.delete(membership)
+    await session.commit()
+    return detail
 
 
 @dataclass

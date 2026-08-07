@@ -30,6 +30,9 @@ from app.integrations.workos.organizations import (
 )
 from app.modules.platform_admin import service
 from app.modules.platform_admin.schemas import (
+    PlatformAdminGrant,
+    PlatformAdminListItem,
+    PlatformAdminListResponse,
     PlatformMembershipListItem,
     PlatformMembershipListResponse,
     PlatformMembershipRoleAssign,
@@ -38,10 +41,89 @@ from app.modules.platform_admin.schemas import (
     PlatformOrganisationListResponse,
     PlatformOrganisationResponse,
     PlatformOrganisationUpdate,
+    PlatformUserListItem,
+    PlatformUserListResponse,
 )
 from app.modules.users.models import User
 
 router = APIRouter(prefix="/api/v1/platform", tags=["platform"])
+
+
+def _platform_admin_item(detail: service.PlatformAdminDetail) -> PlatformAdminListItem:
+    return PlatformAdminListItem(
+        id=detail.membership.id,
+        user_id=detail.membership.user_id,
+        user_name=detail.user_name,
+        user_email=detail.user_email,
+        role_code=detail.role_code,
+        created_at=detail.membership.created_at,
+        updated_at=detail.membership.updated_at,
+    )
+
+
+@router.get("/admins", response_model=PlatformAdminListResponse)
+async def list_platform_admins_endpoint(
+    session: Annotated[AsyncSession, Depends(get_db)],
+    _user: Annotated[User, Depends(require_platform_permission("platform.admin"))],
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=service.MAX_PAGE_SIZE)] = service.DEFAULT_PAGE_SIZE,
+) -> PlatformAdminListResponse:
+    """List the explicit administrators of the dedicated platform plane."""
+    admins, total = await service.list_platform_admins(session, page=page, page_size=page_size)
+    return PlatformAdminListResponse(
+        items=[_platform_admin_item(admin) for admin in admins],
+        page=page,
+        page_size=page_size,
+        total=total,
+    )
+
+
+@router.post("/admins", response_model=PlatformAdminListItem, status_code=201)
+async def grant_platform_admin_endpoint(
+    payload: PlatformAdminGrant,
+    session: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(require_platform_permission("platform.admin"))],
+) -> PlatformAdminListItem:
+    """Grant platform_admin to an existing enabled user (audited)."""
+    return _platform_admin_item(
+        await service.grant_platform_admin(session, actor=user, user_id=payload.user_id)
+    )
+
+
+@router.get("/users", response_model=PlatformUserListResponse)
+async def list_platform_users_endpoint(
+    session: Annotated[AsyncSession, Depends(get_db)],
+    _user: Annotated[User, Depends(require_platform_permission("platform.admin"))],
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=service.MAX_PAGE_SIZE)] = service.DEFAULT_PAGE_SIZE,
+    search: Annotated[str | None, Query(min_length=1, max_length=120)] = None,
+) -> PlatformUserListResponse:
+    """List enabled users by readable identity for platform-role assignment."""
+    users, total = await service.list_enabled_users(
+        session, page=page, page_size=page_size, search=search
+    )
+    return PlatformUserListResponse(
+        items=[
+            PlatformUserListItem(id=user.id, name=user.name, email=user.email) for user in users
+        ],
+        page=page,
+        page_size=page_size,
+        total=total,
+    )
+
+
+@router.delete("/admins/{platform_membership_id}", response_model=PlatformAdminListItem)
+async def revoke_platform_admin_endpoint(
+    platform_membership_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(require_platform_permission("platform.admin"))],
+) -> PlatformAdminListItem:
+    """Revoke platform_admin without allowing the final admin to be removed."""
+    return _platform_admin_item(
+        await service.revoke_platform_admin(
+            session, actor=user, platform_membership_id=platform_membership_id
+        )
+    )
 
 
 def _membership_item(detail: service.MembershipDetail) -> PlatformMembershipListItem:

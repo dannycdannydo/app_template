@@ -173,7 +173,7 @@ frontend/src/
 
 ### Platform Admin Centre (v0.4)
 
-The `/platform` route section (dashboard, organisations, org detail with memberships/invitations/feature flags, invite form, feature-flag catalogue, audit view) is served by `Platform*View.vue` screens gated by a `requiresPlatformAdmin` router guard that reads `platform_roles` from `GET /api/v1/me`; the `SidebarNav` entry appears only for platform admins. This is UI awareness only — every platform endpoint is enforced server-side by `require_platform_permission`. Platform queries live in `src/queries/platform.ts` keyed `['platform', ...]` as cross-org server state.
+The `/platform` route section (dashboard, organisations, org detail with memberships/invitations/feature flags, invite form, feature-flag catalogue, platform-administrator lifecycle, audit view) is served by `Platform*View.vue` screens gated by a `requiresPlatformAdmin` router guard that reads `platform_roles` from `GET /api/v1/me`; the `SidebarNav` entry appears only for platform admins. This is UI awareness only — every platform endpoint is enforced server-side by `require_platform_permission`. Platform queries live in `src/queries/platform.ts` keyed `['platform', ...]` as cross-org server state.
 
 ### Frontend auth flow (v0.3)
 
