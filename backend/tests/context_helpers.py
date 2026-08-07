@@ -317,6 +317,12 @@ class FakeSession:
         # /me payload paths still consume queued rows first.
         if entity is OrganisationMembership:
             return _ScalarsResult(list(self._state.memberships))
+        if entity is Organisation:
+            # Scope §6.9: the platform organisations listing answers from the
+            # staged organisations; the ordering and pagination clauses are
+            # not applied here (proven by the query-construction and
+            # real-database tests).
+            return _ScalarsResult(list(self._state.organisations))
         if entity is MembershipRole:
             return _ScalarsResult(list(self._state.membership_roles))
         if entity is Role:

@@ -56,7 +56,7 @@ async function mountShell(): Promise<{ wrapper: VueWrapper; router: Router }> {
   })
   await router.push('/')
   await router.isReady()
-  mockUseMeQuery.mockReturnValue({ data: ref(me) })
+  mockUseMeQuery.mockReturnValue({ data: ref(me), isPending: ref(false), isError: ref(false) })
   const wrapper = mount(
     { template: '<RouterView />' },
     { global: { plugins: [createPinia(), router] } },

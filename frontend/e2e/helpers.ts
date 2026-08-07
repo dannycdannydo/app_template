@@ -139,16 +139,141 @@ export function createRecordFixture() {
 }
 
 /**
+ * In-memory platform administration fixture (Scope §6.9) served over the
+ * mocked `/api/v1/platform/**` surface. Mutations mutate the arrays, so the
+ * platform-admin journey flows data the way the real backend would: inviting
+ * writes an invitation and (mirroring login-time linking, Scope §6.5) creates
+ * the membership the invitee would gain on acceptance.
+ */
+export function createPlatformFixture() {
+  const organisations = [
+    {
+      id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      name: 'Acme Ltd',
+      workos_organisation_id: 'org_workos_acme',
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+    },
+  ]
+
+  const memberships = [
+    {
+      id: 'm1',
+      organisation_id: organisations[0].id,
+      user_id: TEST_USER_ID,
+      user_name: 'Ada Lovelace',
+      user_email: 'ada@example.com',
+      status: 'active',
+      roles: ['owner'],
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+    },
+  ]
+
+  const invitations: Array<Record<string, string>> = []
+
+  const featureFlags = [
+    {
+      feature_key: 'records.deletion',
+      name: 'Record deletion',
+      description: 'Allow owners and administrators to delete records.',
+      default_enabled: false,
+      enabled: false,
+      overridden: false,
+      configuration_json: null,
+    },
+  ]
+
+  const auditEvents = [
+    {
+      id: 'a1',
+      organisation_id: organisations[0].id,
+      actor_user_id: TEST_USER_ID,
+      action: 'organisation.created',
+      resource_type: 'organisation',
+      resource_id: organisations[0].id,
+      metadata: {},
+      created_at: '2026-01-01T00:00:00Z',
+    },
+  ]
+
+  const envelope = <T>(items: T[], page: number, pageSize: number) => ({
+    items,
+    page,
+    page_size: pageSize,
+    total: items.length,
+  })
+
+  return {
+    organisations,
+    memberships,
+    invitations,
+    featureFlags,
+    auditEvents,
+    envelope,
+    inviteUser: (email: string, roleCode: string) => {
+      const invitation = {
+        id: 'inv_playwright',
+        organisation_id: organisations[0].id,
+        email,
+        role_code: roleCode,
+        workos_invitation_id: 'inv_workos_playwright',
+        invited_by_user_id: TEST_USER_ID,
+        status: 'sent',
+        expires_at: '2027-01-01T00:00:00Z',
+        created_at: '2026-02-01T00:00:00Z',
+        updated_at: '2026-02-01T00:00:00Z',
+      }
+      invitations.push(invitation)
+      // The invited user accepted at next login (login-time linking,
+      // Scope §6.5): they now appear in the memberships.
+      memberships.push({
+        id: 'm_invitee',
+        organisation_id: organisations[0].id,
+        user_id: 'user_invitee',
+        user_name: '',
+        user_email: email,
+        status: 'active',
+        roles: [roleCode],
+        created_at: '2026-02-01T00:00:00Z',
+        updated_at: '2026-02-01T00:00:00Z',
+      })
+      auditEvents.push({
+        id: 'a_invitee',
+        organisation_id: organisations[0].id,
+        actor_user_id: TEST_USER_ID,
+        action: 'invitation.sent',
+        resource_type: 'invitation',
+        resource_id: invitation.id,
+        metadata: { email },
+        created_at: '2026-02-01T00:00:00Z',
+      })
+      return invitation
+    },
+  }
+}
+
+/**
  * Mock the backend `/api/v1/**` surface consumed by the shell (blueprint
  * §5, §15): `me`, and the records list/detail/create/update/delete routes
  * with the standard pagination envelope (blueprint §12). Captured request
  * headers (the Bearer token and `X-Org-Id`) are recorded for assertions.
+ *
+ * With `options.platformAdmin` the `/me` payload reports `platform_roles` and
+ * the `/api/v1/platform/**` surface (Scope §6.9) is answered from the
+ * platform fixture — organisations, memberships, invitations, feature flags
+ * and audit events — so the platform-admin journey flows data end to end.
  */
 export async function mockBackendApi(
   page: Page,
   fixture: ReturnType<typeof createRecordFixture>,
+  options: {
+    platformAdmin?: boolean
+    platformFixture?: ReturnType<typeof createPlatformFixture>
+  } = {},
 ): Promise<{ capturedHeaders: Array<{ authorization: string | null; orgId: string | null }> }> {
   const capturedHeaders: Array<{ authorization: string | null; orgId: string | null }> = []
+  const platform = options.platformFixture
 
   await page.route('**/api/v1/**', async (route) => {
     const request = route.request()
@@ -180,7 +305,73 @@ export async function mockBackendApi(
           },
         ],
         roles: ['owner'],
+        platform_roles: options.platformAdmin ? ['platform_admin'] : [],
       })
+    }
+
+    // Platform Admin Centre (Scope §6.9): answered only for the platform
+    // journey; the real backend would 403 without platform membership.
+    if (url.pathname.startsWith('/api/v1/platform/') && platform) {
+      capturedHeaders.push({ authorization, orgId })
+      const orgMatch = url.pathname.match(
+        /^\/api\/v1\/platform\/organisations\/([^/]+)\/(invitations|memberships)$/,
+      )
+      if (method === 'GET' && url.pathname === '/api/v1/platform/organisations') {
+        const pageNumber = Number(url.searchParams.get('page') ?? '1')
+        const pageSize = Number(url.searchParams.get('page_size') ?? '25')
+        return json(platform.envelope(platform.organisations, pageNumber, pageSize))
+      }
+      const detailMatch = url.pathname.match(/^\/api\/v1\/platform\/organisations\/([^/]+)$/)
+      if (method === 'GET' && detailMatch) {
+        const organisation = platform.organisations.find((entry) => entry.id === detailMatch[1])
+        return json(organisation ?? { code: 'not_found' }, organisation ? 200 : 404)
+      }
+      if (method === 'PATCH' && detailMatch) {
+        const body = request.postDataJSON()
+        const organisation = platform.organisations.find((entry) => entry.id === detailMatch[1])
+        if (organisation) {
+          organisation.name = body.name
+          organisation.updated_at = '2026-03-01T00:00:00Z'
+        }
+        return json(organisation ?? { code: 'not_found' }, organisation ? 200 : 404)
+      }
+      if (method === 'POST' && orgMatch && orgMatch[2] === 'invitations') {
+        const body = request.postDataJSON()
+        return json(platform.inviteUser(body.email, body.role_code), 201)
+      }
+      if (method === 'GET' && orgMatch) {
+        const pageNumber = Number(url.searchParams.get('page') ?? '1')
+        const pageSize = Number(url.searchParams.get('page_size') ?? '25')
+        const source = orgMatch[2] === 'memberships' ? platform.memberships : platform.invitations
+        return json(platform.envelope(source, pageNumber, pageSize))
+      }
+      if (method === 'GET' && url.pathname === '/api/v1/platform/feature-flags') {
+        const organisationId = url.searchParams.get('organisation_id')
+        const items = organisationId
+          ? platform.featureFlags.map((flag) => ({ ...flag, overridden: true, enabled: true }))
+          : platform.featureFlags
+        return json({ items })
+      }
+      if (method === 'PUT' && url.pathname.startsWith('/api/v1/platform/feature-flags/')) {
+        const body = request.postDataJSON()
+        const key = url.pathname.split('/').at(-1)
+        const flag = platform.featureFlags.find((entry) => entry.feature_key === key)
+        if (flag) {
+          flag.enabled = body.enabled
+          flag.overridden = true
+        }
+        return json(flag ?? { code: 'not_found' }, flag ? 200 : 404)
+      }
+      if (method === 'GET' && url.pathname === '/api/v1/platform/audit-events') {
+        const pageNumber = Number(url.searchParams.get('page') ?? '1')
+        const pageSize = Number(url.searchParams.get('page_size') ?? '25')
+        const action = url.searchParams.get('action')
+        const items = action
+          ? platform.auditEvents.filter((entry) => entry.action === action)
+          : platform.auditEvents
+        return json(platform.envelope(items, pageNumber, pageSize))
+      }
+      return json({ code: 'not_found', message: 'Not found', request_id: 'mock-404' }, 404)
     }
 
     if (method === 'GET' && url.pathname === '/api/v1/records') {
@@ -251,6 +442,23 @@ export async function setupAuthenticatedJourney(page: Page, clientId: string) {
   await mockWorkOsTokenEndpoint(page)
   const api = await mockBackendApi(page, fixture)
   return { fixture, capturedHeaders: api.capturedHeaders }
+}
+
+/**
+ * Platform-admin journey setup (Scope §6.9): the authenticated shell plus the
+ * `/api/v1/platform/**` surface, with `/me` reporting `platform_roles` so the
+ * Platform Admin Centre renders.
+ */
+export async function setupPlatformAdminJourney(page: Page, clientId: string) {
+  const fixture = createRecordFixture()
+  const platformFixture = createPlatformFixture()
+  await injectSession(page, clientId)
+  await mockWorkOsTokenEndpoint(page)
+  const api = await mockBackendApi(page, fixture, {
+    platformAdmin: true,
+    platformFixture,
+  })
+  return { fixture, platformFixture, capturedHeaders: api.capturedHeaders }
 }
 
 /**

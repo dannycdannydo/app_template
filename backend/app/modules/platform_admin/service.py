@@ -48,6 +48,7 @@ from app.modules.audit.service import (
     ACTION_MEMBERSHIP_ROLE_CHANGED,
     ACTION_MEMBERSHIP_SUSPENDED,
     ACTION_ORGANISATION_CREATED,
+    ACTION_ORGANISATION_UPDATED,
     ACTION_PLATFORM_BOOTSTRAP_GRANTED,
     record_event,
 )
@@ -68,6 +69,8 @@ from app.modules.platform_admin.models import (
 from app.modules.platform_admin.queries import (
     memberships_count_statement,
     memberships_statement,
+    organisations_count_statement,
+    organisations_statement,
 )
 from app.modules.users.models import User
 
@@ -109,6 +112,74 @@ async def create_platform_organisation(
         resource_type="organisation",
         resource_id=str(organisation.id),
         metadata={"workos_organisation_id": workos_organisation.id},
+    )
+    await session.commit()
+    await session.refresh(organisation)
+    return organisation
+
+
+async def list_organisations(
+    session: AsyncSession,
+    *,
+    page: int,
+    page_size: int,
+) -> tuple[list[Organisation], int]:
+    """Return one page of every organisation plus the total.
+
+    Newest first, ties broken by id so paging is stable (matching the audit,
+    invitation and membership listings). This is the admin centre's catalogue
+    over the whole tenant fleet, so there is no filter beyond the standard
+    pagination envelope.
+    """
+    page = max(page, 1)
+    page_size = min(max(page_size, 1), MAX_PAGE_SIZE)
+    total = await session.scalar(organisations_count_statement())
+    organisations = await session.scalars(
+        organisations_statement()
+        .order_by(Organisation.created_at.desc(), Organisation.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    return list(organisations.all()), total or 0
+
+
+async def get_organisation(
+    session: AsyncSession,
+    *,
+    organisation_id: uuid.UUID,
+) -> Organisation:
+    """Return one organisation, or raise the standard 404.
+
+    Thin public wrapper over the private ``_get_organisation_or_404`` helper
+    so the detail route reads like the listing and mutation routes.
+    """
+    return await _get_organisation_or_404(session, organisation_id)
+
+
+async def update_organisation(
+    session: AsyncSession,
+    *,
+    actor: User,
+    organisation_id: uuid.UUID,
+    name: str,
+) -> Organisation:
+    """Rename an organisation and record the change in the audit log.
+
+    Only the name is editable through the platform plane; the WorkOS mapping
+    is written exclusively by the services (creation and lazy backfill), so
+    it is never touched here. The audit row records the new name so the
+    history is readable without a second lookup.
+    """
+    organisation = await _get_organisation_or_404(session, organisation_id)
+    organisation.name = name
+    await record_event(
+        session,
+        organisation_id=organisation.id,
+        actor_user_id=actor.id,
+        action=ACTION_ORGANISATION_UPDATED,
+        resource_type="organisation",
+        resource_id=str(organisation.id),
+        metadata={"name": name},
     )
     await session.commit()
     await session.refresh(organisation)

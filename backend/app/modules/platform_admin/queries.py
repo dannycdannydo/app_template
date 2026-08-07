@@ -18,7 +18,7 @@ import uuid
 from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.modules.organisations.models import OrganisationMembership
+from app.modules.organisations.models import Organisation, OrganisationMembership
 from app.modules.permissions.models import Permission
 from app.modules.platform_admin.models import (
     PlatformMembership,
@@ -82,3 +82,19 @@ def memberships_count_statement(*, organisation_id: uuid.UUID) -> Select[tuple[i
     return select(func.count()).select_from(
         memberships_statement(organisation_id=organisation_id).subquery()
     )
+
+
+def organisations_statement() -> Select[tuple[Organisation]]:
+    """Return a statement selecting every organisation, newest first.
+
+    The platform organisations listing (Scope §6.9) has no filter: it is the
+    admin centre's catalogue over the whole tenant fleet, so the statement is
+    a plain ordered select and the router's approved query parameters (page,
+    page_size) are the only knobs.
+    """
+    return select(Organisation)
+
+
+def organisations_count_statement() -> Select[tuple[int]]:
+    """Return a statement counting every organisation."""
+    return select(func.count()).select_from(organisations_statement().subquery())

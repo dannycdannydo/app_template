@@ -31,6 +31,20 @@ class PlatformOrganisationCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
 
 
+class PlatformOrganisationUpdate(BaseModel):
+    """Request payload for editing an organisation's name on the platform plane.
+
+    Mirrors ``PlatformOrganisationCreate``: only the name is client-supplied
+    and every server-controlled field is rejected. The WorkOS mapping is never
+    editable through the API (it is written only by the services), so the
+    response to a successful edit carries the unchanged mapping.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=255)
+
+
 class PlatformOrganisationResponse(BaseModel):
     """Response payload for an organisation on the platform plane."""
 
@@ -94,6 +108,15 @@ class PlatformMembershipListResponse(BaseModel):
     """The pagination envelope for the membership listing."""
 
     items: list[PlatformMembershipListItem]
+    page: int
+    page_size: int
+    total: int
+
+
+class PlatformOrganisationListResponse(BaseModel):
+    """The pagination envelope for the platform organisations listing."""
+
+    items: list[PlatformOrganisationResponse]
     page: int
     page_size: int
     total: int

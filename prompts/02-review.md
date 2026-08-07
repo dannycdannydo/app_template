@@ -26,9 +26,26 @@ You are the **reviewer**. You did not write this code. Your job is to find probl
 
 2. Read the relevant §6 subsection in the scope file to confirm which checkbox items this work was supposed to complete.
 
-3. Read **only** the blueprint sections the implementer referenced in the handoff file. These define the conventions you are checking against.
+3. Read **only** the blueprint sections the implementer referenced in the handoff file. These define the conventions you are checking against. Also read the current scope's §2, §5 and the full §6 subsection dependency chain needed to determine whether an interface required by this work already exists. If the scope names a release-specific design source and the contract is ambiguous, read only that source's deliverables/API-surface/frontend-route tables. This is contract verification, not a blanket blueprint read.
 
-4. Review the changes against these lenses, in priority order:
+4. Independently verify interface closure before reviewing implementation
+   details:
+   - translate each checkbox being claimed into concrete observable behaviour;
+   - inspect routers and generated OpenAPI types, not just the diff, to verify
+     the required method/path exists with an explicit response schema;
+   - for a frontend view/action, identify its exact API operation and verify
+     that it exists now or is explicitly scheduled in a later unchecked task;
+   - for API work, verify create/list/detail/edit/delete, pagination and
+     filtering individually when required by §2, §5, a release design source,
+     or a dependent UI task; and
+   - verify every new protected route is in `PROTECTED_ROUTES`.
+
+   Do not accept "the current checkbox was implemented" as sufficient when
+   the release contract or a required dependent UI flow exposes a missing API
+   operation. Record that as a must-fix scope/implementation gap with the
+   source requirement and the missing method/path.
+
+5. Review the changes against these lenses, in priority order:
 
    **Correctness** — Does it do what the task requires? Do the §4 commands actually work? Any logic errors or incomplete paths?
 
@@ -42,12 +59,12 @@ You are the **reviewer**. You did not write this code. Your job is to find probl
 
    **Scope discipline** — Stayed within the current release's scope (§2)? Avoided pulling in deferred work (§3)? Flag any scope creep.
 
-5. Run the validation commands yourself to confirm:
+6. Run the validation commands yourself to confirm:
    - `make lint`
    - `make typecheck`
    - `make test`
 
-6. **Write the review to `.handoff/review.md`.** This file is what the next step reads — they will not see your chat output. Use this format:
+7. **Write the review to `.handoff/review.md`.** This file is what the next step reads — they will not see your chat output. Use this format:
 
    ```
    VERDICT: APPROVED  |  CHANGES REQUESTED
@@ -71,9 +88,13 @@ You are the **reviewer**. You did not write this code. Your job is to find probl
 
    Checklist items that should NOT yet be checked off:
    - (any incomplete, with reason)
+
+   Interface-coverage evidence:
+   - (requirement → method/path → schema/test; list every missing operation,
+     or "none")
    ```
 
-7. **Do not commit. Do not edit the scope file.** Your output is `.handoff/review.md`. If the verdict is APPROVED with no must-fix or should-fix items, note this clearly so the user can go straight to `03-apply-and-commit` for a quick commit.
+8. **Do not commit. Do not edit the scope file.** Your output is `.handoff/review.md`. If the verdict is APPROVED with no must-fix or should-fix items, note this clearly so the user can go straight to `03-apply-and-commit` for a quick commit.
 
 ## Done means
 

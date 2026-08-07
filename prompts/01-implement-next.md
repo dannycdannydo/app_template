@@ -29,6 +29,13 @@ You are the **implementer**.
 
 3. Consult §7 (blueprint reference map) and read **only** the listed blueprint sections for this subsection. Follow existing patterns already in the repo. Do not invent conventions that contradict the blueprint.
 
+   Before coding, inspect the current API surface (routers and generated
+   OpenAPI types) for every endpoint needed by this subsection and by any
+   explicitly dependent later UI task. If the scope says a later view can
+   list, view or edit a resource but the required operation is absent from the
+   current task and all earlier completed tasks, stop and report it as a scope
+   gap rather than quietly assuming it exists.
+
 4. State at the start of your work:
    - which subsection and which checkbox items you will complete;
    - which blueprint sections you read.
@@ -51,6 +58,9 @@ You are the **implementer**.
    - any decisions made where the blueprint was silent or ambiguous;
    - any deviations from the plan and why;
    - what the reviewer should pay closest attention to;
+   - an **interface-coverage check**: each completed checkbox mapped to its
+     method/path, request and response schema, tests, and any known frontend
+     consumer; explicitly list required operations that are still absent;
    - validation commands run and their results.
 
 9. **Do not commit. Do not check off boxes.** Leave the work uncommitted so the reviewer can inspect the diff cleanly. The handoff file `.handoff/implementation.md` must exist before you hand off.

@@ -26,6 +26,7 @@ MAX_PAGE_SIZE = 100
 # catalogue (invitation.*, membership.*, platform.*) joins in later release
 # work units.
 ACTION_ORGANISATION_CREATED = "organisation.created"
+ACTION_ORGANISATION_UPDATED = "organisation.updated"
 ACTION_RECORD_CREATED = "record.created"
 ACTION_RECORD_UPDATED = "record.updated"
 ACTION_RECORD_DELETED = "record.deleted"

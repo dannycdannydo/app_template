@@ -134,6 +134,23 @@ PROTECTED_ROUTES: list[RouteSpec] = [
         org_scoped=False,
         request_body={"name": "Acme"},
     ),
+    # Organisation administration (Scope §6.9): list, view and rename are
+    # platform-gated and never org-scoped; the organisation id comes from the
+    # path, never from a request body.
+    _route("GET", "/api/v1/platform/organisations", org_scoped=False),
+    _route(
+        "GET",
+        "/api/v1/platform/organisations/{organisation_id}",
+        org_scoped=False,
+        path_values={"organisation_id": _ORG_ID},
+    ),
+    _route(
+        "PATCH",
+        "/api/v1/platform/organisations/{organisation_id}",
+        org_scoped=False,
+        request_body={"name": "Renamed"},
+        path_values={"organisation_id": _ORG_ID},
+    ),
     # Invitation endpoints (Scope §6.5): platform-gated, never org-scoped;
     # the organisation and invitation ids come from the path.
     _route(

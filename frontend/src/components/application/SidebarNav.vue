@@ -1,11 +1,20 @@
 <script setup lang="ts">
-import { HomeIcon, InfoIcon, ListIcon, type LucideIcon } from '@lucide/vue'
+import { HomeIcon, InfoIcon, ListIcon, ShieldIcon, type LucideIcon } from '@lucide/vue'
+import { computed } from 'vue'
 import { RouterLink } from 'vue-router'
+
+import { usePlatformAdminStatus } from '@/queries/platform'
 
 /**
  * Shell navigation (Scope §6.3). Rendered in both the desktop sidebar and the
  * mobile sheet. When `collapsed` (desktop only), labels hide and only the
  * icons remain; `router-link-active` provides the active state.
+ *
+ * The Platform Admin Centre entry (Scope §6.9, acceptance §5.10) is shown
+ * only when `/me` reports `platform_roles` (Scope §6.2) — the backend stays
+ * the enforcement point, this only shapes what non-admins see. While `/me`
+ * is still loading the entry stays hidden so it never flashes for a
+ * non-admin.
  */
 const props = withDefaults(
   defineProps<{
@@ -30,6 +39,16 @@ const NAV_ITEMS: NavItem[] = [
   { to: '/about', label: 'About', icon: InfoIcon },
 ]
 
+const { isPlatformAdmin, mePending } = usePlatformAdminStatus()
+
+const visibleItems = computed<NavItem[]>(() => {
+  const items = [...NAV_ITEMS]
+  if (!mePending.value && isPlatformAdmin.value) {
+    items.push({ to: '/platform', label: 'Platform Admin', icon: ShieldIcon })
+  }
+  return items
+})
+
 function navigate(): void {
   props.onNavigate?.()
 }
@@ -38,7 +57,7 @@ function navigate(): void {
 <template>
   <nav class="flex flex-col gap-1" aria-label="Main">
     <RouterLink
-      v-for="item in NAV_ITEMS"
+      v-for="item in visibleItems"
       :key="item.to"
       :to="item.to"
       :title="collapsed ? item.label : undefined"
