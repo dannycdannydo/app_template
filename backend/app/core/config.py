@@ -67,6 +67,15 @@ class Settings(BaseSettings):
             "verified login; empty disables the bootstrap (Scope §6.4)"
         ),
     )
+    workos_webhook_secret: str = Field(
+        default="",
+        description=(
+            "WorkOS webhook endpoint secret used to verify the signature of inbound "
+            "webhook deliveries (Scope §6.8, BP §30). Empty disables webhook "
+            "processing: the endpoint then rejects every delivery (fail-closed); "
+            "login-time reconciliation stays authoritative either way"
+        ),
+    )
     cors_allowed_origins: list[str] = Field(
         default_factory=lambda: ["http://localhost:5173"],
         description="Exact browser origins allowed to call the API",

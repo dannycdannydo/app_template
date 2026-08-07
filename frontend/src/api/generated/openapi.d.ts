@@ -376,6 +376,32 @@ export interface paths {
     patch?: never
     trace?: never
   }
+  '/api/v1/webhooks/workos': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    /**
+     * Workos Webhook Endpoint
+     * @description Consume one signature-verified WorkOS webhook delivery (best-effort).
+     *
+     *     A missing, malformed or stale signature is rejected with 401 before the
+     *     payload is parsed; a valid delivery is parsed and dispatched to the
+     *     consumer, which refreshes best-effort local state only. Login-time
+     *     reconciliation (Scope §6.5) remains the authoritative grant path, so a
+     *     delivery that never arrives cannot block a legitimate invitation.
+     */
+    post: operations['workos_webhook_endpoint_api_v1_webhooks_workos_post']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
 }
 export type webhooks = Record<string, never>
 export interface components {
@@ -914,6 +940,22 @@ export interface components {
       input?: unknown
       /** Context */
       ctx?: Record<string, never>
+    }
+    /**
+     * WebhookResponse
+     * @description Acknowledgement returned for a successfully verified delivery.
+     *
+     *     ``processed`` is always true once the signature verified and the payload
+     *     parsed — the consumer's best-effort refresh may or may not have applied a
+     *     local state change, and the response deliberately does not leak which, so
+     *     nothing about local state can be inferred from the reply.
+     */
+    WebhookResponse: {
+      /**
+       * Processed
+       * @default true
+       */
+      processed: boolean
     }
   }
   responses: never
@@ -1631,6 +1673,37 @@ export interface operations {
         }
         content: {
           'application/json': components['schemas']['PlatformFeatureFlagItem']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  workos_webhook_endpoint_api_v1_webhooks_workos_post: {
+    parameters: {
+      query?: never
+      header?: {
+        'workos-signature'?: string | null
+      }
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['WebhookResponse']
         }
       }
       /** @description Validation Error */

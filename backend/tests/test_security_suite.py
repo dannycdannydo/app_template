@@ -24,16 +24,18 @@ enforced on every protected route.
 
 from __future__ import annotations
 
+import time
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Annotated, Any, cast
 
 import pytest
 from fastapi import Depends, FastAPI
 from httpx import ASGITransport, AsyncClient, Response
 from starlette.routing import Route
-from tests.auth_helpers import generate_key_pair, make_token
+from tests.auth_helpers import generate_key_pair, make_token, webhook_signature_header
 from tests.context_helpers import (
     ContextState,
     build_context_app,
@@ -42,6 +44,7 @@ from tests.context_helpers import (
     make_user,
 )
 
+import app.api.dependencies as dependencies_module
 from app.api.dependencies import get_current_membership
 from app.main import create_app
 from app.modules.organisations.models import OrganisationMembership
@@ -203,6 +206,16 @@ PROTECTED_ROUTES: list[RouteSpec] = [
     ),
 ]
 
+# Signature-gated surface (Scope §6.8): the WorkOS webhook route is protected
+# by the HMAC-SHA256 ``workos-signature`` header, not by a session token, so it
+# is deliberately absent from PROTECTED_ROUTES and the session-based matrix
+# below. It is still counted by the completeness guard and gets its own
+# signature security tests (missing/invalid/replayed signature -> 401, no
+# stack-trace exposure, a Bearer token never substitutes for a signature).
+SIGNATURE_GATED_ROUTES: list[RouteSpec] = [
+    _route("POST", "/api/v1/webhooks/workos", org_scoped=False),
+]
+
 _ORG_SCOPED_ROUTES = [route for route in PROTECTED_ROUTES if route.org_scoped]
 # Platform routes: every route under /api/v1/platform. They are never
 # org-scoped — the platform plane operates across organisations and takes no
@@ -304,6 +317,8 @@ def test_no_protected_route_is_left_out() -> None:
     """Every /api/v1 route must appear in PROTECTED_ROUTES (BP §31 reusability)."""
     # Public endpoints (e.g. /health, /ready) must stay outside /api/v1 so this
     # prefix filter remains the single source of truth for what is protected.
+    # Signature-gated webhook routes are counted too, though they are held in a
+    # separate table because the session-based matrix does not apply to them.
     registered: set[tuple[str, str]] = set()
     for route in _iter_http_routes(create_app()):
         if not route.path.startswith("/api/v1"):
@@ -311,7 +326,9 @@ def test_no_protected_route_is_left_out() -> None:
         for method in route.methods or ():
             if method in {"GET", "POST", "PATCH", "DELETE", "PUT"}:
                 registered.add((method, route.path))
-    expected = {(spec.method, spec.path) for spec in PROTECTED_ROUTES}
+    expected = {(spec.method, spec.path) for spec in PROTECTED_ROUTES} | {
+        (spec.method, spec.path) for spec in SIGNATURE_GATED_ROUTES
+    }
     assert registered == expected
 
 
@@ -485,6 +502,109 @@ async def test_platform_admin_without_org_membership_denied_on_org_routes(
             headers=_headers(make_token(_PRIVATE_KEY), other_org_id),
         )
     _assert_standard_error(response, 403, "not_a_member")
+
+
+# --- Signature-gated webhook surface (Scope §6.8) ---
+#
+# The WorkOS webhook route is protected by signature, not by a session token,
+# so the session-based matrix above does not apply. These tests pin its
+# security contract: missing/invalid/replayed signatures and an unset secret
+# are 401, a Bearer token never substitutes for a signature, and the standard
+# error envelope leaks nothing.
+
+
+def _patched_webhook_settings(monkeypatch: pytest.MonkeyPatch, secret: str) -> None:
+    """Point the dependencies module's settings accessor at a webhook secret."""
+    monkeypatch.setattr(
+        dependencies_module,
+        "get_settings",
+        lambda: SimpleNamespace(workos_webhook_secret=secret),
+    )
+
+
+@pytest.mark.parametrize("spec", SIGNATURE_GATED_ROUTES, ids=lambda s: f"{s.method} {s.path}")
+async def test_webhook_missing_signature_rejected(
+    app_with_state: tuple[FastAPI, ContextState],
+    spec: RouteSpec,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A delivery without a workos-signature header is a 401 (acceptance §5.9)."""
+    _patched_webhook_settings(monkeypatch, "whsec_suite")
+    app, _state = app_with_state
+    async with _client(app) as client:
+        response = await client.request(spec.method, _url(spec), json={"event": "unknown.event"})
+    _assert_standard_error(response, 401, "invalid_webhook_signature")
+
+
+@pytest.mark.parametrize("spec", SIGNATURE_GATED_ROUTES, ids=lambda s: f"{s.method} {s.path}")
+async def test_webhook_invalid_signature_rejected(
+    app_with_state: tuple[FastAPI, ContextState],
+    spec: RouteSpec,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A delivery signed with the wrong secret is a 401 (acceptance §5.9)."""
+    _patched_webhook_settings(monkeypatch, "whsec_suite")
+    app, _state = app_with_state
+    payload = b'{"event":"invitation.revoked","data":{"id":"inv_1"}}'
+    header = webhook_signature_header(payload, "whsec_wrong", int(time.time() * 1000))
+    async with _client(app) as client:
+        response = await client.post(
+            _url(spec), content=payload, headers={"workos-signature": header}
+        )
+    _assert_standard_error(response, 401, "invalid_webhook_signature")
+
+
+@pytest.mark.parametrize("spec", SIGNATURE_GATED_ROUTES, ids=lambda s: f"{s.method} {s.path}")
+async def test_webhook_replayed_signature_rejected(
+    app_with_state: tuple[FastAPI, ContextState],
+    spec: RouteSpec,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A valid signature from beyond the 300s tolerance is a 401 (replay defence)."""
+    _patched_webhook_settings(monkeypatch, "whsec_suite")
+    app, _state = app_with_state
+    payload = b'{"event":"invitation.revoked","data":{"id":"inv_1"}}'
+    stale_ms = int(time.time() * 1000) - 10 * 60 * 1000  # ten minutes ago
+    header = webhook_signature_header(payload, "whsec_suite", stale_ms)
+    async with _client(app) as client:
+        response = await client.post(
+            _url(spec), content=payload, headers={"workos-signature": header}
+        )
+    _assert_standard_error(response, 401, "invalid_webhook_signature")
+
+
+@pytest.mark.parametrize("spec", SIGNATURE_GATED_ROUTES, ids=lambda s: f"{s.method} {s.path}")
+async def test_webhook_rejects_unset_secret_fail_closed(
+    app_with_state: tuple[FastAPI, ContextState], spec: RouteSpec
+) -> None:
+    """Without WORKOS_WEBHOOK_SECRET every delivery is rejected (fail-closed)."""
+    app, _state = app_with_state
+    payload = b'{"event":"unknown.event"}'
+    header = webhook_signature_header(payload, "any-secret", int(time.time() * 1000))
+    async with _client(app) as client:
+        response = await client.post(
+            _url(spec), content=payload, headers={"workos-signature": header}
+        )
+    _assert_standard_error(response, 401, "invalid_webhook_signature")
+
+
+@pytest.mark.parametrize("spec", SIGNATURE_GATED_ROUTES, ids=lambda s: f"{s.method} {s.path}")
+async def test_webhook_bearer_token_never_substitutes_for_signature(
+    app_with_state: tuple[FastAPI, ContextState],
+    spec: RouteSpec,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session token in the Authorization header is not a webhook signature."""
+    _patched_webhook_settings(monkeypatch, "whsec_suite")
+    app, _state = app_with_state
+    async with _client(app) as client:
+        response = await client.request(
+            spec.method,
+            _url(spec),
+            json={"event": "unknown.event"},
+            headers={"Authorization": f"Bearer {make_token(_PRIVATE_KEY)}"},
+        )
+    _assert_standard_error(response, 401, "invalid_webhook_signature")
 
 
 # --- Stack traces are never exposed (BP §13, acceptance §5.8) ---
