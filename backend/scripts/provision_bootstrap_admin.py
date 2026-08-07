@@ -122,8 +122,7 @@ def resolve_email(arg_email: str) -> str:
     email = (arg_email or get_settings().bootstrap_platform_admin_email).strip().lower()
     if not email:
         raise ProvisionError(
-            "No email configured. Set BOOTSTRAP_PLATFORM_ADMIN_EMAIL in .env "
-            "or pass --email."
+            "No email configured. Set BOOTSTRAP_PLATFORM_ADMIN_EMAIL in .env or pass --email."
         )
     return email
 

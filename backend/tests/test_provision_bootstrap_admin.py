@@ -73,9 +73,7 @@ class FakeSession:
 
 def test_creates_a_verified_password_user_when_absent() -> None:
     provisioner = FakeProvisioner()
-    result = provision_bootstrap_admin(
-        provisioner, email="admin@example.com", password="s3cret!"
-    )
+    result = provision_bootstrap_admin(provisioner, email="admin@example.com", password="s3cret!")
 
     assert result.created is True
     assert result.email == "admin@example.com"
@@ -199,13 +197,17 @@ def test_adapter_deletes_a_user() -> None:
 
 def test_delete_removes_the_workos_user_and_the_internal_row() -> None:
     provisioner = FakeProvisioner(
-        existing={"admin@example.com": ProvisionedWorkOSUser(id="user_1", email="admin@example.com")}
+        existing={
+            "admin@example.com": ProvisionedWorkOSUser(id="user_1", email="admin@example.com")
+        }
     )
     session = FakeSession(rowcount=1)
 
     result = asyncio.run(
         delete_bootstrap_admin(
-            provisioner, session, email="admin@example.com"  # type: ignore[arg-type]
+            provisioner,
+            session,
+            email="admin@example.com",  # type: ignore[arg-type]
         )
     )
 
@@ -222,7 +224,9 @@ def test_delete_is_idempotent_when_nothing_exists() -> None:
 
     result = asyncio.run(
         delete_bootstrap_admin(
-            provisioner, session, email="admin@example.com"  # type: ignore[arg-type]
+            provisioner,
+            session,
+            email="admin@example.com",  # type: ignore[arg-type]
         )
     )
 
