@@ -190,6 +190,50 @@ WorkOS owns login and session management end-to-end; the frontend only ever pres
 - **Client state** (session, sidebar collapsed state, selected organisation) lives in Pinia stores (`stores/session.ts`, `stores/ui.ts`, `stores/organisation.ts`) and is persisted client-side only. The selected organisation is client state: it is not fetched server data, but it drives the `X-Org-Id` header and invalidates org-scoped queries on switch.
 - API errors arrive in the standard envelope (`code`, `message`, `details`, `request_id`, blueprint §13) and are normalized into a typed client error used by toasts and forms.
 
+## Storage and direct upload flow (v0.5)
+
+Object storage is provider-neutral (ADR-0006, blueprint §17): `app/storage/` defines one `ObjectStorage` interface — `create_upload_url`, `create_download_url`, `head_object`, `delete_object`, `ensure_bucket` — and adapters implement it. Exactly two adapters ship: `S3Storage` (boto3, S3-compatible including MinIO, selected by `STORAGE_PROVIDER=s3`) and `FakeObjectStorage` (in-memory, used by the pytest suite). No module outside `app/storage/` imports a provider SDK; application code depends on the interface only. `STORAGE_PROVIDER=fake` is rejected in production and the production config fails fast without explicit S3 credentials, bucket and endpoint.
+
+Files are org-scoped records in the `files` table. Object keys are always server-generated (`organisations/{organisation_id}/documents/{file_id}/original`) and the client never supplies an object path or storage provider (`extra="forbid"` on request schemas). The direct upload flow keeps bytes out of the API:
+
+```text
+POST /api/v1/files                      intent: validate filename/content-type/size
+                                        (documents.upload), create `pending` file
+                                        record, return {file_id, upload_url, expires_at}
+        │   browser PUTs bytes straight to the signed URL (object storage)
+        ▼
+POST /api/v1/files/{file_id}/complete   documents.upload: head the object, verify
+                                        existence + size (+ checksum when supplied);
+                                        `uploaded` + enqueue the processing job
+        │   worker runs process_file (job_type "file.processing")
+        ▼
+file ready → GET /api/v1/files/{file_id}/download-url returns a short-lived signed
+GET URL; DELETE /api/v1/files/{file_id} soft-deletes (deleted_at) and removes the
+object from storage (document.deleted audit)
+```
+
+File lifecycle statuses: `pending → uploaded → processing → ready` with the failure states `failed` / `quarantined` and the soft-delete state `deleted`. Every transition is audited append-only (`file.upload_started`, `file.uploaded`, `file.upload_failed`, `file.processing`, `file.ready`, `document.deleted`). A stored object whose size does not match the declared `size_bytes` fails the file at completion.
+
+## Worker and durable job flow (v0.5)
+
+Long-running work runs in Dramatiq workers, never in HTTP handlers (ADR-0004, blueprint §18). The worker is the same backend image running `uv run dramatiq app.workers` (`make worker`, the `dev-docker` `worker` service, and natively as part of `make dev`), with Redis as the broker on `REDIS_URL`.
+
+Jobs are durable, tenant-scoped rows in the `jobs` table. The service writes the row before enqueuing (record-then-enqueue), so a durable `queued` record exists even if the broker is down, and the bounded retry policy self-heals a job that was never picked up:
+
+```text
+HTTP request → jobs_service.create_and_enqueue()   writes `queued` row, then
+                                                   enqueues the task
+        │
+        ▼
+Dramatiq worker → mark_running → update_progress(0–100) → succeed | fail
+        │                                                        │
+        ▼                                                        ▼
+job `succeeded`, file `ready`                     job `failed` + error_code/error_message,
+(job.succeeded audit)                             file `failed` (job.failed audit)
+```
+
+Retries are bounded: transient errors retry up to `MAX_ATTEMPTS` total attempts; permanent validation errors are not retried. Terminal states (`succeeded` / `failed` / `cancelled`) are never re-run, and completion/failure is idempotent. The org-scoped job endpoints `GET /api/v1/jobs` (list, paginated, `status` / `job_type` filters) and `GET /api/v1/jobs/{job_id}` (status + progress 0–100) let the frontend poll a processing file to completion; they are gated by `documents.read` (ADR-0014 — the files module is the only job producer today, so a generic `jobs.*` permission waits for a second producer).
+
 ## Cross-cutting conventions
 
 - **API**: REST, JSON, OpenAPI, `/api/v1` prefix (see `API_CONVENTIONS.md`).

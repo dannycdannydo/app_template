@@ -944,6 +944,32 @@ Ship:
 
 Add Azure and GCS adapters when first required, while maintaining the interface contract.
 
+## Interface implementation and permissions (v0.5)
+
+The v0.5 release implements the interface contract and the direct upload flow:
+
+- `app/storage/` ships the `ObjectStorage` interface (create upload/download
+  URLs, head, delete, ensure bucket) with exactly two adapters: `S3Storage`
+  (boto3, S3-compatible including MinIO) and `FakeObjectStorage` (in-memory,
+  test suite only). `grep -rn "boto3" backend/app | grep -v "app/storage"` is
+  empty — the SDK stays behind the adapter.
+- Storage endpoints are gated by the existing organisation permission codes:
+  `documents.upload` gates upload intent and completion, `documents.read`
+  gates list/detail/download URL, `documents.delete` gates soft delete. Files
+  and jobs are org-scoped resources like any other; there are no
+  storage-specific roles or a generic `jobs.*` permission yet.
+- Upload completion verifies the stored object with `head_object`: a missing
+  object or a size mismatch fails the file (`failed`, or `quarantined` where
+  a scanner would own the decision) and writes `file.upload_failed`. Request
+  schemas use `extra="forbid"`, so the client can never supply an object key
+  or a storage provider.
+- File lifecycle events are audited append-only (`file.upload_started`,
+  `file.uploaded`, `file.upload_failed`, `file.processing`, `file.ready`,
+  `document.deleted`).
+- Signed URLs presign against `STORAGE_PUBLIC_ENDPOINT_URL` when the browser
+  cannot reach the API's storage host (e.g. the dev-docker stack) and fall
+  back to `STORAGE_ENDPOINT_URL`.
+
 ---
 
 # 18. Background Jobs
@@ -1021,6 +1047,30 @@ integrations
 ai
 emails
 ```
+
+## Durable job records (v0.5)
+
+The v0.5 release adds the durable `jobs` table and the record-then-enqueue
+service:
+
+- `create_and_enqueue` writes the durable row (status `queued`) in the
+  request's transaction before the task is enqueued, so a row exists even if
+  the broker is unreachable; the bounded retry policy self-heals a job that
+  was never picked up.
+- The worker writes status, `attempt_count`, `started_at`/`completed_at` and
+  progress through the `mark_running`, `update_progress`, `succeed` and
+  `fail` helpers; terminal states (`succeeded`/`failed`/`cancelled`) are
+  never re-run.
+- Retries are bounded: transient errors retry up to `MAX_ATTEMPTS` total
+  attempts; permanent validation errors are not retried and fail the job
+  immediately. Completion and permanent failure write `job.succeeded` /
+  `job.failed` audit rows in the same transaction as the status transition.
+- The job endpoints (`GET /api/v1/jobs`, `GET /api/v1/jobs/{job_id}`) are
+  org-scoped and gated by the file module's `documents.read` code; a generic
+  `jobs.*` permission is deferred until a second job producer appears (rule
+  of three).
+- Long-running work never runs in HTTP handlers; the worker is the same
+  backend image running `uv run dramatiq app.workers` (see §36).
 
 ---
 
@@ -1551,6 +1601,19 @@ Controls include:
 - quarantine state;
 - malware scanning hook.
 
+### File security implementation (v0.5)
+
+The v0.5 release ships MIME and size validation at upload-intent time (a
+declared size above `STORAGE_MAX_UPLOAD_SIZE` or a disallowed content type is
+rejected before any signed URL is issued), size verification at completion (a
+stored object whose size does not match the declaration fails the file),
+private buckets with short-lived signed URLs, server-generated object keys
+(the client submits the file id, never an object path) and worker isolation
+for processing. Decompression-bomb protections, page limits and malware
+scanning remain deferred until server-side document processing exists
+(post-v1). The storage endpoint is a configured setting, never
+client-supplied, so storage adds no SSRF surface.
+
 ## SSRF
 
 User-supplied URLs must not access:
@@ -1630,6 +1693,14 @@ Platform routes (v0.4) join the same `PROTECTED_ROUTES` matrix and add a
 rejected on platform routes (`403 platform_admin_required`), and a platform
 admin without an organisation membership is rejected on organisation routes
 (`403 not_a_member`). The two planes never grant across each other.
+
+Files and jobs routes (v0.5) join the same matrix with the full case list;
+the oversized-upload rejection (a declared size above
+`STORAGE_MAX_UPLOAD_SIZE` rejected at intent time) is covered by the file
+test suite rather than as a matrix row. MinIO-backed S3
+adapter tests carry a `storage_integration` marker and are excluded from the
+default suite, so the local quality gate stays provider-free; a dedicated CI
+job runs them against a real MinIO service.
 
 ---
 

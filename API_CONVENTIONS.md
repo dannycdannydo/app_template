@@ -169,3 +169,33 @@ The platform administration plane is a separate authorisation plane (ADR-0013, v
 ### Security regression suite
 
 The mandatory reusable security tests in `backend/tests/test_security_suite.py` (blueprint §31, v0.2 Scope §6.6) parametrise the whole protected surface: unauthenticated rejected, invalid sessions rejected, cross-organisation access denied, viewer writes denied, disabled users denied, and stack traces not exposed. The suite's `PROTECTED_ROUTES` table lists every protected endpoint once, and a completeness guard fails when a new `/api/v1` route is registered without being added to it. Adding a route to that table is a mandatory part of adding the endpoint.
+
+## Files and jobs (v0.5)
+
+Files and jobs are org-scoped resources under `/api/v1`, gated by the existing `documents.*` permission codes (ADR-0014) through the same `require_permission` dependency as every other tenant-scoped route. No new permission codes or roles exist for them; a generic `jobs.*` permission is deferred until a second job producer appears.
+
+### Files
+
+The files API implements the direct upload flow (blueprint §17): the backend issues a signed PUT URL, the browser uploads straight to storage, and completion verifies the stored object. The client never supplies an object key or a storage provider — request schemas use `extra="forbid"` so those fields are rejected.
+
+| Method & path | Permission | Purpose | Notes |
+| --- | --- | --- | --- |
+| `POST /api/v1/files` | `documents.upload` | Upload intent: validates declared filename/content-type/size against `STORAGE_ALLOWED_CONTENT_TYPES` / `STORAGE_MAX_UPLOAD_SIZE` (rejected before any URL is issued), creates a `pending` record, returns `{file_id, upload_url, expires_at}` | `201` |
+| `POST /api/v1/files/{file_id}/complete` | `documents.upload` | Verify the stored object (exists, size matches, checksum when supplied); `uploaded` + enqueue the processing job; returns `FileDetail` plus `processing_job_id` | mismatch → `failed`/`quarantined` + audit |
+| `GET /api/v1/files` | `documents.read` | Paginated list, standard envelope, optional `status` filter; deleted files excluded by default | `?page=1&page_size=50&status=ready` |
+| `GET /api/v1/files/{file_id}` | `documents.read` | File detail | cross-org id → `404` |
+| `GET /api/v1/files/{file_id}/download-url` | `documents.read` | Short-lived signed GET URL | |
+| `DELETE /api/v1/files/{file_id}` | `documents.delete` | Soft delete (`deleted_at`) + object removed from storage + `document.deleted` audit | `204` |
+
+File statuses: `pending`, `uploaded`, `processing`, `ready`, `failed`, `quarantined`, `deleted`.
+
+### Jobs
+
+Jobs are durable records the client polls while background work runs; the file-processing job (`job_type="file.processing"`) drives progress 0→100.
+
+| Method & path | Permission | Purpose | Notes |
+| --- | --- | --- | --- |
+| `GET /api/v1/jobs` | `documents.read` | Paginated list of the caller's organisation's jobs, standard envelope, `status` / `job_type` filters | |
+| `GET /api/v1/jobs/{job_id}` | `documents.read` | Job detail: status + progress (0–100) | cross-org id → `404`; terminal states never re-run |
+
+Job statuses: `queued`, `running`, `succeeded`, `failed`, `cancelled`.
