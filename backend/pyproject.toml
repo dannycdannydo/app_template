@@ -1,7 +1,7 @@
 [project]
 name = "app-template-backend"
-version = "0.1.0"
-description = "FastAPI backend for the application starter template (v0.1 foundation)"
+version = "0.5.0"
+description = "FastAPI backend for the application starter template"
 requires-python = ">=3.13"
 dependencies = [
     "alembic>=1.18.5",
