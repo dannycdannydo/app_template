@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.exceptions import BadRequestError, PermissionDenied, UnauthorizedError
-from app.core.logging import current_request_id
+from app.core.logging import bind_identity_context, current_request_id
 from app.core.security import (
     InvalidSessionError,
     SessionValidator,
@@ -73,6 +73,7 @@ def _bearer_token(authorization: str | None) -> str:
 
 
 async def get_current_user(
+    request: Request,
     session: Annotated[AsyncSession, Depends(get_db)],
     validator: Annotated[SessionValidator, Depends(get_session_validator)],
     profiles: Annotated[UserProfileClient, Depends(get_user_profile_client)],
@@ -117,6 +118,15 @@ async def get_current_user(
     # when no grantable invitation exists (one indexed query, no WorkOS call),
     # so it is safe to run on every successful authentication.
     await link_invitation_on_login(session, user, profiles)
+    # Blueprint §28 logging context: every log line emitted by this request
+    # after authentication carries the caller's user id (the request
+    # middleware clears the context at the end of the request). The identity
+    # is also recorded on ``request.state`` so the request middleware can
+    # rebind it for the ``request_finished`` line — BaseHTTPMiddleware runs
+    # the router in a child context, so contextvars bound here never reach
+    # the middleware's own context.
+    bind_identity_context(user_id=str(user.id))
+    request.state.user_id = str(user.id)
     return user
 
 
@@ -141,6 +151,7 @@ def _org_context_id(x_org_id: str | None) -> uuid.UUID:
 
 
 async def get_current_membership(
+    request: Request,
     session: Annotated[AsyncSession, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],
     x_org_id: Annotated[str | None, Header()] = None,
@@ -169,6 +180,8 @@ async def get_current_membership(
             code="not_a_member",
             message="You are not an active member of this organisation.",
         )
+    bind_identity_context(user_id=str(user.id), organisation_id=str(membership.organisation_id))
+    request.state.organisation_id = str(membership.organisation_id)
     return membership
 
 

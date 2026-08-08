@@ -27,7 +27,7 @@ from starlette.responses import Response
 from app.api.health import router as health_router
 from app.core.config import get_settings
 from app.core.exceptions import APIError, ErrorDetail, ErrorResponse
-from app.core.logging import configure_logging, current_request_id
+from app.core.logging import bind_identity_context, configure_logging, current_request_id
 from app.core.rate_limit import RateLimiter, get_rate_limiter
 from app.modules.audit.router import router as audit_router
 from app.modules.feature_flags.router import router as feature_flags_router
@@ -39,6 +39,9 @@ from app.modules.platform_admin.router import router as platform_admin_router
 from app.modules.records.router import router as records_router
 from app.modules.users.router import router as users_router
 from app.modules.webhooks.router import router as webhooks_router
+from app.observability.metrics import metrics_middleware
+from app.observability.metrics import router as metrics_router
+from app.observability.sentry import capture_exception, initialise_sentry
 
 logger = structlog.get_logger()
 
@@ -113,7 +116,11 @@ async def _handle_http_exception(request: Request, exc: Exception) -> JSONRespon
 
 
 async def _handle_unexpected_exception(request: Request, exc: Exception) -> JSONResponse:
+    # Blueprint §13: unexpected exceptions return a safe generic message and
+    # are recorded in Sentry (blueprint §28 worker/API failure visibility).
+    # capture_exception is a no-op when no DSN is configured.
     logger.exception("unhandled_exception", error=str(exc))
+    capture_exception(exc)
     response = ErrorResponse(
         code="internal_error",
         message="An unexpected error occurred.",
@@ -139,6 +146,15 @@ async def _request_id_middleware(request: Request, call_next: RequestResponseEnd
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Permissions-Policy"] = "camera=(), geolocation=(), microphone=()"
     duration_ms = (perf_counter() - started) * 1000
+    # The router runs in a child context (BaseHTTPMiddleware task group), so
+    # identity contextvars bound by the auth dependencies never reach this
+    # middleware's own context. The dependencies record the caller on
+    # ``request.state`` (shared scope); rebind here so the ``request_finished``
+    # line carries the blueprint §28 identity fields too.
+    user_id = getattr(request.state, "user_id", None)
+    organisation_id = getattr(request.state, "organisation_id", None)
+    if user_id is not None:
+        bind_identity_context(user_id=user_id, organisation_id=organisation_id)
     logger.info(
         "request_finished",
         method=request.method,
@@ -185,6 +201,9 @@ def _register_middleware(
         expose_headers=["X-Request-ID"],
     )
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=trusted_hosts)
+    # Metrics instrument the whole request path (rate limits and auth failures
+    # included) but skip the /metrics scrape itself.
+    app.add_middleware(BaseHTTPMiddleware, dispatch=metrics_middleware)
     app.add_middleware(BaseHTTPMiddleware, dispatch=_rate_limit_middleware)
     app.add_middleware(BaseHTTPMiddleware, dispatch=_request_id_middleware)
 
@@ -193,6 +212,12 @@ def create_app() -> FastAPI:
     """Build and configure the FastAPI application."""
     settings = get_settings()
     configure_logging(log_level=settings.log_level, json_logs=not settings.debug)
+    if settings.sentry_dsn:
+        initialise_sentry(
+            dsn=settings.sentry_dsn,
+            environment=settings.sentry_environment,
+            traces_sample_rate=settings.sentry_traces_sample_rate,
+        )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
@@ -216,6 +241,7 @@ def create_app() -> FastAPI:
         trusted_hosts=settings.trusted_hosts,
     )
     app.include_router(health_router)
+    app.include_router(metrics_router)
     app.include_router(users_router)
     app.include_router(organisations_router)
     app.include_router(platform_admin_router)

@@ -23,6 +23,7 @@ from typing import Any
 
 import dramatiq
 
+from app.core.logging import bind_worker_context
 from app.db.session import async_session_factory
 from app.modules.jobs import service as jobs_service
 
@@ -56,6 +57,7 @@ async def mark_job_failed_after_retries(
     ``MARK_FAILED_AFTER_RETRIES_ACTOR`` so the two can never drift apart.
     """
     job_id = job_id_from_message(message_dict)
+    bind_worker_context(job_id=str(job_id))
     async with async_session_factory() as session:
         await jobs_service.fail(
             session,

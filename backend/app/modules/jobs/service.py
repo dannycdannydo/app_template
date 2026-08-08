@@ -40,6 +40,7 @@ from app.modules.audit.service import (
 )
 from app.modules.jobs.models import Job, JobStatus
 from app.modules.jobs.queries import org_jobs_count_statement, org_scoped_jobs_statement
+from app.observability.metrics import JOBS_ENQUEUED_TOTAL, JOBS_FAILED_TOTAL, JOBS_SUCCEEDED_TOTAL
 
 # The pagination envelope contract shared with the files module (BP §12):
 # ``?page=1&page_size=50`` with the ``{items, page, page_size, total}`` body,
@@ -218,6 +219,7 @@ async def create_and_enqueue(
     task.send(job_id=str(job.id))
     await session.commit()
     await session.refresh(job)
+    JOBS_ENQUEUED_TOTAL.labels(job_type=job.job_type).inc()
     return job
 
 
@@ -312,6 +314,7 @@ async def succeed(
     )
     await session.commit()
     await session.refresh(job)
+    JOBS_SUCCEEDED_TOTAL.labels(job_type=job.job_type).inc()
     return job
 
 
@@ -358,4 +361,5 @@ async def fail(
     )
     await session.commit()
     await session.refresh(job)
+    JOBS_FAILED_TOTAL.labels(job_type=job.job_type).inc()
     return job

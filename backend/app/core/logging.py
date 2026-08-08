@@ -19,6 +19,25 @@ _LOG_LEVELS: dict[str, int] = {
     "CRITICAL": logging.CRITICAL,
 }
 
+# The core processors every configuration must keep, in order: context
+# variables (request/identity/job ids), log level, ISO timestamp, exception
+# formatting. The renderer is appended after these in ``configure_logging``.
+_CORE_PROCESSORS: tuple[structlog.typing.Processor, ...] = (
+    structlog.contextvars.merge_contextvars,
+    structlog.processors.add_log_level,
+    structlog.processors.TimeStamper(fmt="iso"),
+    structlog.processors.StackInfoRenderer(),
+    structlog.processors.format_exc_info,
+)
+
+# The process-wide processor chain. ``configure_logging`` mutates this one
+# list in place (never replaces it) so that loggers cached by
+# ``cache_logger_on_first_use`` keep referencing the same object — repeated
+# configuration (every ``create_app`` in tests) and tooling that temporarily
+# swaps processors (structlog's ``capture_logs`` test helper) then always see
+# the current chain.
+_PROCESSORS: list[structlog.typing.Processor] = [*_CORE_PROCESSORS]
+
 
 def configure_logging(*, log_level: str, json_logs: bool) -> None:
     """Configure structlog once.
@@ -30,18 +49,13 @@ def configure_logging(*, log_level: str, json_logs: bool) -> None:
             readable console renderer (local development).
     """
     level = _LOG_LEVELS.get(log_level.upper(), logging.INFO)
-    processors: list[structlog.typing.Processor] = [
-        structlog.contextvars.merge_contextvars,
-        structlog.processors.add_log_level,
-        structlog.processors.TimeStamper(fmt="iso"),
-        structlog.processors.StackInfoRenderer(),
-        structlog.processors.format_exc_info,
-    ]
     renderer: structlog.typing.Processor = (
         structlog.processors.JSONRenderer() if json_logs else structlog.dev.ConsoleRenderer()
     )
+    _PROCESSORS.clear()
+    _PROCESSORS.extend([*_CORE_PROCESSORS, renderer])
     structlog.configure(
-        processors=[*processors, renderer],
+        processors=_PROCESSORS,
         wrapper_class=structlog.make_filtering_bound_logger(level),
         logger_factory=structlog.PrintLoggerFactory(),
         cache_logger_on_first_use=True,
@@ -52,3 +66,33 @@ def configure_logging(*, log_level: str, json_logs: bool) -> None:
 def current_request_id() -> str:
     """Return the request ID bound by the request ID middleware, if any."""
     return str(structlog.contextvars.get_contextvars().get("request_id", ""))
+
+
+def bind_identity_context(*, user_id: str, organisation_id: str | None = None) -> None:
+    """Bind the authenticated caller's identity to the logging context.
+
+    Called by the authentication dependencies once the caller is validated and
+    enabled (blueprint §28 logging-context field set: ``user_id`` and
+    ``organisation_id``). The request middleware clears the context at the
+    start and end of every request, so nothing leaks across requests.
+    """
+    context: dict[str, str] = {"user_id": user_id}
+    if organisation_id is not None:
+        context["organisation_id"] = organisation_id
+    structlog.contextvars.bind_contextvars(**context)
+
+
+def bind_worker_context(*, job_id: str, resource_id: str | None = None) -> None:
+    """Bind the durable job identity to the logging context in a worker task.
+
+    Worker tasks call this first thing (after clearing context vars) so every
+    log line an attempt emits carries the ``job_id``, and ``resource_id`` once
+    the row the job operates on is known. Context vars are per-async-task, so
+    a message cannot observe another message's context; the explicit clear is
+    a belt-and-braces guard for threads that process messages serially.
+    """
+    structlog.contextvars.clear_contextvars()
+    context: dict[str, str] = {"job_id": job_id}
+    if resource_id is not None:
+        context["resource_id"] = resource_id
+    structlog.contextvars.bind_contextvars(**context)

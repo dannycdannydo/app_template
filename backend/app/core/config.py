@@ -151,6 +151,21 @@ class Settings(BaseSettings):
             "`make worker` and the dev-docker worker service"
         ),
     )
+    sentry_dsn: str = Field(
+        default="",
+        description=(
+            "Sentry DSN (blueprint §28). Empty disables Sentry entirely: the app "
+            "boots without initialising the SDK and nothing is captured."
+        ),
+    )
+    sentry_environment: str = Field(
+        default="",
+        description="Sentry environment label; defaults to APP_ENV when empty.",
+    )
+    sentry_traces_sample_rate: float = Field(
+        default=0.1,
+        description="Sentry performance-trace sample rate between 0.0 and 1.0.",
+    )
 
     @field_validator("cors_allowed_origins")
     @classmethod
@@ -200,6 +215,13 @@ class Settings(BaseSettings):
             raise ValueError("worker_concurrency must be at least 1")
         return concurrency
 
+    @field_validator("sentry_traces_sample_rate")
+    @classmethod
+    def _validate_sentry_traces_sample_rate(cls, sample_rate: float) -> float:
+        if not 0.0 <= sample_rate <= 1.0:
+            raise ValueError("sentry_traces_sample_rate must be between 0.0 and 1.0")
+        return sample_rate
+
     @field_validator("bootstrap_platform_admin_email")
     @classmethod
     def _validate_bootstrap_platform_admin_email(cls, email: str) -> str:
@@ -248,6 +270,8 @@ class Settings(BaseSettings):
             raise ValueError("workos_jwt_issuer is required")
         if not self.storage_public_endpoint_url:
             self.storage_public_endpoint_url = self.storage_endpoint_url
+        if not self.sentry_environment:
+            self.sentry_environment = self.app_env
         if self.app_env == "production":
             if self.storage_provider == "fake":
                 raise ValueError(

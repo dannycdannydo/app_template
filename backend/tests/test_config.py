@@ -247,6 +247,40 @@ def test_storage_public_endpoint_defaults_to_endpoint() -> None:
     assert settings.storage_public_endpoint_url == "http://localhost:9000"
 
 
+def test_sentry_settings_defaults_and_validation() -> None:
+    """Sentry is optional and off by default; the sample rate is bounded.
+
+    The environment label falls back to APP_ENV when empty (Scope §6.1,
+    blueprint §28): the application boots with no Sentry unless a DSN is
+    configured, and production is not forced to set one.
+    """
+    settings = Settings(app_env="staging", database_url="postgresql+asyncpg://x")
+    assert settings.sentry_dsn == ""
+    assert settings.sentry_environment == "staging"
+    assert settings.sentry_traces_sample_rate == 0.1
+
+    with pytest.raises(ValidationError, match="sentry_traces_sample_rate"):
+        Settings(
+            app_env="development",
+            database_url="postgresql+asyncpg://x",
+            sentry_traces_sample_rate=1.5,
+        )
+    with pytest.raises(ValidationError, match="sentry_traces_sample_rate"):
+        Settings(
+            app_env="development",
+            database_url="postgresql+asyncpg://x",
+            sentry_traces_sample_rate=-0.1,
+        )
+    assert (
+        Settings(
+            app_env="development",
+            database_url="postgresql+asyncpg://x",
+            sentry_traces_sample_rate=0.0,
+        ).sentry_traces_sample_rate
+        == 0.0
+    )
+
+
 def test_storage_public_endpoint_can_be_set_explicitly() -> None:
     settings = Settings(
         app_env="development",
