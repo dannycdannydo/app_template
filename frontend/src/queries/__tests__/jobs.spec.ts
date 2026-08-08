@@ -114,7 +114,12 @@ describe('jobs query composables', () => {
       setup() {
         captured = {
           ...captured,
-          list: useJobsQuery({ page: 2, pageSize: 25, status: 'running', jobType: 'file.processing' }),
+          list: useJobsQuery({
+            page: 2,
+            pageSize: 25,
+            status: 'running',
+            jobType: 'file.processing',
+          }),
         }
         return {}
       },

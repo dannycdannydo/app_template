@@ -225,7 +225,9 @@ async def test_complete_enqueues_job_and_worker_drives_file_to_ready(
         )
         assert ready.status == FileStatus.READY
 
-    assert await _audit_count(session_factory, action="file.processing", resource_id=str(file.id)) == 1
+    assert (
+        await _audit_count(session_factory, action="file.processing", resource_id=str(file.id)) == 1
+    )
     assert await _audit_count(session_factory, action="file.ready", resource_id=str(file.id)) == 1
     assert await _audit_count(session_factory, action="job.succeeded", resource_id=str(job_id)) == 1
 
@@ -263,7 +265,10 @@ async def test_processing_failure_fails_file_and_job_with_error_code(
         assert job.error_code == files_tasks.ERROR_CODE_VERIFICATION_FAILED
         assert job.error_message is not None
 
-    assert await _audit_count(session_factory, action="file.upload_failed", resource_id=str(file.id)) == 1
+    assert (
+        await _audit_count(session_factory, action="file.upload_failed", resource_id=str(file.id))
+        == 1
+    )
     assert await _audit_count(session_factory, action="job.failed", resource_id=str(job_id)) == 1
 
 
@@ -435,9 +440,7 @@ async def test_job_list_and_detail_are_org_scoped(
         assert typed == []
 
         # Detail: own org resolves, another org's job id is a 404.
-        fetched = await jobs_service.get_job(
-            session, organisation_id=org_a.id, job_id=job_a_1.id
-        )
+        fetched = await jobs_service.get_job(session, organisation_id=org_a.id, job_id=job_a_1.id)
         assert fetched.id == job_a_1.id
         with pytest.raises(NotFoundError):
             await jobs_service.get_job(session, organisation_id=org_b.id, job_id=job_a_1.id)

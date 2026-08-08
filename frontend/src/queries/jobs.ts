@@ -33,8 +33,7 @@ export const jobsQueryKeys = {
   lists: (organisationId: string) => ['organisations', organisationId, 'jobs', 'list'] as const,
   list: (organisationId: string, params: JobsListParams) =>
     ['organisations', organisationId, 'jobs', 'list', params] as const,
-  details: (organisationId: string) =>
-    ['organisations', organisationId, 'jobs', 'detail'] as const,
+  details: (organisationId: string) => ['organisations', organisationId, 'jobs', 'detail'] as const,
   detail: (organisationId: string, jobId: string) =>
     ['organisations', organisationId, 'jobs', 'detail', jobId] as const,
 }

@@ -42,13 +42,7 @@ const emit = defineEmits<{
 }>()
 
 type Phase =
-  | 'idle'
-  | 'requesting-url'
-  | 'uploading'
-  | 'completing'
-  | 'processing'
-  | 'done'
-  | 'error'
+  'idle' | 'requesting-url' | 'uploading' | 'completing' | 'processing' | 'done' | 'error'
 
 const fileInput = ref<HTMLInputElement | null>(null)
 const selectedFile = ref<File | null>(null)
@@ -172,8 +166,8 @@ const pickerId = 'file-upload-input'
         <FileUpIcon class="text-muted-foreground size-8" aria-hidden="true" />
         <span class="text-sm font-medium">Choose a file to upload</span>
         <span class="text-muted-foreground text-xs">
-          The file uploads directly to storage through a signed URL, then a background job
-          processes it.
+          The file uploads directly to storage through a signed URL, then a background job processes
+          it.
         </span>
         <input
           :id="pickerId"
@@ -200,7 +194,12 @@ const pickerId = 'file-upload-input'
               <CheckCircle2Icon class="size-4" aria-hidden="true" />
               Done
             </span>
-            <Button variant="outline" size="sm" data-testid="file-upload-clear" @click="clearSelection">
+            <Button
+              variant="outline"
+              size="sm"
+              data-testid="file-upload-clear"
+              @click="clearSelection"
+            >
               Upload another
             </Button>
           </template>
@@ -229,7 +228,13 @@ const pickerId = 'file-upload-input'
           </span>
           <span class="text-muted-foreground tabular-nums">{{ progress }}%</span>
         </div>
-        <div class="bg-muted h-2 w-full overflow-hidden rounded-full" role="progressbar" :aria-valuenow="progress" aria-valuemin="0" aria-valuemax="100">
+        <div
+          class="bg-muted h-2 w-full overflow-hidden rounded-full"
+          role="progressbar"
+          :aria-valuenow="progress"
+          aria-valuemin="0"
+          aria-valuemax="100"
+        >
           <div
             class="bg-primary h-full rounded-full transition-[width] duration-300"
             :style="{ width: `${progress}%` }"
@@ -237,7 +242,12 @@ const pickerId = 'file-upload-input'
         </div>
       </div>
 
-      <p v-if="phase === 'error'" class="text-destructive text-sm" data-testid="file-upload-error" role="alert">
+      <p
+        v-if="phase === 'error'"
+        class="text-destructive text-sm"
+        data-testid="file-upload-error"
+        role="alert"
+      >
         <span class="flex items-center gap-1.5">
           <TriangleAlertIcon class="size-4 shrink-0" aria-hidden="true" />
           {{ errorMessage }}

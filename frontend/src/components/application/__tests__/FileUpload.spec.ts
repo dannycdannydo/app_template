@@ -5,9 +5,7 @@ import { nextTick, ref } from 'vue'
 
 import type { components } from '@/api/generated/openapi'
 
-const mockUseUploadFileMutation = vi.hoisted(() =>
-  vi.fn<(options?: unknown) => unknown>(),
-)
+const mockUseUploadFileMutation = vi.hoisted(() => vi.fn<(options?: unknown) => unknown>())
 const mockUseJobQuery = vi.hoisted(() => vi.fn<() => unknown>())
 const mockShowApiErrorToast = vi.hoisted(() =>
   vi.fn<(error: unknown, options?: { title?: string }) => void>(),

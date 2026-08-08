@@ -130,11 +130,13 @@ describe('FilesListView', () => {
       const downloadOptions = (options ?? {}) as { onSuccess?: (url: string) => void }
       return {
         isPending: ref(false),
-        mutateAsync: vi.fn<(fileId: string) => Promise<string>>().mockImplementation(async (_fileId: string) => {
-          const url = 'https://storage.example.com/dl'
-          downloadOptions.onSuccess?.(url)
-          return url
-        }),
+        mutateAsync: vi
+          .fn<(fileId: string) => Promise<string>>()
+          .mockImplementation(async (_fileId: string) => {
+            const url = 'https://storage.example.com/dl'
+            downloadOptions.onSuccess?.(url)
+            return url
+          }),
       }
     })
     mockUseUploadFileMutation.mockReturnValue({

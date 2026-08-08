@@ -21,7 +21,9 @@ const meta = computed(() => fileStatusMeta(props.status))
 <template>
   <span
     :data-testid="`file-status-${props.status}`"
-    :class="cn('inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium', meta.className)"
+    :class="
+      cn('inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium', meta.className)
+    "
   >
     {{ meta.label }}
   </span>

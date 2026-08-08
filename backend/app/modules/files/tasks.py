@@ -113,9 +113,7 @@ async def process_file(job_id: str) -> None:
                 session,
                 job_id=job_uuid,
                 error_code=ERROR_CODE_VERIFICATION_FAILED,
-                error_message=(
-                    "The stored object could not be verified while processing."
-                ),
+                error_message=("The stored object could not be verified while processing."),
             )
             raise jobs_service.JobPermanentError(
                 f"the stored object could not be verified ({reason})"
