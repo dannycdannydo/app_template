@@ -141,7 +141,7 @@ Depends on the v0.5 foundation (structlog, request-id middleware, durable job re
 - [x] Logging context completion (BP §28, all seven fields): `request_id` (ships in v0.1) and `route` (already logged as path on `request_finished`) re-verified; bind the missing fields — `user_id` and `organisation_id` on authenticated `/api/v1` requests (dependencies or middleware, cleared per request), `job_id` and `resource_id` inside worker tasks for file/job/notification operations, and a consistent `event` name on every log line; assert the context fields in captured log lines via tests; keep the BP §28 never-log list enforced by test
 - [x] `GET /metrics` (BP §28 basic metrics): `prometheus-client` dependency; request counter + latency histogram middleware plus job counters (enqueued/succeeded/failed); `/metrics` public like `/health`/`/ready`; test asserts Prometheus text format output
 - [x] Sentry: `sentry-sdk` dependency; `SENTRY_DSN`, `SENTRY_ENVIRONMENT` (default `APP_ENV`), `SENTRY_TRACES_SAMPLE_RATE` settings in `core/config.py`; `create_app()` initialises the SDK when the DSN is set (FastAPI integration); worker failure capture (Dramatiq middleware mirroring the durable job failure record); tests with the SDK mocked (capture on unhandled 500 and worker exception, no-op without DSN)
-- [ ] `.env.example` documents `SENTRY_*`; worker logging context verified under `make dev` (job_id present in worker log lines)
+- [x] `.env.example` documents `SENTRY_*`; worker logging context verified under `make dev` (job_id present in worker log lines)
 
 ## 6.2 Email Provider Interface and SMTP Adapter
 
