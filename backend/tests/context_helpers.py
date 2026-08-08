@@ -44,6 +44,7 @@ from app.modules.audit.models import AuditEvent
 from app.modules.feature_flags.models import OrganisationFeature
 from app.modules.files.models import File, FileStatus
 from app.modules.invitations.models import Invitation, InvitationStatus
+from app.modules.jobs.models import Job, JobStatus
 from app.modules.organisations.models import (
     MembershipStatus,
     Organisation,
@@ -87,6 +88,11 @@ class ContextState:
     # service returns these and the service's own status/email/expiry guards
     # decide which can grant.
     invitations: list[Invitation] = field(default_factory=list[Invitation])
+    # Jobs (Scope §6.5): the durable job rows staged or created by the fake
+    # session; the fake answers the org-scoped job listing from here and the
+    # service tests re-apply the org/status/job_type filters (the WHERE
+    # clauses are proven by the query-construction and real-database tests).
+    jobs: list[Job] = field(default_factory=list[Job])
     # Feature flags (Scope §6.7): the organisation override rows staged or
     # created by the fake session; the enforcement helper answers from here.
     feature_flags: list[OrganisationFeature] = field(default_factory=list[OrganisationFeature])
@@ -198,6 +204,32 @@ def make_record(
     record.created_at = datetime.now(UTC)
     record.updated_at = datetime.now(UTC)
     return record
+
+
+def make_job(
+    organisation_id: uuid.UUID,
+    *,
+    job_type: str = "file.processing",
+    status: JobStatus = JobStatus.QUEUED,
+    progress: int = 0,
+    input_reference: str = "file-1",
+    error_code: str | None = None,
+    error_message: str | None = None,
+) -> Job:
+    """Build a standalone durable job row for the request-flow tests."""
+    job = Job(
+        organisation_id=organisation_id,
+        job_type=job_type,
+        status=status,
+        progress=progress,
+        input_reference=input_reference,
+        error_code=error_code,
+        error_message=error_message,
+        attempt_count=0,
+    )
+    job.id = uuid.uuid4()
+    job.created_at = datetime.now(UTC)
+    return job
 
 
 def make_file(
@@ -376,6 +408,8 @@ class FakeSession:
             return _ScalarsResult(list(self._state.records))
         if entity is File:
             return _ScalarsResult(list(self._state.files))
+        if entity is Job:
+            return _ScalarsResult(list(self._state.jobs))
         if entity is AuditEvent:
             return _ScalarsResult(list(self._state.audit_events))
         return _ScalarsResult(sorted(self._state.granted_permissions))
@@ -436,6 +470,10 @@ class FakeSession:
                 # Updates reuse the staged instance, so never append twice.
                 if all(existing is not obj for existing in self._state.files):
                     self._state.files.append(obj)
+            elif isinstance(obj, Job):
+                # Updates reuse the staged instance, so never append twice.
+                if all(existing is not obj for existing in self._state.jobs):
+                    self._state.jobs.append(obj)
             elif isinstance(obj, AuditEvent):
                 # Append-only: never modify or remove an existing event.
                 if all(existing is not obj for existing in self._state.audit_events):

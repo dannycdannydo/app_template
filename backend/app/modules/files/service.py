@@ -1,4 +1,4 @@
-"""File metadata services (Scope §6.3, blueprint §11, §12, §17, §30).
+"""File metadata services (Scope §6.3/§6.5, blueprint §11, §12, §17, §18, §30).
 
 The service owns the direct-upload flow and the file lifecycle. Every function
 is one atomic operation that commits itself (BP §11); every query is org-scoped
@@ -13,13 +13,21 @@ extension against ``STORAGE_ALLOWED_CONTENT_TYPES`` before any signed URL is
 issued. Storage SDK calls go through the :class:`ObjectStorage` interface only
 (ADR-0006) — the provider adapter is selected from settings by
 ``app.storage.factory.get_storage``.
+
+Scope §6.5 adds the worker-side half of the lifecycle: after the browser's PUT
+is verified at completion, :func:`complete_upload` writes the durable job row
+and enqueues the ``process_file`` task (BP §18 record-then-enqueue), and the
+``mark_file_*`` helpers are the transitions the worker calls — each idempotent,
+so a retried message re-running the job converges instead of erroring.
 """
 
 from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
+from dramatiq import Actor
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -27,6 +35,8 @@ from app.core.exceptions import ConflictError, ErrorDetail, NotFoundError, Valid
 from app.db.conventions import uuid7
 from app.modules.audit.service import (
     ACTION_FILE_DELETED,
+    ACTION_FILE_PROCESSING,
+    ACTION_FILE_READY,
     ACTION_FILE_UPLOAD_FAILED,
     ACTION_FILE_UPLOAD_STARTED,
     ACTION_FILE_UPLOADED,
@@ -37,6 +47,7 @@ from app.modules.files.queries import (
     org_files_count_statement,
     org_scoped_files_statement,
 )
+from app.modules.jobs import service as jobs_service
 from app.storage import SignedUrl, get_storage
 
 DEFAULT_PAGE_SIZE = 50
@@ -220,8 +231,9 @@ async def complete_upload(
     file_id: uuid.UUID,
     checksum: str | None = None,
     actor_user_id: uuid.UUID | None = None,
+    process_task: Actor[Any, Any] | None = None,
 ) -> tuple[File, uuid.UUID | None]:
-    """Verify the stored object and mark the file ``uploaded``.
+    """Verify the stored object, mark the file ``uploaded`` and enqueue the job.
 
     The browser's direct PUT is verified, never trusted (BP §17 security): the
     object must exist, its size must match the declared ``size_bytes``, and
@@ -229,10 +241,17 @@ async def complete_upload(
     (the checksum is opaque; equality only). Verification failure fails the
     file and raises a 422 so the client knows the upload was rejected.
 
-    The processing job is not enqueued here: the durable job foundation and the
-    file-processing task are Scope §6.4/§6.5, which extend this function to
-    enqueue ``process_file`` and return its job id (the response schema already
-    carries ``processing_job_id``).
+    Once verified, the file is marked ``uploaded`` and the durable processing
+    job is created and enqueued (BP §18 record-then-enqueue, Scope §6.5): the
+    job row is written with ``job_type="file.processing"`` and
+    ``input_reference`` set to the file id, then the ``process_file`` task is
+    sent with that job id. The returned job id is what the client polls via
+    ``GET /api/v1/jobs/{job_id}`` (the response schema carries it as
+    ``processing_job_id``).
+
+    ``process_task`` is the actor to enqueue; it defaults to the module-level
+    ``process_file`` actor. Tests pass a copy re-declared on their own broker
+    (the same seam ``jobs_service.create_and_enqueue`` exposes for its task).
     """
     file = await get_file(session, organisation_id=organisation_id, file_id=file_id)
     if file.status != FileStatus.PENDING:
@@ -289,7 +308,22 @@ async def complete_upload(
     )
     await session.commit()
     await session.refresh(file)
-    return file, None
+    # Imported lazily: the task module imports this service, so a module-level
+    # import would be circular. By the time the completion flow runs the module
+    # is cached, so the import is a dict lookup. The task module is the single
+    # source of truth for the actor and its ``job_type`` identity.
+    from app.modules.files import tasks as files_tasks
+
+    task = process_task or files_tasks.process_file_actor
+    job = await jobs_service.create_and_enqueue(
+        session,
+        organisation_id=organisation_id,
+        job_type=files_tasks.JOB_TYPE_FILE_PROCESSING,
+        input_reference=str(file.id),
+        actor_user_id=actor_user_id,
+        task=task,
+    )
+    return file, job.id
 
 
 async def list_files(
@@ -391,3 +425,115 @@ async def delete_file(
         },
     )
     await session.commit()
+
+
+async def mark_file_processing(
+    session: AsyncSession,
+    *,
+    organisation_id: uuid.UUID,
+    file_id: uuid.UUID,
+) -> File:
+    """Transition a file ``uploaded`` -> ``processing`` (worker-side, §6.5).
+
+    Called by the ``process_file`` task. Idempotent across retries: a file
+    already ``processing`` (or already ``ready``, when a retried message
+    re-runs after the file finished) is returned untouched, so the task can be
+    safely re-run on a re-delivered message. Any other state is a 409 — a
+    pending, failed or deleted file never enters processing.
+    """
+    file = await get_file(session, organisation_id=organisation_id, file_id=file_id)
+    if file.status in (FileStatus.PROCESSING, FileStatus.READY):
+        return file
+    if file.status != FileStatus.UPLOADED:
+        raise ConflictError(
+            code="file_not_processing",
+            message="Only an uploaded file can enter processing.",
+        )
+    file.status = FileStatus.PROCESSING
+    await record_event(
+        session,
+        organisation_id=organisation_id,
+        action=ACTION_FILE_PROCESSING,
+        resource_type="file",
+        resource_id=str(file.id),
+        metadata={
+            "object_key": file.object_key,
+            "original_filename": file.original_filename,
+        },
+    )
+    await session.commit()
+    await session.refresh(file)
+    return file
+
+
+async def mark_file_ready(
+    session: AsyncSession,
+    *,
+    organisation_id: uuid.UUID,
+    file_id: uuid.UUID,
+) -> File:
+    """Transition a file ``processing`` -> ``ready`` (worker-side, §6.5).
+
+    Called by the ``process_file`` task once the stored object is verified. A
+    file that is already ``ready`` is returned untouched (idempotent retry); a
+    file not in ``processing`` is a 409, so a ready file is never moved again.
+    """
+    file = await get_file(session, organisation_id=organisation_id, file_id=file_id)
+    if file.status == FileStatus.READY:
+        return file
+    if file.status != FileStatus.PROCESSING:
+        raise ConflictError(
+            code="file_not_ready",
+            message="Only a processing file can become ready.",
+        )
+    file.status = FileStatus.READY
+    await record_event(
+        session,
+        organisation_id=organisation_id,
+        action=ACTION_FILE_READY,
+        resource_type="file",
+        resource_id=str(file.id),
+        metadata={
+            "object_key": file.object_key,
+            "original_filename": file.original_filename,
+        },
+    )
+    await session.commit()
+    await session.refresh(file)
+    return file
+
+
+async def mark_file_failed(
+    session: AsyncSession,
+    *,
+    organisation_id: uuid.UUID,
+    file_id: uuid.UUID,
+    reason: str,
+) -> File:
+    """Mark a file ``failed`` after a worker-side verification failure (§6.5).
+
+    Called by the ``process_file`` task when the stored object cannot be
+    verified while processing (missing, or a size that drifted from the
+    declaration). Idempotent: an already-``failed`` or ``deleted`` file is
+    returned untouched, so a retried message cannot double-audit. The audit
+    row reuses ``file.upload_failed`` with the reason in the metadata, exactly
+    like the completion-time failure path.
+    """
+    file = await get_file(session, organisation_id=organisation_id, file_id=file_id)
+    if file.status in (FileStatus.FAILED, FileStatus.DELETED):
+        return file
+    file.status = FileStatus.FAILED
+    await record_event(
+        session,
+        organisation_id=organisation_id,
+        action=ACTION_FILE_UPLOAD_FAILED,
+        resource_type="file",
+        resource_id=str(file.id),
+        metadata={
+            "object_key": file.object_key,
+            "reason": reason,
+        },
+    )
+    await session.commit()
+    await session.refresh(file)
+    return file

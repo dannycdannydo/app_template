@@ -473,6 +473,46 @@ export interface paths {
     patch?: never
     trace?: never
   }
+  '/api/v1/jobs': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /**
+     * List Jobs Endpoint
+     * @description List the caller's organisation's jobs, newest first, paginated.
+     */
+    get: operations['list_jobs_endpoint_api_v1_jobs_get']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/api/v1/jobs/{job_id}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /**
+     * Get Job Endpoint
+     * @description Return one job's status and progress; a foreign job is a 404.
+     */
+    get: operations['get_job_endpoint_api_v1_jobs__job_id__get']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
   '/api/v1/platform/organisations/{organisation_id}/invitations': {
     parameters: {
       query?: never
@@ -931,6 +971,94 @@ export interface components {
      * @enum {string}
      */
     InvitationStatus: 'sent' | 'accepted' | 'revoked' | 'expired'
+    /**
+     * JobDetail
+     * @description Full job detail: the polling payload (status + progress + error).
+     */
+    JobDetail: {
+      /**
+       * Id
+       * Format: uuid
+       */
+      id: string
+      /** Job Type */
+      job_type: string
+      /** Status */
+      status: string
+      /** Progress */
+      progress: number
+      /** Attempt Count */
+      attempt_count: number
+      /** Created By User Id */
+      created_by_user_id: string | null
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string
+      /** Started At */
+      started_at: string | null
+      /** Completed At */
+      completed_at: string | null
+      /** Input Reference */
+      input_reference: string
+      /** Result Reference */
+      result_reference: string | null
+      /** Error Code */
+      error_code: string | null
+      /** Error Message */
+      error_message: string | null
+    }
+    /**
+     * JobListItem
+     * @description A job in list contexts; the columns the files/jobs table shows.
+     */
+    JobListItem: {
+      /**
+       * Id
+       * Format: uuid
+       */
+      id: string
+      /** Job Type */
+      job_type: string
+      /** Status */
+      status: string
+      /** Progress */
+      progress: number
+      /** Attempt Count */
+      attempt_count: number
+      /** Created By User Id */
+      created_by_user_id: string | null
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string
+      /** Started At */
+      started_at: string | null
+      /** Completed At */
+      completed_at: string | null
+    }
+    /**
+     * JobListResponse
+     * @description The pagination envelope documented in API_CONVENTIONS.md (BP §12).
+     */
+    JobListResponse: {
+      /** Items */
+      items: components['schemas']['JobListItem'][]
+      /** Page */
+      page: number
+      /** Page Size */
+      page_size: number
+      /** Total */
+      total: number
+    }
+    /**
+     * JobStatus
+     * @description Lifecycle state of a durable job (blueprint §18 statuses).
+     * @enum {string}
+     */
+    JobStatus: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
     /**
      * MeResponse
      * @description The current user with their memberships, role codes and platform roles.
@@ -2425,6 +2553,77 @@ export interface operations {
         }
         content: {
           'application/json': components['schemas']['FileDownloadUrlResponse']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  list_jobs_endpoint_api_v1_jobs_get: {
+    parameters: {
+      query?: {
+        page?: number
+        page_size?: number
+        status?: components['schemas']['JobStatus'] | null
+        job_type?: string | null
+      }
+      header?: {
+        'x-org-id'?: string | null
+        authorization?: string | null
+      }
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['JobListResponse']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  get_job_endpoint_api_v1_jobs__job_id__get: {
+    parameters: {
+      query?: never
+      header?: {
+        'x-org-id'?: string | null
+        authorization?: string | null
+      }
+      path: {
+        job_id: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['JobDetail']
         }
       }
       /** @description Validation Error */

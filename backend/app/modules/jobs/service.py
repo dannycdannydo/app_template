@@ -39,6 +39,13 @@ from app.modules.audit.service import (
     record_event,
 )
 from app.modules.jobs.models import Job, JobStatus
+from app.modules.jobs.queries import org_jobs_count_statement, org_scoped_jobs_statement
+
+# The pagination envelope contract shared with the files module (BP §12):
+# ``?page=1&page_size=50`` with the ``{items, page, page_size, total}`` body,
+# page_size clamped to ``MAX_PAGE_SIZE``.
+DEFAULT_PAGE_SIZE = 50
+MAX_PAGE_SIZE = 100
 
 # Bounded retry policy (blueprint §18: retry transient errors, do not retry
 # permanent validation errors indefinitely). ``MAX_ATTEMPTS`` is the total
@@ -110,6 +117,71 @@ async def _get_job(session: AsyncSession, *, job_id: uuid.UUID) -> Job:
     if job is None:
         raise _not_found()
     return job
+
+
+async def get_job_for_task(session: AsyncSession, *, job_id: uuid.UUID) -> Job:
+    """Return the durable row a worker task operates on (worker-side read).
+
+    Public wrapper over the worker-side lookup (the task modules call it);
+    like ``_get_job`` it is deliberately not org-scoped, because the worker
+    knows only the job id it was messaged with.
+    """
+    return await _get_job(session, job_id=job_id)
+
+
+def is_terminal(status: JobStatus) -> bool:
+    """Return whether ``status`` is a terminal state that is never re-run."""
+    return _terminal(status)
+
+
+async def get_job(
+    session: AsyncSession,
+    *,
+    organisation_id: uuid.UUID,
+    job_id: uuid.UUID,
+) -> Job:
+    """Return one job; a job outside the organisation is a 404 (Scope §6.5).
+
+    The org-scoped filter is the isolation boundary: a job id that exists in
+    another organisation simply does not match, so cross-organisation reads
+    are indistinguishable from missing rows (acceptance §5.7).
+    """
+    job = await session.scalar(
+        select(Job).where(Job.organisation_id == organisation_id, Job.id == job_id)
+    )
+    if job is None:
+        raise _not_found()
+    return job
+
+
+async def list_jobs(
+    session: AsyncSession,
+    *,
+    organisation_id: uuid.UUID,
+    page: int,
+    page_size: int,
+    status: JobStatus | None = None,
+    job_type: str | None = None,
+) -> tuple[list[Job], int]:
+    """Return one page of the caller's organisation's jobs plus the total.
+
+    Newest first, ties broken by id so paging is stable (the same ordering as
+    files and records). ``status`` and ``job_type`` are the only approved
+    filter fields (BP §12); the router validates the query parameters and the
+    service still clamps page/page_size defensively.
+    """
+    page = max(page, 1)
+    page_size = min(max(page_size, 1), MAX_PAGE_SIZE)
+    total = await session.scalar(
+        org_jobs_count_statement(organisation_id, status=status, job_type=job_type)
+    )
+    rows = await session.scalars(
+        org_scoped_jobs_statement(organisation_id, status=status, job_type=job_type)
+        .order_by(Job.created_at.desc(), Job.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    return list(rows.all()), total or 0
 
 
 async def create_and_enqueue(
