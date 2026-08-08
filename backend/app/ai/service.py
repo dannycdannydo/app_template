@@ -145,7 +145,11 @@ class AIService:
             ),
             output=output,
             usage=response.usage,
-            cost=self._estimate_cost(model.pricing.input_price_per_million_tokens, model.pricing.output_price_per_million_tokens, response.usage),
+            cost=self._estimate_cost(
+                model.pricing.input_price_per_million_tokens,
+                model.pricing.output_price_per_million_tokens,
+                response.usage,
+            ),
             completed_at=datetime.now(UTC),
         )
 
@@ -231,9 +235,7 @@ class AIService:
         if output_schema is None:
             if declares_text_result:
                 return content
-            raise OutputValidationError(
-                "task declares neither an output schema nor a text result"
-            )
+            raise OutputValidationError("task declares neither an output schema nor a text result")
         model_class = self._schema_resolver(output_schema)
         raw = structured if structured is not None else content
         if isinstance(raw, str):
