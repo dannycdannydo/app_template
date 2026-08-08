@@ -96,6 +96,13 @@ ACTION_FILE_DELETED = "document.deleted"
 ACTION_JOB_SUCCEEDED = "job.succeeded"
 ACTION_JOB_FAILED = "job.failed"
 
+# Notifications (Scope §6.3, blueprint §29): ``notification.test_sent`` when
+# the test-send endpoint creates an in-app notification and enqueues its email
+# delivery, and ``notification.delivery_failed`` when the worker task cannot
+# deliver a notification's email. Resource type is ``notification`` for both.
+ACTION_NOTIFICATION_TEST_SENT = "notification.test_sent"
+ACTION_NOTIFICATION_DELIVERY_FAILED = "notification.delivery_failed"
+
 
 async def record_event(
     session: AsyncSession,

@@ -64,7 +64,11 @@ class AIRequest(BaseModel):
 
     @model_validator(mode="after")
     def _exactly_one_input(self) -> AIRequest:
-        supplied = [value for value in (self.text, self.messages, self.storage_reference) if value is not None]
+        supplied = [
+            value
+            for value in (self.text, self.messages, self.storage_reference)
+            if value is not None
+        ]
         if len(supplied) != 1:
             raise ValueError("exactly one of text, messages or storage_reference must be supplied")
         return self

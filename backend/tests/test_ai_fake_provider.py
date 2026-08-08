@@ -16,7 +16,9 @@ from app.ai.providers.fake import FakeLLMProvider
 from app.ai.schemas import TokenUsage
 
 
-def _request(*, output_schema: str | None = None, task: str = "document.classify") -> ProviderRequest:
+def _request(
+    *, output_schema: str | None = None, task: str = "document.classify"
+) -> ProviderRequest:
     return ProviderRequest(
         task=task,
         prompt="Classify: {document_id}",

@@ -28,12 +28,43 @@ PERMISSIONS: tuple[tuple[str, str], ...] = (
     ("documents.read", "View documents"),
     ("documents.upload", "Upload documents"),
     ("documents.delete", "Delete documents"),
+    ("notifications.read", "View notifications"),
+    ("notifications.manage", "Send and manage notifications"),
     ("users.invite", "Invite users"),
     ("users.manage_roles", "Manage member roles"),
     ("organisation.manage", "Manage the organisation"),
 )
 
 ALL_PERMISSION_CODES: tuple[str, ...] = tuple(code for code, _ in PERMISSIONS)
+
+# The notifications permission additions (Scope §6.3). Kept as a separate
+# catalogue because the ``notifications`` tables and permission rows land in
+# their own release: the data migration must insert exactly these two codes
+# without re-inserting the earlier catalogue (unique constraint), and the
+# narrower grant map below is what it applies to the existing roles. The two
+# codes are still part of ``PERMISSIONS`` above, so ``owner`` and
+# ``administrator`` receive them automatically through ``ALL_PERMISSION_CODES``.
+NOTIFICATION_PERMISSIONS: tuple[tuple[str, str], ...] = (
+    ("notifications.read", "View notifications"),
+    ("notifications.manage", "Send and manage notifications"),
+)
+
+# Role grants for the notifications codes only (Scope §6.3). The data
+# migration applies this map to the existing roles: on a database seeded with
+# the earlier catalogue, owner and administrator must receive the new codes
+# too (they otherwise only get them through ``ALL_PERMISSION_CODES`` on a
+# fresh seed), so the map covers all four roles whose bundle grows — owner,
+# administrator and manager hold both codes, member read only. The ``viewer``
+# bundle is deliberately unchanged (no notifications access for read-only
+# viewers, acceptance §5.5). On a fresh database the seed migration has
+# already granted the same codes, and the migration's idempotent inserts are
+# no-ops.
+NOTIFICATION_ROLE_GRANTS: dict[str, tuple[str, ...]] = {
+    "owner": ("notifications.read", "notifications.manage"),
+    "administrator": ("notifications.read", "notifications.manage"),
+    "manager": ("notifications.read", "notifications.manage"),
+    "member": ("notifications.read",),
+}
 
 # The stable code of the platform-admin role seeded into ``platform_roles``.
 # A platform membership holding this role is what makes a user a platform
@@ -68,6 +99,8 @@ ROLE_PERMISSION_MAP: dict[str, tuple[str, ...]] = {
         "documents.read",
         "documents.upload",
         "documents.delete",
+        "notifications.read",
+        "notifications.manage",
         "users.invite",
     ),
     "member": (
@@ -77,6 +110,7 @@ ROLE_PERMISSION_MAP: dict[str, tuple[str, ...]] = {
         "properties.create",
         "documents.read",
         "documents.upload",
+        "notifications.read",
     ),
     "viewer": (
         "records.read",

@@ -34,6 +34,7 @@ from app.modules.feature_flags.router import router as feature_flags_router
 from app.modules.files.router import router as files_router
 from app.modules.invitations.router import router as invitations_router
 from app.modules.jobs.router import router as jobs_router
+from app.modules.notifications.router import router as notifications_router
 from app.modules.organisations.router import router as organisations_router
 from app.modules.platform_admin.router import router as platform_admin_router
 from app.modules.records.router import router as records_router
@@ -249,6 +250,7 @@ def create_app() -> FastAPI:
     app.include_router(audit_router)
     app.include_router(files_router)
     app.include_router(jobs_router)
+    app.include_router(notifications_router)
     app.include_router(invitations_router)
     app.include_router(feature_flags_router)
     app.include_router(webhooks_router)

@@ -187,9 +187,7 @@ async def test_malformed_provider_json_fails_validation() -> None:
     """The provider returned garbage JSON: an OutputValidationError, never a
     success — acceptance criterion §5.4."""
     provider = FakeLLMProvider()
-    provider.set_next_response(
-        _canned_response(content="not json at all", structured=None)
-    )
+    provider.set_next_response(_canned_response(content="not json at all", structured=None))
     service, _ = _service(provider=provider)
     with pytest.raises(OutputValidationError):
         await service.execute(_request())
@@ -244,7 +242,9 @@ async def test_cost_is_calculated_from_model_pricing_and_usage() -> None:
     service, _ = _service(registries)
     result = await service.execute(_request())
     expected_input_cost = Decimal("1.00") * Decimal(result.usage.input_tokens) / Decimal(1_000_000)
-    expected_output_cost = Decimal("2.00") * Decimal(result.usage.output_tokens) / Decimal(1_000_000)
+    expected_output_cost = (
+        Decimal("2.00") * Decimal(result.usage.output_tokens) / Decimal(1_000_000)
+    )
     assert result.cost.amount == pytest.approx(expected_input_cost + expected_output_cost)
     assert result.cost.currency == "USD"
 

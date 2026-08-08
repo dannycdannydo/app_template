@@ -45,6 +45,11 @@ from app.modules.feature_flags.models import OrganisationFeature
 from app.modules.files.models import File, FileStatus
 from app.modules.invitations.models import Invitation, InvitationStatus
 from app.modules.jobs.models import Job, JobStatus
+from app.modules.notifications.models import (
+    Notification,
+    NotificationDelivery,
+    NotificationDeliveryStatus,
+)
 from app.modules.organisations.models import (
     MembershipStatus,
     Organisation,
@@ -93,6 +98,15 @@ class ContextState:
     # service tests re-apply the org/status/job_type filters (the WHERE
     # clauses are proven by the query-construction and real-database tests).
     jobs: list[Job] = field(default_factory=list[Job])
+    # Notifications (Scope §6.3): the in-app notification rows staged or
+    # created by the fake session, and their email delivery rows. The fake
+    # answers the org+user scoped listing from here; the service re-applies
+    # the org/user/type filters in Python (the WHERE clauses are proven by the
+    # query-construction and real-database tests).
+    notifications: list[Notification] = field(default_factory=list[Notification])
+    notification_deliveries: list[NotificationDelivery] = field(
+        default_factory=list[NotificationDelivery]
+    )
     # Feature flags (Scope §6.7): the organisation override rows staged or
     # created by the fake session; the enforcement helper answers from here.
     feature_flags: list[OrganisationFeature] = field(default_factory=list[OrganisationFeature])
@@ -230,6 +244,55 @@ def make_job(
     job.id = uuid.uuid4()
     job.created_at = datetime.now(UTC)
     return job
+
+
+def make_notification(
+    organisation_id: uuid.UUID,
+    user_id: uuid.UUID,
+    *,
+    type: str = "notification.test_sent",
+    title: str = "Test notification",
+    body: str = "A test notification body.",
+    resource_type: str | None = None,
+    resource_id: str | None = None,
+    read_at: datetime | None = None,
+) -> Notification:
+    """Build a standalone notification row for the request-flow tests."""
+    notification = Notification(
+        organisation_id=organisation_id,
+        user_id=user_id,
+        type=type,
+        title=title,
+        body=body,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        read_at=read_at,
+    )
+    notification.id = uuid.uuid4()
+    notification.created_at = datetime.now(UTC)
+    notification.updated_at = datetime.now(UTC)
+    return notification
+
+
+def make_delivery(
+    notification_id: uuid.UUID,
+    *,
+    recipient: str = "recipient@example.com",
+    channel: str = "email",
+    status: NotificationDeliveryStatus = NotificationDeliveryStatus.QUEUED,
+) -> NotificationDelivery:
+    """Build a standalone notification delivery row for the request-flow tests."""
+    delivery = NotificationDelivery(
+        notification_id=notification_id,
+        channel=channel,
+        recipient=recipient,
+        status=status,
+        attempt_count=0,
+    )
+    delivery.id = uuid.uuid4()
+    delivery.created_at = datetime.now(UTC)
+    delivery.updated_at = datetime.now(UTC)
+    return delivery
 
 
 def make_file(
@@ -410,6 +473,14 @@ class FakeSession:
             return _ScalarsResult(list(self._state.files))
         if entity is Job:
             return _ScalarsResult(list(self._state.jobs))
+        if entity is Notification:
+            # Scope §6.3: the notification listing answers from the staged
+            # notifications; the service re-applies the org/user/type filters
+            # in Python because the WHERE clauses are not applied here (proven
+            # by the query-construction and real-database tests).
+            return _ScalarsResult(list(self._state.notifications))
+        if entity is NotificationDelivery:
+            return _ScalarsResult(list(self._state.notification_deliveries))
         if entity is AuditEvent:
             return _ScalarsResult(list(self._state.audit_events))
         return _ScalarsResult(sorted(self._state.granted_permissions))
@@ -474,6 +545,15 @@ class FakeSession:
                 # Updates reuse the staged instance, so never append twice.
                 if all(existing is not obj for existing in self._state.jobs):
                     self._state.jobs.append(obj)
+            elif isinstance(obj, Notification):
+                # Updates (e.g. mark_read) reuse the staged instance, so never
+                # append twice.
+                if all(existing is not obj for existing in self._state.notifications):
+                    self._state.notifications.append(obj)
+            elif isinstance(obj, NotificationDelivery):
+                # Updates reuse the staged instance, so never append twice.
+                if all(existing is not obj for existing in self._state.notification_deliveries):
+                    self._state.notification_deliveries.append(obj)
             elif isinstance(obj, AuditEvent):
                 # Append-only: never modify or remove an existing event.
                 if all(existing is not obj for existing in self._state.audit_events):

@@ -513,6 +513,99 @@ export interface paths {
     patch?: never
     trace?: never
   }
+  '/api/v1/notifications': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /**
+     * List Notifications Endpoint
+     * @description List the caller's own notifications in the organisation, newest first.
+     *
+     *     ``type`` is the only approved filter field (BP §12); the envelope carries
+     *     the caller's ``unread_count`` so one request refreshes both the list and
+     *     the header badge (acceptance §5.5).
+     */
+    get: operations['list_notifications_endpoint_api_v1_notifications_get']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/api/v1/notifications/unread-count': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /**
+     * Unread Count Endpoint
+     * @description Return the caller's unread notification count in the organisation.
+     */
+    get: operations['unread_count_endpoint_api_v1_notifications_unread_count_get']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/api/v1/notifications/{notification_id}/read': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    /**
+     * Mark Read Endpoint
+     * @description Mark one of the caller's notifications read.
+     *
+     *     A notification that does not exist, belongs to another organisation or
+     *     belongs to another user is a 404 (the org+user scoped lookup is the
+     *     isolation boundary, acceptance §5.5).
+     */
+    patch: operations['mark_read_endpoint_api_v1_notifications__notification_id__read_patch']
+    trace?: never
+  }
+  '/api/v1/notifications/test': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    /**
+     * Send Test Notification Endpoint
+     * @description Create a test in-app notification for the caller and enqueue its email.
+     *
+     *     The notification content is server-owned (fixed test copy, no request
+     *     body); the email delivery is enqueued as a durable ``notification.email``
+     *     job addressed to the caller's verified email. The ``notification.test_sent``
+     *     audit event is written in the same transaction (acceptance §5.5).
+     */
+    post: operations['send_test_notification_endpoint_api_v1_notifications_test_post']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
   '/api/v1/platform/organisations/{organisation_id}/invitations': {
     parameters: {
       query?: never
@@ -1110,6 +1203,58 @@ export interface components {
      */
     MembershipStatus: 'active' | 'invited' | 'suspended' | 'left'
     /**
+     * NotificationListItem
+     * @description One notification in list/detail contexts (the full row is public).
+     *
+     *     ``read_at`` is ``None`` until the recipient marks the notification read;
+     *     the ``type`` carries the dotted event name and the optional
+     *     ``resource_type``/``resource_id`` link the notification to its subject.
+     */
+    NotificationListItem: {
+      /**
+       * Id
+       * Format: uuid
+       */
+      id: string
+      /** Type */
+      type: string
+      /** Title */
+      title: string
+      /** Body */
+      body: string
+      /** Resource Type */
+      resource_type: string | null
+      /** Resource Id */
+      resource_id: string | null
+      /** Read At */
+      read_at: string | null
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string
+    }
+    /**
+     * NotificationListResponse
+     * @description The pagination envelope (BP §12) plus the caller's unread count.
+     *
+     *     The ``unread_count`` sits on the envelope so a single list request can
+     *     refresh both the list and the header badge; it is scoped to the same
+     *     caller/org pair as the items (acceptance §5.5).
+     */
+    NotificationListResponse: {
+      /** Items */
+      items: components['schemas']['NotificationListItem'][]
+      /** Page */
+      page: number
+      /** Page Size */
+      page_size: number
+      /** Total */
+      total: number
+      /** Unread Count */
+      unread_count: number
+    }
+    /**
      * OrganisationCreate
      * @description Request payload for creating an organisation.
      *
@@ -1511,6 +1656,14 @@ export interface components {
       title?: string | null
       /** Body */
       body?: string | null
+    }
+    /**
+     * UnreadCountResponse
+     * @description The unread-count endpoint's explicit response shape.
+     */
+    UnreadCountResponse: {
+      /** Unread Count */
+      unread_count: number
     }
     /**
      * UserListItem
@@ -2624,6 +2777,140 @@ export interface operations {
         }
         content: {
           'application/json': components['schemas']['JobDetail']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  list_notifications_endpoint_api_v1_notifications_get: {
+    parameters: {
+      query?: {
+        page?: number
+        page_size?: number
+        type?: string | null
+      }
+      header?: {
+        'x-org-id'?: string | null
+        authorization?: string | null
+      }
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['NotificationListResponse']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  unread_count_endpoint_api_v1_notifications_unread_count_get: {
+    parameters: {
+      query?: never
+      header?: {
+        'x-org-id'?: string | null
+        authorization?: string | null
+      }
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['UnreadCountResponse']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  mark_read_endpoint_api_v1_notifications__notification_id__read_patch: {
+    parameters: {
+      query?: never
+      header?: {
+        'x-org-id'?: string | null
+        authorization?: string | null
+      }
+      path: {
+        notification_id: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['NotificationListItem']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  send_test_notification_endpoint_api_v1_notifications_test_post: {
+    parameters: {
+      query?: never
+      header?: {
+        'x-org-id'?: string | null
+        authorization?: string | null
+      }
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['NotificationListItem']
         }
       }
       /** @description Validation Error */

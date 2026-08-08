@@ -177,5 +177,7 @@ class ModelRegistry(ABC):
         """Return every registered model definition."""
 
     @abstractmethod
-    def resolve(self, task: TaskDefinition, *, allowed_providers: list[str] | None = None) -> ModelDefinition:
+    def resolve(
+        self, task: TaskDefinition, *, allowed_providers: list[str] | None = None
+    ) -> ModelDefinition:
         """Resolve a model for the task under the given provider allowlist."""
