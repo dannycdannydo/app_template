@@ -147,10 +147,10 @@ Depends on the v0.5 foundation (structlog, request-id middleware, durable job re
 
 Depends on §6.1 (logging context for the worker that sends mail) and the v0.5 job foundation. The provider-neutral email seam (parallel to ADR-0006).
 
-- [ ] `app/email/` package: `EmailProvider` interface — `send_email(from_address, to_address, subject, text_body, html_body) -> EmailDeliveryResult(provider_message_id, status)` — plus `FakeEmailProvider` (in-memory, test-only) and `SmtpEmailProvider` (standard library `smtplib`, no new runtime dependency); `get_email_provider()` factory wired from settings (lru_cache singleton like `get_storage`)
-- [ ] Settings in `core/config.py`: `email_provider` (`smtp` default / `fake`), `email_from`, `smtp_host`, `smtp_port`, `smtp_username`, `smtp_password`, `smtp_use_tls`; production fail-fast (no `fake` provider, SMTP host/port/from required); pytest conftest pins `email_provider=fake`
-- [ ] `mailhog` service in `deploy/compose/compose.local.yml` (infra set, so `make dev` starts it) + fullstack profile; SMTP 1025, UI 8025; `EMAIL_*`/`SMTP_*` dev defaults documented in `.env.example`; `make dev` message mentions the Mailhog UI
-- [ ] Tests: interface contract against `FakeEmailProvider` (round-trip, provider_message_id, failure path); SMTP adapter against Mailhog behind an `email_integration` marker (like `storage_integration`), excluded from the default suite; proof that email is only ever sent from worker tasks
+- [x] `app/email/` package: `EmailProvider` interface — `send_email(from_address, to_address, subject, text_body, html_body) -> EmailDeliveryResult(provider_message_id, status)` — plus `FakeEmailProvider` (in-memory, test-only) and `SmtpEmailProvider` (standard library `smtplib`, no new runtime dependency); `get_email_provider()` factory wired from settings (lru_cache singleton like `get_storage`)
+- [x] Settings in `core/config.py`: `email_provider` (`smtp` default / `fake`), `email_from`, `smtp_host`, `smtp_port`, `smtp_username`, `smtp_password`, `smtp_use_tls`; production fail-fast (no `fake` provider, SMTP host/port/from required); pytest conftest pins `email_provider=fake`
+- [x] `mailhog` service in `deploy/compose/compose.local.yml` (infra set, so `make dev` starts it) + fullstack profile; SMTP 1025, UI 8025; `EMAIL_*`/`SMTP_*` dev defaults documented in `.env.example`; `make dev` message mentions the Mailhog UI
+- [x] Tests: interface contract against `FakeEmailProvider` (round-trip, provider_message_id, failure path); SMTP adapter against Mailhog behind an `email_integration` marker (like `storage_integration`), excluded from the default suite; proof that email is only ever sent from worker tasks
 
 ## 6.3 Notifications Records, Permission Codes and API
 

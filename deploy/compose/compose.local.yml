@@ -1,7 +1,7 @@
 # Local development Compose file (blueprint §36, ADR-0008).
 #
-# The default service set is infrastructure only: PostgreSQL, Redis and MinIO,
-# which the host-native applications connect to under `make dev`. The
+# The default service set is infrastructure only: PostgreSQL, Redis, MinIO and
+# Mailhog, which the host-native applications connect to under `make dev`. The
 # `fullstack` profile adds the API, worker and frontend containers for
 # `make dev-docker` (CI parity, onboarding, Dockerfile validation), so one
 # file serves both commands without adding a fourth Compose file.
@@ -64,6 +64,16 @@ services:
       retries: 10
       start_period: 10s
 
+  # Local SMTP catcher for development email (Scope §6.2, ADR-0015). The
+  # host-native `make dev` API/worker reach it on MAILHOG_SMTP_PORT (1025)
+  # via the SMTP_* defaults in `.env.example`; the web UI on
+  # MAILHOG_UI_PORT (8025) shows every message the worker sends.
+  mailhog:
+    image: mailhog/mailhog:v1.0.1
+    ports:
+      - "${MAILHOG_SMTP_PORT:-1025}:1025"
+      - "${MAILHOG_UI_PORT:-8025}:8025"
+
   # Full-container path (`make dev-docker`): the same image that serves CI and
   # production profiles. Migrations run on container start so a fresh clone
   # works with a single command; the host-native `make migrate` targets the
@@ -79,6 +89,8 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      mailhog:
+        condition: service_started
     environment:
       APP_ENV: development
       DEBUG: "true"
@@ -103,6 +115,16 @@ services:
       STORAGE_SECRET_ACCESS_KEY: ${STORAGE_SECRET_ACCESS_KEY:-minioadmin}
       STORAGE_MAX_UPLOAD_SIZE: ${STORAGE_MAX_UPLOAD_SIZE:-26214400}
       STORAGE_ALLOWED_CONTENT_TYPES: ${STORAGE_ALLOWED_CONTENT_TYPES:-'["application/pdf","application/json","text/plain","text/csv","image/png","image/jpeg"]'}
+      # In the container stack the worker reaches Mailhog on the compose
+      # network (mailhog:1025); the host-native `make dev` path uses the
+      # SMTP_* defaults in `.env.example` (localhost:1025).
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-smtp}
+      EMAIL_FROM: ${EMAIL_FROM:-no-reply@example.com}
+      SMTP_HOST: ${SMTP_HOST:-mailhog}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-false}
     ports:
       - "8000:8000"
     command: >
@@ -122,9 +144,9 @@ services:
       start_period: 10s
 
   # Dramatiq worker (Scope §6.2, blueprint §36): the same backend image with
-  # a different runtime command. It shares the API's database, Redis broker
-  # and storage configuration; the worker will read and write durable job
-  # records once the job service lands (Scope §6.4).
+  # a different runtime command. It shares the API's database, Redis broker,
+  # storage and email configuration; the worker will read and write durable
+  # job records once the job service lands (Scope §6.4).
   worker:
     profiles: ["fullstack"]
     build:
@@ -136,6 +158,8 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      mailhog:
+        condition: service_started
     environment:
       APP_ENV: development
       DEBUG: "true"
@@ -148,6 +172,15 @@ services:
       STORAGE_REGION: ${STORAGE_REGION:-us-east-1}
       STORAGE_ACCESS_KEY_ID: ${STORAGE_ACCESS_KEY_ID:-minioadmin}
       STORAGE_SECRET_ACCESS_KEY: ${STORAGE_SECRET_ACCESS_KEY:-minioadmin}
+      # Email is always sent from the worker (BP §20); in the container stack
+      # it reaches Mailhog on the compose network (mailhog:1025).
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-smtp}
+      EMAIL_FROM: ${EMAIL_FROM:-no-reply@example.com}
+      SMTP_HOST: ${SMTP_HOST:-mailhog}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-false}
       WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-8}
     command: >
       sh -c "dramatiq app.workers --threads $${WORKER_CONCURRENCY:-8}"

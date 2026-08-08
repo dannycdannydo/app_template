@@ -29,6 +29,7 @@ from __future__ import annotations
 import uuid
 
 import dramatiq
+import structlog
 
 from app.core.exceptions import NotFoundError
 from app.core.logging import bind_worker_context
@@ -57,6 +58,8 @@ _PROGRESS_PROCESSING = 80
 ERROR_CODE_FILE_NOT_FOUND = "file_not_found"
 ERROR_CODE_VERIFICATION_FAILED = "file_verification_failed"
 
+logger = structlog.get_logger()
+
 
 async def process_file(job_id: str) -> None:
     """Verify the stored object and move the file to ``ready``, with progress.
@@ -71,12 +74,14 @@ async def process_file(job_id: str) -> None:
     """
     job_uuid = uuid.UUID(job_id)
     bind_worker_context(job_id=str(job_uuid))
+    logger.info("file.processing.started")
     async with async_session_factory() as session:
         job = await jobs_service.get_job_for_task(session, job_id=job_uuid)
         bind_worker_context(job_id=str(job_uuid), resource_id=job.input_reference)
         if jobs_service.is_terminal(job.status):
             # A re-delivered message for a finished job: terminal states are
             # never re-run (acceptance §5.7), so this attempt is a no-op.
+            logger.info("file.processing.skipped", reason="terminal_state")
             return
 
         await jobs_service.mark_running(session, job_id=job_uuid)
@@ -97,6 +102,7 @@ async def process_file(job_id: str) -> None:
                 error_code=ERROR_CODE_FILE_NOT_FOUND,
                 error_message="The file this job processes no longer exists.",
             )
+            logger.warning("file.processing.failed", error_code=ERROR_CODE_FILE_NOT_FOUND)
             raise jobs_service.JobPermanentError(
                 "the file referenced by the job does not exist"
             ) from exc
@@ -117,6 +123,11 @@ async def process_file(job_id: str) -> None:
                 job_id=job_uuid,
                 error_code=ERROR_CODE_VERIFICATION_FAILED,
                 error_message=("The stored object could not be verified while processing."),
+            )
+            logger.warning(
+                "file.processing.failed",
+                error_code=ERROR_CODE_VERIFICATION_FAILED,
+                reason=reason,
             )
             raise jobs_service.JobPermanentError(
                 f"the stored object could not be verified ({reason})"
@@ -139,6 +150,7 @@ async def process_file(job_id: str) -> None:
             job_id=job_uuid,
             result_reference=str(file.id),
         )
+        logger.info("file.processing.succeeded", file_id=str(file.id))
 
 
 process_file_actor = dramatiq.actor(

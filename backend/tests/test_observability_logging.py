@@ -122,6 +122,83 @@ def test_bind_worker_context_binds_job_and_resource_ids() -> None:
     assert logs[1]["resource_id"] == "file-42"
 
 
+async def test_worker_tasks_emit_context_bound_log_lines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scope §6.1: task log lines carry job_id and resource_id.
+
+    The worker tasks bind ``job_id``/``resource_id`` but originally emitted no
+    log line, so there was nothing to observe under ``make dev``. The task
+    handlers now log start/result events; this test proves the captured lines
+    carry the context fields, keeping the "verify under make dev" item
+    automatable in the suite. The handlers run against stubbed sessions so
+    the assertions need no database or broker.
+    """
+    from app.modules.files import tasks as files_tasks
+    from app.modules.jobs import service as jobs_service
+    from app.modules.jobs import tasks as jobs_tasks
+    from app.modules.jobs.models import JobStatus
+
+    JOB_ID = "00000000-0000-7000-8000-000000000001"
+
+    class _FakeSession:
+        async def __aenter__(self) -> _FakeSession:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    def _fake_factory() -> _FakeSession:
+        return _FakeSession()
+
+    # --- files task: a terminal job makes the attempt a logged no-op, so the
+    # start line (job_id only) and the skip line (job_id + resource_id) are
+    # both emitted without touching a database. ---
+    class _TerminalJob:
+        input_reference = "file-42"
+        status = JobStatus.SUCCEEDED
+
+    async def _get_terminal_job(session: object, *, job_id: object) -> _TerminalJob:
+        return _TerminalJob()
+
+    def _is_terminal(status: object) -> bool:
+        return True
+
+    monkeypatch.setattr(files_tasks, "async_session_factory", _fake_factory)
+    monkeypatch.setattr(jobs_service, "get_job_for_task", _get_terminal_job)
+    monkeypatch.setattr(jobs_service, "is_terminal", _is_terminal)
+
+    with _capture_logs() as logs:
+        await files_tasks.process_file(JOB_ID)
+
+    started = [entry for entry in logs if entry["event"] == "file.processing.started"]
+    skipped = [entry for entry in logs if entry["event"] == "file.processing.skipped"]
+    assert started and started[0]["job_id"] == JOB_ID
+    assert "resource_id" not in started[0]
+    assert skipped and skipped[0]["job_id"] == JOB_ID
+    assert skipped[0]["resource_id"] == "file-42"
+
+    # --- jobs task: the retries-exhausted finalizer logs with job_id only. ---
+    recorded: list[str] = []
+
+    async def _fail(
+        session: object, *, job_id: object, error_code: str, error_message: str
+    ) -> None:
+        recorded.append(error_code)
+
+    monkeypatch.setattr(jobs_service, "fail", _fail)
+
+    message_dict: dict[str, object] = {"kwargs": {"job_id": JOB_ID}}
+    with _capture_logs() as logs:
+        await jobs_tasks.mark_job_failed_after_retries(message_dict, {})
+
+    started = [entry for entry in logs if entry["event"] == "job.retries_exhausted.started"]
+    recorded_lines = [entry for entry in logs if entry["event"] == "job.retries_exhausted.recorded"]
+    assert started and started[0]["job_id"] == JOB_ID
+    assert recorded_lines and recorded_lines[0]["job_id"] == JOB_ID
+    assert recorded == [jobs_service.ERROR_CODE_RETRIES_EXHAUSTED]
+
+
 async def test_never_log_list_is_enforced() -> None:
     """Secrets placed in headers never appear in any captured log line.
 
