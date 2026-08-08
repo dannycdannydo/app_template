@@ -7,7 +7,10 @@ another organisation or another recipient surfaces as a 404 (the isolation
 boundary), and domain failures are raised as domain exceptions for the central
 handlers (``NotFoundError`` -> 404).
 
-``send_test_notification`` is the one producer in this release: it creates the
+``send_test_notification`` and ``create_file_notification`` are the two
+producers in this release: the former is the test-send endpoint's fixed copy,
+the latter is what the ``process_file`` task calls when a file finishes
+processing (``file.ready`` / ``file.failed``, Scope §6.4). Each creates the
 in-app notification, its email delivery row and the durable ``notification.email``
 job in a single transaction, then enqueues the worker task (record-then-enqueue,
 BP §18 — the same flow ``files_service.complete_upload`` uses). The delivery
@@ -65,6 +68,23 @@ TEST_BODY = (
 
 # The only delivery channel in this release (blueprint §20 delivery tracking).
 DELIVERY_CHANNEL_EMAIL = "email"
+
+# The notification types the file-processing task produces (Scope §6.4). They
+# reuse the file lifecycle audit action names as dotted event names, so the
+# frontend can group notifications and audit rows by the same type.
+NOTIFICATION_TYPE_FILE_READY = "file.ready"
+NOTIFICATION_TYPE_FILE_FAILED = "file.failed"
+
+# The resource type file notifications link back to (blueprint §17).
+RESOURCE_TYPE_FILE = "file"
+
+# File-status notification copy: server-owned, names the file so the recipient
+# knows what changed. The title stays constant per event type (the frontend can
+# rely on it); the body carries the original filename.
+FILE_READY_TITLE = "File ready"
+FILE_READY_BODY = "Your file {filename} is ready."
+FILE_FAILED_TITLE = "File failed"
+FILE_FAILED_BODY = "Your file {filename} could not be processed."
 
 
 def _notification_not_found() -> NotFoundError:
@@ -246,6 +266,83 @@ async def send_test_notification(
     await session.refresh(notification)
     await session.refresh(delivery)
     return notification, delivery, job
+
+
+async def create_file_notification(
+    session: AsyncSession,
+    *,
+    organisation_id: uuid.UUID,
+    user_id: uuid.UUID,
+    notification_type: str,
+    title: str,
+    body: str,
+    resource_id: str,
+    recipient_email: str,
+    actor_user_id: uuid.UUID | None = None,
+    delivery_task: Actor[Any, Any] | None = None,
+) -> Notification:
+    """Create a file-status notification, its email delivery and the job.
+
+    Called by the ``process_file`` task (Scope §6.4) when a file finishes
+    processing (``file.ready``) or fails (``file.failed``): the in-app
+    notification for the uploader, its ``email`` delivery row and the durable
+    ``notification.email`` job are written in one transaction and the worker
+    task enqueued with the delivery id as its ``input_reference`` — the same
+    record-then-enqueue flow ``send_test_notification`` uses.
+
+    Idempotent on retry (Scope §6.4): a notification of the same type for the
+    same resource and user already existing means this file's outcome was
+    already notified, so the function returns the existing row without
+    creating a second delivery or enqueueing a second email job. A retried or
+    re-delivered ``process_file`` message therefore cannot double-notify or
+    double-send.
+    """
+    existing = await session.scalar(
+        select(Notification).where(
+            Notification.organisation_id == organisation_id,
+            Notification.user_id == user_id,
+            Notification.type == notification_type,
+            Notification.resource_type == RESOURCE_TYPE_FILE,
+            Notification.resource_id == resource_id,
+        )
+    )
+    if existing is not None:
+        return existing
+
+    notification = Notification(
+        organisation_id=organisation_id,
+        user_id=user_id,
+        type=notification_type,
+        title=title,
+        body=body,
+        resource_type=RESOURCE_TYPE_FILE,
+        resource_id=resource_id,
+    )
+    session.add(notification)
+    await session.flush()
+    delivery = NotificationDelivery(
+        notification_id=notification.id,
+        channel=DELIVERY_CHANNEL_EMAIL,
+        recipient=recipient_email,
+        status=NotificationDeliveryStatus.QUEUED,
+    )
+    session.add(delivery)
+    await session.flush()
+    # Imported lazily: the task module imports this service, so a module-level
+    # import would be circular (the same pattern as ``send_test_notification``).
+    from app.modules.notifications import tasks as notifications_tasks
+
+    task = delivery_task or notifications_tasks.send_notification_email_actor
+    await jobs_service.create_and_enqueue(
+        session,
+        organisation_id=organisation_id,
+        job_type=notifications_tasks.JOB_TYPE_NOTIFICATION_EMAIL,
+        input_reference=str(delivery.id),
+        actor_user_id=actor_user_id,
+        task=task,
+    )
+    await session.refresh(notification)
+    return notification
 
 
 # --- Worker-side delivery helpers (called by ``send_notification_email``) ---

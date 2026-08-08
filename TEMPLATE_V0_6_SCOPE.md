@@ -166,9 +166,9 @@ Depends on §6.2 (email delivery) and the v0.4 audit service. The org-scoped not
 
 Depends on §6.3 (API) and the v0.5 job foundation. The capability that makes notifications demonstrably deliver.
 
-- [ ] `send_notification_email` Dramatiq task (`job_type="notification.email"`, `input_reference` = delivery id): update delivery queued → running → succeeded/failed, record `provider_message_id`, set `attempt_count`; idempotent on retry (status/attempt check before sending); failure → delivery `failed` + audit
-- [ ] Extend the v0.5 `process_file` task: on completion (ready or failed) create an in-app notification for the uploader (`file.ready` / `file.failed`, resource_type `file`, resource_id = file id) and enqueue the email delivery job
-- [ ] Integration test: file → ready → notification row → email delivery job → provider_message_id recorded (fake provider in unit tests, real broker + Redis in CI); delivery-failure path test (delivery failed, job failed with error_code, audit written); no double-send on retry
+- [x] `send_notification_email` Dramatiq task (`job_type="notification.email"`, `input_reference` = delivery id): update delivery queued → running → succeeded/failed, record `provider_message_id`, set `attempt_count`; idempotent on retry (status/attempt check before sending); failure → delivery `failed` + audit
+- [x] Extend the v0.5 `process_file` task: on completion (ready or failed) create an in-app notification for the uploader (`file.ready` / `file.failed`, resource_type `file`, resource_id = file id) and enqueue the email delivery job
+- [x] Integration test: file → ready → notification row → email delivery job → provider_message_id recorded (fake provider in unit tests, real broker + Redis in CI); delivery-failure path test (delivery failed, job failed with error_code, audit written); no double-send on retry
 
 ## 6.5 Notifications Frontend
 

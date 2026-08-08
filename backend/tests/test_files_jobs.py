@@ -45,13 +45,22 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import NullPool
 
 from app.core.exceptions import NotFoundError
+from app.email.base import EmailSendError
 from app.modules.audit.models import AuditEvent
 from app.modules.files import service as files_service
 from app.modules.files import tasks as files_tasks
 from app.modules.files.models import File, FileStatus
 from app.modules.jobs import service as jobs_service
 from app.modules.jobs.models import Job, JobStatus
+from app.modules.notifications import service as notifications_service
+from app.modules.notifications import tasks as notifications_tasks
+from app.modules.notifications.models import (
+    Notification,
+    NotificationDelivery,
+    NotificationDeliveryStatus,
+)
 from app.modules.organisations.models import Organisation
+from app.modules.users.models import User
 from app.storage import FakeObjectStorage, get_storage
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -170,6 +179,7 @@ async def _upload_round_trip(
     organisation_id: uuid.UUID,
     *,
     content: bytes = b"the bytes that were uploaded",
+    actor_user_id: uuid.UUID | None = None,
     process_task: Any = None,
 ) -> tuple[File, uuid.UUID]:
     """Run intent -> direct PUT -> complete, returning the file and job id."""
@@ -179,7 +189,7 @@ async def _upload_round_trip(
         original_filename="report.pdf",
         content_type="application/pdf",
         size_bytes=len(content),
-        actor_user_id=None,
+        actor_user_id=actor_user_id,
     )
     assert signed_url.method == "PUT"
     await _fake_storage().put(file.object_key, content)
@@ -444,3 +454,292 @@ async def test_job_list_and_detail_are_org_scoped(
         assert fetched.id == job_a_1.id
         with pytest.raises(NotFoundError):
             await jobs_service.get_job(session, organisation_id=org_b.id, job_id=job_a_1.id)
+
+
+# --- Scope §6.4: file -> ready/failed -> notification -> email delivery loop ---
+
+
+async def _seed_uploader(session: AsyncSession, *, email: str = "uploader@example.com") -> User:
+    """Seed the internal user the processed file belongs to (its uploader)."""
+    user = User(workos_user_id=f"user_{uuid.uuid4().hex}", email=email, name="Ada Lovelace")
+    session.add(user)
+    await session.commit()
+    return user
+
+
+async def _email_job_for_delivery(session: AsyncSession, delivery_id: uuid.UUID) -> Job:
+    """Return the durable email job whose ``input_reference`` is a delivery id."""
+    job = await session.scalar(
+        select(Job).where(
+            Job.job_type == notifications_tasks.JOB_TYPE_NOTIFICATION_EMAIL,
+            Job.input_reference == str(delivery_id),
+        )
+    )
+    assert job is not None, "the notification.email job was not enqueued"
+    return job
+
+
+async def test_file_ready_loop_creates_notification_and_delivers_email(
+    migrated_database: str,
+    broker_and_worker: tuple[StubBroker, Worker, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Acceptance §5.5: a completed file notifies the uploader and delivers email.
+
+    The full Scope §6.4 loop against the real database: intent -> PUT ->
+    complete -> ``process_file`` runs on the stub broker -> the file is
+    ``ready``, an in-app ``file.ready`` notification exists for the uploader,
+    and the ``notification.email`` delivery job was enqueued; the real
+    ``send_notification_email`` handler (fake provider) then advances the
+    delivery ``queued -> running -> succeeded`` and records
+    ``provider_message_id``.
+    """
+    broker, _worker, process_task = broker_and_worker
+    session_factory = _session_factory(migrated_database)
+    engine = create_async_engine(migrated_database, poolclass=NullPool)
+    task_factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(notifications_tasks, "async_session_factory", task_factory)
+    try:
+        async with session_factory() as session:
+            organisation = await _create_org(session, "File Loop Ready Ltd")
+            uploader = await _seed_uploader(session)
+            file, job_id = await _upload_round_trip(
+                session,
+                organisation.id,
+                actor_user_id=uploader.id,
+                process_task=process_task,
+            )
+            file_id = file.id
+            uploader_id = uploader.id
+            org_id = organisation.id
+
+        broker.join(_QUEUE, timeout=10000)
+        finished = await _wait_for_status(session_factory, job_id, JobStatus.SUCCEEDED)
+        assert finished.progress == 100
+
+        # The in-app notification for the uploader was created with the file
+        # resource link (acceptance §5.5: file.ready, resource_type file).
+        async with session_factory() as session:
+            notification = await session.scalar(
+                select(Notification).where(
+                    Notification.organisation_id == org_id,
+                    Notification.user_id == uploader_id,
+                    Notification.type == notifications_service.NOTIFICATION_TYPE_FILE_READY,
+                )
+            )
+            assert notification is not None
+            assert notification.resource_type == "file"
+            assert notification.resource_id == str(file_id)
+            assert notification.read_at is None
+
+            delivery = await session.scalar(
+                select(NotificationDelivery).where(
+                    NotificationDelivery.notification_id == notification.id
+                )
+            )
+            assert delivery is not None
+            assert delivery.channel == "email"
+            assert delivery.recipient == "uploader@example.com"
+            assert delivery.status == NotificationDeliveryStatus.QUEUED
+            email_job = await _email_job_for_delivery(session, delivery.id)
+            email_job_id = email_job.id
+
+        # The durable email job runs against the real database with the fake
+        # provider (pinned by conftest): delivery -> succeeded, provider id
+        # recorded, attempt counted once.
+        await notifications_tasks.send_notification_email(str(email_job_id))
+
+        async with session_factory() as session:
+            delivery = await session.scalar(
+                select(NotificationDelivery).where(
+                    NotificationDelivery.notification_id == notification.id
+                )
+            )
+            assert delivery is not None
+            assert delivery.status == NotificationDeliveryStatus.SUCCEEDED
+            assert delivery.provider_message_id is not None
+            assert delivery.provider_message_id.startswith("fake-")
+            assert delivery.sent_at is not None
+            assert delivery.attempt_count == 1
+
+            email_job = await session.get(Job, email_job_id)
+            assert email_job is not None
+            assert email_job.status == JobStatus.SUCCEEDED
+            assert email_job.result_reference == delivery.provider_message_id
+    finally:
+        await engine.dispose()
+
+
+async def test_failed_file_loop_creates_notification_and_delivery_failure_is_audited(
+    migrated_database: str,
+    broker_and_worker: tuple[StubBroker, Worker, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Acceptance §5.5: a failed file notifies the uploader; email failure audited.
+
+    The failure path of the Scope §6.4 loop: the stored object vanishes before
+    processing, so ``process_file`` fails the file and still notifies the
+    uploader (``file.failed``). The email delivery then fails against the
+    provider: the delivery row is marked ``failed``, the durable email job
+    ``failed`` with ``email_delivery_failed``, and the
+    ``notification.delivery_failed`` audit row is written (acceptance §5.5).
+    """
+    _broker, _worker, process_task = broker_and_worker
+    session_factory = _session_factory(migrated_database)
+    engine = create_async_engine(migrated_database, poolclass=NullPool)
+    task_factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(notifications_tasks, "async_session_factory", task_factory)
+
+    class _FailingProvider:
+        async def send_email(self, **kwargs: Any) -> Any:
+            raise EmailSendError("relay refused the message")
+
+    monkeypatch.setattr(notifications_tasks, "get_email_provider", lambda: _FailingProvider())
+    try:
+        async with session_factory() as session:
+            organisation = await _create_org(session, "File Loop Failed Ltd")
+            uploader = await _seed_uploader(session, email="failed@example.com")
+            # process_task=None enqueues on the module-level actor (inert), so
+            # the object can be tampered with before the worker sees the job.
+            file, job_id = await _upload_round_trip(
+                session, organisation.id, actor_user_id=uploader.id, process_task=None
+            )
+            await _fake_storage().delete_object(file.object_key)
+            file_id = file.id
+            uploader_id = uploader.id
+            org_id = organisation.id
+
+        process_task.send(job_id=str(job_id))  # enqueue the attempt on this broker
+        await _wait_for_status(session_factory, job_id, JobStatus.FAILED)
+
+        async with session_factory() as session:
+            notification = await session.scalar(
+                select(Notification).where(
+                    Notification.organisation_id == org_id,
+                    Notification.user_id == uploader_id,
+                    Notification.type == notifications_service.NOTIFICATION_TYPE_FILE_FAILED,
+                )
+            )
+            assert notification is not None
+            assert notification.resource_type == "file"
+            assert notification.resource_id == str(file_id)
+
+            delivery = await session.scalar(
+                select(NotificationDelivery).where(
+                    NotificationDelivery.notification_id == notification.id
+                )
+            )
+            assert delivery is not None
+            assert delivery.recipient == "failed@example.com"
+            email_job = await _email_job_for_delivery(session, delivery.id)
+            email_job_id = email_job.id
+            notification_id = notification.id
+
+        # The provider refuses the message: the delivery fails permanently and
+        # the durable email job records the failure with its error code.
+        with pytest.raises(jobs_service.JobPermanentError):
+            await notifications_tasks.send_notification_email(str(email_job_id))
+
+        async with session_factory() as session:
+            delivery = await session.scalar(
+                select(NotificationDelivery).where(
+                    NotificationDelivery.notification_id == notification_id
+                )
+            )
+            assert delivery is not None
+            assert delivery.status == NotificationDeliveryStatus.FAILED
+
+            email_job = await session.get(Job, email_job_id)
+            assert email_job is not None
+            assert email_job.status == JobStatus.FAILED
+            assert email_job.error_code == notifications_tasks.ERROR_CODE_EMAIL_DELIVERY_FAILED
+
+            audit = await session.scalar(
+                select(AuditEvent).where(
+                    AuditEvent.action == "notification.delivery_failed",
+                    AuditEvent.resource_id == str(notification_id),
+                )
+            )
+            assert audit is not None
+            assert audit.organisation_id == org_id
+    finally:
+        await engine.dispose()
+
+
+async def test_file_loop_no_double_send_on_retry(
+    migrated_database: str,
+    broker_and_worker: tuple[StubBroker, Worker, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Acceptance §5.5/§5.7: a redelivered file job never double-notifies.
+
+    Re-delivering the ``process_file`` message after the job succeeded is a
+    no-op (terminal states are never re-run): no second notification, no second
+    delivery, and the email task's own idempotency check means a re-run of the
+    delivery message never sends twice (delivery terminal -> no-op).
+    """
+    broker, _worker, process_task = broker_and_worker
+    session_factory = _session_factory(migrated_database)
+    engine = create_async_engine(migrated_database, poolclass=NullPool)
+    task_factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(notifications_tasks, "async_session_factory", task_factory)
+    try:
+        async with session_factory() as session:
+            organisation = await _create_org(session, "File Loop No Double Ltd")
+            uploader = await _seed_uploader(session)
+            file, job_id = await _upload_round_trip(
+                session,
+                organisation.id,
+                actor_user_id=uploader.id,
+                process_task=process_task,
+            )
+            file_id = file.id
+            uploader_id = uploader.id
+            org_id = organisation.id
+
+        broker.join(_QUEUE, timeout=10000)
+        await _wait_for_status(session_factory, job_id, JobStatus.SUCCEEDED)
+
+        # Re-deliver the same process_file message: terminal job, no-op.
+        process_task.send(job_id=str(job_id))
+        broker.join(_QUEUE, timeout=10000)
+        await asyncio.sleep(0.5)
+
+        async with session_factory() as session:
+            notifications = (
+                await session.scalars(
+                    select(Notification).where(
+                        Notification.organisation_id == org_id,
+                        Notification.user_id == uploader_id,
+                        Notification.type == notifications_service.NOTIFICATION_TYPE_FILE_READY,
+                        Notification.resource_type == "file",
+                        Notification.resource_id == str(file_id),
+                    )
+                )
+            ).all()
+            assert len(notifications) == 1  # never double-notified
+
+            deliveries = (
+                await session.scalars(
+                    select(NotificationDelivery).where(
+                        NotificationDelivery.notification_id == notifications[0].id
+                    )
+                )
+            ).all()
+            assert len(deliveries) == 1  # one email delivery, never two
+
+        # Deliver the email once, then re-run the delivery message: the second
+        # run sees the terminal delivery and sends nothing (attempt stays 1).
+        async with session_factory() as session:
+            email_job = await _email_job_for_delivery(session, deliveries[0].id)
+            email_job_id = email_job.id
+        await notifications_tasks.send_notification_email(str(email_job_id))
+        await notifications_tasks.send_notification_email(str(email_job_id))  # re-delivered
+
+        async with session_factory() as session:
+            delivery = await session.get(NotificationDelivery, deliveries[0].id)
+            assert delivery is not None
+            assert delivery.status == NotificationDeliveryStatus.SUCCEEDED
+            assert delivery.attempt_count == 1  # never sent twice
+    finally:
+        await engine.dispose()

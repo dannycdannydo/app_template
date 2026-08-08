@@ -413,6 +413,90 @@ async def test_delivery_lifecycle_helpers(migrated_database: str) -> None:
         await engine.dispose()
 
 
+async def test_create_file_notification_is_idempotent_on_retry(
+    migrated_database: str,
+) -> None:
+    """Scope §6.4: a retried producer never double-notifies or double-sends.
+
+    ``create_file_notification`` (the worker-side producer the ``process_file``
+    task calls) deduplicates on (organisation, user, type, file): calling it a
+    second time for the same outcome returns the existing notification without
+    creating a second delivery row or a second ``notification.email`` job, so a
+    retried or re-delivered message cannot produce a double notification or a
+    double email send (acceptance §5.5 idempotency rule).
+    """
+    engine = create_async_engine(migrated_database, poolclass=NullPool)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    stub_task = _stub_task()
+    try:
+        async with session_factory() as session:
+            org, user = await _seed_org_and_user(session)
+            first = await notifications_service.create_file_notification(
+                session,
+                organisation_id=org.id,
+                user_id=user.id,
+                notification_type="file.ready",
+                title=notifications_service.FILE_READY_TITLE,
+                body=notifications_service.FILE_READY_BODY.format(filename="report.pdf"),
+                resource_id="file-1",
+                recipient_email=user.email,
+                actor_user_id=user.id,
+                delivery_task=stub_task,
+            )
+            assert first.resource_type == "file"
+            assert first.resource_id == "file-1"
+
+            second = await notifications_service.create_file_notification(
+                session,
+                organisation_id=org.id,
+                user_id=user.id,
+                notification_type="file.ready",
+                title=notifications_service.FILE_READY_TITLE,
+                body=notifications_service.FILE_READY_BODY.format(filename="report.pdf"),
+                resource_id="file-1",
+                recipient_email=user.email,
+                actor_user_id=user.id,
+                delivery_task=stub_task,
+            )
+            assert second.id == first.id  # never double-notified
+
+            deliveries = (
+                await session.scalars(
+                    select(NotificationDelivery).where(
+                        NotificationDelivery.notification_id == first.id
+                    )
+                )
+            ).all()
+            assert len(deliveries) == 1  # one delivery, never two
+
+            jobs = (
+                await session.scalars(
+                    select(Job).where(
+                        Job.job_type == "notification.email",
+                        Job.input_reference == str(deliveries[0].id),
+                    )
+                )
+            ).all()
+            assert len(jobs) == 1  # one email job, never two
+
+        # A different file's outcome is a distinct notification (no over-match).
+        async with session_factory() as session:
+            other = await notifications_service.create_file_notification(
+                session,
+                organisation_id=org.id,
+                user_id=user.id,
+                notification_type="file.ready",
+                title=notifications_service.FILE_READY_TITLE,
+                body=notifications_service.FILE_READY_BODY.format(filename="other.pdf"),
+                resource_id="file-2",
+                recipient_email=user.email,
+                delivery_task=stub_task,
+            )
+            assert other.id != first.id
+    finally:
+        await engine.dispose()
+
+
 async def test_mark_delivery_failed_writes_audit(migrated_database: str) -> None:
     engine = create_async_engine(migrated_database, poolclass=NullPool)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)

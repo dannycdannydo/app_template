@@ -1,4 +1,4 @@
-"""File-processing Dramatiq task (Scope §6.5, blueprint §17, §18).
+"""File-processing Dramatiq task (Scope §6.5, §6.4, blueprint §17, §18).
 
 ``process_file`` is the example job that makes files and jobs work together:
 after the browser's direct PUT is verified at completion, this task re-verifies
@@ -7,6 +7,12 @@ flow), advances the file ``uploaded`` -> ``processing`` -> ``ready`` with job
 progress 0 -> 100, and closes the durable job as ``succeeded``. Failure (the
 object vanished or its size drifted) marks the file ``failed`` and the job
 ``failed`` with an ``error_code``.
+
+Scope §6.4 closes the loop the release exists to demonstrate: on completion
+the task notifies the uploader. A file that reaches ``ready`` produces a
+``file.ready`` in-app notification with its email delivery job enqueued; a
+file that fails produces ``file.failed`` the same way (the notification and
+delivery creation is idempotent, so a retried message cannot double-notify).
 
 Idempotency follows the rules in ``jobs.service`` (BP §18): the task re-runs
 safely on a retried or re-delivered message. A job that already reached a
@@ -30,12 +36,16 @@ import uuid
 
 import dramatiq
 import structlog
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError
 from app.core.logging import bind_worker_context
 from app.db.session import async_session_factory
 from app.modules.files import service as files_service
+from app.modules.files.models import File
 from app.modules.jobs import service as jobs_service
+from app.modules.notifications import service as notifications_service
+from app.modules.users.models import User
 from app.storage import get_storage
 
 # The durable ``job_type`` this task produces (Scope §6.5). ``create_and_enqueue``
@@ -118,6 +128,14 @@ async def process_file(job_id: str) -> None:
                 file_id=file.id,
                 reason=reason,
             )
+            await _notify_uploader(
+                session,
+                organisation_id=job.organisation_id,
+                file=file,
+                notification_type=notifications_service.NOTIFICATION_TYPE_FILE_FAILED,
+                title=notifications_service.FILE_FAILED_TITLE,
+                body=notifications_service.FILE_FAILED_BODY.format(filename=file.original_filename),
+            )
             await jobs_service.fail(
                 session,
                 job_id=job_uuid,
@@ -145,12 +163,65 @@ async def process_file(job_id: str) -> None:
             organisation_id=job.organisation_id,
             file_id=file.id,
         )
+        await _notify_uploader(
+            session,
+            organisation_id=job.organisation_id,
+            file=file,
+            notification_type=notifications_service.NOTIFICATION_TYPE_FILE_READY,
+            title=notifications_service.FILE_READY_TITLE,
+            body=notifications_service.FILE_READY_BODY.format(filename=file.original_filename),
+        )
         await jobs_service.succeed(
             session,
             job_id=job_uuid,
             result_reference=str(file.id),
         )
         logger.info("file.processing.succeeded", file_id=str(file.id))
+
+
+async def _notify_uploader(
+    session: AsyncSession,
+    *,
+    organisation_id: uuid.UUID,
+    file: File,
+    notification_type: str,
+    title: str,
+    body: str,
+) -> None:
+    """Create the in-app notification and enqueue its email for the uploader.
+
+    Scope §6.4: a file's terminal outcome (``ready`` or ``failed``) is
+    delivered to the uploader as an in-app notification plus an email delivery
+    job. The notification service deduplicates on (org, user, type, resource),
+    so a retried or re-delivered message cannot double-notify or double-send.
+
+    A file with no recorded uploader, or whose uploader row is gone, has
+    nobody to notify: the task logs and continues — the file and job outcomes
+    are already audited, and a notification needs a recipient.
+    """
+    if file.created_by_user_id is None:
+        logger.info("file.processing.notification_skipped", reason="no_uploader")
+        return
+    uploader = await session.get(User, file.created_by_user_id)
+    if uploader is None:
+        logger.info("file.processing.notification_skipped", reason="uploader_missing")
+        return
+    await notifications_service.create_file_notification(
+        session,
+        organisation_id=organisation_id,
+        user_id=file.created_by_user_id,
+        notification_type=notification_type,
+        title=title,
+        body=body,
+        resource_id=str(file.id),
+        recipient_email=uploader.email,
+        actor_user_id=file.created_by_user_id,
+    )
+    logger.info(
+        "file.processing.notified",
+        notification_type=notification_type,
+        file_id=str(file.id),
+    )
 
 
 process_file_actor = dramatiq.actor(
