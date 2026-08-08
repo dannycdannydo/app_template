@@ -32,6 +32,7 @@ from dramatiq.middleware import AsyncIO, Middleware, default_middleware
 
 from app.core.config import get_settings
 from app.core.logging import configure_logging
+from app.observability.sentry import SentryWorkerMiddleware
 
 _settings = get_settings()
 
@@ -44,11 +45,17 @@ def worker_middleware() -> MiddlewareStack:
     The dramatiq defaults handle retries (with per-actor options from
     ``jobs_service.retry_policy``), time limits, callbacks and pipelines;
     ``AsyncIO`` runs the async tasks on a managed event-loop thread and is
-    added here because it is not part of the dramatiq default list. Passing a
-    full stack to the broker constructor is required — a custom list replaces
-    the defaults rather than extending them.
+    added here because it is not part of the dramatiq default list.
+    ``SentryWorkerMiddleware`` captures unhandled task exceptions (a no-op
+    when no DSN is configured). Passing a full stack to the broker
+    constructor is required — a custom list replaces the defaults rather than
+    extending them.
     """
-    return [AsyncIO(), *(middleware() for middleware in default_middleware)]
+    return [
+        AsyncIO(),
+        SentryWorkerMiddleware(),
+        *(middleware() for middleware in default_middleware),
+    ]
 
 
 def build_broker() -> RedisBroker:

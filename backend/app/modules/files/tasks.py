@@ -31,6 +31,7 @@ import uuid
 import dramatiq
 
 from app.core.exceptions import NotFoundError
+from app.core.logging import bind_worker_context
 from app.db.session import async_session_factory
 from app.modules.files import service as files_service
 from app.modules.jobs import service as jobs_service
@@ -69,8 +70,10 @@ async def process_file(job_id: str) -> None:
     :class:`JobPermanentError` is raised so the message is never retried.
     """
     job_uuid = uuid.UUID(job_id)
+    bind_worker_context(job_id=str(job_uuid))
     async with async_session_factory() as session:
         job = await jobs_service.get_job_for_task(session, job_id=job_uuid)
+        bind_worker_context(job_id=str(job_uuid), resource_id=job.input_reference)
         if jobs_service.is_terminal(job.status):
             # A re-delivered message for a finished job: terminal states are
             # never re-run (acceptance §5.7), so this attempt is a no-op.
