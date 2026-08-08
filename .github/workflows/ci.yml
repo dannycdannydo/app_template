@@ -139,15 +139,17 @@ jobs:
   # upload round trip, private-bucket denial (unsigned GET -> 403) and lazy
   # bucket creation. The tests carry the `storage_integration` marker and are
   # excluded from the default `make test` suite (see backend/pyproject.toml),
-  # so this dedicated service-backed job is where that marker runs. The image
-  # is pinned to the same release the local Compose stack uses.
+  # so this dedicated service-backed job is where that marker runs. The
+  # `edge-cicd` image starts the server by default (its `CMD` runs
+  # `server /data`), which the release images do not; the local Compose stack
+  # stays on the pinned release and passes the server command explicitly.
   storage-integration:
     name: Storage integration tests (MinIO)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     services:
       minio:
-        image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+        image: minio/minio:edge-cicd
         env:
           MINIO_ROOT_USER: minioadmin
           MINIO_ROOT_PASSWORD: minioadmin
