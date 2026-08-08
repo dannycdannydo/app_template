@@ -59,6 +59,7 @@ _INVITATION_ID = str(uuid.uuid4())
 _MEMBERSHIP_ID = str(uuid.uuid4())
 _FEATURE_FLAG_ORG_ID = str(uuid.uuid4())
 _FILE_ID = str(uuid.uuid4())
+_JOB_ID = str(uuid.uuid4())
 
 _PRIVATE_KEY, _ = generate_key_pair()
 _OTHER_KEY, _ = generate_key_pair()
@@ -165,6 +166,18 @@ PROTECTED_ROUTES: list[RouteSpec] = [
         "/api/v1/files/{file_id}",
         org_scoped=True,
         path_values={"file_id": _FILE_ID},
+    ),
+    # Jobs (Scope §6.5): status/progress polling is gated by documents.read —
+    # the files module is the only job producer in v0.5, so the job endpoints
+    # reuse its gate. Both routes are org-scoped (X-Org-Id); a foreign job id
+    # is a 404. There is no job write surface: the durable row is written by
+    # the service, never by a client.
+    _route("GET", "/api/v1/jobs", org_scoped=True),
+    _route(
+        "GET",
+        "/api/v1/jobs/{job_id}",
+        org_scoped=True,
+        path_values={"job_id": _JOB_ID},
     ),
     _route("GET", "/api/v1/platform/audit-events", org_scoped=False),
     _route("GET", "/api/v1/platform/admins", org_scoped=False),

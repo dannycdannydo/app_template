@@ -18,6 +18,12 @@ Two journeys are proven:
   ``mark_job_failed_after_retries`` handler records ``failed`` with the
   exhausted error code, so a job never sits in ``running`` forever.
 
+Scope §6.5 adds the real-broker half of the files<->jobs journey: the real
+``process_file`` handler re-declared on the namespaced broker, enqueued by
+``files_service.complete_upload``, runs against the real database and leaves
+the file ``ready`` and the job ``succeeded`` with progress 100. The
+stub-broker half of the same journey lives in ``test_files_jobs.py``.
+
 The middleware stack is the same factory the worker process uses
 (``app.workers.worker_middleware``), so the async tasks run exactly as they
 do in production; only the broker (namespace) and the per-test backoff differ.
@@ -43,10 +49,14 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from app.modules.files import service as files_service
+from app.modules.files import tasks as files_tasks
+from app.modules.files.models import FileStatus
 from app.modules.jobs import service as jobs_service
 from app.modules.jobs import tasks as jobs_tasks
 from app.modules.jobs.models import Job, JobStatus
 from app.modules.organisations.models import Organisation
+from app.storage import FakeObjectStorage, get_storage
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 _REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
@@ -143,6 +153,14 @@ async def broker_and_worker() -> AsyncIterator[tuple[RedisBroker, Worker]]:
     yield broker, worker
     worker.stop()
     broker.flush_all()
+    # The handlers (and Scope §6.5's process_file) run on the worker's AsyncIO
+    # event-loop thread but use the process-wide engine (async_session_factory).
+    # Dispose the pool so no loop-bound connection outlives this test's worker:
+    # the next test's worker runs on a fresh loop and would otherwise reuse a
+    # connection "attached to a different loop", failing every task.
+    from app.db.session import engine
+
+    await engine.dispose()
 
 
 def _session_factory(database_url: str) -> Any:
@@ -189,6 +207,19 @@ def _make_transient_failure_task(session_factory: Any) -> Any:
         "min_backoff": _EXHAUST_MIN_BACKOFF_MS,
     }
     return dramatiq.actor(queue_name=_QUEUE, **options)(_run)
+
+
+def _make_process_file_task() -> Any:
+    """The real ``process_file`` handler re-declared bound to this broker.
+
+    ``files_service.complete_upload`` enqueues whatever actor it is passed
+    (defaulting to the module-level one, which is bound to the default broker
+    from import time); passing the re-declared actor makes the journey test's
+    enqueue land on the namespaced Redis broker this worker consumes.
+    """
+    return dramatiq.actor(queue_name=_QUEUE, **jobs_service.retry_policy())(
+        files_tasks.process_file
+    )
 
 
 async def _create_org(session_factory: Any) -> Organisation:
@@ -261,3 +292,55 @@ async def test_transient_exhaustion_records_failed_status(
     assert failed.completed_at is not None
     # Three attempts ran (one per MAX_ATTEMPTS) before the handler recorded it.
     assert failed.attempt_count == jobs_service.MAX_ATTEMPTS
+
+
+async def test_upload_complete_process_job_runs_on_real_broker(
+    migrated_database: str, broker_and_worker: tuple[RedisBroker, Worker]
+) -> None:
+    """Acceptance §5.8: the files<->jobs journey against real Redis + Postgres.
+
+    The Scope §6.5 acceptance journey runs against the real broker and worker:
+    intent -> signed PUT (fake adapter) -> complete (which writes the durable
+    row and enqueues the re-declared ``process_file`` task) -> the worker runs
+    it -> the file is ``ready`` and the job ``succeeded`` with progress 100.
+    """
+    session_factory = _session_factory(migrated_database)
+    organisation = await _create_org(session_factory)
+    process_task = _make_process_file_task()
+    content = b"the bytes that were uploaded"
+
+    async with session_factory() as session:
+        file, signed_url = await files_service.create_upload_intent(
+            session,
+            organisation_id=organisation.id,
+            original_filename="report.pdf",
+            content_type="application/pdf",
+            size_bytes=len(content),
+            actor_user_id=None,
+        )
+        assert signed_url.method == "PUT"
+        fake = cast(FakeObjectStorage, get_storage())
+        await fake.put(file.object_key, content)
+        completed, job_id = await files_service.complete_upload(
+            session,
+            organisation_id=organisation.id,
+            file_id=file.id,
+            process_task=process_task,
+        )
+        assert completed.status == FileStatus.UPLOADED
+        assert job_id is not None
+        queued = await session.get(Job, job_id)
+        assert queued is not None
+        assert queued.status == JobStatus.QUEUED
+        assert queued.job_type == files_tasks.JOB_TYPE_FILE_PROCESSING
+
+    finished = await _wait_for_status(session_factory, job_id, JobStatus.SUCCEEDED)
+    assert finished.progress == 100
+    assert finished.result_reference == str(file.id)
+    assert finished.error_code is None
+
+    async with session_factory() as session:
+        ready = await files_service.get_file(
+            session, organisation_id=organisation.id, file_id=file.id
+        )
+        assert ready.status == FileStatus.READY

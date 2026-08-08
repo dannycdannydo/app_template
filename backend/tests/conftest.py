@@ -29,13 +29,19 @@ os.environ["STORAGE_BUCKET"] = "test-bucket"
 # WorkOS credentials are developer-shell exports that must never leak into the
 # suite: config tests assert the empty development defaults and the production
 # fail-fast validation, so drop them before any Settings model is constructed.
-# Tests that need them pass explicit values.
+# Tests that need them pass explicit values. The bootstrap platform-admin
+# credentials are dropped for the same reason: when exported, the login-time
+# bootstrap hook queries the database on every request, which shifts the fake
+# session's lookup queue and silently breaks every request-flow test that
+# staged exactly user + membership.
 for _var in (
     "WORKOS_API_KEY",
     "WORKOS_CLIENT_ID",
     "WORKOS_API_BASE_URL",
     "WORKOS_JWT_ISSUER",
     "WORKOS_JWT_LEEWAY",
+    "BOOTSTRAP_PLATFORM_ADMIN_EMAIL",
+    "BOOTSTRAP_PLATFORM_ADMIN_PASSWORD",
 ):
     os.environ.pop(_var, None)
 

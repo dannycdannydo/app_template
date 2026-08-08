@@ -74,9 +74,18 @@ ACTION_USER_DEACTIVATED = "user.deactivated"
 # object is verified, ``file.upload_failed`` when verification rejects the
 # upload, and ``document.deleted`` (the blueprint's own example action) on soft
 # delete. Resource type is ``file`` for all four.
+#
+# Worker-side transitions (Scope §6.5): ``file.processing`` when the
+# ``process_file`` job takes the file from ``uploaded`` to ``processing``, and
+# ``file.ready`` when verification passes and the file is downloadable. The
+# failure side reuses ``file.upload_failed`` with the job's reason in the
+# metadata, so the trail of a file that failed in the worker reads the same as
+# one that failed at completion.
 ACTION_FILE_UPLOAD_STARTED = "file.upload_started"
 ACTION_FILE_UPLOADED = "file.uploaded"
 ACTION_FILE_UPLOAD_FAILED = "file.upload_failed"
+ACTION_FILE_PROCESSING = "file.processing"
+ACTION_FILE_READY = "file.ready"
 ACTION_FILE_DELETED = "document.deleted"
 
 # Durable job lifecycle (Scope §6.4, blueprint §18): ``job.succeeded`` on

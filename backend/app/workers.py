@@ -65,6 +65,7 @@ def configure_worker() -> None:
     # once per worker process. The import is intentionally side-effect-only:
     # both linters are told so (ruff needs noqa, pyright needs the ignore, the
     # same double-suppression pattern db/base.py uses for its model imports).
+    import app.modules.files.tasks  # pyright: ignore[reportUnusedImport]
     import app.modules.jobs.tasks  # noqa: F401  # pyright: ignore[reportUnusedImport]
 
 

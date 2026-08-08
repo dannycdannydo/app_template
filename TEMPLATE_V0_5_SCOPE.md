@@ -164,9 +164,9 @@ Depends on Redis (already in the stack) and the v0.4 audit service. Independent 
 
 Depends on §6.3 (files API) and §6.4 (job foundation). The capability that makes files and jobs demonstrably work together.
 
-- [ ] `process_file` Dramatiq task (`job_type="file.processing"`): update job progress (0→100), verify the stored object, transition the file uploaded → processing → ready; failure → file `failed` + job `failed` with `error_code`; idempotent (safe to re-run on retry)
-- [ ] Job endpoints: `GET /api/v1/jobs` (documents.read gate, paginated, status/job_type filters), `GET /api/v1/jobs/{job_id}` (documents.read gate, returns status + progress; cross-org → 404); both in `PROTECTED_ROUTES`
-- [ ] Integration test: intent → signed PUT (fake adapter) → complete → job runs (stub broker in unit tests, real broker + Redis in CI) → file `ready`, job `succeeded` with progress 100; failure path test (size mismatch → file failed/quarantined, job failed)
+- [x] `process_file` Dramatiq task (`job_type="file.processing"`): update job progress (0→100), verify the stored object, transition the file uploaded → processing → ready; failure → file `failed` + job `failed` with `error_code`; idempotent (safe to re-run on retry)
+- [x] Job endpoints: `GET /api/v1/jobs` (documents.read gate, paginated, status/job_type filters), `GET /api/v1/jobs/{job_id}` (documents.read gate, returns status + progress; cross-org → 404); both in `PROTECTED_ROUTES`
+- [x] Integration test: intent → signed PUT (fake adapter) → complete → job runs (stub broker in unit tests, real broker + Redis in CI) → file `ready`, job `succeeded` with progress 100; failure path test (size mismatch → file failed/quarantined, job failed)
 
 ## 6.6 Files and Jobs Frontend
 

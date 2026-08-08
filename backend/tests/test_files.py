@@ -37,6 +37,7 @@ from app.modules.files.models import File, FileStatus
 from app.modules.files.service import (
     _EXTENSIONS_BY_CONTENT_TYPE,  # pyright: ignore[reportPrivateUsage]
 )
+from app.modules.jobs.models import JobStatus
 from app.modules.organisations.models import OrganisationMembership
 from app.modules.users.models import User
 from app.storage import FakeObjectStorage, get_storage
@@ -439,8 +440,11 @@ async def test_complete_verifies_object_and_marks_uploaded(context_app: ContextA
     assert body["id"] == str(file_id)
     assert body["status"] == "uploaded"
     assert body["checksum"] is not None
-    assert "processing_job_id" in body
-    assert body["processing_job_id"] is None  # the job foundation is Scope §6.4/§6.5
+    # The completion step now enqueues the processing job and returns its id
+    # (Scope §6.5): the client polls it via GET /api/v1/jobs/{job_id}.
+    processing_job_id = body["processing_job_id"]
+    assert processing_job_id is not None
+    uuid.UUID(processing_job_id)
 
     file = state.files[0]
     assert file.status == FileStatus.UPLOADED
@@ -449,6 +453,15 @@ async def test_complete_verifies_object_and_marks_uploaded(context_app: ContextA
     assert actions.count("file.uploaded") == 1
     uploaded = next(event for event in state.audit_events if event.action == "file.uploaded")
     assert uploaded.event_metadata["object_key"] == object_key
+
+    # The durable job row was written queued with the file id as its input.
+    assert len(state.jobs) == 1
+    job = state.jobs[0]
+    assert job.id == uuid.UUID(processing_job_id)
+    assert job.organisation_id == org_id
+    assert job.status == JobStatus.QUEUED
+    assert job.job_type == "file.processing"
+    assert job.input_reference == str(file_id)
 
 
 async def test_complete_with_checksum_verifies_equality(context_app: ContextApp) -> None:
