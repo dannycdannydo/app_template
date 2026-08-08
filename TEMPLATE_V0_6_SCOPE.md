@@ -156,11 +156,11 @@ Depends on §6.1 (logging context for the worker that sends mail) and the v0.5 j
 
 Depends on §6.2 (email delivery) and the v0.4 audit service. The org-scoped notifications module.
 
-- [ ] `notifications` and `notification_deliveries` tables (BP §20 shape + §10 conventions: UUIDv7 ids, timestamps, naming, indexes on organisation/user/read_at) via Alembic migration; `modules/notifications/` models/queries/service/schemas registered in `db/base.py` and `main.py`
-- [ ] Permission catalogue change (human review required, BP §33): `notifications.read` + `notifications.manage` codes in `constants.py` with role-bundle data migration (owner/administrator/manager: both; member: read; viewer: none); default-deny unchanged
-- [ ] `GET /api/v1/notifications` (notifications.read; own notifications in the caller's org only, paginated, standard envelope with `unread_count`, type filter), `GET /api/v1/notifications/unread-count` (notifications.read); explicit response schemas on every endpoint
-- [ ] `PATCH /api/v1/notifications/{notification_id}/read` (notifications.read; sets `read_at`; foreign/other-user id → 404), `POST /api/v1/notifications/test` (notifications.manage; creates an in-app notification for the caller + enqueues the email delivery job); audit events on test-send and on delivery failure
-- [ ] Security suite: all four notifications routes in `PROTECTED_ROUTES` (org_scoped=True) with the full matrix (unauth 401, invalid session 401, disabled 403, viewer-write 403, cross-org 404, no stack traces)
+- [x] `notifications` and `notification_deliveries` tables (BP §20 shape + §10 conventions: UUIDv7 ids, timestamps, naming, indexes on organisation/user/read_at) via Alembic migration; `modules/notifications/` models/queries/service/schemas registered in `db/base.py` and `main.py`
+- [x] Permission catalogue change (human review required, BP §33): `notifications.read` + `notifications.manage` codes in `constants.py` with role-bundle data migration (owner/administrator/manager: both; member: read; viewer: none); default-deny unchanged
+- [x] `GET /api/v1/notifications` (notifications.read; own notifications in the caller's org only, paginated, standard envelope with `unread_count`, type filter), `GET /api/v1/notifications/unread-count` (notifications.read); explicit response schemas on every endpoint
+- [x] `PATCH /api/v1/notifications/{notification_id}/read` (notifications.read; sets `read_at`; foreign/other-user id → 404), `POST /api/v1/notifications/test` (notifications.manage; creates an in-app notification for the caller + enqueues the email delivery job); audit events on test-send and on delivery failure
+- [x] Security suite: all four notifications routes in `PROTECTED_ROUTES` (org_scoped=True) with the full matrix (unauth 401, invalid session 401, disabled 403, viewer-write 403, cross-org 404, no stack traces)
 
 ## 6.4 Notification Production Loop
 

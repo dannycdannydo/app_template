@@ -60,6 +60,7 @@ _MEMBERSHIP_ID = str(uuid.uuid4())
 _FEATURE_FLAG_ORG_ID = str(uuid.uuid4())
 _FILE_ID = str(uuid.uuid4())
 _JOB_ID = str(uuid.uuid4())
+_NOTIFICATION_ID = str(uuid.uuid4())
 
 _PRIVATE_KEY, _ = generate_key_pair()
 _OTHER_KEY, _ = generate_key_pair()
@@ -179,6 +180,19 @@ PROTECTED_ROUTES: list[RouteSpec] = [
         org_scoped=True,
         path_values={"job_id": _JOB_ID},
     ),
+    # Notifications (Scope §6.3): the four org-scoped notification routes.
+    # List and unread-count need notifications.read; mark-read also
+    # notifications.read (a foreign or other-user id is a 404); test-send needs
+    # notifications.manage and takes no body (the content is server-owned).
+    _route("GET", "/api/v1/notifications", org_scoped=True),
+    _route("GET", "/api/v1/notifications/unread-count", org_scoped=True),
+    _route(
+        "PATCH",
+        "/api/v1/notifications/{notification_id}/read",
+        org_scoped=True,
+        path_values={"notification_id": _NOTIFICATION_ID},
+    ),
+    _route("POST", "/api/v1/notifications/test", org_scoped=True),
     _route("GET", "/api/v1/platform/audit-events", org_scoped=False),
     _route("GET", "/api/v1/platform/admins", org_scoped=False),
     _route("GET", "/api/v1/platform/users", org_scoped=False),
