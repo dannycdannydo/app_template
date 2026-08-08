@@ -1,0 +1,314 @@
+"""AIService contract tests (v0.7 Scope §6.1, ADR-0017).
+
+The service is exercised end-to-end with the in-memory registries (Scope §6.2
+ships the checked-in YAML/JSON registries) and the deterministic
+FakeLLMProvider: task → prompt → model resolution → provider dispatch →
+structured-output validation → result with usage/cost/routing metadata. Every
+error path returns the safe taxonomy (never unvalidated data, never provider
+content), matching acceptance criterion §5.4.
+"""
+
+from __future__ import annotations
+
+from datetime import date
+from decimal import Decimal
+from uuid import uuid4
+
+import pytest
+from pydantic import BaseModel
+from tests.ai_test_helpers import InMemoryRegistries
+
+from app.ai.errors import (
+    AIInputValidationError,
+    ModelNotAvailableError,
+    OutputSchemaError,
+    OutputValidationError,
+    PromptNotFoundError,
+    ProviderResponseError,
+    TaskNotFoundError,
+)
+from app.ai.providers.base import ProviderResponse
+from app.ai.providers.fake import FakeLLMProvider
+from app.ai.registry import (
+    Capability,
+    ModelDefinition,
+    ModelRegistry,
+    PricingBasis,
+    TaskDefinition,
+)
+from app.ai.schemas import AIRequest, TokenUsage
+from app.ai.service import AIService
+
+
+class ClassificationResult(BaseModel):
+    """Pydantic output schema the demo task validates against."""
+
+    task: str
+    prompt_hash: str
+    variables: dict[str, str]
+
+
+_ORG_ID = uuid4()
+_USER_ID = uuid4()
+
+
+def _request(**overrides: object) -> AIRequest:
+    payload: dict[str, object] = {
+        "task": "document.classify",
+        "text": "classify this lease document",
+        "organisation_id": _ORG_ID,
+        "user_id": _USER_ID,
+        "metadata": {"document_id": "doc-1"},
+    }
+    payload.update(overrides)
+    return AIRequest.model_validate(payload)
+
+
+def _resolver(path: str) -> type[BaseModel]:
+    if path == "demo.ClassificationResult":
+        return ClassificationResult
+    raise OutputSchemaError(f"unknown schema {path!r}")
+
+
+def _service(
+    registries: InMemoryRegistries | None = None,
+    *,
+    provider: FakeLLMProvider | None = None,
+) -> tuple[AIService, FakeLLMProvider]:
+    registries = registries or InMemoryRegistries.default()
+    provider = provider or FakeLLMProvider()
+    service = AIService(
+        task_registry=registries.tasks,
+        prompt_registry=registries.prompts,
+        model_registry=registries.models,
+        provider=provider,
+        schema_resolver=_resolver,
+    )
+    return service, provider
+
+
+async def test_execute_returns_validated_structured_result() -> None:
+    service, provider = _service()
+    result = await service.execute(_request())
+
+    assert result.routing.task == "document.classify"
+    assert result.routing.provider == "fake"
+    assert result.routing.model == "fake-model-document.classify"
+    assert result.routing.prompt_name == "classify"
+    assert result.routing.prompt_version == 1
+    assert result.routing.fallback_used is False
+    assert isinstance(result.output, ClassificationResult)
+    assert result.output.task == "document.classify"
+    assert result.output.variables == {"document_id": "doc-1"}
+    assert result.usage.total_tokens > 0
+    assert result.cost.amount >= 0
+    assert result.completed_at.tzinfo is not None
+    assert len(provider.requests) == 1
+    # The adapter only ever saw the rendered prompt + approved metadata.
+    request = provider.requests[0]
+    assert "document.classify" in request.prompt
+    assert "doc-1" in request.prompt
+    assert request.output_schema == "demo.ClassificationResult"
+    assert request.metadata == {"document_id": "doc-1"}
+
+
+async def test_execute_is_deterministic_for_the_same_input() -> None:
+    service, _ = _service()
+    first = await service.execute(_request())
+    second = await service.execute(_request())
+    assert first.output == second.output
+    assert first.usage == second.usage
+    assert first.cost == second.cost
+    assert first.routing == second.routing
+
+
+async def test_unknown_task_raises_task_not_found() -> None:
+    service, _ = _service()
+    with pytest.raises(TaskNotFoundError):
+        await service.execute(_request(task="lease.extract_terms"))
+
+
+async def test_unknown_prompt_version_raises_prompt_not_found() -> None:
+    registries = InMemoryRegistries.default()
+    registries.tasks.register(
+        TaskDefinition(
+            name="document.classify",
+            prompt_name="classify",
+            prompt_version=99,
+            output_schema="demo.ClassificationResult",
+        )
+    )
+    service, _ = _service(registries)
+    with pytest.raises(PromptNotFoundError):
+        await service.execute(_request())
+
+
+async def test_missing_input_variable_raises_input_validation_error() -> None:
+    service, _ = _service()
+    with pytest.raises(AIInputValidationError):
+        await service.execute(_request(metadata={}))
+
+
+async def test_disallowed_provider_raises_model_not_available() -> None:
+    service, _ = _service()
+    with pytest.raises(ModelNotAvailableError):
+        await service.execute(_request(), allowed_providers=["openai"])
+
+
+async def test_no_model_with_required_capability_raises_model_not_available() -> None:
+    registries = InMemoryRegistries.default()
+    registries.tasks.register(
+        TaskDefinition(
+            name="document.classify",
+            prompt_name="classify",
+            prompt_version=1,
+            required_capabilities=[Capability.VISION],
+            output_schema="demo.ClassificationResult",
+        )
+    )
+    service, _ = _service(registries)
+    with pytest.raises(ModelNotAvailableError):
+        await service.execute(_request())
+
+
+async def test_unexpected_provider_failure_is_normalised() -> None:
+    """A non-taxonomy exception from an adapter is wrapped in a safe,
+    retryable=False ProviderResponseError — no provider detail leaks out."""
+    provider = FakeLLMProvider()
+    provider.fail_next_call(error=RuntimeError)
+    service, _ = _service(provider=provider)
+    with pytest.raises(ProviderResponseError) as exc_info:
+        await service.execute(_request())
+    assert exc_info.value.error_code == "provider_response_invalid"
+    assert "raw SDK blowup" not in str(exc_info.value)
+
+
+async def test_malformed_provider_json_fails_validation() -> None:
+    """The provider returned garbage JSON: an OutputValidationError, never a
+    success — acceptance criterion §5.4."""
+    provider = FakeLLMProvider()
+    provider.set_next_response(
+        _canned_response(content="not json at all", structured=None)
+    )
+    service, _ = _service(provider=provider)
+    with pytest.raises(OutputValidationError):
+        await service.execute(_request())
+
+
+async def test_schema_mismatch_fails_validation() -> None:
+    """Valid JSON that does not match the schema is rejected."""
+    provider = FakeLLMProvider()
+    provider.set_next_response(
+        _canned_response(
+            content='{"task": "document.classify"}',
+            structured={"task": "document.classify"},
+        )
+    )
+    service, _ = _service(provider=provider)
+    with pytest.raises(OutputValidationError):
+        await service.execute(_request())
+
+
+async def test_unknown_output_schema_raises_output_schema_error() -> None:
+    service, _ = _service()
+    with pytest.raises(OutputSchemaError):
+        await service.execute(_request(output_schema="missing.module.Schema"))
+
+
+async def test_text_result_is_returned_only_when_declared() -> None:
+    """Free text is only returned when the task explicitly declares it
+    (Scope §6.4); a structured task without a schema fails validation instead.
+    """
+    registries = InMemoryRegistries.default()
+    registries.tasks.register(
+        TaskDefinition(
+            name="document.classify",
+            prompt_name="classify",
+            prompt_version=1,
+            declares_text_result=True,
+            output_schema=None,
+        )
+    )
+    service, provider = _service(registries)
+    result = await service.execute(_request())
+    assert isinstance(result.output, str)
+    assert len(result.output) > 0
+    assert provider.requests[0].output_schema is None
+
+
+async def test_cost_is_calculated_from_model_pricing_and_usage() -> None:
+    """Cost = input_price * input_tokens + output_price * output_tokens,
+    scaled per million tokens, in the model's currency (Scope §6.2)."""
+    registries = InMemoryRegistries.default()
+    registries.models = _PricedModelRegistry()
+    service, _ = _service(registries)
+    result = await service.execute(_request())
+    expected_input_cost = Decimal("1.00") * Decimal(result.usage.input_tokens) / Decimal(1_000_000)
+    expected_output_cost = Decimal("2.00") * Decimal(result.usage.output_tokens) / Decimal(1_000_000)
+    assert result.cost.amount == pytest.approx(expected_input_cost + expected_output_cost)
+    assert result.cost.currency == "USD"
+
+
+async def test_request_requires_exactly_one_input() -> None:
+    with pytest.raises(ValueError):
+        _request(text=None)
+    with pytest.raises(ValueError):
+        _request(text="a", storage_reference="s3://x")
+
+
+async def test_request_bounds_metadata() -> None:
+    with pytest.raises(ValueError):
+        _request(metadata={f"key-{i}": "v" for i in range(20)})
+
+
+def _canned_response(*, content: str, structured: dict[str, object] | None) -> ProviderResponse:
+    return ProviderResponse(
+        model="fake-model-document.classify",
+        content=content,
+        structured=structured,
+        usage=TokenUsage(input_tokens=10, output_tokens=10),
+        latency_ms=1.0,
+        finish_reason="stop",
+    )
+
+
+class _PricedModelRegistry(ModelRegistry):
+    """Model registry whose pricing basis is fixed by the test."""
+
+    def __init__(self) -> None:
+        self._model = ModelDefinition(
+            provider="fake",
+            model="fake-model-document.classify",
+            capabilities=[Capability.STRUCTURED_OUTPUT],
+            context_window=128_000,
+            pricing=PricingBasis(
+                currency="USD",
+                input_price_per_million_tokens=Decimal("1.00"),
+                output_price_per_million_tokens=Decimal("2.00"),
+                effective_date=date(2026, 1, 1),
+                owner="tests",
+            ),
+        )
+
+    def get(self, provider: str, model: str) -> ModelDefinition:
+        if (provider, model) != ("fake", self._model.model):
+            raise KeyError(model)
+        return self._model
+
+    def all(self) -> list[ModelDefinition]:
+        return [self._model]
+
+    def resolve(
+        self,
+        task: TaskDefinition,
+        *,
+        allowed_providers: list[str] | None = None,
+    ) -> ModelDefinition:
+        if allowed_providers is not None and self._model.provider not in allowed_providers:
+            raise ValueError("provider not allowed")
+        return self._model
+
+
+def test_token_usage_total_property() -> None:
+    usage = TokenUsage(input_tokens=10, output_tokens=5)
+    assert usage.total_tokens == 15
