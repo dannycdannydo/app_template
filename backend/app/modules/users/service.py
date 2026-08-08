@@ -8,16 +8,19 @@ concurrent first login.
 
 from __future__ import annotations
 
-from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ServiceUnavailableError
 from app.core.security import UserProfileClient, ValidatedSession
 from app.modules.organisations.models import OrganisationMembership
-from app.modules.permissions.models import MembershipRole, Role
 from app.modules.platform_admin.queries import platform_role_codes_statement
 from app.modules.users.models import User
+from app.modules.users.queries import (
+    memberships_for_user_statement,
+    role_codes_for_user_statement,
+    user_by_workos_id_statement,
+)
 
 
 async def get_or_provision_user(
@@ -26,7 +29,7 @@ async def get_or_provision_user(
     profiles: UserProfileClient,
 ) -> User:
     """Return the internal user for a validated session, provisioning on first login."""
-    user = await session.scalar(select(User).where(User.workos_user_id == validated.workos_user_id))
+    user = await session.scalar(user_by_workos_id_statement(validated.workos_user_id))
     if user is not None:
         return user
 
@@ -41,9 +44,7 @@ async def get_or_provision_user(
         await session.commit()
     except IntegrityError:
         await session.rollback()
-        user = await session.scalar(
-            select(User).where(User.workos_user_id == validated.workos_user_id)
-        )
+        user = await session.scalar(user_by_workos_id_statement(validated.workos_user_id))
         if user is None:
             raise ServiceUnavailableError(
                 code="provisioning_failed",
@@ -63,25 +64,7 @@ async def get_me_payload(
     platform memberships (empty for non-admins). A user with no roles yields
     empty lists.
     """
-    memberships = (
-        await session.scalars(
-            select(OrganisationMembership)
-            .where(OrganisationMembership.user_id == user.id)
-            .order_by(OrganisationMembership.created_at)
-        )
-    ).all()
-    roles = (
-        await session.scalars(
-            select(Role.code)
-            .join(MembershipRole, MembershipRole.role_id == Role.id)
-            .join(
-                OrganisationMembership,
-                OrganisationMembership.id == MembershipRole.membership_id,
-            )
-            .where(OrganisationMembership.user_id == user.id)
-            .distinct()
-            .order_by(Role.code)
-        )
-    ).all()
+    memberships = (await session.scalars(memberships_for_user_statement(user.id))).all()
+    roles = (await session.scalars(role_codes_for_user_statement(user.id))).all()
     platform_roles = (await session.scalars(platform_role_codes_statement(user.id))).all()
     return list(memberships), list(roles), list(platform_roles)
