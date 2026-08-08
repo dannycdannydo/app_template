@@ -18,6 +18,7 @@ FastAPI
    ├── Object storage
    ├── WorkOS
    ├── Email provider
+   ├── AI / LLM providers (app/ai)
    └── External integrations
 ```
 
@@ -33,10 +34,46 @@ backend/app/
 ├── integrations/        provider adapters (workos: organizations, invitations)
 ├── storage/             provider-neutral storage interface + adapters
 ├── email/               email interface + adapters
+├── ai/                  AI application layer (v0.7): AIService, task/prompt/model registries, provider adapters
 ├── events/              domain events / outbox
 ├── workers/             Dramatiq tasks
 └── observability/       logging, tracing, metrics
 ```
+
+## AI application layer (v0.7)
+
+The template ships a **provider-neutral AI layer** (ADR-0017) as a platform
+package, not a business module. Application code calls only
+`AIService.execute(request: AIRequest) -> AIResult` and names a task
+(e.g. `document.classify`); it never imports an LLM SDK, selects a model,
+formats a provider request, parses provider JSON or computes cost.
+
+```text
+Feature service
+    │
+    ▼
+AIService.execute(task=...)          app/ai/service.py
+    │
+    ├── Task registry                app/ai/tasks/        (prompt name/version, capabilities, schema, retry/fallback)
+    ├── Prompt registry              app/ai/prompts/      (versioned YAML, immutable versions)
+    ├── Model registry + router      app/ai/models/       (capabilities, pricing, ordered fallback)
+    ├── LLMProvider adapters         app/ai/providers/    (OpenAI, Anthropic, DeepSeek, Azure, Vertex, local)
+    └── ai_requests / ai_outputs     usage, cost, audit, retention (v0.7 Scope §6.5)
+```
+
+- `app/ai/providers/` is the only place provider SDKs may be imported; a
+  repository test enforces the boundary (ADR-0017, mirroring the storage
+  boto3 rule). The deterministic `FakeLLMProvider` is the default test adapter.
+- Google Gemini is reached **through Vertex AI only** (ADR-0018): project and
+  location settings plus server-side ADC / workload-identity / service-account
+  credentials; no `GEMINI_API_KEY` or Google AI Studio / developer-API path
+  exists.
+- Small bounded tasks run synchronously; document-scale work enqueues an
+  `ai.execute` job on the `ai` queue with the durable record-then-enqueue
+  lifecycle. Organisation AI settings are default-off, budget-enforced in
+  `AIService`, and content never reaches logs, Sentry or audit metadata
+  (retained output is a per-organisation policy with a documented deletion
+  path).
 
 Each domain module normally uses: `models.py`, `schemas.py`, `router.py`, `service.py`, `queries.py` (optional), `permissions.py`, `tests/`. A mandatory repository class is not part of the architecture. The platform plane lives in `modules/platform_admin` (organisation/membership administration), `modules/invitations`, `modules/feature_flags`, `modules/audit` and `modules/webhooks`, all gated by `require_platform_permission` in `api/dependencies.py`.
 

@@ -101,6 +101,20 @@ Provider-neutral interface with adapters for:
 - Azure Blob Storage
 - MinIO for local development
 
+## AI / LLM application layer (v0.7)
+
+The template ships a **provider-neutral AI application layer** (ADR-0017) as a
+platform capability: a feature calls `AIService.execute(task=...)` and never
+imports an LLM SDK, selects a model, formats a provider request, parses
+provider JSON, calculates cost or writes retry logic. Task/prompt/model
+registries, a deterministic capability/cost router, typed provider adapters
+(OpenAI, Anthropic, DeepSeek, Azure OpenAI, Vertex AI Gemini, local
+OpenAI-compatible), structured Pydantic outputs, organisation controls and
+usage/cost/audit records live under `app/ai/`. Google Gemini is reached
+through **Vertex AI only** (ADR-0018) — no Gemini Developer API / AI Studio
+path exists. The layer is deliberately not an agent or retrieval framework;
+those sit above or beside it in derived applications.
+
 ## Tooling
 
 Backend:
@@ -144,12 +158,20 @@ FastAPI
    ├── Object storage
    ├── WorkOS
    ├── Email provider
+   ├── AI / LLM providers (app/ai)
    └── External integrations
 ```
 
 Microservices are not part of the default architecture.
 
 A service may be extracted only when there is a demonstrated operational or organisational need.
+
+The AI layer (v0.7, ADR-0017) is a platform package inside the monolith: it
+plugs into the same Postgres, Redis/Dramatiq, audit and observability
+foundations and exposes `AIService.execute(request: AIRequest) -> AIResult` as
+its only application-facing entry point. Provider SDKs are confined to
+`app/ai/providers/` (ADR-0017, ADR-0018); the modular-monolith and
+no-direct-SDK rules are unchanged.
 
 ---
 
@@ -185,6 +207,7 @@ backend/
 │   ├── integrations/
 │   ├── storage/
 │   ├── email/
+│   ├── ai/                (v0.7, ADR-0017: AI application layer)
 │   ├── events/
 │   ├── workers/
 │   ├── observability/
@@ -194,6 +217,13 @@ backend/
 ├── uv.lock
 └── Dockerfile
 ```
+
+The AI package (v0.7) follows the same provider-neutral shape as storage and
+email: `app/ai/providers/` holds the `LLMProvider` contract and all provider
+adapters; `app/ai/tasks/`, `app/ai/prompts/` and `app/ai/models/` hold the
+checked-in registries; `app/ai/service.py` owns `AIService`; schemas and the
+error taxonomy live in `app/ai/schemas.py` and `app/ai/errors.py`. No code
+outside `app/ai/providers/` imports a provider SDK (ADR-0017, ADR-0018).
 
 Each domain module should normally use:
 
@@ -1037,6 +1067,10 @@ cancelled
 - Do not retry permanent validation errors indefinitely.
 - Heavy workloads may use separate queues.
 - Worker concurrency must be configurable.
+- AI work (v0.7) always runs through `AIService`, which keeps a bounded
+  synchronous path for small tasks and an `ai.execute` job on the `ai` queue
+  for document-scale work; the durable record-then-enqueue rules below apply
+  unchanged, and worker logs/metrics carry `ai_request_id` alongside `job_id`.
 
 Example queues:
 
@@ -1303,6 +1337,19 @@ Each adapter owns:
 
 Business services use internal interfaces, not raw HTTP calls.
 
+## AI providers (v0.7)
+
+LLM provider adapters are **not** general integrations: they live under
+`app/ai/providers/` and implement the typed `LLMProvider` contract
+(ADR-0017) with normalised requests/responses and a retryability-aware error
+taxonomy. Each adapter declares the capabilities it actually supports
+(structured output, vision, tools, reasoning, context window) rather than
+pretending providers are interchangeable. Provider SDKs, provider-specific
+HTTP formats, authentication, streaming mechanics, token reporting and model
+quirks are confined to the adapters; a deterministic `FakeLLMProvider` is the
+default test adapter. Google Gemini is Vertex AI only (ADR-0018) and the local
+OpenAI-compatible adapter is never exposed to browsers.
+
 ## Integration records
 
 Possible tables:
@@ -1443,6 +1490,18 @@ FRONTEND_URL
 
 The application must fail fast on invalid production configuration.
 
+## AI configuration (v0.7)
+
+Settings carry provider enablement and endpoint/project/deployment
+identifiers only; keys, Azure credentials and Google credential material are
+server-side secrets. Production fails fast when an enabled provider lacks its
+required configuration, when a local provider endpoint is insecure or
+publicly reachable, or when the configured default/fallback model cannot
+satisfy declared task requirements. Organisation-level AI policy (enabled,
+allowed providers/models, override, budget, retention) is database-backed in
+`organisation_ai_settings`, default-off for new organisations, and enforced
+inside `AIService` — never only in a router (ADR-0017, v0.7 Scope §6.5).
+
 ## Feature flags
 
 Support:
@@ -1508,7 +1567,10 @@ Never log:
 - authorisation headers;
 - signed URLs;
 - full database connection strings;
-- complete document contents by default.
+- complete document contents by default;
+- AI prompts, raw provider responses, provider keys/headers, or retained
+  input/output content (v0.7, ADR-0017): logs, Sentry and audit metadata bind
+  `ai_request_id`, task, provider/model and routing metadata, never content.
 
 ---
 
@@ -1702,6 +1764,13 @@ adapter tests carry a `storage_integration` marker and are excluded from the
 default suite, so the local quality gate stays provider-free; a dedicated CI
 job runs them against a real MinIO service.
 
+The AI layer (v0.7, ADR-0017) follows the same provider-free default: the
+fake provider covers every adapter contract in the default suite, an
+import-boundary test proves no provider SDK is imported outside
+`app/ai/providers/`, and opt-in `ai_contracts`-marked tests exercise real
+providers only against dedicated non-production accounts/projects in
+protected CI (ADR-0018: Vertex AI only for Google, never a Gemini API key).
+
 ---
 
 # 32. Developer Tooling
@@ -1753,6 +1822,10 @@ make check
 - deliberate upgrades;
 - agents must not add packages merely to avoid simple code.
 
+Provider SDKs are regular dependencies and follow the same rules; an LLM
+provider SDK may only be added together with its adapter under
+`app/ai/providers/`, with the justification recorded (v0.7 Scope §6.3, ADR-0017).
+
 ---
 
 # 33. Coding-Agent Governance
@@ -1781,6 +1854,8 @@ docs/decisions/
 - Every database change includes an Alembic migration.
 - Long-running work uses Dramatiq.
 - Provider SDKs stay behind adapters.
+- AI requests go through `AIService` by task name; no feature module imports
+  an LLM SDK or names a provider/model directly (v0.7, ADR-0017).
 - Frontend API types are generated.
 - Tests accompany behavioural changes.
 - Do not weaken linting, typing or tests.
@@ -1805,6 +1880,13 @@ isolation (cross-tenant platform routes) and secret handling (WorkOS org
 mapping and webhook secret); all such work units are reviewed through the
 implement → review → apply-and-commit loop with the review recorded per
 `CONTRIBUTING.md` before it is applied.
+
+The v0.7 AI layer (ADR-0017, ADR-0018) touches tenant isolation
+(`organisation_ai_settings`, AI usage/cost records), secret handling (provider
+credentials, Vertex credential material) and public API surface (the
+organisation-scoped demonstration endpoint); each work unit is reviewed
+through the same loop, and any provider SDK dependency is justified and pinned
+per §32.
 
 ---
 
