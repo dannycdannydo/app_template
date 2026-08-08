@@ -45,7 +45,7 @@ from alembic import command
 from alembic.config import Config
 from dramatiq.brokers.redis import RedisBroker
 from dramatiq.worker import Worker
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -55,7 +55,14 @@ from app.modules.files.models import FileStatus
 from app.modules.jobs import service as jobs_service
 from app.modules.jobs import tasks as jobs_tasks
 from app.modules.jobs.models import Job, JobStatus
+from app.modules.notifications import tasks as notifications_tasks
+from app.modules.notifications.models import (
+    Notification,
+    NotificationDelivery,
+    NotificationDeliveryStatus,
+)
 from app.modules.organisations.models import Organisation
+from app.modules.users.models import User
 from app.storage import FakeObjectStorage, get_storage
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -344,3 +351,121 @@ async def test_upload_complete_process_job_runs_on_real_broker(
             session, organisation_id=organisation.id, file_id=file.id
         )
         assert ready.status == FileStatus.READY
+
+
+# --- Scope §6.4: the files -> notifications -> email loop on real Redis ---
+
+
+async def test_file_ready_loop_runs_on_real_broker(
+    migrated_database: str,
+    broker_and_worker: tuple[RedisBroker, Worker],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Acceptance §5.5/§5.6: the full §6.4 loop on real Redis + Postgres.
+
+    The Scope §6.4 integration journey against the real broker and worker: a
+    file uploaded by an internal user completes, ``process_file`` runs on the
+    namespaced Redis broker and leaves the file ``ready``, an in-app
+    ``file.ready`` notification exists for the uploader, and the
+    ``notification.email`` delivery job was enqueued with the delivery id as
+    its ``input_reference``; the real email handler (fake provider, pinned by
+    conftest) then advances the delivery to ``succeeded`` and records
+    ``provider_message_id``. The notification enqueue happens inside the worker
+    on the same broker, so the loop is proven end to end.
+    """
+    session_factory = _session_factory(migrated_database)
+    engine = create_async_engine(migrated_database, poolclass=NullPool)
+    task_factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(notifications_tasks, "async_session_factory", task_factory)
+    organisation = await _create_org(session_factory)
+    async with session_factory() as session:
+        uploader = User(
+            workos_user_id=f"user_{uuid.uuid4().hex}",
+            email="uploader@example.com",
+            name="Ada Lovelace",
+        )
+        session.add(uploader)
+        await session.commit()
+        uploader_id = uploader.id
+        org_id = organisation.id
+
+    process_task = _make_process_file_task()
+    content = b"the bytes that were uploaded"
+    async with session_factory() as session:
+        file, signed_url = await files_service.create_upload_intent(
+            session,
+            organisation_id=organisation.id,
+            original_filename="report.pdf",
+            content_type="application/pdf",
+            size_bytes=len(content),
+            actor_user_id=uploader_id,
+        )
+        assert signed_url.method == "PUT"
+        fake = cast(FakeObjectStorage, get_storage())
+        await fake.put(file.object_key, content)
+        completed, job_id = await files_service.complete_upload(
+            session,
+            organisation_id=organisation.id,
+            file_id=file.id,
+            process_task=process_task,
+        )
+        assert completed.status == FileStatus.UPLOADED
+        assert job_id is not None
+        file_id = file.id
+
+    finished = await _wait_for_status(session_factory, job_id, JobStatus.SUCCEEDED)
+    assert finished.progress == 100
+
+    try:
+        async with session_factory() as session:
+            ready = await files_service.get_file(
+                session, organisation_id=organisation.id, file_id=file_id
+            )
+            assert ready.status == FileStatus.READY
+
+            notification = await session.scalar(
+                select(Notification).where(
+                    Notification.organisation_id == org_id,
+                    Notification.user_id == uploader_id,
+                    Notification.type == "file.ready",
+                )
+            )
+            assert notification is not None
+            assert notification.resource_type == "file"
+            assert notification.resource_id == str(file_id)
+
+            delivery = await session.scalar(
+                select(NotificationDelivery).where(
+                    NotificationDelivery.notification_id == notification.id
+                )
+            )
+            assert delivery is not None
+            assert delivery.status == NotificationDeliveryStatus.QUEUED
+            email_job = await session.scalar(
+                select(Job).where(
+                    Job.job_type == notifications_tasks.JOB_TYPE_NOTIFICATION_EMAIL,
+                    Job.input_reference == str(delivery.id),
+                )
+            )
+            assert email_job is not None
+            email_job_id = email_job.id
+
+        # Drive the durable email job on this loop (fake provider): the
+        # delivery succeeds and the provider message id is recorded.
+        await notifications_tasks.send_notification_email(str(email_job_id))
+
+        async with session_factory() as session:
+            delivery = await session.scalar(
+                select(NotificationDelivery).where(
+                    NotificationDelivery.notification_id == notification.id
+                )
+            )
+            assert delivery is not None
+            assert delivery.status == NotificationDeliveryStatus.SUCCEEDED
+            assert delivery.provider_message_id is not None
+            assert delivery.provider_message_id.startswith("fake-")
+            email_job = await session.get(Job, email_job_id)
+            assert email_job is not None
+            assert email_job.status == JobStatus.SUCCEEDED
+    finally:
+        await engine.dispose()
