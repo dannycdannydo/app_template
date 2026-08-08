@@ -9,12 +9,14 @@ This repository is a **template**, not an application. New projects start from a
 - Modular monolith backend with typed configuration, structured logging, and a standard API error format
 - Vue 3 SPA with a generated, type-safe OpenAPI client
 - Alembic migrations wired to application settings
-- Local development per ADR-0008: PostgreSQL and Redis in Docker, app code native (`make dev`), with a full-container path for CI parity (`make dev-docker`)
+- Local development per ADR-0008: PostgreSQL, Redis and MinIO in Docker, app code native (`make dev`), with a full-container path for CI parity (`make dev-docker`)
+- A Dramatiq worker (same backend image) for durable background jobs
+- Provider-neutral object storage with signed uploads (ADR-0006)
 - A single Makefile surface for development and quality gates
 - CI that runs the same gate on every push to `main` and on pull requests
 - Governance docs and architecture decision records (ADRs)
 
-The authoritative design standard is `Internal_Custom_Application_Starter_Architecture_v2.md`. The scoped contract and progress log for the current release is `TEMPLATE_V0_4_SCOPE.md`. Agents read the architecture documentation before structural changes (see `AGENTS.md`).
+The authoritative design standard is `Internal_Custom_Application_Starter_Architecture_v2.md`. The scoped contract and progress log for the current release is `TEMPLATE_V0_5_SCOPE.md`. Agents read the architecture documentation before structural changes (see `AGENTS.md`).
 
 ## Repository layout
 
@@ -30,11 +32,11 @@ Makefile                 Command surface for development and quality gates
 
 ## Prerequisites
 
-Local development follows **ADR-0008**: PostgreSQL and Redis run in Docker, while the API and frontend run natively on the host. The host toolchain is therefore required and pinned:
+Local development follows **ADR-0008**: PostgreSQL, Redis and MinIO run in Docker, while the API, the Dramatiq worker and the frontend run natively on the host. The host toolchain is therefore required and pinned:
 
 - **Python 3.13** with `uv` for the backend (`uv` installs Python if needed; the version is recorded in `backend/.python-version`)
 - **Node >= 24** with `pnpm` (11.x) for the frontend
-- **Docker with Compose** for PostgreSQL and Redis
+- **Docker with Compose** for PostgreSQL, Redis and MinIO
 - `make`
 
 ## Clean clone
@@ -47,8 +49,9 @@ cp .env.example .env
 cd backend && uv sync
 cd ../frontend && pnpm install
 
-# 3. Start PostgreSQL + Redis, apply migrations, and run the API + frontend
-#    natively with live reload (this is the day-to-day workflow)
+# 3. Start PostgreSQL + Redis + MinIO, apply migrations, and run the API, the
+#    Dramatiq worker and the frontend natively with live reload (this is the
+#    day-to-day workflow)
 cd .. && make dev
 
 # 4. Run the full quality gate (lint + typecheck + test + client drift)
@@ -57,7 +60,7 @@ make check
 
 If a port is already taken on your machine, override it in `.env` (e.g. `REDIS_PORT=6380` when a local Redis runs on 6379) — every variable is documented in `.env.example`.
 
-The API is served at `http://localhost:8000` (docs at `/docs`) and the frontend at `http://localhost:5173`, which proxies API traffic to the backend.
+The API is served at `http://localhost:8000` (docs at `/docs`), the frontend at `http://localhost:5173` (which proxies API traffic to the backend), and the MinIO admin console at `http://localhost:9001`.
 
 For CI parity, onboarding, or Dockerfile validation the **entire stack runs in containers** instead:
 
@@ -65,7 +68,7 @@ For CI parity, onboarding, or Dockerfile validation the **entire stack runs in c
 make dev-docker
 ```
 
-`make dev` and `make dev-docker` apply pending Alembic migrations before the API serves traffic. `make migrate` remains available for a deliberate migration-only step. The container command starts the same Postgres and Redis plus the API and frontend containers (built from `backend/Dockerfile` and `frontend/Dockerfile`). Both commands share `deploy/compose/compose.local.yml`: the default service set is infrastructure only, and the `fullstack` Compose profile adds the application containers.
+`make dev` and `make dev-docker` apply pending Alembic migrations before the API serves traffic. `make migrate` remains available for a deliberate migration-only step. The container command starts the same Postgres, Redis and MinIO plus the API, worker and frontend containers (built from `backend/Dockerfile` and `frontend/Dockerfile`). Both commands share `deploy/compose/compose.local.yml`: the default service set is infrastructure only, and the `fullstack` Compose profile adds the application containers.
 
 Verification: after `cp .env.example .env`, both `make dev` and `make dev-docker` must start the services and `make check` must pass with zero lint errors, zero type errors, and green tests.
 
@@ -95,7 +98,9 @@ To tear the test admin down again (e.g. to provision a different one and re-test
 
 | Command | What it does |
 | --- | --- |
-| `make dev` | Start Postgres, Redis, API, and frontend |
+| `make dev` | Start Postgres, Redis, MinIO, API, Dramatiq worker, and frontend |
+| `make dev-docker` | Entire stack in containers (CI parity, onboarding) |
+| `make worker` | Run the Dramatiq worker natively (`uv run dramatiq app.workers`) |
 | `make migrate` | Run Alembic migrations |
 | `make provision-admin` | Pre-create the bootstrap platform admin in WorkOS (email + password; idempotent) |
 | `make provision-admin-delete` | Tear down the bootstrap admin (WorkOS + internal user, resets the one-time bootstrap); `EMAIL=...` to override |
@@ -106,6 +111,15 @@ To tear the test admin down again (e.g. to provision a different one and re-test
 | `make format` | Ruff format + Prettier |
 | `make generate-client` | Export OpenAPI from FastAPI and generate the TypeScript client |
 | `make check` | Full local quality gate: lint + typecheck + test + generated-client drift |
+
+## Files and jobs (v0.5)
+
+v0.5 adds provider-neutral object storage with signed uploads and a durable Dramatiq job pipeline. From the `/files` page (sidebar entry, `requiresAuth`) an organisation member can:
+
+- upload a file: the browser PUTs the bytes **directly to MinIO/S3** through a short-lived signed URL (nothing large passes through the API), the backend verifies the stored object on completion, and a `process_file` worker job drives the file `pending → uploaded → processing → ready` while the UI polls the job's progress,
+- see all of the organisation's files in a table (status badge, size, uploaded-at, actions) and delete or download them (download is another short-lived signed URL).
+
+Files and jobs are org-scoped like every other resource and gated by the existing `documents.read` / `documents.upload` / `documents.delete` permissions (ADR-0014). Everything runs with the `.env.example` defaults: MinIO at `http://localhost:9000` with the `minioadmin` dev credentials and bucket `app-files`. For the raw API, see `API_CONVENTIONS.md` → Files and jobs, or the `/docs` page.
 
 ## Platform Admin Centre
 
@@ -121,6 +135,6 @@ The backend remains the enforcement point: every `/api/v1/platform/*` endpoint r
 
 ## Releases
 
-The template is versioned and tagged. `make check` passing is the gate for a release. Current release: v0.4 (platform administration). See `TEMPLATE_V0_4_SCOPE.md` §6 for the progress log.
+The template is versioned and tagged. `make check` passing is the gate for a release. Current release: v0.5 (files and jobs). See `TEMPLATE_V0_5_SCOPE.md` §6 for the progress log.
 
 Development follows the branch workflow in `CONTRIBUTING.md`: work units live on `feature/*` branches and reach `main` only through reviewed pull requests, so CI runs once per merged unit rather than on every push.

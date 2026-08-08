@@ -181,8 +181,8 @@ Depends on §6.3 and §6.5 (the full files/jobs API surface). The Vue documents 
 
 Depends on §6.6 (exercises the release). Closes v0.5.
 
-- [ ] Blueprint amendments applied where the release proves gaps (BP §17, §18, §30, §31 — see §7 of this file); ADR note or new ADR recording the boto3 S3 adapter as the first storage adapter implementation (ADR-0006 contract) and the `documents.*` gating decision for files/jobs
-- [ ] `ARCHITECTURE.md` (storage interface, direct upload flow, worker/request flow), `API_CONVENTIONS.md`, `SECURITY.md` (file security, SSRF, private storage, signed URLs) and `README.md` updated; `.env.example` documents the `STORAGE_*` settings and worker commands
+- [x] Blueprint amendments applied where the release proves gaps (BP §17, §18, §30, §31 — see §7 of this file); ADR note or new ADR recording the boto3 S3 adapter as the first storage adapter implementation (ADR-0006 contract) and the `documents.*` gating decision for files/jobs
+- [x] `ARCHITECTURE.md` (storage interface, direct upload flow, worker/request flow), `API_CONVENTIONS.md`, `SECURITY.md` (file security, SSRF, private storage, signed URLs) and `README.md` updated; `.env.example` documents the `STORAGE_*` settings and worker commands
 - [ ] CI changes landed and green: Redis service on backend-test, MinIO-backed storage-integration job; `make check` green from a clean checkout; generated-client drift clean; Playwright job green including the files journey
 - [ ] Human review recorded for infrastructure changes (MinIO, worker, CI services), secret handling (storage credentials), and major dependency additions (dramatiq, boto3, moto) per BP §33; architecture audit clean (no CRITICAL/MAJOR)
 

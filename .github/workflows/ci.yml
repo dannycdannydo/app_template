@@ -2,10 +2,11 @@
 #
 # One shared workflow runs the quality gate on every push to main and on
 # every pull request. Jobs map to the release checklist items: backend
-# format/lint, backend typecheck, backend tests, frontend format/lint,
-# frontend typecheck, frontend tests, generated-client drift, migration
-# validity, container build, and the Playwright smoke journeys (v0.3
-# Scope §6.8: "Playwright smoke journeys wired into CI").
+# format/lint, backend typecheck, backend tests, storage integration tests
+# against MinIO (v0.5 Scope §6.7), frontend format/lint, frontend typecheck,
+# frontend tests, generated-client drift, migration validity, container
+# build, and the Playwright smoke journeys (v0.3 Scope §6.8: "Playwright
+# smoke journeys wired into CI").
 #
 # Local `make lint` auto-fixes; CI runs the same checks in check-only mode
 # (no --fix) so formatting and lint failures fail the build instead of being
@@ -132,6 +133,55 @@ jobs:
         run: uv sync --frozen
       - name: Test (pytest)
         run: uv run pytest
+
+  # MinIO-backed storage integration tests (v0.5 Scope §6.7, blueprint §17):
+  # the S3 adapter is proven against a real S3-compatible server — signed
+  # upload round trip, private-bucket denial (unsigned GET -> 403) and lazy
+  # bucket creation. The tests carry the `storage_integration` marker and are
+  # excluded from the default `make test` suite (see backend/pyproject.toml),
+  # so this dedicated service-backed job is where that marker runs. The
+  # `edge-cicd` image starts the server by default (its `CMD` runs
+  # `server /data`), which the release images do not; the local Compose stack
+  # stays on the pinned release and passes the server command explicitly.
+  storage-integration:
+    name: Storage integration tests (MinIO)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      minio:
+        image: minio/minio:edge-cicd
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+        ports:
+          - 9000:9000
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/live"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      STORAGE_PROVIDER: s3
+      STORAGE_BUCKET: ci-storage-tests
+      STORAGE_ENDPOINT_URL: http://localhost:9000
+      STORAGE_REGION: us-east-1
+      STORAGE_ACCESS_KEY_ID: minioadmin
+      STORAGE_SECRET_ACCESS_KEY: minioadmin
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-python: true
+      - name: Sync dependencies from lockfile
+        run: uv sync --frozen
+      - name: Test the S3 adapter against MinIO
+        run: uv run pytest -m storage_integration
 
   frontend-format-lint:
     name: Frontend formatting & linting (Prettier + ESLint)
@@ -357,7 +407,8 @@ jobs:
   # real WorkOS credentials are needed. CI runs the production preview build
   # served on port 4173. A dummy client id keeps the authenticated journeys
   # active: the injected test-profile session is mocked end-to-end and the
-  # id is never validated against a real WorkOS application.
+  # id is never validated against a real WorkOS application. The files
+  # journey (upload intent + table, v0.5 Scope §6.6) is one of the specs.
   playwright-smoke:
     name: Playwright smoke journeys
     runs-on: ubuntu-latest

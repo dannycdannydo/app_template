@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Instructions for human and AI contributors working in this repository. The canonical design standard is `Internal_Custom_Application_Starter_Architecture_v2.md`; the release contract is `TEMPLATE_V0_4_SCOPE.md` (see its §7 reference map for which blueprint sections apply to each work unit).
+Instructions for human and AI contributors working in this repository. The canonical design standard is `Internal_Custom_Application_Starter_Architecture_v2.md`; the release contract is `TEMPLATE_V0_5_SCOPE.md` (see its §7 reference map for which blueprint sections apply to each work unit).
 
 ## Mandatory agent rules
 
