@@ -22,6 +22,7 @@ import uuid
 from typing import Any
 
 import dramatiq
+import structlog
 
 from app.core.logging import bind_worker_context
 from app.db.session import async_session_factory
@@ -31,6 +32,8 @@ from app.modules.jobs import service as jobs_service
 # workload, so it never competes with the workload queues (blueprint §18
 # example queues: default, documents, integrations, ai, emails).
 HANDLER_QUEUE = "default"
+
+logger = structlog.get_logger()
 
 
 def job_id_from_message(message_dict: dict[str, Any]) -> uuid.UUID:
@@ -58,6 +61,7 @@ async def mark_job_failed_after_retries(
     """
     job_id = job_id_from_message(message_dict)
     bind_worker_context(job_id=str(job_id))
+    logger.info("job.retries_exhausted.started")
     async with async_session_factory() as session:
         await jobs_service.fail(
             session,
@@ -65,6 +69,7 @@ async def mark_job_failed_after_retries(
             error_code=jobs_service.ERROR_CODE_RETRIES_EXHAUSTED,
             error_message=jobs_service.ERROR_MESSAGE_RETRIES_EXHAUSTED,
         )
+        logger.info("job.retries_exhausted.recorded")
 
 
 mark_job_failed_after_retries_actor = dramatiq.actor(

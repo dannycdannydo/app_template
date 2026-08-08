@@ -67,12 +67,15 @@ reportMissingTypeStubs = false
 testpaths = ["tests"]
 pythonpath = ["."]
 # The default suite must stay provider-free (Scope §6.2): MinIO-backed S3
-# adapter tests carry the storage_integration marker and are excluded unless
-# explicitly requested with `uv run pytest -m storage_integration`. A CLI -m
-# overrides this expression, so the marker can be run on its own.
-addopts = "-ra -m 'not storage_integration'"
+# adapter tests carry the storage_integration marker and Mailhog-backed SMTP
+# adapter tests carry the email_integration marker; both are excluded unless
+# explicitly requested with `uv run pytest -m storage_integration` /
+# `uv run pytest -m email_integration`. A CLI -m overrides this expression,
+# so either marker can be run on its own.
+addopts = "-ra -m 'not storage_integration and not email_integration'"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = [
     "storage_integration: S3 adapter tests that need a live S3-compatible service (MinIO); skipped when unreachable",
+    "email_integration: SMTP adapter tests that need a live SMTP relay (Mailhog); skipped when unreachable",
 ]

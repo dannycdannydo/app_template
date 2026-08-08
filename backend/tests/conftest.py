@@ -26,6 +26,11 @@ os.environ["DATABASE_URL"] = "postgresql+asyncpg://app:app@localhost:5432/app_te
 # because the fake ignores them.
 os.environ["STORAGE_PROVIDER"] = "fake"
 os.environ["STORAGE_BUCKET"] = "test-bucket"
+# The email adapter must never touch a real relay in the suite: pin the
+# in-memory fake (Scope §6.2) so ``make check`` needs no Mailhog. SMTP_*
+# credentials a developer exported are harmless here because the fake ignores
+# them.
+os.environ["EMAIL_PROVIDER"] = "fake"
 # WorkOS credentials are developer-shell exports that must never leak into the
 # suite: config tests assert the empty development defaults and the production
 # fail-fast validation, so drop them before any Settings model is constructed.

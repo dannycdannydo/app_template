@@ -30,14 +30,15 @@ endef
 
 .PHONY: dev dev-docker worker migrate provision-admin provision-admin-delete lint typecheck test e2e format generate-client check
 
-## Start PostgreSQL + Redis + MinIO in Docker, then run the API, the Dramatiq
-## worker and the frontend natively with live reload (ADR-0008). Infra stays
-## up after Ctrl-C so `make migrate` and repeat `make dev` runs keep working;
-## stop it with `docker compose -f deploy/compose/compose.local.yml down`.
+## Start PostgreSQL + Redis + MinIO + Mailhog in Docker, then run the API, the
+## Dramatiq worker and the frontend natively with live reload (ADR-0008).
+## Infra stays up after Ctrl-C so `make migrate` and repeat `make dev` runs
+## keep working; stop it with
+## `docker compose -f deploy/compose/compose.local.yml down`.
 dev:
-	$(COMPOSE_CMD) up -d --wait postgres redis minio
+	$(COMPOSE_CMD) up -d --wait postgres redis minio mailhog
 	$(MAKE) migrate
-	@echo "API on http://localhost:8000 (live reload), worker native, frontend on http://localhost:5173, MinIO console on http://localhost:9001. Ctrl-C stops the apps; Postgres/Redis/MinIO stay up."
+	@echo "API on http://localhost:8000 (live reload), worker native, frontend on http://localhost:5173, MinIO console on http://localhost:9001, Mailhog UI on http://localhost:8025. Ctrl-C stops the apps; Postgres/Redis/MinIO/Mailhog stay up."
 	@$(load_env) (cd backend && uv run uvicorn app.main:app --reload --port 8000) & \
 	(cd backend && uv run dramatiq app.workers --threads $${WORKER_CONCURRENCY:-8}) & \
 	(cd frontend && pnpm dev) & \

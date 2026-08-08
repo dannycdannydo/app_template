@@ -166,6 +166,38 @@ class Settings(BaseSettings):
         default=0.1,
         description="Sentry performance-trace sample rate between 0.0 and 1.0.",
     )
+    email_provider: str = Field(
+        default="smtp",
+        description=(
+            "Email adapter (ADR-0015): 'smtp' (standard-library smtplib, the "
+            "default) or 'fake' (in-memory, test-only). The 'fake' provider "
+            "is rejected in production."
+        ),
+    )
+    email_from: str = Field(
+        default="",
+        description="Sender address for application email; required when email_provider=smtp",
+    )
+    smtp_host: str = Field(
+        default="",
+        description="SMTP relay host; required when email_provider=smtp (Mailhog locally)",
+    )
+    smtp_port: int = Field(
+        default=0,
+        description="SMTP relay port; 0 means unset (Mailhog publishes 1025 locally)",
+    )
+    smtp_username: str = Field(
+        default="",
+        description="SMTP username when the relay requires authentication",
+    )
+    smtp_password: str = Field(
+        default="",
+        description="SMTP password (secret, backend-only, never logged)",
+    )
+    smtp_use_tls: bool = Field(
+        default=False,
+        description="Enable STARTTLS when connecting to the SMTP relay",
+    )
 
     @field_validator("cors_allowed_origins")
     @classmethod
@@ -221,6 +253,20 @@ class Settings(BaseSettings):
         if not 0.0 <= sample_rate <= 1.0:
             raise ValueError("sentry_traces_sample_rate must be between 0.0 and 1.0")
         return sample_rate
+
+    @field_validator("email_provider")
+    @classmethod
+    def _validate_email_provider(cls, provider: str) -> str:
+        if provider not in {"smtp", "fake"}:
+            raise ValueError("email_provider must be 'smtp' or 'fake'")
+        return provider
+
+    @field_validator("smtp_port")
+    @classmethod
+    def _validate_smtp_port(cls, port: int) -> int:
+        if not 0 <= port <= 65535:
+            raise ValueError("smtp_port must be between 0 and 65535")
+        return port
 
     @field_validator("bootstrap_platform_admin_email")
     @classmethod
@@ -293,6 +339,23 @@ class Settings(BaseSettings):
                         "storage_provider=s3 requires explicit storage configuration "
                         f"in the production environment: {', '.join(missing)}"
                     )
+        if self.app_env == "production" and self.email_provider == "fake":
+            raise ValueError("email_provider must not be 'fake' in the production environment")
+        if self.app_env == "production" and self.email_provider == "smtp":
+            missing_email = [
+                name
+                for name, value in (
+                    ("email_from", self.email_from),
+                    ("smtp_host", self.smtp_host),
+                    ("smtp_port", str(self.smtp_port) if self.smtp_port else ""),
+                )
+                if not value
+            ]
+            if missing_email:
+                raise ValueError(
+                    "email_provider=smtp requires explicit email configuration "
+                    f"in the production environment: {', '.join(missing_email)}"
+                )
         return self
 
 

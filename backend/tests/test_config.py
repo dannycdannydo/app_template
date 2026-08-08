@@ -54,6 +54,10 @@ def test_production_requires_workos_credentials() -> None:
         storage_secret_access_key="sk_storage_test",
         storage_bucket="files",
         storage_endpoint_url="https://s3.example.test",
+        email_provider="smtp",
+        email_from="no-reply@example.com",
+        smtp_host="smtp.example.test",
+        smtp_port=587,
     )
     assert settings.workos_api_base_url == "https://api.workos.com/"
     assert settings.workos_jwt_leeway == 30.0
@@ -162,6 +166,10 @@ def test_production_accepts_a_valid_bootstrap_email() -> None:
         storage_secret_access_key="sk_storage_test",
         storage_bucket="files",
         storage_endpoint_url="https://s3.example.test",
+        email_provider="smtp",
+        email_from="no-reply@example.com",
+        smtp_host="smtp.example.test",
+        smtp_port=587,
         bootstrap_platform_admin_email="admin@example.com",
     )
     assert settings.bootstrap_platform_admin_email == "admin@example.com"
@@ -196,6 +204,10 @@ def test_production_accepts_a_webhook_secret() -> None:
         storage_secret_access_key="sk_storage_test",
         storage_bucket="files",
         storage_endpoint_url="https://s3.example.test",
+        email_provider="smtp",
+        email_from="no-reply@example.com",
+        smtp_host="smtp.example.test",
+        smtp_port=587,
         workos_webhook_secret="whsec_prod",
     )
     assert settings.workos_webhook_secret == "whsec_prod"
@@ -385,6 +397,164 @@ def test_production_accepts_complete_s3_configuration() -> None:
         storage_secret_access_key="sk_storage_test",
         storage_bucket="files",
         storage_endpoint_url="https://s3.example.test",
+        email_provider="smtp",
+        email_from="no-reply@example.com",
+        smtp_host="smtp.example.test",
+        smtp_port=587,
     )
     assert settings.storage_provider == "s3"
     assert settings.storage_public_endpoint_url == "https://s3.example.test"
+
+
+# --- Email settings (Scope §6.2, blueprint §20, ADR-0015) ---
+
+
+def test_email_settings_defaults() -> None:
+    """Scope §6.2: smtp is the default provider; SMTP is unconfigured by default."""
+    settings = Settings(
+        app_env="development",
+        database_url="postgresql+asyncpg://x",
+        email_provider="smtp",  # explicit: conftest pins EMAIL_PROVIDER=fake for the suite
+    )
+    assert settings.email_provider == "smtp"
+    assert settings.email_from == ""
+    assert settings.smtp_host == ""
+    assert settings.smtp_port == 0
+    assert settings.smtp_username == ""
+    assert settings.smtp_password == ""
+    assert settings.smtp_use_tls is False
+
+
+def test_email_provider_rejects_unknown_values() -> None:
+    with pytest.raises(ValidationError, match="email_provider"):
+        Settings(
+            app_env="development",
+            database_url="postgresql+asyncpg://x",
+            email_provider="resend",
+        )
+
+
+def test_smtp_port_rejects_values_outside_the_valid_range() -> None:
+    with pytest.raises(ValidationError, match="smtp_port"):
+        Settings(
+            app_env="development",
+            database_url="postgresql+asyncpg://x",
+            smtp_port=70000,
+        )
+    with pytest.raises(ValidationError, match="smtp_port"):
+        Settings(
+            app_env="development",
+            database_url="postgresql+asyncpg://x",
+            smtp_port=-1,
+        )
+
+
+def test_production_rejects_fake_email_provider() -> None:
+    """Scope §5.3: production never boots with the in-memory provider."""
+    with pytest.raises(ValidationError, match="email_provider must not be 'fake'"):
+        Settings(
+            app_env="production",
+            database_url="postgresql+asyncpg://x",
+            workos_api_key="sk_test",
+            workos_client_id="client_1",
+            cors_allowed_origins=["https://app.example.test"],
+            trusted_hosts=["api.example.test"],
+            redis_url="rediss://redis.example.test:6380/0",
+            storage_provider="s3",
+            storage_access_key_id="ak_test",
+            storage_secret_access_key="sk_storage_test",
+            storage_bucket="files",
+            storage_endpoint_url="https://s3.example.test",
+            email_provider="fake",
+        )
+
+
+def test_production_requires_explicit_smtp_configuration() -> None:
+    """Scope §4: production with email_provider=smtp requires host/port/from."""
+    with pytest.raises(ValidationError, match="smtp_host"):
+        Settings(
+            app_env="production",
+            database_url="postgresql+asyncpg://x",
+            workos_api_key="sk_test",
+            workos_client_id="client_1",
+            cors_allowed_origins=["https://app.example.test"],
+            trusted_hosts=["api.example.test"],
+            redis_url="rediss://redis.example.test:6380/0",
+            storage_provider="s3",
+            storage_access_key_id="ak_test",
+            storage_secret_access_key="sk_storage_test",
+            storage_bucket="files",
+            storage_endpoint_url="https://s3.example.test",
+            email_provider="smtp",
+            email_from="no-reply@example.com",
+            smtp_port=587,
+        )
+
+    with pytest.raises(ValidationError, match="smtp_port"):
+        Settings(
+            app_env="production",
+            database_url="postgresql+asyncpg://x",
+            workos_api_key="sk_test",
+            workos_client_id="client_1",
+            cors_allowed_origins=["https://app.example.test"],
+            trusted_hosts=["api.example.test"],
+            redis_url="rediss://redis.example.test:6380/0",
+            storage_provider="s3",
+            storage_access_key_id="ak_test",
+            storage_secret_access_key="sk_storage_test",
+            storage_bucket="files",
+            storage_endpoint_url="https://s3.example.test",
+            email_provider="smtp",
+            email_from="no-reply@example.com",
+            smtp_host="smtp.example.test",
+        )
+
+    with pytest.raises(ValidationError, match="email_from"):
+        Settings(
+            app_env="production",
+            database_url="postgresql+asyncpg://x",
+            workos_api_key="sk_test",
+            workos_client_id="client_1",
+            cors_allowed_origins=["https://app.example.test"],
+            trusted_hosts=["api.example.test"],
+            redis_url="rediss://redis.example.test:6380/0",
+            storage_provider="s3",
+            storage_access_key_id="ak_test",
+            storage_secret_access_key="sk_storage_test",
+            storage_bucket="files",
+            storage_endpoint_url="https://s3.example.test",
+            email_provider="smtp",
+            smtp_host="smtp.example.test",
+            smtp_port=587,
+        )
+
+
+def test_production_accepts_complete_smtp_configuration() -> None:
+    settings = Settings(
+        app_env="production",
+        database_url="postgresql+asyncpg://x",
+        workos_api_key="sk_test",
+        workos_client_id="client_1",
+        cors_allowed_origins=["https://app.example.test"],
+        trusted_hosts=["api.example.test"],
+        redis_url="rediss://redis.example.test:6380/0",
+        storage_provider="s3",
+        storage_access_key_id="ak_test",
+        storage_secret_access_key="sk_storage_test",
+        storage_bucket="files",
+        storage_endpoint_url="https://s3.example.test",
+        email_provider="smtp",
+        email_from="no-reply@example.com",
+        smtp_host="smtp.example.test",
+        smtp_port=587,
+        smtp_username="smtp-user",
+        smtp_password="smtp-secret",
+        smtp_use_tls=True,
+    )
+    assert settings.email_provider == "smtp"
+    assert settings.email_from == "no-reply@example.com"
+    assert settings.smtp_host == "smtp.example.test"
+    assert settings.smtp_port == 587
+    assert settings.smtp_username == "smtp-user"
+    assert settings.smtp_password == "smtp-secret"
+    assert settings.smtp_use_tls is True
