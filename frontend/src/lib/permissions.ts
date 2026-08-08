@@ -119,3 +119,63 @@ export function useRecordPermissions() {
   })
   return { roles, permissions, isReadOnly, mePending: isPending, meError: isError }
 }
+
+/**
+ * File write capabilities derived from the role codes returned by `/me`
+ * (Scope §6.6, blueprint §14). Mirrors the backend `ROLE_PERMISSION_MAP`
+ * seed (backend/app/modules/permissions/constants.py) for the `documents.*`
+ * permissions:
+ *
+ * - `owner`, `administrator`, `manager`: upload and delete;
+ * - `member`: upload only (no delete);
+ * - `viewer`: read only (no write actions at all).
+ *
+ * Like the records bundle, this is the template's single frontend copy of the
+ * `documents.*` role bundle; the backend stays the enforcement point.
+ */
+const FILE_ROLE_PERMISSIONS: Record<string, { canUpload: boolean; canDelete: boolean }> = {
+  owner: { canUpload: true, canDelete: true },
+  administrator: { canUpload: true, canDelete: true },
+  manager: { canUpload: true, canDelete: true },
+  member: { canUpload: true, canDelete: false },
+  viewer: { canUpload: false, canDelete: false },
+}
+
+export interface FilePermissions {
+  canUpload: boolean
+  canDelete: boolean
+}
+
+const NO_FILE_PERMISSIONS: FilePermissions = { canUpload: false, canDelete: false }
+
+/**
+ * Union of file write permissions across the caller's role codes. Same
+ * generous per-role union as `recordPermissionsForRoles`; enforcement is
+ * server-side either way.
+ */
+export function filePermissionsForRoles(roles: readonly string[] | undefined): FilePermissions {
+  if (!roles || roles.length === 0) {
+    return NO_FILE_PERMISSIONS
+  }
+  let canUpload = false
+  let canDelete = false
+  for (const role of roles) {
+    const bundle = FILE_ROLE_PERMISSIONS[role]
+    if (!bundle) continue
+    canUpload ||= bundle.canUpload
+    canDelete ||= bundle.canDelete
+  }
+  return { canUpload, canDelete }
+}
+
+/**
+ * Reactive file permissions for the current user (Scope §6.6). Reads the
+ * roles from `useMeQuery` and exposes a single computed object so the files
+ * view and upload component gate write actions in one place.
+ */
+export function useFilePermissions() {
+  const { data, isPending } = useMeQuery()
+  const roles = computed<readonly string[] | undefined>(() => data.value?.roles)
+  const permissions = computed<FilePermissions>(() => filePermissionsForRoles(roles.value))
+  return { roles, permissions, mePending: isPending }
+}

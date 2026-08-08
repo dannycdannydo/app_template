@@ -23,6 +23,11 @@ composables → components).
 | `usePlatformFeatureFlagsQuery` + `useSetFeatureFlagMutation`                      | platform feature flags                         | `src/queries/platform.ts` |
 | `usePlatformAuditEventsQuery(params)`                                             | platform audit trail (read-only)               | `src/queries/platform.ts` |
 | `usePlatformAdminStatus`                                                          | `platform_roles` from `/me` (nav/guard gating) | `src/queries/platform.ts` |
+| `useFilesQuery(params)` / `useFileQuery(fileId)`                                  | org-scoped files list/detail                   | `src/queries/files.ts`    |
+| `useCreateUploadIntentMutation` / `useCompleteUploadMutation`                     | direct-upload intent + completion steps        | `src/queries/files.ts`    |
+| `useUploadFileMutation(file, onProgress)`                                         | full flow: intent → signed PUT → complete      | `src/queries/files.ts`    |
+| `useDeleteFileMutation` / `useDownloadFileMutation`                               | soft delete + signed GET URL                   | `src/queries/files.ts`    |
+| `useJobsQuery(params)` / `useJobQuery(jobId)`                                     | jobs list + polled detail                      | `src/queries/jobs.ts`     |
 
 ## Platform-plane keys
 
@@ -54,6 +59,9 @@ Keys are per-organisation. Every org-scoped key starts with
 ```text
 ['organisations', <orgId>, 'records', 'list', { page, pageSize }]
 ['organisations', <orgId>, 'records', 'detail', <recordId>]
+['organisations', <orgId>, 'files', 'list', { page, pageSize, status? }]
+['organisations', <orgId>, 'files', 'detail', <fileId>]
+['organisations', <orgId>, 'jobs', 'detail', <jobId>]
 ```
 
 Rules:

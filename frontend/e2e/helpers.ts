@@ -254,6 +254,107 @@ export function createPlatformFixture() {
 }
 
 /**
+ * In-memory files/jobs fixture (Scope §6.6) served over the mocked
+ * `/api/v1/**` surface. The fixture is stateful the way the real backend is:
+ * the upload intent creates a `pending` file record, completion moves it to
+ * `processing` and hands back a job id, and the first job poll returns a
+ * running job while subsequent polls succeed and flip the file to `ready`.
+ * The signed-URL PUT is not part of this fixture — the journey intercepts the
+ * storage host separately (see `e2e/files.spec.ts`).
+ */
+export function createFileFixture() {
+  const files: Array<{
+    id: string
+    original_filename: string
+    content_type: string
+    size_bytes: number
+    status: string
+    created_by_user_id: string
+    created_at: string
+    checksum: string | null
+    updated_at: string
+  }> = [
+    {
+      id: 'aaaaaaaa-aaaa-4aaa-8aaa-111111111111',
+      original_filename: 'welcome.pdf',
+      content_type: 'application/pdf',
+      size_bytes: 4096,
+      status: 'ready',
+      created_by_user_id: TEST_USER_ID,
+      created_at: '2026-01-01T00:00:00Z',
+      checksum: null,
+      updated_at: '2026-01-01T00:00:00Z',
+    },
+  ]
+
+  let jobPollCount = 0
+  let activeFileId: string | null = null
+
+  const nextFileId = () => 'aaaaaaaa-aaaa-4aaa-8aaa-222222222222'
+  const nextJobId = () => 'aaaaaaaa-aaaa-4aaa-8aaa-333333333333'
+
+  return {
+    files,
+    nextFileId,
+    nextJobId,
+    /**
+     * Job payload for `GET /api/v1/jobs/{job_id}`: running first, then
+     * succeeded. The client polls by job id, but the file the job belongs to
+     * is tracked via `completeFor` (the job URL id never equals the file id),
+     * so the fixture flips that file to `ready` once the poll succeeds.
+     */
+    jobFor() {
+      jobPollCount += 1
+      const succeeded = jobPollCount > 1
+      const status = succeeded ? 'succeeded' : 'running'
+      const progress = succeeded ? 100 : 45
+      if (succeeded && activeFileId !== null) {
+        const file = files.find((entry) => entry.id === activeFileId)
+        if (file) {
+          file.status = 'ready'
+          file.updated_at = '2026-05-01T00:00:00Z'
+        }
+      }
+      return {
+        id: nextJobId(),
+        job_type: 'file.processing',
+        status,
+        progress,
+        attempt_count: 1,
+        created_by_user_id: TEST_USER_ID,
+        created_at: '2026-04-01T00:00:00Z',
+        started_at: '2026-04-01T00:00:01Z',
+        completed_at: succeeded ? '2026-04-01T00:00:02Z' : null,
+        input_reference: activeFileId !== null ? `file:${activeFileId}` : '',
+        result_reference: null,
+        error_code: null,
+        error_message: null,
+      }
+    },
+    /** Completion payload: the file record plus the job the client polls. */
+    completeFor(fileId: string) {
+      const file = files.find((entry) => entry.id === fileId)
+      if (!file) return undefined
+      file.status = 'processing'
+      file.updated_at = '2026-04-01T00:00:00Z'
+      activeFileId = file.id
+      return {
+        id: file.id,
+        original_filename: file.original_filename,
+        content_type: file.content_type,
+        size_bytes: file.size_bytes,
+        status: file.status,
+        created_by_user_id: file.created_by_user_id,
+        created_at: file.created_at,
+        checksum: file.checksum,
+        updated_at: file.updated_at,
+        processing_job_id: nextJobId(),
+      }
+    },
+  }
+}
+
+/**
  * Mock the backend `/api/v1/**` surface consumed by the shell (blueprint
  * §5, §15): `me`, and the records list/detail/create/update/delete routes
  * with the standard pagination envelope (blueprint §12). Captured request
@@ -263,6 +364,11 @@ export function createPlatformFixture() {
  * the `/api/v1/platform/**` surface (Scope §6.9) is answered from the
  * platform fixture — organisations, memberships, invitations, feature flags
  * and audit events — so the platform-admin journey flows data end to end.
+ *
+ * With `options.files` the files/jobs surface (Scope §6.6) is answered from
+ * the files fixture — list/detail/delete/download-url, the upload intent and
+ * completion steps, and the job-poll endpoint — so the files journey flows
+ * the direct-upload lifecycle end to end.
  */
 export async function mockBackendApi(
   page: Page,
@@ -270,6 +376,7 @@ export async function mockBackendApi(
   options: {
     platformAdmin?: boolean
     platformFixture?: ReturnType<typeof createPlatformFixture>
+    files?: ReturnType<typeof createFileFixture>
   } = {},
 ): Promise<{ capturedHeaders: Array<{ authorization: string | null; orgId: string | null }> }> {
   const capturedHeaders: Array<{ authorization: string | null; orgId: string | null }> = []
@@ -374,6 +481,97 @@ export async function mockBackendApi(
       return json({ code: 'not_found', message: 'Not found', request_id: 'mock-404' }, 404)
     }
 
+    // Files and jobs surface (Scope §6.6): answered only for the files
+    // journey. Mirrors the real backend lifecycle — intent creates a pending
+    // record, completion verifies and moves it to processing, and the job
+    // poll eventually flips it to ready.
+    const files = options.files
+    if (files) {
+      const filesMatch = url.pathname.match(/^\/api\/v1\/files\/([^/]+)$/)
+      const filesCompleteMatch = url.pathname.match(/^\/api\/v1\/files\/([^/]+)\/complete$/)
+      const filesDownloadMatch = url.pathname.match(/^\/api\/v1\/files\/([^/]+)\/download-url$/)
+      const jobMatch = url.pathname.match(/^\/api\/v1\/jobs\/([^/]+)$/)
+
+      if (method === 'GET' && url.pathname === '/api/v1/files') {
+        capturedHeaders.push({ authorization, orgId })
+        const pageNumber = Number(url.searchParams.get('page') ?? '1')
+        const pageSize = Number(url.searchParams.get('page_size') ?? '25')
+        return json({
+          items: files.files,
+          page: pageNumber,
+          page_size: pageSize,
+          total: files.files.length,
+        })
+      }
+
+      if (method === 'POST' && url.pathname === '/api/v1/files') {
+        capturedHeaders.push({ authorization, orgId })
+        const body = request.postDataJSON()
+        const file = {
+          id: files.nextFileId(),
+          original_filename: body.original_filename,
+          content_type: body.content_type,
+          size_bytes: body.size_bytes,
+          status: 'pending',
+          created_by_user_id: TEST_USER_ID,
+          created_at: '2026-04-01T00:00:00Z',
+          checksum: null,
+          updated_at: '2026-04-01T00:00:00Z',
+        }
+        files.files.push(file)
+        return json(
+          {
+            file_id: file.id,
+            upload_url: 'https://storage.example.com/upload',
+            expires_at: '2026-04-01T00:10:00Z',
+          },
+          201,
+        )
+      }
+
+      if (method === 'POST' && filesCompleteMatch) {
+        capturedHeaders.push({ authorization, orgId })
+        const completed = files.completeFor(filesCompleteMatch[1])
+        return completed
+          ? json(completed)
+          : json({ code: 'not_found', message: 'File not found', request_id: 'mock-404' }, 404)
+      }
+
+      if (method === 'GET' && filesMatch) {
+        capturedHeaders.push({ authorization, orgId })
+        const file = files.files.find((entry) => entry.id === filesMatch[1])
+        return file
+          ? json(file)
+          : json({ code: 'not_found', message: 'File not found', request_id: 'mock-404' }, 404)
+      }
+
+      if (method === 'GET' && filesDownloadMatch) {
+        capturedHeaders.push({ authorization, orgId })
+        const file = files.files.find((entry) => entry.id === filesDownloadMatch[1])
+        return file
+          ? json({
+              download_url: 'https://storage.example.com/download?X-Amz-Signature=mock',
+              expires_at: '2026-04-01T00:10:00Z',
+            })
+          : json({ code: 'not_found', message: 'File not found', request_id: 'mock-404' }, 404)
+      }
+
+      if (method === 'DELETE' && filesMatch) {
+        capturedHeaders.push({ authorization, orgId })
+        const index = files.files.findIndex((entry) => entry.id === filesMatch[1])
+        if (index === -1) {
+          return json({ code: 'not_found', message: 'File not found', request_id: 'mock-404' }, 404)
+        }
+        files.files.splice(index, 1)
+        return route.fulfill({ status: 204 })
+      }
+
+      if (method === 'GET' && jobMatch) {
+        capturedHeaders.push({ authorization, orgId })
+        return json(files.jobFor())
+      }
+    }
+
     if (method === 'GET' && url.pathname === '/api/v1/records') {
       capturedHeaders.push({ authorization, orgId })
       const pageNumber = Number(url.searchParams.get('page') ?? '1')
@@ -459,6 +657,41 @@ export async function setupPlatformAdminJourney(page: Page, clientId: string) {
     platformFixture,
   })
   return { fixture, platformFixture, capturedHeaders: api.capturedHeaders }
+}
+
+/**
+ * Files journey setup (Scope §6.6): the authenticated shell plus the
+ * files/jobs surface, including an intercepted storage host for the direct
+ * PUT. The upload URL points at `https://storage.example.com`, which is not
+ * under `/api/v1`, so this helper also fulfils that PUT with CORS headers —
+ * the browser XHR enforces CORS exactly as it would against real MinIO.
+ */
+export async function setupFilesJourney(page: Page, clientId: string) {
+  const fixture = createRecordFixture()
+  const filesFixture = createFileFixture()
+  await injectSession(page, clientId)
+  await mockWorkOsTokenEndpoint(page)
+  const api = await mockBackendApi(page, fixture, { files: filesFixture })
+
+  // The direct upload: the browser PUTs the file bytes to the signed URL on
+  // the storage host. Playwright fulfils the request with CORS headers so
+  // the XHR completes, and with the same content-type the browser sent.
+  await page.route('https://storage.example.com/**', async (route) => {
+    const request = route.request()
+    if (request.method() === 'PUT') {
+      await route.fulfill({
+        status: 200,
+        headers: { 'access-control-allow-origin': '*' },
+      })
+      return
+    }
+    await route.fulfill({
+      status: 404,
+      headers: { 'access-control-allow-origin': '*' },
+    })
+  })
+
+  return { fixture, filesFixture, capturedHeaders: api.capturedHeaders }
 }
 
 /**

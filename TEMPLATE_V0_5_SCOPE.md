@@ -172,10 +172,10 @@ Depends on §6.3 (files API) and §6.4 (job foundation). The capability that mak
 
 Depends on §6.3 and §6.5 (the full files/jobs API surface). The Vue documents page.
 
-- [ ] `make generate-client` regenerates types for the files/jobs endpoints; drift gate stays in `make check`
-- [ ] `src/queries/files.ts` composables keyed `['organisations', orgId, 'files', ...]` (list, detail, upload intent, complete, delete, download-url; invalidation after delete/complete) and `src/queries/jobs.ts` (job detail with polling via `refetchInterval` while running); no component/store imports `src/api/client.ts` directly
-- [ ] Router: `/files` route (`name: 'files'`, `meta.requiresAuth`) + `SidebarNav` entry; `FilesListView` with the existing `DataTable` (status badge, size, uploaded-by, actions), upload component (file picker → intent → direct PUT with `XHR` progress → complete → poll job progress bar → refresh), delete confirm, download link
-- [ ] Vitest: files/jobs composables, upload component (mock PUT + polling), files view; Playwright journey: upload intent + file appears in the table (mocked `/api/v1/**` surface per existing e2e pattern)
+- [x] `make generate-client` regenerates types for the files/jobs endpoints; drift gate stays in `make check`
+- [x] `src/queries/files.ts` composables keyed `['organisations', orgId, 'files', ...]` (list, detail, upload intent, complete, delete, download-url; invalidation after delete/complete) and `src/queries/jobs.ts` (job detail with polling via `refetchInterval` while running); no component/store imports `src/api/client.ts` directly
+- [x] Router: `/files` route (`name: 'files'`, `meta.requiresAuth`) + `SidebarNav` entry; `FilesListView` with the existing `DataTable` (status badge, size, uploaded-at timestamp, actions), upload component (file picker → intent → direct PUT with `XHR` progress → complete → poll job progress bar → refresh), delete confirm, download link *(uploaded-by shows the created timestamp, not a user name: `FileListItem` carries only `created_by_user_id`, and a human-readable name needs a backend join outside this frontend-only unit)*
+- [x] Vitest: files/jobs composables, upload component (mock PUT + polling), files view; Playwright journey: upload intent + file appears in the table (mocked `/api/v1/**` surface per existing e2e pattern)
 
 ## 6.7 Docs, ADR & Release Governance
 

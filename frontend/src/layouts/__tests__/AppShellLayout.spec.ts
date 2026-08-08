@@ -83,9 +83,9 @@ describe('AppShellLayout', () => {
     expect(wrapper.find('[data-testid="user-menu-trigger"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="mobile-nav-trigger"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="sidebar-toggle"]').exists()).toBe(true)
-    // Sidebar navigation links are present (Home, Records, About).
+    // Sidebar navigation links are present (Home, Records, Files, About).
     const links = wrapper.find('[data-testid="sidebar"] nav').findAll('a')
-    expect(links.map((link) => link.text())).toEqual(['Home', 'Records', 'About'])
+    expect(links.map((link) => link.text())).toEqual(['Home', 'Records', 'Files', 'About'])
   })
 
   it('toggles the collapsed sidebar through the header button and persists it', async () => {
