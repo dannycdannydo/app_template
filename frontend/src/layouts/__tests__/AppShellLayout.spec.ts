@@ -13,6 +13,17 @@ vi.mock('@/queries/me', () => ({
   useMeQuery: mockUseMeQuery,
 }))
 
+const mockUseUnreadNotificationsCountQuery = vi.hoisted(() => vi.fn<() => unknown>())
+const mockUseNotificationsQuery = vi.hoisted(() => vi.fn<(params: unknown) => unknown>())
+const mockUseMarkNotificationReadMutation = vi.hoisted(() =>
+  vi.fn<(options?: unknown) => unknown>(),
+)
+vi.mock('@/queries/notifications', () => ({
+  useUnreadNotificationsCountQuery: mockUseUnreadNotificationsCountQuery,
+  useNotificationsQuery: mockUseNotificationsQuery,
+  useMarkNotificationReadMutation: mockUseMarkNotificationReadMutation,
+}))
+
 import AppShellLayout from '@/layouts/AppShellLayout.vue'
 import { requiresAuth } from '@/router'
 import { useSessionStore } from '@/stores/session'
@@ -57,6 +68,15 @@ async function mountShell(): Promise<{ wrapper: VueWrapper; router: Router }> {
   await router.push('/')
   await router.isReady()
   mockUseMeQuery.mockReturnValue({ data: ref(me), isPending: ref(false), isError: ref(false) })
+  mockUseUnreadNotificationsCountQuery.mockReturnValue({ data: ref({ unread_count: 0 }) })
+  mockUseNotificationsQuery.mockReturnValue({
+    data: ref({ items: [], page: 1, page_size: 5, total: 0, unread_count: 0 }),
+    isPending: ref(false),
+  })
+  mockUseMarkNotificationReadMutation.mockReturnValue({
+    mutate: vi.fn<(id: string) => void>(),
+    isPending: ref(false),
+  })
   const wrapper = mount(
     { template: '<RouterView />' },
     { global: { plugins: [createPinia(), router] } },
@@ -69,6 +89,9 @@ describe('AppShellLayout', () => {
     localStorage.clear()
     setActivePinia(createPinia())
     mockUseMeQuery.mockReset()
+    mockUseUnreadNotificationsCountQuery.mockReset()
+    mockUseNotificationsQuery.mockReset()
+    mockUseMarkNotificationReadMutation.mockReset()
   })
 
   afterEach(() => {
@@ -83,9 +106,15 @@ describe('AppShellLayout', () => {
     expect(wrapper.find('[data-testid="user-menu-trigger"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="mobile-nav-trigger"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="sidebar-toggle"]').exists()).toBe(true)
-    // Sidebar navigation links are present (Home, Records, Files, About).
+    // Sidebar navigation links are present (Home, Records, Files, Notifications, About).
     const links = wrapper.find('[data-testid="sidebar"] nav').findAll('a')
-    expect(links.map((link) => link.text())).toEqual(['Home', 'Records', 'Files', 'About'])
+    expect(links.map((link) => link.text())).toEqual([
+      'Home',
+      'Records',
+      'Files',
+      'Notifications',
+      'About',
+    ])
   })
 
   it('toggles the collapsed sidebar through the header button and persists it', async () => {

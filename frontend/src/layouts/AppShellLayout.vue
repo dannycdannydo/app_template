@@ -4,6 +4,7 @@ import { MenuIcon, PanelLeftIcon } from '@lucide/vue'
 import { RouterView } from 'vue-router'
 
 import OrganisationSelector from '@/components/application/OrganisationSelector.vue'
+import NotificationBell from '@/components/application/NotificationBell.vue'
 import SidebarNav from '@/components/application/SidebarNav.vue'
 import UserMenu from '@/components/application/UserMenu.vue'
 import { Button } from '@/components/ui/button'
@@ -85,6 +86,7 @@ function closeMobileNav(): void {
 
           <div class="ml-auto flex items-center gap-2">
             <OrganisationSelector />
+            <NotificationBell />
             <UserMenu />
           </div>
         </header>

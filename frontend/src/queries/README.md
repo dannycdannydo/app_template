@@ -28,6 +28,9 @@ composables → components).
 | `useUploadFileMutation(file, onProgress)`                                         | full flow: intent → signed PUT → complete      | `src/queries/files.ts`    |
 | `useDeleteFileMutation` / `useDownloadFileMutation`                               | soft delete + signed GET URL                   | `src/queries/files.ts`    |
 | `useJobsQuery(params)` / `useJobQuery(jobId)`                                     | jobs list + polled detail                      | `src/queries/jobs.ts`     |
+| `useNotificationsQuery(params)`                                                   | org-scoped notifications list (envelope carries `unread_count`) | `src/queries/notifications.ts` |
+| `useUnreadNotificationsCountQuery()`                                              | header-bell unread badge (polled)              | `src/queries/notifications.ts` |
+| `useMarkNotificationReadMutation` / `useSendTestNotificationMutation`             | mark-read + gated test-send, invalidate lists and unread count | `src/queries/notifications.ts` |
 
 ## Platform-plane keys
 
@@ -62,6 +65,8 @@ Keys are per-organisation. Every org-scoped key starts with
 ['organisations', <orgId>, 'files', 'list', { page, pageSize, status? }]
 ['organisations', <orgId>, 'files', 'detail', <fileId>]
 ['organisations', <orgId>, 'jobs', 'detail', <jobId>]
+['organisations', <orgId>, 'notifications', 'list', { page, pageSize, type? }]
+['organisations', <orgId>, 'notifications', 'unread-count']
 ```
 
 Rules:

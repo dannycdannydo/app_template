@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
-import { isReadOnlyRoles, recordPermissionsForRoles } from '@/lib/permissions'
+import {
+  isReadOnlyRoles,
+  notificationPermissionsForRoles,
+  recordPermissionsForRoles,
+} from '@/lib/permissions'
 
 describe('recordPermissionsForRoles', () => {
   it('grants owner full record write access', () => {
@@ -90,5 +94,58 @@ describe('isReadOnlyRoles', () => {
     expect(isReadOnlyRoles(['owner'])).toBe(false)
     expect(isReadOnlyRoles(['manager'])).toBe(false)
     expect(isReadOnlyRoles(['member'])).toBe(false)
+  })
+})
+
+describe('notificationPermissionsForRoles', () => {
+  it('grants owner, administrator and manager read and manage', () => {
+    expect(notificationPermissionsForRoles(['owner'])).toEqual({
+      canRead: true,
+      canManage: true,
+    })
+    expect(notificationPermissionsForRoles(['administrator'])).toEqual({
+      canRead: true,
+      canManage: true,
+    })
+    expect(notificationPermissionsForRoles(['manager'])).toEqual({
+      canRead: true,
+      canManage: true,
+    })
+  })
+
+  it('grants member read but not manage', () => {
+    expect(notificationPermissionsForRoles(['member'])).toEqual({
+      canRead: true,
+      canManage: false,
+    })
+  })
+
+  it('grants viewer nothing (default deny)', () => {
+    expect(notificationPermissionsForRoles(['viewer'])).toEqual({
+      canRead: false,
+      canManage: false,
+    })
+  })
+
+  it('unions permissions across multiple roles (generous reading of /me)', () => {
+    expect(notificationPermissionsForRoles(['viewer', 'manager'])).toEqual({
+      canRead: true,
+      canManage: true,
+    })
+  })
+
+  it('denies everything for an unknown role or an empty role set', () => {
+    expect(notificationPermissionsForRoles(['auditor'])).toEqual({
+      canRead: false,
+      canManage: false,
+    })
+    expect(notificationPermissionsForRoles([])).toEqual({
+      canRead: false,
+      canManage: false,
+    })
+    expect(notificationPermissionsForRoles(undefined)).toEqual({
+      canRead: false,
+      canManage: false,
+    })
   })
 })

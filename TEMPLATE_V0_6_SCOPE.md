@@ -174,10 +174,10 @@ Depends on §6.3 (API) and the v0.5 job foundation. The capability that makes no
 
 Depends on §6.3 and §6.4 (the full notifications API surface). The bell and notifications view.
 
-- [ ] `make generate-client` regenerates types for the notifications endpoints; drift gate stays in `make check`
-- [ ] `src/queries/notifications.ts` composables keyed `['organisations', orgId, 'notifications', ...]` (list, unread-count with `refetchInterval`, mark-read, test-send; invalidation after mark-read/test-send); no component/store imports `src/api/client.ts` directly
-- [ ] `NotificationBell` in the `AppShellLayout` header (unread badge, recent notifications dropdown, mark-read action); router: `/notifications` route (`name: 'notifications'`, `meta.requiresAuth`) + `SidebarNav` entry; `NotificationsListView` with the existing `DataTable`/dropdown/toast building blocks (read/unread state, mark-read, test-send for `notifications.manage` holders)
-- [ ] Vitest: notifications composables, bell, notifications view; Playwright journey: mocked list-and-mark-read flow per existing e2e pattern
+- [x] `make generate-client` regenerates types for the notifications endpoints; drift gate stays in `make check`
+- [x] `src/queries/notifications.ts` composables keyed `['organisations', orgId, 'notifications', ...]` (list, unread-count with `refetchInterval`, mark-read, test-send; invalidation after mark-read/test-send); no component/store imports `src/api/client.ts` directly
+- [x] `NotificationBell` in the `AppShellLayout` header (unread badge, recent notifications dropdown, mark-read action); router: `/notifications` route (`name: 'notifications'`, `meta.requiresAuth`) + `SidebarNav` entry; `NotificationsListView` with the existing `DataTable`/dropdown/toast building blocks (read/unread state, mark-read, test-send for `notifications.manage` holders)
+- [x] Vitest: notifications composables, bell, notifications view; Playwright journey: mocked list-and-mark-read flow per existing e2e pattern
 
 ## 6.6 Provider-Neutral VPS/Container-Host Deployment Profile
 
