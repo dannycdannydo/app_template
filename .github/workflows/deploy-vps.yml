@@ -1,0 +1,307 @@
+# Provider-neutral VPS / container-host deployment (Scope §6.6, blueprint §37).
+#
+# Builds immutable backend, Caddy edge and frontend artifacts, publishes them
+# to a configurable registry / release store, then SSHes to a configurable
+# Linux host to install the release: verify artifact identity, obtain a
+# deployment lock, run exactly one deliberate `alembic upgrade head`, recreate
+# the services, and wait for /ready. The previous release is retained on the
+# host for rollback.
+#
+# No provider-specific application code lives here (Scope §3.1 portability
+# contract): registry, host, release directory, domain and environment-file
+# location are all inputs. The same images and settings contract is what a
+# managed-provider adapter (deploy/<provider>/) would consume.
+#
+# Inputs resolve in this order: workflow inputs > repository/environment
+# variables > defaults. Secrets (registry password, host SSH key,
+# environment-file contents) live in GitHub secrets and environments, never
+# in the repository. The production environment should be protected by
+# required reviewers and environment secrets.
+#
+# Triggers:
+#   - workflow_dispatch: deploy a specific ref to a chosen environment.
+#   - push of a v* tag: deploy the tagged commit to the production
+#     environment (environment-separated via GitHub environments).
+
+name: Deploy VPS
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Deployment environment (staging or production)
+        required: true
+        default: staging
+        type: choice
+        options: [staging, production]
+      ref:
+        description: "Git ref, branch or SHA to deploy (default: the default branch head)"
+        required: false
+        default: ""
+        type: string
+      host:
+        description: SSH host override (hostname or user@host); defaults to the DEPLOY_HOST variable/secret
+        required: false
+        default: ""
+        type: string
+      registry:
+        description: Image registry override (e.g. ghcr.io/org); defaults to the REGISTRY variable
+        required: false
+        default: ""
+        type: string
+      release_dir:
+        description: Release directory on the host; defaults to the RELEASE_DIR variable
+        required: false
+        default: ""
+        type: string
+      domain:
+        description: Public domain used for the /ready wait; defaults to the DOMAIN variable
+        required: false
+        default: ""
+        type: string
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: deploy-vps-${{ inputs.environment || 'production' }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ${{ inputs.registry || vars.REGISTRY || 'ghcr.io' }}
+  DEPLOY_HOST: ${{ inputs.host || vars.DEPLOY_HOST || secrets.DEPLOY_HOST || '' }}
+  RELEASE_DIR: ${{ inputs.release_dir || vars.RELEASE_DIR || '/opt/app-template' }}
+  DOMAIN: ${{ inputs.domain || vars.DOMAIN || '' }}
+  # The frontend toolchain is pinned exactly as in ci.yml; the pnpm/setup
+  # step below fails without these two (they resolve to empty otherwise).
+  PNPM_VERSION: "11.13.0"
+  NODE_VERSION: "24"
+
+jobs:
+  build:
+    name: Build and publish immutable artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      git_sha: ${{ steps.sha.outputs.sha }}
+      backend_image: ${{ steps.meta.outputs.image }}
+      caddy_image: ${{ steps.meta.outputs.caddy_image }}
+      frontend_artifact: ${{ steps.package.outputs.artifact }}
+      frontend_checksum: ${{ steps.package.outputs.checksum }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Resolve the deployed commit
+        id: sha
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.2.0
+
+      - name: Log in to the container registry
+        uses: docker/login-action@v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.REGISTRY_USERNAME || github.actor }}
+          password: ${{ secrets.REGISTRY_PASSWORD || secrets.GITHUB_TOKEN }}
+
+      - name: Derive the immutable image refs
+        id: meta
+        run: |
+          tag="${{ steps.sha.outputs.sha }}"
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            tag="${{ github.ref_name }}-$tag"
+          fi
+          image="${{ env.REGISTRY }}/${{ github.repository }}-backend:${tag}"
+          caddy_image="${{ env.REGISTRY }}/${{ github.repository }}-caddy:${tag}"
+          echo "image=${image}" >> "$GITHUB_OUTPUT"
+          echo "caddy_image=${caddy_image}" >> "$GITHUB_OUTPUT"
+          echo "Built and will publish: ${image} ${caddy_image}"
+
+      - name: Build and push the backend image
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: ./backend
+          push: true
+          tags: ${{ steps.meta.outputs.image }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push the Caddy edge image
+        # The edge is the pinned custom build from deploy/caddy/Dockerfile
+        # (Caddy + caddy-ratelimit); it must reach the host the same way the
+        # backend image does, so compose can pull it under CADDY_IMAGE.
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: ./deploy/caddy
+          push: true
+          tags: ${{ steps.meta.outputs.caddy_image }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - uses: pnpm/setup@v2.0.0
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          runtime: node@${{ env.NODE_VERSION }}
+          install: false
+          cache: true
+          package-json-file: frontend/package.json
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install frontend dependencies from lockfile
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the versioned Vue artifact
+        working-directory: frontend
+        env:
+          VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL || '' }}
+          VITE_WORKOS_CLIENT_ID: ${{ vars.VITE_WORKOS_CLIENT_ID || '' }}
+          VITE_WORKOS_REDIRECT_URI: ${{ vars.VITE_WORKOS_REDIRECT_URI || '' }}
+        run: pnpm build
+
+      - name: Package the artifact with its checksum
+        id: package
+        working-directory: frontend
+        run: |
+          archive="frontend-${{ steps.sha.outputs.sha }}.tar.gz"
+          tar -czf "$archive" -C dist .
+          echo "checksum=$(sha256sum "$archive" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "artifact=$archive" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the frontend artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.artifact }}
+          path: frontend/${{ steps.package.outputs.artifact }}
+          retention-days: 30
+
+  deploy:
+    name: Deploy to ${{ inputs.environment || 'production' }}
+    runs-on: ubuntu-latest
+    needs: build
+    environment: ${{ inputs.environment || 'production' }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Fail fast on a missing deployment host
+        run: |
+          if [ -z "$DEPLOY_HOST" ]; then
+            echo "DEPLOY_HOST is empty. Set the DEPLOY_HOST repository/environment variable or secret (or pass the host input)."
+            exit 1
+          fi
+
+      - name: Download the frontend artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.frontend_artifact }}
+          path: artifact
+
+      - name: Install the SSH key
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          if [ -z "$SSH_KEY" ]; then
+            echo "DEPLOY_SSH_KEY secret is empty; the deploy job cannot authenticate."
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          host_port="${DEPLOY_HOST#*@}"
+          host_name="${host_port%:*}"
+          ssh-keyscan -H "$host_name" >> ~/.ssh/known_hosts
+
+      - name: Copy the compose file and Caddyfile to the host
+        run: |
+          ssh "$DEPLOY_HOST" "mkdir -p '$RELEASE_DIR'"
+          scp deploy/compose/compose.hybrid-vps.yml "$DEPLOY_HOST:$RELEASE_DIR/compose.hybrid-vps.yml"
+          scp deploy/caddy/Caddyfile "$DEPLOY_HOST:$RELEASE_DIR/Caddyfile"
+
+      - name: Stage the release and verify its identity
+        run: |
+          set -euo pipefail
+          git_sha="${{ needs.build.outputs.git_sha }}"
+          artifact="${{ needs.build.outputs.frontend_artifact }}"
+          checksum="${{ needs.build.outputs.frontend_checksum }}"
+          release="$RELEASE_DIR/releases/$git_sha"
+          ssh "$DEPLOY_HOST" "mkdir -p '$release'"
+          scp "artifact/$artifact" "$DEPLOY_HOST:$release/"
+          printf '%s  %s\n' "$checksum" "$artifact" > expected.sha256
+          scp expected.sha256 "$DEPLOY_HOST:$release/expected.sha256"
+          ssh "$DEPLOY_HOST" "cd '$release' && sha256sum -c expected.sha256 && tar -xzf '$artifact' && ln -sfn '$git_sha' '$RELEASE_DIR/releases/current'"
+
+      - name: Deploy (locked, one migration, recreate, /ready wait)
+        env:
+          BACKEND_IMAGE: ${{ needs.build.outputs.backend_image }}
+          CADDY_IMAGE: ${{ needs.build.outputs.caddy_image }}
+        run: |
+          set -euo pipefail
+          # Pass the values into the remote shell; the quoted heredoc prevents
+          # local expansion, so nothing here is interpolated twice.
+          ssh "$DEPLOY_HOST" \
+            "RELEASE_DIR='$RELEASE_DIR' BACKEND_IMAGE='$BACKEND_IMAGE' CADDY_IMAGE='$CADDY_IMAGE' bash -s" <<'EOF'
+          set -euo pipefail
+          compose="docker compose -f $RELEASE_DIR/compose.hybrid-vps.yml --env-file $RELEASE_DIR/.env.production"
+
+          # One deployment at a time per host.
+          exec 9>"$RELEASE_DIR/.deploy.lock"
+          flock -n 9 || { echo "another deployment holds the lock"; exit 1; }
+
+          # The immutable images are addressed by content commit, so the pulls
+          # are reproducible and the running image always matches the release.
+          BACKEND_IMAGE="$BACKEND_IMAGE" CADDY_IMAGE="$CADDY_IMAGE" $compose pull api worker caddy
+
+          # Exactly one deliberate migration per release (blueprint §37);
+          # --no-deps keeps the one-off container off the application network.
+          BACKEND_IMAGE="$BACKEND_IMAGE" CADDY_IMAGE="$CADDY_IMAGE" $compose run --rm --no-deps api alembic upgrade head
+
+          # Recreate the services on the new image tags. The previous release
+          # stays under releases/<previous>/ and releases/current is a symlink
+          # that flips back atomically for rollback.
+          BACKEND_IMAGE="$BACKEND_IMAGE" CADDY_IMAGE="$CADDY_IMAGE" $compose up -d --remove-orphans
+
+          # Wait for readiness inside the API container with a 5-minute timeout.
+          for i in $(seq 1 60); do
+            if BACKEND_IMAGE="$BACKEND_IMAGE" CADDY_IMAGE="$CADDY_IMAGE" $compose exec -T api python -c \
+                "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready', timeout=3)" 2>/dev/null; then
+              echo "API ready after $((i * 5))s"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "API did not become ready within 5 minutes"
+          exit 1
+          EOF
+
+      - name: Verify the public endpoint
+        if: env.DOMAIN != ''
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 24); do
+            if curl -fsS "https://$DOMAIN/ready" >/dev/null; then
+              echo "https://$DOMAIN/ready is healthy"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "https://$DOMAIN/ready did not become healthy"
+          exit 1
+
+      - name: Retain the previous release for rollback
+        run: |
+          # Keep the newest 3 releases, never the `current` symlink itself
+          # and never the release it points at (rollback target). Ordering is
+          # by mtime, so clock skew or a re-staged same-SHA release could
+          # reorder entries; the explicit `grep -vx "$target"` guard keeps the
+          # rollback target safe regardless of the order.
+          ssh "$DEPLOY_HOST" 'cd "$RELEASE_DIR"/releases && target=$(readlink current) && ls -1t | grep -v "^current$" | grep -vx "$target" | tail -n +4 | xargs -r -I{} rm -rf {}'
+          echo "Kept the newest 3 releases (plus the rollback target); older ones pruned."

@@ -1,0 +1,224 @@
+# Generic Linux VPS / container-host production profile (blueprint §35.1,
+# ADR-0007, Scope §6.6).
+#
+# The portable production baseline: Caddy (edge TLS, static frontend, edge
+# rate limiting), the FastAPI backend, the Dramatiq worker and a private
+# Redis. PostgreSQL, object storage, WorkOS, transactional email and
+# monitoring are external services configured through the environment file.
+#
+# Everything the profile needs from the host is a deployment input, never an
+# application assumption (Scope §3.1 portability contract):
+#
+#   DEPLOY_ROOT        host directory holding compose file, Caddyfile, the
+#                      environment file and the releases directory
+#                      (default: the directory this file is run from)
+#   ENV_FILE           path to the environment file (default .env.production
+#                      next to this compose file); CI validates with
+#                      ENV_FILE=/dev/null
+#   FRONTEND_DIR       host directory with the versioned Vue static artifact,
+#                      e.g. $DEPLOY_ROOT/releases/current/frontend
+#   BACKEND_IMAGE      immutable backend image ref (API and worker share it,
+#                      blueprint §36), e.g. ghcr.io/<org>/<app>-backend:<sha>
+#   CADDY_IMAGE        edge image built from deploy/caddy (pinned Caddy +
+#                      caddy-ratelimit module)
+#
+# The API and worker read the same environment file (the v0.6 setting
+# surface: DATABASE_URL, REDIS_URL, WorkOS, STORAGE_*, EMAIL_*/SMTP_*,
+# SENTRY_*, CORS/TRUSTED_HOSTS for the production domain). Redis is created
+# by this profile but never published; it is password-protected and its
+# configuration is documented in docs/operations.md.
+#
+# Validation: `docker compose -f deploy/compose/compose.hybrid-vps.yml
+# config` requires REDIS_PASSWORD (a secret, deliberately fail-fast) and an
+# existing environment file; CI exports a placeholder password and passes
+# ENV_FILE=/dev/null.
+
+# A distinct project name keeps this profile from ever colliding with the
+# local development stack (compose.local.yml uses `app-template`) on a host
+# where both files exist; on a production host it is simply the deploy name.
+name: app-template-prod
+
+services:
+  # Edge: terminates TLS, serves the versioned static Vue artifact,
+  # reverse-proxies /api, applies security headers and enforces the edge rate
+  # limits (deploy/caddy/Caddyfile). The image is the pinned custom build from
+  # deploy/caddy/Dockerfile: standard Caddy plus the pinned caddy-ratelimit
+  # module, because an unqualified rate_limit directive is not available in
+  # stock Caddy (Scope §6.6, SECURITY.md).
+  caddy:
+    image: ${CADDY_IMAGE:-ghcr.io/example/app-template-caddy:local}
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    volumes:
+      - ${DEPLOY_ROOT:-.}/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${FRONTEND_DIR:-./releases/current/frontend}:/srv/frontend:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    healthcheck:
+      # Automatic HTTPS makes Caddy answer every :80 request with a 308
+      # redirect to https, so a plain `wget --spider` (which follows the
+      # redirect into a TLS/SNI mismatch for $DOMAIN) would report the edge
+      # unhealthy. This image's busybox wget has no --no-check-certificate
+      # and no redirect control, so probe the redirect itself: a 308 from
+      # :80 is the auto-HTTPS liveness contract — Caddy is up and the
+      # redirect is wired (verified against the pinned image).
+      test: ["CMD-SHELL", "wget -S --spider http://localhost:80/ 2>&1 | grep -q '308'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # FastAPI. Health checks hit /ready (DB reachable + service initialised);
+  # the deploy workflow waits for it after a release. `stop_grace_period`
+  # gives uvicorn time to drain in-flight requests. BACKEND_IMAGE defaults to
+  # a placeholder so `docker compose config` validates on a clean checkout
+  # (Scope §6.6 acceptance); the deploy workflow always sets the real
+  # commit-pinned image, and the compose environment file never defines it.
+  api:
+    image: ${BACKEND_IMAGE:-ghcr.io/example/app-template-backend:local}
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    restart: unless-stopped
+    env_file:
+      - ${ENV_FILE:-.env.production}
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready', timeout=3)",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    stop_grace_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  # Dramatiq worker: the same backend image with a different runtime command
+  # (blueprint §36). Concurrency comes from WORKER_CONCURRENCY in the
+  # environment file (default 8). The longer stop_grace_period lets in-flight
+  # jobs finish during a release; Dramatiq shuts down gracefully after the
+  # current message.
+  worker:
+    image: ${BACKEND_IMAGE:-ghcr.io/example/app-template-backend:local}
+    command:
+      [
+        "dramatiq",
+        "app.workers",
+        "--threads",
+        "${WORKER_CONCURRENCY:-8}",
+      ]
+    restart: unless-stopped
+    env_file:
+      - ${ENV_FILE:-.env.production}
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+    # The worker has no HTTP endpoint, so the health check verifies the
+    # dramatiq process is alive via /proc (the slim base image has neither
+    # pgrep nor ps).
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import os,sys; alive=any(b'dramatiq' in open(os.path.join('/proc',p,'cmdline'),'rb').read() for p in os.listdir('/proc') if p.isdigit()); sys.exit(0 if alive else 1)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    stop_grace_period: 120s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  # Private Redis: broker for Dramatiq and backing store for the distributed
+  # API rate limit. Not published — only the compose network can reach it.
+  # Password, persistence (append-only file) and the memory/eviction policy
+  # are set here and documented in docs/operations.md; REDIS_URL in the
+  # environment file must carry the same password.
+  redis:
+    image: redis:7-alpine
+    environment:
+      # The healthcheck and the command below both need the password; the
+      # `:?` form fails `docker compose config` (and any `up`) until it is
+      # set, so a production host can never start with an empty or default
+      # Redis password.
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in the environment file}
+    command:
+      [
+        "redis-server",
+        "--requirepass",
+        "${REDIS_PASSWORD:?set REDIS_PASSWORD in the environment file}",
+        "--appendonly",
+        "yes",
+        "--maxmemory",
+        "200mb",
+        "--maxmemory-policy",
+        "allkeys-lru",
+        "--save",
+        "60",
+        "1000",
+      ]
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=$$REDIS_PASSWORD redis-cli ping | grep PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  caddy_data:
+  caddy_config:
+  redis_data:
