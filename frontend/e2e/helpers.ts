@@ -355,6 +355,84 @@ export function createFileFixture() {
 }
 
 /**
+ * In-memory notifications fixture (Scope §6.5) served over the mocked
+ * `/api/v1/**` surface. The fixture is stateful the way the real backend is:
+ * marking a notification read flips its `read_at` and drops the unread count,
+ * and sending a test notification appends a fresh unread row.
+ */
+export function createNotificationsFixture() {
+  const notifications: Array<{
+    id: string
+    type: string
+    title: string
+    body: string
+    resource_type: string | null
+    resource_id: string | null
+    read_at: string | null
+    created_at: string
+  }> = [
+    {
+      id: 'aaaaaaaa-aaaa-4aaa-8aaa-444444444444',
+      type: 'file.ready',
+      title: 'File ready',
+      body: 'Your file welcome.pdf is ready.',
+      resource_type: 'file',
+      resource_id: 'aaaaaaaa-aaaa-4aaa-8aaa-111111111111',
+      read_at: null,
+      created_at: '2026-01-01T00:00:00Z',
+    },
+    {
+      id: 'aaaaaaaa-aaaa-4aaa-8aaa-555555555555',
+      type: 'notification.test_sent',
+      title: 'Test notification',
+      body: 'This is a test notification.',
+      resource_type: 'notification',
+      resource_id: null,
+      read_at: '2026-01-02T00:00:00Z',
+      created_at: '2026-01-02T00:00:00Z',
+    },
+  ]
+
+  const nextId = () => 'aaaaaaaa-aaaa-4aaa-8aaa-666666666666'
+
+  const unreadCount = () => notifications.filter((entry) => entry.read_at === null).length
+
+  const envelope = (page: number, pageSize: number) => ({
+    items: notifications,
+    page,
+    page_size: pageSize,
+    total: notifications.length,
+    unread_count: unreadCount(),
+  })
+
+  return {
+    notifications,
+    envelope,
+    unreadCount,
+    markRead: (id: string) => {
+      const notification = notifications.find((entry) => entry.id === id)
+      if (!notification) return undefined
+      notification.read_at = '2026-06-01T00:00:00Z'
+      return notification
+    },
+    sendTest: () => {
+      const notification = {
+        id: nextId(),
+        type: 'notification.test_sent',
+        title: 'Test notification',
+        body: 'This is a test notification.',
+        resource_type: 'notification',
+        resource_id: null,
+        read_at: null,
+        created_at: '2026-06-01T00:00:00Z',
+      }
+      notifications.unshift(notification)
+      return notification
+    },
+  }
+}
+
+/**
  * Mock the backend `/api/v1/**` surface consumed by the shell (blueprint
  * §5, §15): `me`, and the records list/detail/create/update/delete routes
  * with the standard pagination envelope (blueprint §12). Captured request
@@ -369,6 +447,11 @@ export function createFileFixture() {
  * the files fixture — list/detail/delete/download-url, the upload intent and
  * completion steps, and the job-poll endpoint — so the files journey flows
  * the direct-upload lifecycle end to end.
+ *
+ * With `options.notifications` the notifications surface (Scope §6.5) is
+ * answered from the notifications fixture — list, unread-count, mark-read and
+ * test-send — so the notifications journey flows the list-and-mark-read flow
+ * end to end.
  */
 export async function mockBackendApi(
   page: Page,
@@ -377,10 +460,12 @@ export async function mockBackendApi(
     platformAdmin?: boolean
     platformFixture?: ReturnType<typeof createPlatformFixture>
     files?: ReturnType<typeof createFileFixture>
+    notifications?: ReturnType<typeof createNotificationsFixture>
   } = {},
 ): Promise<{ capturedHeaders: Array<{ authorization: string | null; orgId: string | null }> }> {
   const capturedHeaders: Array<{ authorization: string | null; orgId: string | null }> = []
   const platform = options.platformFixture
+  const notifications = options.notifications
 
   await page.route('**/api/v1/**', async (route) => {
     const request = route.request()
@@ -572,6 +657,42 @@ export async function mockBackendApi(
       }
     }
 
+    // Notifications surface (Scope §6.5): answered only for the
+    // notifications journey. Mirrors the real backend lifecycle — marking a
+    // notification read flips its read_at, and test-send appends a new
+    // unread row.
+    if (notifications) {
+      const readMatch = url.pathname.match(/^\/api\/v1\/notifications\/([^/]+)\/read$/)
+
+      if (method === 'GET' && url.pathname === '/api/v1/notifications') {
+        capturedHeaders.push({ authorization, orgId })
+        const pageNumber = Number(url.searchParams.get('page') ?? '1')
+        const pageSize = Number(url.searchParams.get('page_size') ?? '25')
+        return json(notifications.envelope(pageNumber, pageSize))
+      }
+
+      if (method === 'GET' && url.pathname === '/api/v1/notifications/unread-count') {
+        capturedHeaders.push({ authorization, orgId })
+        return json({ unread_count: notifications.unreadCount() })
+      }
+
+      if (method === 'PATCH' && readMatch) {
+        capturedHeaders.push({ authorization, orgId })
+        const notification = notifications.markRead(readMatch[1])
+        return notification
+          ? json(notification)
+          : json(
+              { code: 'not_found', message: 'Notification not found', request_id: 'mock-404' },
+              404,
+            )
+      }
+
+      if (method === 'POST' && url.pathname === '/api/v1/notifications/test') {
+        capturedHeaders.push({ authorization, orgId })
+        return json(notifications.sendTest(), 201)
+      }
+    }
+
     if (method === 'GET' && url.pathname === '/api/v1/records') {
       capturedHeaders.push({ authorization, orgId })
       const pageNumber = Number(url.searchParams.get('page') ?? '1')
@@ -692,6 +813,20 @@ export async function setupFilesJourney(page: Page, clientId: string) {
   })
 
   return { fixture, filesFixture, capturedHeaders: api.capturedHeaders }
+}
+
+/**
+ * Notifications journey setup (Scope §6.5): the authenticated shell plus the
+ * notifications surface, so the bell badge and the `/notifications` view flow
+ * the list-and-mark-read flow end to end.
+ */
+export async function setupNotificationsJourney(page: Page, clientId: string) {
+  const fixture = createRecordFixture()
+  const notificationsFixture = createNotificationsFixture()
+  await injectSession(page, clientId)
+  await mockWorkOsTokenEndpoint(page)
+  const api = await mockBackendApi(page, fixture, { notifications: notificationsFixture })
+  return { fixture, notificationsFixture, capturedHeaders: api.capturedHeaders }
 }
 
 /**

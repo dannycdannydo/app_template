@@ -179,3 +179,71 @@ export function useFilePermissions() {
   const permissions = computed<FilePermissions>(() => filePermissionsForRoles(roles.value))
   return { roles, permissions, mePending: isPending }
 }
+
+/**
+ * Notification capabilities derived from the role codes returned by `/me`
+ * (Scope §6.5, blueprint §14). Mirrors the backend `ROLE_PERMISSION_MAP` seed
+ * (backend/app/modules/permissions/constants.py) for the `notifications.*`
+ * permissions:
+ *
+ * - `owner`, `administrator`, `manager`: read and manage (test-send);
+ * - `member`: read only (no test-send);
+ * - `viewer`: none at all (default deny).
+ *
+ * Like the records and files bundles, this is the template's single frontend
+ * copy of the `notifications.*` role bundle; the backend stays the
+ * enforcement point (`require_permission` gates every notifications route).
+ */
+const NOTIFICATION_ROLE_PERMISSIONS: Record<string, { canRead: boolean; canManage: boolean }> = {
+  owner: { canRead: true, canManage: true },
+  administrator: { canRead: true, canManage: true },
+  manager: { canRead: true, canManage: true },
+  member: { canRead: true, canManage: false },
+  viewer: { canRead: false, canManage: false },
+}
+
+export interface NotificationPermissions {
+  canRead: boolean
+  canManage: boolean
+}
+
+const NO_NOTIFICATION_PERMISSIONS: NotificationPermissions = {
+  canRead: false,
+  canManage: false,
+}
+
+/**
+ * Union of notification permissions across the caller's role codes. Same
+ * generous per-role union as `recordPermissionsForRoles`; enforcement is
+ * server-side either way.
+ */
+export function notificationPermissionsForRoles(
+  roles: readonly string[] | undefined,
+): NotificationPermissions {
+  if (!roles || roles.length === 0) {
+    return NO_NOTIFICATION_PERMISSIONS
+  }
+  let canRead = false
+  let canManage = false
+  for (const role of roles) {
+    const bundle = NOTIFICATION_ROLE_PERMISSIONS[role]
+    if (!bundle) continue
+    canRead ||= bundle.canRead
+    canManage ||= bundle.canManage
+  }
+  return { canRead, canManage }
+}
+
+/**
+ * Reactive notification permissions for the current user (Scope §6.5). Reads
+ * the roles from `useMeQuery` and exposes a single computed object so the
+ * bell and notifications view gate the test-send action in one place.
+ */
+export function useNotificationPermissions() {
+  const { data, isPending } = useMeQuery()
+  const roles = computed<readonly string[] | undefined>(() => data.value?.roles)
+  const permissions = computed<NotificationPermissions>(() =>
+    notificationPermissionsForRoles(roles.value),
+  )
+  return { roles, permissions, mePending: isPending }
+}

@@ -1,5 +1,13 @@
 <script setup lang="ts">
-import { FilesIcon, HomeIcon, InfoIcon, ListIcon, ShieldIcon, type LucideIcon } from '@lucide/vue'
+import {
+  BellIcon,
+  FilesIcon,
+  HomeIcon,
+  InfoIcon,
+  ListIcon,
+  ShieldIcon,
+  type LucideIcon,
+} from '@lucide/vue'
 import { computed } from 'vue'
 import { RouterLink } from 'vue-router'
 
@@ -37,6 +45,7 @@ const NAV_ITEMS: NavItem[] = [
   { to: '/', label: 'Home', icon: HomeIcon },
   { to: '/records', label: 'Records', icon: ListIcon },
   { to: '/files', label: 'Files', icon: FilesIcon },
+  { to: '/notifications', label: 'Notifications', icon: BellIcon },
   { to: '/about', label: 'About', icon: InfoIcon },
 ]
 

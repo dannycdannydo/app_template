@@ -118,6 +118,11 @@ const router = createRouter({
           name: 'files',
           component: () => import('@/views/FilesListView.vue'),
         },
+        {
+          path: 'notifications',
+          name: 'notifications',
+          component: () => import('@/views/NotificationsListView.vue'),
+        },
         // Platform Admin Centre (Scope §6.9): gated by the platform
         // authorisation plane (Scope §6.2). Every route carries
         // `requiresPlatformAdmin`; the backend still enforces each one
