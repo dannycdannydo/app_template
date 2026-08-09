@@ -1,0 +1,91 @@
+# Caddyfile for the generic Linux VPS / container-host profile (Scope §6.6,
+# blueprint §35.1). Deployed at $DEPLOY_ROOT/Caddyfile by deploy-vps.yml and
+# mounted into the caddy service of compose.hybrid-vps.yml.
+#
+# - Automatic TLS from Let's Encrypt for $DOMAIN.
+# - The versioned Vue static artifact is served from /srv/frontend
+#   (FRONTEND_DIR on the host, e.g. $DEPLOY_ROOT/releases/current/frontend).
+# - /api, /health, /ready and /metrics are reverse-proxied to the api service.
+# - Security headers and edge rate limiting are applied at the edge.
+#
+# The rate_limit directive comes from the pinned caddy-ratelimit module in
+# deploy/caddy/Dockerfile (v0.1.0); stock Caddy has no rate-limiting
+# directive, and an unqualified rate_limit directive is not acceptable per
+# Scope §6.6. The API's own Redis-backed limiter (300 req/min per IP on
+# /api/v1, ADR-0012) remains the authoritative per-user control beneath it —
+# the edge zone is deliberately looser so legitimate traffic is never cut off
+# at the edge.
+{
+	admin off
+	email {$ACME_EMAIL}
+}
+
+# Browser-facing hardening shared by every response (mirrors the local nginx
+# headers, plus HSTS which only a TLS-terminating edge may set).
+(security_headers) {
+	header {
+		Content-Security-Policy "default-src 'self'; base-uri 'self'; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' https://api.workos.com; frame-ancestors 'none'; form-action 'self'"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		X-Frame-Options "DENY"
+		Permissions-Policy "camera=(), geolocation=(), microphone=()"
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+}
+
+# Coarse per-client-IP edge limit for API traffic. Deliberately looser than
+# the application limiter; tune in docs/operations.md.
+(api_rate_limit) {
+	rate_limit {
+		zone api {
+			key {remote_host}
+			events 600
+			window 1m
+		}
+	}
+}
+
+{$DOMAIN} {
+	import security_headers
+	encode zstd gzip
+
+	handle /api/* {
+		import api_rate_limit
+		reverse_proxy api:8000
+	}
+
+	handle /health {
+		import api_rate_limit
+		reverse_proxy api:8000
+	}
+
+	handle /ready {
+		reverse_proxy api:8000
+	}
+
+	handle /metrics {
+		import api_rate_limit
+		reverse_proxy api:8000
+	}
+
+	# Static Vue artifact with SPA history-mode fallback, bounded by a looser
+	# per-IP edge limit for asset/burst abuse.
+	handle {
+		rate_limit {
+			zone static {
+				key {remote_host}
+				events 2400
+				window 1m
+			}
+		}
+		root * /srv/frontend
+		try_files {path} /index.html
+		file_server
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

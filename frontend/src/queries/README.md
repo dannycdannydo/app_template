@@ -9,28 +9,28 @@ composables → components).
 
 ## Composables
 
-| Composable                                                                        | Scope                                          | Source                    |
-| --------------------------------------------------------------------------------- | ---------------------------------------------- | ------------------------- |
-| `useMeQuery`                                                                      | global identity (`/api/v1/me`)                 | `src/queries/me.ts`       |
-| `useHealthQuery`                                                                  | health probe (`/health`)                       | `src/queries/health.ts`   |
-| `useRecordsQuery(params)`                                                         | org-scoped paginated list                      | `src/queries/records.ts`  |
-| `useRecordQuery(recordId)`                                                        | org-scoped detail                              | `src/queries/records.ts`  |
-| `useCreateRecordMutation` / `useUpdateRecordMutation` / `useDeleteRecordMutation` | org-scoped writes with invalidation            | `src/queries/records.ts`  |
-| `usePlatformOrganisationsQuery` / `usePlatformOrganisationQuery`                  | platform org list/detail                       | `src/queries/platform.ts` |
-| `useCreatePlatformOrganisationMutation` / `useUpdatePlatformOrganisationMutation` | platform org writes                            | `src/queries/platform.ts` |
-| `usePlatformMembershipsQuery` + role/status/removal mutations                     | platform membership administration             | `src/queries/platform.ts` |
-| `usePlatformInvitationsQuery` + invite/revoke mutations                           | platform invitations                           | `src/queries/platform.ts` |
-| `usePlatformFeatureFlagsQuery` + `useSetFeatureFlagMutation`                      | platform feature flags                         | `src/queries/platform.ts` |
-| `usePlatformAuditEventsQuery(params)`                                             | platform audit trail (read-only)               | `src/queries/platform.ts` |
-| `usePlatformAdminStatus`                                                          | `platform_roles` from `/me` (nav/guard gating) | `src/queries/platform.ts` |
-| `useFilesQuery(params)` / `useFileQuery(fileId)`                                  | org-scoped files list/detail                   | `src/queries/files.ts`    |
-| `useCreateUploadIntentMutation` / `useCompleteUploadMutation`                     | direct-upload intent + completion steps        | `src/queries/files.ts`    |
-| `useUploadFileMutation(file, onProgress)`                                         | full flow: intent → signed PUT → complete      | `src/queries/files.ts`    |
-| `useDeleteFileMutation` / `useDownloadFileMutation`                               | soft delete + signed GET URL                   | `src/queries/files.ts`    |
-| `useJobsQuery(params)` / `useJobQuery(jobId)`                                     | jobs list + polled detail                      | `src/queries/jobs.ts`     |
+| Composable                                                                        | Scope                                                           | Source                         |
+| --------------------------------------------------------------------------------- | --------------------------------------------------------------- | ------------------------------ |
+| `useMeQuery`                                                                      | global identity (`/api/v1/me`)                                  | `src/queries/me.ts`            |
+| `useHealthQuery`                                                                  | health probe (`/health`)                                        | `src/queries/health.ts`        |
+| `useRecordsQuery(params)`                                                         | org-scoped paginated list                                       | `src/queries/records.ts`       |
+| `useRecordQuery(recordId)`                                                        | org-scoped detail                                               | `src/queries/records.ts`       |
+| `useCreateRecordMutation` / `useUpdateRecordMutation` / `useDeleteRecordMutation` | org-scoped writes with invalidation                             | `src/queries/records.ts`       |
+| `usePlatformOrganisationsQuery` / `usePlatformOrganisationQuery`                  | platform org list/detail                                        | `src/queries/platform.ts`      |
+| `useCreatePlatformOrganisationMutation` / `useUpdatePlatformOrganisationMutation` | platform org writes                                             | `src/queries/platform.ts`      |
+| `usePlatformMembershipsQuery` + role/status/removal mutations                     | platform membership administration                              | `src/queries/platform.ts`      |
+| `usePlatformInvitationsQuery` + invite/revoke mutations                           | platform invitations                                            | `src/queries/platform.ts`      |
+| `usePlatformFeatureFlagsQuery` + `useSetFeatureFlagMutation`                      | platform feature flags                                          | `src/queries/platform.ts`      |
+| `usePlatformAuditEventsQuery(params)`                                             | platform audit trail (read-only)                                | `src/queries/platform.ts`      |
+| `usePlatformAdminStatus`                                                          | `platform_roles` from `/me` (nav/guard gating)                  | `src/queries/platform.ts`      |
+| `useFilesQuery(params)` / `useFileQuery(fileId)`                                  | org-scoped files list/detail                                    | `src/queries/files.ts`         |
+| `useCreateUploadIntentMutation` / `useCompleteUploadMutation`                     | direct-upload intent + completion steps                         | `src/queries/files.ts`         |
+| `useUploadFileMutation(file, onProgress)`                                         | full flow: intent → signed PUT → complete                       | `src/queries/files.ts`         |
+| `useDeleteFileMutation` / `useDownloadFileMutation`                               | soft delete + signed GET URL                                    | `src/queries/files.ts`         |
+| `useJobsQuery(params)` / `useJobQuery(jobId)`                                     | jobs list + polled detail                                       | `src/queries/jobs.ts`          |
 | `useNotificationsQuery(params)`                                                   | org-scoped notifications list (envelope carries `unread_count`) | `src/queries/notifications.ts` |
-| `useUnreadNotificationsCountQuery()`                                              | header-bell unread badge (polled)              | `src/queries/notifications.ts` |
-| `useMarkNotificationReadMutation` / `useSendTestNotificationMutation`             | mark-read + gated test-send, invalidate lists and unread count | `src/queries/notifications.ts` |
+| `useUnreadNotificationsCountQuery()`                                              | header-bell unread badge (polled)                               | `src/queries/notifications.ts` |
+| `useMarkNotificationReadMutation` / `useSendTestNotificationMutation`             | mark-read + gated test-send, invalidate lists and unread count  | `src/queries/notifications.ts` |
 
 ## Platform-plane keys
 

@@ -105,8 +105,38 @@ There is no hidden universal bypass.
 ## Secrets
 
 - No secrets are committed to the repository.
-- `.env.example` documents every variable the application reads, with safe placeholder values; real secrets live in environment-specific secret stores.
-- Never log secrets, tokens, or credentials.
+- `.env.example` documents every variable the application reads, with safe placeholder values; real secrets live in environment-specific secret stores. The production surface is `.env.production.example` (Scope §6.6), which documents the hybrid VPS deployment inputs (registry, host, release path, domain) and every production container setting.
+- Never log secrets, tokens, or credentials. The BP §28 never-log list (passwords, tokens, authorisation headers, signed URLs, full connection strings) is enforced by test.
+
+## Hybrid VPS production profile (Scope §6.6, blueprint §35.1)
+
+The generic Linux VPS / container-host profile (`deploy/compose/compose.hybrid-vps.yml`, `deploy/caddy/`, `.github/workflows/deploy-vps.yml`) is the portable production baseline. It runs Caddy, the static Vue artifact, the FastAPI backend, the Dramatiq worker and a private Redis on the host; PostgreSQL, object storage, WorkOS, transactional email and monitoring stay external (ADR-0007). The following controls are mandatory for any deployment built from this profile:
+
+- **Firewall**: the host firewall allows only 22/TCP (SSH), 80/TCP and 443/TCP from the public internet, plus the egress ports the external services need. Configure it at the provider or host level (ufw/firewalld/nftables); never expose PostgreSQL, Redis, MinIO or the API port directly.
+- **SSH keys only**: password and root SSH login are disabled (`PasswordAuthentication no`, `PermitRootLogin no`); the deploy workflow authenticates with a dedicated deploy key (GitHub secret `DEPLOY_SSH_KEY`) that has no password and is restricted to the release directory and docker group on the host.
+- **Non-public Redis**: the Redis container binds only to the internal compose network (no `ports:` mapping in `compose.hybrid-vps.yml`), requires a strong password (`REDIS_PASSWORD`, fail-fast at compose level), and enforces a memory cap and eviction policy (docs/operations.md — Redis authentication, persistence, memory/eviction policy, loss consequences).
+- **Automatic security updates**: unattended-upgrades for the host OS and a documented weekly patch cadence; the application images are rebuilt from pinned bases (`python:3.13-slim`, `node:24-alpine`, `redis:7-alpine`, Caddy `v2.11.4`) and scanned by the CI container-scan job.
+- **Monitoring and alerting**: external uptime checks against `/health` and `/ready`, metrics scraping of `GET /metrics`, and alerts for readiness/API failures, worker/job failures, disk pressure, certificate expiry and backup failures (docs/operations.md).
+- **Disk alerts**: the host disk and the Caddy/Redis log volumes are monitored with thresholds (default alert at 80% usage).
+- **Container resource limits**: every service declares explicit CPU/memory `deploy.resources.limits` and JSON-file log rotation (`max-size`/`max-file`) in the compose file.
+- **Documented rollback**: every release is immutable (image tagged by commit SHA, frontend artifact checksum-verified into `releases/<sha>`); `releases/current` is an atomic symlink and the previous release is retained, so rollback is a one-line symlink flip plus `docker compose up -d` (docs/operations.md, docs/backup-and-recovery.md).
+- **Off-site configuration backups**: the `.env.production` file, the Caddyfile, the compose file and the `releases/` metadata are backed up off-site; without them a lost host cannot be rebuilt (docs/backup-and-recovery.md — secret recovery, lost VPS replacement).
+
+### Trusted proxy and client-IP handling
+
+Caddy terminates TLS and is the only entry point, so the application must treat it as the trusted proxy:
+
+- Caddy sets `X-Forwarded-For` for proxied requests; the API's trusted-host allowlist (`TRUSTED_HOSTS`) contains only the real production domains, so a request cannot spoof a Host header.
+- The **edge** rate limiter keys on `{remote_host}`, which behind the edge is the real client IP — the edge limit is therefore per-client-IP and is the effective coarse DoS control.
+- The **application** limiter keys on `request.client.host`, which behind the edge is the Caddy container address. It remains the authoritative per-user/burst control in direct-connect deployments, but behind the edge it behaves as a site-wide bucket. Applications that need true per-client-IP limits behind the edge must derive the client IP from `X-Forwarded-For` while trusting only the edge (see docs/operations.md — scaling and rate-limit tuning).
+
+### Edge rate limiting
+
+An unqualified Caddy `rate_limit` directive is not acceptable because stock Caddy ships no such directive (Scope §6.6). The profile uses the pinned, tested implementation:
+
+- `deploy/caddy/Dockerfile` builds Caddy `v2.11.4` with the pinned `mholt/caddy-ratelimit v0.1.0` module via xcaddy; both versions are pinned and the upgrade procedure is documented in the Dockerfile.
+- `deploy/caddy/Caddyfile` applies per-client-IP zones: 600 events/min for `/api/*`, `/health` and `/metrics` (looser than the application's 300/min so the app stays authoritative), 2400 events/min for static assets, and no limit on `/ready` so deployment health checks are never throttled.
+- CI builds the image and runs `caddy validate`; the rate limiting itself was verified functionally (200 × 3 then 429 on the fourth request). An external WAF (e.g. Cloudflare) may sit in front instead; if one is used, keep the Caddy security headers and TLS termination behind it and document the WAF rules in `docs/operations.md`.
 
 ## Reporting a vulnerability
 
@@ -114,4 +144,4 @@ If you find a security issue, report it privately to the maintainers before disc
 
 ## Deferred controls
 
-The following controls land with their owning capabilities in later releases and must be present before v1.0: malware scanning and server-side document processing (post-v1 — v0.5 ships the quarantine/failed states and the scanning hook seam), decompression-bomb protections, and rate limiting at the edge for production profiles (v0.6). The v0.5 release shipped provider-neutral private object storage with signed URLs, size/type validation, worker isolation and durable job records; the v0.4 release shipped append-only audit logging, the signature-verified WorkOS webhook consumer, and the platform plane (see above).
+The following controls land with their owning capabilities in later releases and must be present before v1.0: malware scanning and server-side document processing (post-v1 — v0.5 ships the quarantine/failed states and the scanning hook seam), and decompression-bomb protections. The v0.6 release shipped edge rate limiting for the hybrid VPS production profile (a pinned, tested Caddy build — see "Edge rate limiting" above), plus the mandatory §35.1 protections documented above. The v0.5 release shipped provider-neutral private object storage with signed URLs, size/type validation, worker isolation and durable job records; the v0.4 release shipped append-only audit logging, the signature-verified WorkOS webhook consumer, and the platform plane (see above).
