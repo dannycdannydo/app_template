@@ -115,6 +115,23 @@ through **Vertex AI only** (ADR-0018) — no Gemini Developer API / AI Studio
 path exists. The layer is deliberately not an agent or retrieval framework;
 those sit above or beside it in derived applications.
 
+Bounded file input is a first-class v0.7 attachment contract: a feature
+supplies a private storage reference, the service/job boundary resolves it
+server-side into a provider-neutral `Attachment` (validated display name, MIME
+type, bytes, SHA-256 digest; template caps 5 MB per file, 10 MB combined), and
+capable adapters map it to their native inline request form. Attachments are
+capability-gated via the `documents` model capability and per-model inline
+ceilings; bytes never enter the database, job broker, logs or audit metadata,
+and no adapter receives a storage credential or signed URL. Keep-flow source
+objects stay feature-owned; temporary analyse-only objects use the
+organisation-scoped AI scratch namespace governed by the v0.7 retention job.
+Provider regions are explicit, validated configuration (OpenAI region,
+Anthropic inference geography, Azure endpoint, Vertex location) and fallback
+never changes region implicitly. Provider-hosted uploads, provider file
+identifiers, `gs://` references and URL inputs are deferred to v0.8
+(`plans/AI_LARGE_ATTACHMENTS_V0_8_PLAN.md`); inline is the only v0.7 transfer
+mode and oversized inputs fail before dispatch.
+
 ## Tooling
 
 Backend:
@@ -1000,6 +1017,29 @@ The v0.5 release implements the interface contract and the direct upload flow:
   cannot reach the API's storage host (e.g. the dev-docker stack) and fall
   back to `STORAGE_ENDPOINT_URL`.
 
+## AI attachments and scratch lifecycle (v0.7)
+
+The AI layer (v0.7, ADR-0017) consumes the same provider-neutral storage
+interface and adds two ownership rules:
+
+- **Keep-flow objects stay feature-owned.** When a feature passes a private
+  storage reference in an `AIRequest`, the object remains owned by that
+  feature and its lifecycle events; AI-side deletion or retention never
+  deletes the feature object.
+- **Temporary analyse-only objects use the organisation-scoped AI scratch
+  namespace.** Objects a feature or the template's demonstration flow creates
+  solely for AI analysis (for example a redacted extraction copy) live under
+  an AI scratch key namespace and are governed by the v0.7 retention job,
+  which applies the organisation AI retention policy and deletes expired
+  scratch objects with audit events. Scratch is not a document store.
+
+The AI layer resolves a storage reference into a bounded in-memory
+`Attachment` (5 MB per file, 10 MB combined) at the service/job boundary;
+`ai_requests`/`ai_outputs` persist the reference and SHA-256 digest, never the
+bytes, and no adapter receives a signed URL or storage credential. Large-file
+and provider-reference transfer modes are deferred to v0.8
+(`plans/AI_LARGE_ATTACHMENTS_V0_8_PLAN.md`).
+
 ---
 
 # 18. Background Jobs
@@ -1343,12 +1383,36 @@ LLM provider adapters are **not** general integrations: they live under
 `app/ai/providers/` and implement the typed `LLMProvider` contract
 (ADR-0017) with normalised requests/responses and a retryability-aware error
 taxonomy. Each adapter declares the capabilities it actually supports
-(structured output, vision, tools, reasoning, context window) rather than
-pretending providers are interchangeable. Provider SDKs, provider-specific
-HTTP formats, authentication, streaming mechanics, token reporting and model
-quirks are confined to the adapters; a deterministic `FakeLLMProvider` is the
-default test adapter. Google Gemini is Vertex AI only (ADR-0018) and the local
-OpenAI-compatible adapter is never exposed to browsers.
+(structured output, vision, tools, reasoning, documents, context window)
+rather than pretending providers are interchangeable. Provider SDKs,
+provider-specific HTTP formats, authentication, streaming mechanics, token
+reporting and model quirks are confined to the adapters; a deterministic
+`FakeLLMProvider` is the default test adapter. Google Gemini is Vertex AI
+only (ADR-0018) and the local OpenAI-compatible adapter is never exposed to
+browsers.
+
+Bounded document input uses a provider-neutral `Attachment` (validated display
+name, MIME type, bytes, SHA-256 digest; 5 MB per file, 10 MB combined) that
+adapters map to their native inline request form. Routing is gated by the
+`documents` capability and per-model inline ceilings declared in the model
+registry; unsupported modalities, MIME types and sizes are rejected before
+dispatch. OpenAI/Azure, Anthropic and Vertex adapters map supported
+attachments inline; local adapters declare only the modalities they actually
+support and DeepSeek rejects attachments. No adapter ever receives a private
+storage credential or signed URL, and attachment bytes never reach the
+database, job broker, logs or audit metadata.
+
+Provider regions are explicit, validated deployment configuration: OpenAI
+region and Anthropic inference geography are typed settings, Azure's region
+is inherent in its configured resource endpoint, Vertex is pinned by its
+location setting, DeepSeek documents that it offers no template-controlled
+regional pinning, and local/fake providers inherit their operator-controlled
+location. Defaults are honest for ordinary accounts and unsupported regions
+fail configuration validation; fallback never changes region implicitly, and
+routing metadata records the configured or observed region only where the
+provider exposes it. Provider-hosted uploads, provider file identifiers,
+`gs://` references and URL inputs are deferred to v0.8
+(`plans/AI_LARGE_ATTACHMENTS_V0_8_PLAN.md`).
 
 ## Integration records
 
@@ -1496,11 +1560,20 @@ Settings carry provider enablement and endpoint/project/deployment
 identifiers only; keys, Azure credentials and Google credential material are
 server-side secrets. Production fails fast when an enabled provider lacks its
 required configuration, when a local provider endpoint is insecure or
-publicly reachable, or when the configured default/fallback model cannot
-satisfy declared task requirements. Organisation-level AI policy (enabled,
-allowed providers/models, override, budget, retention) is database-backed in
-`organisation_ai_settings`, default-off for new organisations, and enforced
-inside `AIService` — never only in a router (ADR-0017, v0.7 Scope §6.5).
+publicly reachable, when the configured default/fallback model cannot
+satisfy declared task requirements, or when a configured provider region is
+unsupported. Provider regions are explicit, validated configuration: OpenAI
+region and Anthropic inference geography are typed settings, Azure's region
+is inherent in its configured resource endpoint, Vertex is pinned by its
+location setting and DeepSeek documents no template-controlled pinning;
+defaults are honest for ordinary accounts and fallback never changes region
+implicitly (ADR-0017/0018, v0.7 Scope §6.1/§6.3). Organisation-level AI
+policy (enabled, allowed providers/models, override, budget, retention) is
+database-backed in `organisation_ai_settings`, default-off for new
+organisations, and enforced inside `AIService`, never only in a router
+(ADR-0017, v0.7 Scope §6.5). Attachment limits are configuration-backed
+template constants (5 MB per file, 10 MB combined) and per-model inline
+ceilings come from the model registry.
 
 ## Feature flags
 
@@ -1568,9 +1641,11 @@ Never log:
 - signed URLs;
 - full database connection strings;
 - complete document contents by default;
-- AI prompts, raw provider responses, provider keys/headers, or retained
-  input/output content (v0.7, ADR-0017): logs, Sentry and audit metadata bind
-  `ai_request_id`, task, provider/model and routing metadata, never content.
+- AI prompts, raw provider responses, provider keys/headers, attachment bytes
+  or retained input/output content (v0.7, ADR-0017): logs, Sentry and audit
+  metadata bind `ai_request_id`, task, provider/model and routing metadata,
+  never content. Attachment bytes exist only in worker memory for one provider
+  call and are never persisted, placed on the job broker, or logged.
 
 ---
 

@@ -1,6 +1,6 @@
 # ADR 0017: Provider-Neutral AI Service, Task-Based Routing, Prompt/Version Lifecycle, Structured-Output Contract, Cost/Retention Boundaries
 
-Status: Accepted
+Status: Accepted (amended 2026-08-10: bounded inline attachments, storage/lifecycle ownership, regional configuration truthfulness, v0.8 large-file boundary; v0.7 Scope §6.1)
 
 ## Context
 
@@ -106,6 +106,42 @@ The contract includes:
   an `ai.execute` Dramatiq job on the `ai` queue with the existing durable
   record-then-enqueue lifecycle (BP §18).
 
+### Amendment (v0.7 attachment/regional, Scope §6.1)
+
+- **Bounded inline attachments**: a feature may supply a private
+  `storage_reference` for document-scale work; `AIService` (or the `ai.execute`
+  job boundary) authorises and resolves that object into a provider-neutral
+  `Attachment` carrying only a validated display name, MIME type, bytes and
+  SHA-256 digest. The default template limits are 5 MB per attachment and
+  10 MB combined. The reference is resolved to bytes before dispatch and is
+  never rendered as if it were document content; no adapter ever receives a
+  private storage credential, a signed URL or an object path. Attachment bytes
+  exist only in worker memory for the duration of one provider call: they are
+  never persisted in `ai_requests`/`ai_outputs`, placed on the job broker, or
+  written to logs, Sentry or audit metadata.
+- **Storage and lifecycle ownership**: keep-flow source objects remain owned by
+  their feature; AI cleanup never deletes them. Temporary analyse-only objects
+  live in the organisation-scoped AI scratch namespace and are governed by the
+  v0.7 retention job. Durable records persist storage references and digests,
+  never attachment bytes. Every job retry re-reads and revalidates the
+  referenced object so retries stay idempotent.
+- **Regional configuration truthfulness**: provider regions are explicit,
+  validated deployment configuration — OpenAI region and Anthropic inference
+  geography are typed settings, Azure's region is inherent in its configured
+  resource endpoint, Vertex stays pinned by its location setting, DeepSeek
+  documents that it offers no template-controlled regional pinning, and
+  local/fake providers inherit their operator-controlled location. Defaults are
+  honest for ordinary accounts (regional endpoints that require provider
+  approval are explicit opt-ins), unsupported regions fail configuration
+  validation, and routing/fallback never implicitly changes region. Routing
+  metadata records the configured or observed region only where the provider
+  exposes it, without increasing label cardinality.
+- **v0.8 large-file boundary**: inline is the only v0.7 transfer mode.
+  Provider-hosted uploads, provider file identifiers, direct `gs://`
+  references, URL inputs and larger ceilings are deferred to v0.8
+  (`plans/AI_LARGE_ATTACHMENTS_V0_8_PLAN.md`); oversized or unsupported inputs
+  fail before dispatch in v0.7.
+
 ## Consequences
 
 - Feature code contains zero provider/SDK/model references; provider or model
@@ -123,3 +159,15 @@ The contract includes:
 - Human review is required (BP §33) for the tenant/configuration work
   (`organisation_ai_settings`), secret handling (provider credentials) and any
   new provider SDK dependencies.
+- Attachments are capability-gated and bounded: a task can only route to a
+  model that declares the `documents` capability and the per-model inline
+  attachment ceiling; incompatible modality, MIME type and size combinations
+  are rejected before provider dispatch rather than silently downgraded.
+  Adapters that cannot carry documents (DeepSeek; local until a reviewed
+  capability exists) fail fast, preserving the "no fake interchangeability"
+  rule.
+- The v0.7 inline seam deliberately stops short of large-file and
+  provider-reference support; those modes add durable external-file state,
+  upload/cleanup jobs and IAM/expiry policy that belong to a separate reviewed
+  release (v0.8 plan), so v0.7 never has to mint signed URLs, manage provider
+  file identifiers or place bytes on the broker.
