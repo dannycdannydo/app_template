@@ -108,7 +108,7 @@ async def broker_and_worker() -> AsyncIterator[tuple[StubBroker, Worker, Any]]:
     its default-broker binding and is only used to enqueue *inert* messages
     the failure-path tests can race against.
     """
-    from app.workers import worker_middleware
+    from app.broker import worker_middleware
 
     broker = StubBroker(middleware=worker_middleware())
     dramatiq.set_broker(broker)

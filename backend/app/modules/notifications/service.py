@@ -23,10 +23,11 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from dramatiq import Actor
 from sqlalchemy import select
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, NotFoundError
@@ -43,6 +44,7 @@ from app.modules.notifications.models import (
     NotificationDeliveryStatus,
 )
 from app.modules.notifications.queries import (
+    mark_all_notifications_read_statement,
     unread_notifications_count_statement,
     user_notifications_count_statement,
     user_notifications_statement,
@@ -196,6 +198,29 @@ async def mark_read(
         await session.commit()
         await session.refresh(notification)
     return notification
+
+
+async def mark_all_read(
+    session: AsyncSession,
+    *,
+    organisation_id: uuid.UUID,
+    user_id: uuid.UUID,
+) -> int:
+    """Mark all unread notifications for the caller as read.
+
+    The statement carries both tenant boundaries, so the bulk action cannot
+    alter another organisation's or recipient's rows. Repeating it is safe:
+    already-read rows do not match and the result is zero.
+    """
+    result = await session.execute(
+        mark_all_notifications_read_statement(
+            organisation_id,
+            user_id,
+            read_at=datetime.now(UTC),
+        )
+    )
+    await session.commit()
+    return cast(CursorResult[Any], result).rowcount or 0
 
 
 async def send_test_notification(

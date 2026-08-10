@@ -12,12 +12,16 @@ const mockUseNotificationsQuery = vi.hoisted(() => vi.fn<(params: unknown) => un
 const mockUseMarkNotificationReadMutation = vi.hoisted(() =>
   vi.fn<(options?: unknown) => unknown>(),
 )
+const mockUseMarkAllNotificationsReadMutation = vi.hoisted(() =>
+  vi.fn<(options?: unknown) => unknown>(),
+)
 const mockShowApiErrorToast = vi.hoisted(() => vi.fn<(error: unknown, options?: unknown) => void>())
 
 vi.mock('@/queries/notifications', () => ({
   useUnreadNotificationsCountQuery: mockUseUnreadNotificationsCountQuery,
   useNotificationsQuery: mockUseNotificationsQuery,
   useMarkNotificationReadMutation: mockUseMarkNotificationReadMutation,
+  useMarkAllNotificationsReadMutation: mockUseMarkAllNotificationsReadMutation,
 }))
 
 vi.mock('@/lib/toast', () => ({
@@ -31,6 +35,7 @@ type NotificationListItem = components['schemas']['NotificationListItem']
 
 const UNREAD_ID = '11111111-1111-4111-8111-111111111111'
 const READ_ID = '22222222-2222-4222-8222-222222222222'
+const SECOND_UNREAD_ID = '33333333-3333-4333-8333-333333333333'
 
 const unread: NotificationListItem = {
   id: UNREAD_ID,
@@ -52,6 +57,12 @@ const read: NotificationListItem = {
   resource_id: 'file-1',
   read_at: '2026-01-02T00:00:00Z',
   created_at: '2026-01-02T00:00:00Z',
+}
+
+const secondUnread: NotificationListItem = {
+  ...unread,
+  id: SECOND_UNREAD_ID,
+  title: 'Second test notification',
 }
 
 let wrapper: VueWrapper
@@ -80,9 +91,13 @@ function stubQueries(items: NotificationListItem[], unreadCount: number): void {
 }
 
 async function mountBell(): Promise<void> {
-  stubQueries([unread, read], 1)
+  stubQueries([unread, secondUnread, read], 2)
   mockUseMarkNotificationReadMutation.mockReturnValue({
     mutate: vi.fn<(id: string) => void>(),
+    isPending: ref(false),
+  })
+  mockUseMarkAllNotificationsReadMutation.mockReturnValue({
+    mutate: vi.fn<() => void>(),
     isPending: ref(false),
   })
 
@@ -99,6 +114,7 @@ describe('NotificationBell', () => {
     mockUseUnreadNotificationsCountQuery.mockReset()
     mockUseNotificationsQuery.mockReset()
     mockUseMarkNotificationReadMutation.mockReset()
+    mockUseMarkAllNotificationsReadMutation.mockReset()
     mockShowApiErrorToast.mockReset()
   })
 
@@ -115,13 +131,17 @@ describe('NotificationBell', () => {
     expect(wrapper.find('[data-testid="notification-bell-trigger"]').exists()).toBe(true)
     const badge = wrapper.find('[data-testid="notification-bell-badge"]')
     expect(badge.exists()).toBe(true)
-    expect(badge.text()).toBe('1')
+    expect(badge.text()).toBe('2')
   })
 
   it('hides the badge when there is nothing unread', async () => {
     stubQueries([read], 0)
     mockUseMarkNotificationReadMutation.mockReturnValue({
       mutate: vi.fn<(id: string) => void>(),
+      isPending: ref(false),
+    })
+    mockUseMarkAllNotificationsReadMutation.mockReturnValue({
+      mutate: vi.fn<() => void>(),
       isPending: ref(false),
     })
 
@@ -172,10 +192,34 @@ describe('NotificationBell', () => {
     expect(markReadMutation.mutate).toHaveBeenCalledWith(UNREAD_ID)
   })
 
-  it('renders an empty state with a view-all link when there are no notifications', async () => {
+  it('only disables the notification currently being marked read', async () => {
+    await mountBell()
+
+    await wrapper.find('[data-testid="notification-bell-trigger"]').trigger('click')
+    await flushPromises()
+
+    const firstButton = document.querySelector(
+      `[data-testid="notification-bell-mark-read-${UNREAD_ID}"]`,
+    ) as HTMLButtonElement
+    const secondButton = document.querySelector(
+      `[data-testid="notification-bell-mark-read-${SECOND_UNREAD_ID}"]`,
+    ) as HTMLButtonElement
+
+    firstButton.click()
+    await flushPromises()
+
+    expect(firstButton.disabled).toBe(true)
+    expect(secondButton.disabled).toBe(false)
+  })
+
+  it('renders an empty state without a bulk action when there are no unread notifications', async () => {
     stubQueries([], 0)
     mockUseMarkNotificationReadMutation.mockReturnValue({
       mutate: vi.fn<(id: string) => void>(),
+      isPending: ref(false),
+    })
+    mockUseMarkAllNotificationsReadMutation.mockReturnValue({
+      mutate: vi.fn<() => void>(),
       isPending: ref(false),
     })
 
@@ -188,6 +232,24 @@ describe('NotificationBell', () => {
     await flushPromises()
 
     expect(document.querySelector('[data-testid="notification-bell-empty"]')).not.toBeNull()
-    expect(document.querySelector('[data-testid="notification-bell-view-all"]')).not.toBeNull()
+    expect(document.querySelector('[data-testid="notification-bell-mark-all-read"]')).toBeNull()
+  })
+
+  it('marks every unread notification read through the bulk mutation', async () => {
+    await mountBell()
+
+    await wrapper.find('[data-testid="notification-bell-trigger"]').trigger('click')
+    await flushPromises()
+
+    const markAllMutation = mockUseMarkAllNotificationsReadMutation.mock.results[0]?.value as {
+      mutate: ReturnType<typeof vi.fn>
+    }
+    const markAllButton = document.querySelector(
+      '[data-testid="notification-bell-mark-all-read"]',
+    ) as HTMLElement
+    markAllButton.click()
+    await flushPromises()
+
+    expect(markAllMutation.mutate).toHaveBeenCalledExactlyOnceWith()
   })
 })

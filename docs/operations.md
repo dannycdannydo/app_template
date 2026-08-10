@@ -31,7 +31,7 @@ export COMPOSE="docker compose -f compose.hybrid-vps.yml --env-file .env.product
 | --- | --- | --- | --- |
 | `caddy` | custom image from `deploy/caddy/Dockerfile` (Caddy v2.11.4 + caddy-ratelimit v0.1.0) | 1 instance | Edge TLS, static frontend, `/api` proxy, security headers, edge rate limits |
 | `api` | backend image, `uvicorn app.main:app` | replicas via `--scale api=N` | Health-checked on `/ready`; Caddy load-balances across replicas |
-| `worker` | backend image, `dramatiq app.workers --threads N` | `WORKER_CONCURRENCY` per process, `--scale worker=N` for more processes | Durable job pipeline (ADR-0004) |
+| `worker` | backend image, `dramatiq app.workers --processes 1 --threads N` | `WORKER_CONCURRENCY` per process, `--scale worker=N` for more processes | Durable job pipeline (ADR-0004) |
 | `redis` | `redis:7-alpine`, password + AOF persistence | 1 instance | Dramatiq broker + API rate-limit store; never published |
 
 Initial defaults: 1 API replica, 1 worker process at `WORKER_CONCURRENCY=8`,

@@ -31,7 +31,7 @@ from app.core.security import (
 )
 from app.main import create_app
 from app.modules.invitations.models import Invitation
-from app.modules.organisations.models import MembershipStatus, OrganisationMembership
+from app.modules.organisations.models import MembershipStatus, Organisation, OrganisationMembership
 from app.modules.users.models import User
 
 WORKOS_USER_ID = "user_test123"
@@ -74,6 +74,13 @@ class FakeSession:
         return None
 
     async def scalars(self, statement: object) -> _ScalarsResult:
+        return await self.execute(statement)
+
+    async def execute(self, statement: object) -> _ScalarsResult:
+        # The /me memberships projection runs through ``execute`` (it selects
+        # ``(membership, organisation_name)`` rows, which ``scalars`` would
+        # unwrap to the first column only); both entry points share the same
+        # queue so the /me payload order stays identical.
         # The login-time invitation query (Scope §6.5) runs inside
         # get_current_user, before the /me payload queries that consume the
         # queue; with no staged invitations it must answer empty rather than
@@ -132,13 +139,16 @@ def _make_user(*, is_active: bool = True, workos_user_id: str = WORKOS_USER_ID) 
 
 
 def _make_membership(user: User) -> OrganisationMembership:
+    organisation = Organisation(name="Example Organisation")
+    organisation.id = uuid.uuid4()
     membership = OrganisationMembership(
         user_id=user.id,
-        organisation_id=uuid.uuid4(),
+        organisation_id=organisation.id,
         status=MembershipStatus.ACTIVE,
     )
     membership.id = uuid.uuid4()
     membership.created_at = datetime.now(UTC)
+    membership.organisation = organisation
     return membership
 
 
@@ -290,7 +300,7 @@ async def test_me_returns_memberships_and_roles(auth_app: AuthApp) -> None:
     membership = _make_membership(user)
     state.memberships = [membership]
     # memberships, then org role codes, then platform role codes
-    state.scalars_queue = [[membership], ["owner"], []]
+    state.scalars_queue = [[(membership, "Example Organisation")], ["owner"], []]
 
     async with _client(app) as client:
         response = await _get_me(client, make_token(private_key))
@@ -299,6 +309,7 @@ async def test_me_returns_memberships_and_roles(auth_app: AuthApp) -> None:
     body = response.json()
     assert len(body["memberships"]) == 1
     assert body["memberships"][0]["status"] == "active"
+    assert body["memberships"][0]["organisation_name"] == "Example Organisation"
     assert body["roles"] == ["owner"]
     assert body["platform_roles"] == []
 

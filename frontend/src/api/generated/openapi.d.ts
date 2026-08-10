@@ -581,6 +581,26 @@ export interface paths {
     patch: operations['mark_read_endpoint_api_v1_notifications__notification_id__read_patch']
     trace?: never
   }
+  '/api/v1/notifications/read-all': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    /**
+     * Mark All Read Endpoint
+     * @description Mark every unread notification belonging to the caller as read.
+     */
+    patch: operations['mark_all_read_endpoint_api_v1_notifications_read_all_patch']
+    trace?: never
+  }
   '/api/v1/notifications/test': {
     parameters: {
       query?: never
@@ -1153,27 +1173,18 @@ export interface components {
      */
     JobStatus: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
     /**
-     * MeResponse
-     * @description The current user with their memberships, role codes and platform roles.
-     *
-     *     ``platform_roles`` is empty for non-admins; the frontend uses it only to
-     *     show or hide the Platform Admin Centre (UI awareness is cosmetic — the
-     *     backend remains the enforcement point).
+     * MarkAllReadResponse
+     * @description The number of the caller's unread notifications marked read.
      */
-    MeResponse: {
-      user: components['schemas']['UserListItem']
-      /** Memberships */
-      memberships: components['schemas']['MembershipListItem'][]
-      /** Roles */
-      roles: string[]
-      /** Platform Roles */
-      platform_roles: string[]
+    MarkAllReadResponse: {
+      /** Marked Count */
+      marked_count: number
     }
     /**
-     * MembershipListItem
-     * @description One membership in a list context, e.g. the current user's memberships.
+     * MeMembershipListItem
+     * @description An active or historic membership, including its organisation's name.
      */
-    MembershipListItem: {
+    MeMembershipListItem: {
       /**
        * Id
        * Format: uuid
@@ -1184,6 +1195,8 @@ export interface components {
        * Format: uuid
        */
       organisation_id: string
+      /** Organisation Name */
+      organisation_name: string
       /**
        * User Id
        * Format: uuid
@@ -1195,6 +1208,23 @@ export interface components {
        * Format: date-time
        */
       created_at: string
+    }
+    /**
+     * MeResponse
+     * @description The current user with their memberships, role codes and platform roles.
+     *
+     *     ``platform_roles`` is empty for non-admins; the frontend uses it only to
+     *     show or hide the Platform Admin Centre (UI awareness is cosmetic — the
+     *     backend remains the enforcement point).
+     */
+    MeResponse: {
+      user: components['schemas']['UserListItem']
+      /** Memberships */
+      memberships: components['schemas']['MeMembershipListItem'][]
+      /** Roles */
+      roles: string[]
+      /** Platform Roles */
+      platform_roles: string[]
     }
     /**
      * MembershipStatus
@@ -2879,6 +2909,38 @@ export interface operations {
         }
         content: {
           'application/json': components['schemas']['NotificationListItem']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  mark_all_read_endpoint_api_v1_notifications_read_all_patch: {
+    parameters: {
+      query?: never
+      header?: {
+        'x-org-id'?: string | null
+        authorization?: string | null
+      }
+      path?: never
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['MarkAllReadResponse']
         }
       }
       /** @description Validation Error */

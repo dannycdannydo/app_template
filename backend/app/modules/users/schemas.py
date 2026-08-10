@@ -12,7 +12,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict
 
-from app.modules.organisations.schemas import MembershipListItem
+from app.modules.organisations.models import MembershipStatus
 
 
 class UserListItem(BaseModel):
@@ -27,6 +27,17 @@ class UserListItem(BaseModel):
     created_at: datetime
 
 
+class MeMembershipListItem(BaseModel):
+    """An active or historic membership, including its organisation's name."""
+
+    id: uuid.UUID
+    organisation_id: uuid.UUID
+    organisation_name: str
+    user_id: uuid.UUID
+    status: MembershipStatus
+    created_at: datetime
+
+
 class MeResponse(BaseModel):
     """The current user with their memberships, role codes and platform roles.
 
@@ -36,6 +47,6 @@ class MeResponse(BaseModel):
     """
 
     user: UserListItem
-    memberships: list[MembershipListItem]
+    memberships: list[MeMembershipListItem]
     roles: list[str]
     platform_roles: list[str]

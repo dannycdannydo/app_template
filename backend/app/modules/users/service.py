@@ -63,15 +63,22 @@ async def get_or_provision_user(
 async def get_me_payload(
     session: AsyncSession,
     user: User,
-) -> tuple[list[OrganisationMembership], list[str], list[str]]:
+) -> tuple[list[tuple[OrganisationMembership, str]], list[str], list[str]]:
     """Return the current user's memberships, role codes and platform role codes.
 
+    Memberships are an explicit ``(membership, organisation_name)`` projection
+    so callers never rely on the ``organisation`` relationship being loaded.
     Roles are the distinct role codes across all of the user's memberships,
     ordered by code; platform roles are the distinct codes of the user's
     platform memberships (empty for non-admins). A user with no roles yields
     empty lists.
     """
-    memberships = (await session.scalars(memberships_for_user_statement(user.id))).all()
+    memberships = [
+        (membership, organisation_name)
+        for membership, organisation_name in (
+            await session.execute(memberships_for_user_statement(user.id))
+        ).all()
+    ]
     roles = (await session.scalars(role_codes_for_user_statement(user.id))).all()
     platform_roles = (await session.scalars(platform_role_codes_statement(user.id))).all()
-    return list(memberships), list(roles), list(platform_roles)
+    return memberships, list(roles), list(platform_roles)

@@ -57,3 +57,9 @@ class UnreadCountResponse(BaseModel):
     """The unread-count endpoint's explicit response shape."""
 
     unread_count: int
+
+
+class MarkAllReadResponse(BaseModel):
+    """The number of the caller's unread notifications marked read."""
+
+    marked_count: int

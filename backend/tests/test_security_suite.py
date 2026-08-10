@@ -192,6 +192,7 @@ PROTECTED_ROUTES: list[RouteSpec] = [
         org_scoped=True,
         path_values={"notification_id": _NOTIFICATION_ID},
     ),
+    _route("PATCH", "/api/v1/notifications/read-all", org_scoped=True),
     _route("POST", "/api/v1/notifications/test", org_scoped=True),
     _route("GET", "/api/v1/platform/audit-events", org_scoped=False),
     _route("GET", "/api/v1/platform/admins", org_scoped=False),

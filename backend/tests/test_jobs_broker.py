@@ -25,7 +25,7 @@ the file ``ready`` and the job ``succeeded`` with progress 100. The
 stub-broker half of the same journey lives in ``test_files_jobs.py``.
 
 The middleware stack is the same factory the worker process uses
-(``app.workers.worker_middleware``), so the async tasks run exactly as they
+(``app.broker.worker_middleware``), so the async tasks run exactly as they
 do in production; only the broker (namespace) and the per-test backoff differ.
 """
 
@@ -125,11 +125,11 @@ async def broker_and_worker() -> AsyncIterator[tuple[RedisBroker, Worker]]:
     """A namespaced real Redis broker and a real worker, configured like prod.
 
     The namespace isolates the test from any developer's worker; the middleware
-    stack comes from ``app.workers.worker_middleware`` (the same factory the
+    stack comes from ``app.broker.worker_middleware`` (the same factory the
     ``dramatiq app.workers`` process uses), so async tasks run on the AsyncIO
     event-loop thread exactly as in production.
     """
-    from app.workers import worker_middleware
+    from app.broker import worker_middleware
 
     broker = RedisBroker(
         url=_REDIS_URL,

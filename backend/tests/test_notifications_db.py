@@ -327,6 +327,61 @@ async def test_mark_read_is_idempotent_and_isolated(migrated_database: str) -> N
         await engine.dispose()
 
 
+async def test_mark_all_read_is_idempotent_and_scoped(migrated_database: str) -> None:
+    engine = create_async_engine(migrated_database, poolclass=NullPool)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            org, user = await _seed_org_and_user(session)
+            _, other_user = await _seed_org_and_user(session, email="bulk-other@example.com")
+            own_unread = Notification(
+                organisation_id=org.id,
+                user_id=user.id,
+                type="file.ready",
+                title="Own unread",
+                body="Read me.",
+            )
+            other_unread = Notification(
+                organisation_id=org.id,
+                user_id=other_user.id,
+                type="file.ready",
+                title="Other unread",
+                body="Do not read me.",
+            )
+            session.add_all([own_unread, other_unread])
+            await session.commit()
+
+            marked_count = await notifications_service.mark_all_read(
+                session,
+                organisation_id=org.id,
+                user_id=user.id,
+            )
+            assert marked_count == 1
+
+            own_fresh = await session.get(Notification, own_unread.id)
+            other_fresh = await session.get(Notification, other_unread.id)
+            # The bulk statement bypasses the ORM unit of work, so the
+            # identity-map instances keep their stale ``read_at``; refresh
+            # re-reads the committed rows asynchronously (expiring attributes
+            # would trigger a synchronous lazy load, which async sessions
+            # forbid).
+            await session.refresh(own_fresh)
+            await session.refresh(other_fresh)
+            assert own_fresh is not None and own_fresh.read_at is not None
+            assert other_fresh is not None and other_fresh.read_at is None
+
+            assert (
+                await notifications_service.mark_all_read(
+                    session,
+                    organisation_id=org.id,
+                    user_id=user.id,
+                )
+                == 0
+            )
+    finally:
+        await engine.dispose()
+
+
 # --- Test-send flow and delivery lifecycle ---
 
 

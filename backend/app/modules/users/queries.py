@@ -13,7 +13,7 @@ import uuid
 
 from sqlalchemy import Select, select
 
-from app.modules.organisations.models import OrganisationMembership
+from app.modules.organisations.models import Organisation, OrganisationMembership
 from app.modules.permissions.models import MembershipRole, Role
 from app.modules.users.models import User
 
@@ -23,10 +23,18 @@ def user_by_workos_id_statement(workos_user_id: str) -> Select[tuple[User]]:
     return select(User).where(User.workos_user_id == workos_user_id)
 
 
-def memberships_for_user_statement(user_id: uuid.UUID) -> Select[tuple[OrganisationMembership]]:
-    """Return a statement selecting a user's organisation memberships, oldest first."""
+def memberships_for_user_statement(
+    user_id: uuid.UUID,
+) -> Select[tuple[OrganisationMembership, str]]:
+    """Return a statement selecting a user's memberships and organisation names.
+
+    The rows are an explicit ``(membership, organisation_name)`` projection
+    joined in one statement, so the /me payload never depends on a lazily
+    loaded relationship being populated on the membership object.
+    """
     return (
-        select(OrganisationMembership)
+        select(OrganisationMembership, Organisation.name)
+        .join(Organisation, Organisation.id == OrganisationMembership.organisation_id)
         .where(OrganisationMembership.user_id == user_id)
         .order_by(OrganisationMembership.created_at)
     )

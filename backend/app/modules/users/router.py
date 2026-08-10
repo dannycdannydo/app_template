@@ -12,9 +12,8 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_current_user, get_db
-from app.modules.organisations.schemas import MembershipListItem
 from app.modules.users.models import User
-from app.modules.users.schemas import MeResponse, UserListItem
+from app.modules.users.schemas import MeMembershipListItem, MeResponse, UserListItem
 from app.modules.users.service import get_me_payload
 
 router = APIRouter(prefix="/api/v1", tags=["users"])
@@ -29,7 +28,17 @@ async def me(
     memberships, roles, platform_roles = await get_me_payload(session, user)
     return MeResponse(
         user=UserListItem.model_validate(user),
-        memberships=[MembershipListItem.model_validate(m) for m in memberships],
+        memberships=[
+            MeMembershipListItem(
+                id=membership.id,
+                organisation_id=membership.organisation_id,
+                organisation_name=organisation_name,
+                user_id=membership.user_id,
+                status=membership.status,
+                created_at=membership.created_at,
+            )
+            for membership, organisation_name in memberships
+        ],
         roles=roles,
         platform_roles=platform_roles,
     )

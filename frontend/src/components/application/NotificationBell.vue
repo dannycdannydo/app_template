@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { BellIcon, CheckIcon, InboxIcon } from '@lucide/vue'
 import { computed, ref } from 'vue'
-import { RouterLink } from 'vue-router'
 
 import { Button } from '@/components/ui/button'
 import {
@@ -15,6 +14,7 @@ import { formatDateTime } from '@/lib/format'
 import { showApiErrorToast } from '@/lib/toast'
 import {
   useMarkNotificationReadMutation,
+  useMarkAllNotificationsReadMutation,
   useNotificationsQuery,
   useUnreadNotificationsCountQuery,
 } from '@/queries/notifications'
@@ -30,11 +30,24 @@ import {
  * touch the HTTP client directly.
  */
 const { data: unreadData } = useUnreadNotificationsCountQuery()
-const { data: listData, isPending } = useNotificationsQuery({ page: 1, pageSize: 5 })
+const { data: listData, isPending } = useNotificationsQuery({ page: 1, pageSize: 100 })
 
-const { mutate: markRead, isPending: markReadPending } = useMarkNotificationReadMutation({
+const markingReadIds = ref<Set<string>>(new Set())
+
+const { mutate: markRead } = useMarkNotificationReadMutation({
   onError: (error) => {
     showApiErrorToast(error, { title: 'Could not mark notification as read' })
+  },
+  onSettled: (notificationId) => {
+    const nextMarkingReadIds = new Set(markingReadIds.value)
+    nextMarkingReadIds.delete(notificationId)
+    markingReadIds.value = nextMarkingReadIds
+  },
+})
+
+const { mutate: markAllRead, isPending: markAllReadPending } = useMarkAllNotificationsReadMutation({
+  onError: (error) => {
+    showApiErrorToast(error, { title: 'Could not mark notifications as read' })
   },
 })
 
@@ -47,8 +60,18 @@ const recentNotifications = computed(() => listData.value?.items ?? [])
 const hasUnread = computed(() => unreadCount.value > 0)
 
 function handleMarkRead(notificationId: string): void {
-  if (markReadPending.value) return
+  if (markingReadIds.value.has(notificationId)) return
+  markingReadIds.value = new Set(markingReadIds.value).add(notificationId)
   markRead(notificationId)
+}
+
+function isMarkingRead(notificationId: string): boolean {
+  return markingReadIds.value.has(notificationId)
+}
+
+function handleMarkAllRead(): void {
+  if (markAllReadPending.value) return
+  markAllRead()
 }
 </script>
 
@@ -77,14 +100,17 @@ function handleMarkRead(notificationId: string): void {
       <DropdownMenuLabel class="font-normal">
         <div class="flex items-center justify-between">
           <span class="text-foreground text-sm font-medium">Notifications</span>
-          <RouterLink
-            to="/notifications"
-            class="text-muted-foreground hover:text-foreground text-xs underline-offset-2 hover:underline"
-            data-testid="notification-bell-view-all"
-            @click="open = false"
+          <Button
+            v-if="hasUnread"
+            variant="ghost"
+            size="sm"
+            class="text-muted-foreground hover:text-foreground h-auto px-1 text-xs"
+            :disabled="markAllReadPending"
+            data-testid="notification-bell-mark-all-read"
+            @click="handleMarkAllRead"
           >
-            View all
-          </RouterLink>
+            Mark all as read
+          </Button>
         </div>
       </DropdownMenuLabel>
       <DropdownMenuSeparator />
@@ -100,7 +126,7 @@ function handleMarkRead(notificationId: string): void {
         <InboxIcon class="size-6" aria-hidden="true" />
         <span>No notifications yet.</span>
       </div>
-      <template v-else>
+      <div v-else class="max-h-96 overflow-y-auto" data-testid="notification-bell-list">
         <div
           v-for="notification in recentNotifications"
           :key="notification.id"
@@ -122,7 +148,7 @@ function handleMarkRead(notificationId: string): void {
               size="icon-sm"
               class="text-muted-foreground shrink-0"
               :aria-label="`Mark ${notification.title} as read`"
-              :disabled="markReadPending"
+              :disabled="isMarkingRead(notification.id) || markAllReadPending"
               :data-testid="`notification-bell-mark-read-${notification.id}`"
               @click="handleMarkRead(notification.id)"
             >
@@ -134,7 +160,7 @@ function handleMarkRead(notificationId: string): void {
             {{ formatDateTime(notification.created_at) }}
           </span>
         </div>
-      </template>
+      </div>
     </DropdownMenuContent>
   </DropdownMenu>
 </template>

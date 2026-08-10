@@ -127,6 +127,7 @@ export function useUnreadNotificationsCountQuery() {
 export function useMarkNotificationReadMutation(options?: {
   onSuccess?: (notification: NotificationListItem) => void
   onError?: (error: unknown) => void
+  onSettled?: (notificationId: string) => void
 }) {
   const queryClient = useQueryClient()
   const organisation = useOrganisationStore()
@@ -152,6 +153,47 @@ export function useMarkNotificationReadMutation(options?: {
         queryKey: notificationsQueryKeys.unreadCount(result.organisationId),
       })
       options?.onSuccess?.(result.notification)
+    },
+    onError: (error) => {
+      options?.onError?.(error)
+    },
+    onSettled: (_data, _error, notificationId) => {
+      options?.onSettled?.(notificationId)
+    },
+  })
+}
+
+/**
+ * Mark every unread notification for the selected organisation as read.
+ *
+ * The server scopes the bulk update to the authenticated recipient as well as
+ * the selected organisation. Success invalidates both notification lists and
+ * the unread badge, matching the single-notification mutation.
+ */
+export function useMarkAllNotificationsReadMutation(options?: {
+  onError?: (error: unknown) => void
+}) {
+  const queryClient = useQueryClient()
+  const organisation = useOrganisationStore()
+
+  return useMutation({
+    mutationFn: async () => {
+      const organisationId = organisation.selectedOrganisationId
+      if (!organisationId) {
+        throw new Error('Cannot mark notifications read without a selected organisation')
+      }
+      const { data, error } = await client.PATCH('/api/v1/notifications/read-all')
+      if (error) throw error
+      if (!data) throw new Error('Empty mark-all-read response')
+      return { organisationId, markedCount: data.marked_count }
+    },
+    onSuccess: (result) => {
+      void queryClient.invalidateQueries({
+        queryKey: notificationsQueryKeys.lists(result.organisationId),
+      })
+      void queryClient.invalidateQueries({
+        queryKey: notificationsQueryKeys.unreadCount(result.organisationId),
+      })
     },
     onError: (error) => {
       options?.onError?.(error)

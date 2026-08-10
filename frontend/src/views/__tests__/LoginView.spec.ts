@@ -33,10 +33,10 @@ describe('LoginView', () => {
     startLoginMock.mockResolvedValue(undefined)
   })
 
-  it('renders a WorkOS entry point and never collects identity fields', async () => {
+  it('renders a simple login entry point and never collects identity fields', async () => {
     const { wrapper } = await mountLogin()
 
-    expect(wrapper.text()).toContain('Continue with WorkOS')
+    expect(wrapper.find('[data-testid="login-button"]').text()).toBe('Login')
     expect(wrapper.findAll('input')).toHaveLength(0)
     expect(wrapper.find('input[type="email"]').exists()).toBe(false)
     expect(wrapper.find('input[type="password"]').exists()).toBe(false)
@@ -45,7 +45,7 @@ describe('LoginView', () => {
   it('starts the WorkOS flow when the button is clicked', async () => {
     const { wrapper } = await mountLogin()
 
-    await wrapper.find('button').trigger('click')
+    await wrapper.find('[data-testid="login-button"]').trigger('click')
 
     expect(startLoginMock).toHaveBeenCalledOnce()
   })
@@ -54,7 +54,7 @@ describe('LoginView', () => {
     startLoginMock.mockRejectedValueOnce(new Error('VITE_WORKOS_CLIENT_ID is not configured.'))
     const { wrapper } = await mountLogin()
 
-    await wrapper.find('button').trigger('click')
+    await wrapper.find('[data-testid="login-button"]').trigger('click')
     await flushPromises()
 
     const error = wrapper.find('[data-testid="login-error"]')

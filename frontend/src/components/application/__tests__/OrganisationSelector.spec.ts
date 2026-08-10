@@ -32,6 +32,7 @@ function meWithMemberships(ids: string[]): MeResponse {
     memberships: ids.map((organisation_id, index) => ({
       id: `m${index}`,
       organisation_id,
+      organisation_name: `Organisation ${String.fromCharCode(65 + index)}`,
       user_id: 'u1',
       status: 'active',
       created_at: '2026-01-01T00:00:00Z',
@@ -80,9 +81,7 @@ describe('OrganisationSelector', () => {
 
     const organisation = useOrganisationStore()
     expect(organisation.selectedOrganisationId).toBe(ORG_A)
-    expect(wrapper.find('[data-testid="org-selector-trigger"]').text()).toContain(
-      'Organisation aaaaaaaa',
-    )
+    expect(wrapper.find('[data-testid="org-selector-trigger"]').text()).toContain('Organisation A')
   })
 
   it('keeps a persisted selection that is still a membership', async () => {
@@ -92,9 +91,7 @@ describe('OrganisationSelector', () => {
 
     const organisation = useOrganisationStore()
     expect(organisation.selectedOrganisationId).toBe(ORG_B)
-    expect(wrapper.find('[data-testid="org-selector-trigger"]').text()).toContain(
-      'Organisation bbbbbbbb',
-    )
+    expect(wrapper.find('[data-testid="org-selector-trigger"]').text()).toContain('Organisation B')
   })
 
   it('replaces a persisted selection that is no longer a membership', async () => {
@@ -117,8 +114,8 @@ describe('OrganisationSelector', () => {
 
     const options = document.querySelectorAll('[data-testid="org-selector-option"]')
     expect(options).toHaveLength(2)
-    expect(options[0]!.textContent).toContain('Organisation aaaaaaaa')
-    expect(options[1]!.textContent).toContain('Organisation bbbbbbbb')
+    expect(options[0]!.textContent).toContain('Organisation A')
+    expect(options[1]!.textContent).toContain('Organisation B')
 
     ;(options[1] as HTMLElement).click()
     await flushPromises()
@@ -126,9 +123,7 @@ describe('OrganisationSelector', () => {
     const organisation = useOrganisationStore()
     expect(organisation.selectedOrganisationId).toBe(ORG_B)
     expect(localStorage.getItem('app-template:selected-organisation')).toBe(ORG_B)
-    expect(wrapper.find('[data-testid="org-selector-trigger"]').text()).toContain(
-      'Organisation bbbbbbbb',
-    )
+    expect(wrapper.find('[data-testid="org-selector-trigger"]').text()).toContain('Organisation B')
   })
 
   it('shows an empty state when the user has no memberships', async () => {

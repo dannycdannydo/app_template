@@ -18,10 +18,14 @@ const mockUseNotificationsQuery = vi.hoisted(() => vi.fn<(params: unknown) => un
 const mockUseMarkNotificationReadMutation = vi.hoisted(() =>
   vi.fn<(options?: unknown) => unknown>(),
 )
+const mockUseMarkAllNotificationsReadMutation = vi.hoisted(() =>
+  vi.fn<(options?: unknown) => unknown>(),
+)
 vi.mock('@/queries/notifications', () => ({
   useUnreadNotificationsCountQuery: mockUseUnreadNotificationsCountQuery,
   useNotificationsQuery: mockUseNotificationsQuery,
   useMarkNotificationReadMutation: mockUseMarkNotificationReadMutation,
+  useMarkAllNotificationsReadMutation: mockUseMarkAllNotificationsReadMutation,
 }))
 
 import AppShellLayout from '@/layouts/AppShellLayout.vue'
@@ -43,6 +47,7 @@ const me: MeResponse = {
     {
       id: 'm1',
       organisation_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      organisation_name: 'Example Organisation',
       user_id: 'u1',
       status: 'active',
       created_at: '2026-01-01T00:00:00Z',
@@ -77,6 +82,10 @@ async function mountShell(): Promise<{ wrapper: VueWrapper; router: Router }> {
     mutate: vi.fn<(id: string) => void>(),
     isPending: ref(false),
   })
+  mockUseMarkAllNotificationsReadMutation.mockReturnValue({
+    mutate: vi.fn<() => void>(),
+    isPending: ref(false),
+  })
   const wrapper = mount(
     { template: '<RouterView />' },
     { global: { plugins: [createPinia(), router] } },
@@ -92,6 +101,7 @@ describe('AppShellLayout', () => {
     mockUseUnreadNotificationsCountQuery.mockReset()
     mockUseNotificationsQuery.mockReset()
     mockUseMarkNotificationReadMutation.mockReset()
+    mockUseMarkAllNotificationsReadMutation.mockReset()
   })
 
   afterEach(() => {

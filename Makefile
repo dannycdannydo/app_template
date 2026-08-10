@@ -39,10 +39,7 @@ dev:
 	$(COMPOSE_CMD) up -d --wait postgres redis minio mailhog
 	$(MAKE) migrate
 	@echo "API on http://localhost:8000 (live reload), worker native, frontend on http://localhost:5173, MinIO console on http://localhost:9001, Mailhog UI on http://localhost:8025. Ctrl-C stops the apps; Postgres/Redis/MinIO/Mailhog stay up."
-	@$(load_env) (cd backend && uv run uvicorn app.main:app --reload --port 8000) & \
-	(cd backend && uv run dramatiq app.workers --threads $${WORKER_CONCURRENCY:-8}) & \
-	(cd frontend && pnpm dev) & \
-	wait
+	@$(load_env) exec bash scripts/dev.sh
 
 ## Build and run the entire stack in containers (CI parity, onboarding,
 ## Dockerfile validation). Ctrl-C stops all services.
@@ -54,9 +51,10 @@ migrate:
 	@$(load_env) cd backend && uv run alembic upgrade head
 
 ## Run the Dramatiq worker natively (blueprint §36, ADR-0004, Scope §6.2).
-## Concurrency comes from WORKER_CONCURRENCY in the repo-root .env (default 8).
+## One local worker process runs WORKER_CONCURRENCY threads (default 8). Its
+## ten-second shutdown timeout keeps Ctrl-C responsive during development.
 worker:
-	@$(load_env) cd backend && uv run dramatiq app.workers --threads $${WORKER_CONCURRENCY:-8}
+	@$(load_env) cd backend && uv run dramatiq app.workers --processes 1 --threads $${WORKER_CONCURRENCY:-8} --worker-shutdown-timeout 10000
 
 ## Create the bootstrap platform admin in WorkOS (email + password; idempotent).
 ## Reads BOOTSTRAP_PLATFORM_ADMIN_EMAIL / BOOTSTRAP_PLATFORM_ADMIN_PASSWORD from

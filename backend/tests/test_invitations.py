@@ -464,7 +464,7 @@ async def test_full_invite_accept_journey_creates_membership_and_audits() -> Non
     membership = make_membership(invitee, organisation.id)
     state.lookup_queue = [invitee, member_role, None]  # user, role, no membership
     # /me payload: memberships, org role codes, platform role codes
-    state.scalars_queue = [[membership], ["member"], []]
+    state.scalars_queue = [[(membership, organisation.name)], ["member"], []]
     async with context_client(app) as client:
         response = await _me(client, make_token(private_key, sub=invitee.workos_user_id))
 
@@ -505,7 +505,7 @@ async def test_repeat_login_after_acceptance_links_nothing() -> None:
     app = build_context_app(private_key=private_key, state=state)
     # user; the linking pass finds the invitation already accepted and skips it
     state.lookup_queue = [invitee]
-    state.scalars_queue = [[membership], ["member"], []]
+    state.scalars_queue = [[(membership, organisation.name)], ["member"], []]
 
     async with context_client(app) as client:
         response = await _me(client, make_token(private_key, sub=invitee.workos_user_id))
@@ -631,7 +631,7 @@ async def test_existing_membership_accepts_without_mutating_it() -> None:
     app = build_context_app(private_key=private_key, state=state)
     # user, role (resolved), the already-existing membership
     state.lookup_queue = [invitee, make_role("member", "Member"), existing]
-    state.scalars_queue = [[existing], ["owner"], []]
+    state.scalars_queue = [[(existing, organisation.name)], ["owner"], []]
 
     async with context_client(app) as client:
         response = await _me(client, make_token(private_key, sub=invitee.workos_user_id))

@@ -137,6 +137,8 @@ services:
       [
         "dramatiq",
         "app.workers",
+        "--processes",
+        "1",
         "--threads",
         "${WORKER_CONCURRENCY:-8}",
       ]

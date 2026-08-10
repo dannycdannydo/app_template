@@ -1,4 +1,4 @@
-"""Dramatiq worker entrypoint (blueprint §18, ADR-0004, Scope §6.2/§6.4).
+"""Dramatiq worker entrypoint (blueprint §18, ADR-0004, v0.5 Scope §6.2/§6.4).
 
 ``uv run dramatiq app.workers`` starts the worker process: this module
 configures the Redis broker, installs it as the process-wide Dramatiq broker,
@@ -6,9 +6,9 @@ and configures the same structured logging the API uses, so worker logs and
 request logs are shaped identically (blueprint §28 logging context — the
 worker's tasks add ``job_id`` to that context).
 
-Scope §6.4 adds the two things the durable-job foundation needs here:
+v0.5 Scope §6.4 adds the two things the durable-job foundation needs here:
 
-- the :func:`worker_middleware` stack: the dramatiq defaults (retries, time
+- the shared ``app.broker`` factory: the Dramatiq defaults (retries, time
   limits, callbacks, pipelines, shutdown notifications, age limits) plus
   ``AsyncIO``, which manages the event-loop thread the async tasks run on
   (it is deliberately absent from the dramatiq defaults). Tests build their
@@ -16,7 +16,7 @@ Scope §6.4 adds the two things the durable-job foundation needs here:
   drift apart.
 - the task-module import in :func:`configure_worker`: importing task modules
   is what registers their actors with the broker. The first task modules
-  arrive with the job infrastructure and the file-processing job (Scope
+  arrive with the job infrastructure and the file-processing job (v0.5 Scope
   §6.4/§6.5).
 
 Worker concurrency is passed by the ``make worker`` / ``dev-docker`` commands
@@ -27,40 +27,12 @@ so the CLI flag stays the single knob and this module never needs it.
 from __future__ import annotations
 
 import dramatiq
-from dramatiq.brokers.redis import RedisBroker
-from dramatiq.middleware import AsyncIO, Middleware, default_middleware
 
+from app.broker import build_broker
 from app.core.config import get_settings
 from app.core.logging import configure_logging
-from app.observability.sentry import SentryWorkerMiddleware
 
 _settings = get_settings()
-
-type MiddlewareStack = list[Middleware]
-
-
-def worker_middleware() -> MiddlewareStack:
-    """Return the middleware stack every worker broker must use.
-
-    The dramatiq defaults handle retries (with per-actor options from
-    ``jobs_service.retry_policy``), time limits, callbacks and pipelines;
-    ``AsyncIO`` runs the async tasks on a managed event-loop thread and is
-    added here because it is not part of the dramatiq default list.
-    ``SentryWorkerMiddleware`` captures unhandled task exceptions (a no-op
-    when no DSN is configured). Passing a full stack to the broker
-    constructor is required — a custom list replaces the defaults rather than
-    extending them.
-    """
-    return [
-        AsyncIO(),
-        SentryWorkerMiddleware(),
-        *(middleware() for middleware in default_middleware),
-    ]
-
-
-def build_broker() -> RedisBroker:
-    """Return the Redis broker configured for the worker process."""
-    return RedisBroker(url=_settings.redis_url, middleware=worker_middleware())
 
 
 def configure_worker() -> None:
