@@ -98,7 +98,7 @@ To tear the test admin down again (e.g. to provision a different one and re-test
 
 | Command | What it does |
 | --- | --- |
-| `make dev` | Start Postgres, Redis, MinIO, API, Dramatiq worker, and frontend |
+| `make dev` | Start Postgres, Redis, MinIO, Mailhog, API, Dramatiq worker, and frontend |
 | `make dev-docker` | Entire stack in containers (CI parity, onboarding) |
 | `make worker` | Run the Dramatiq worker natively (`uv run dramatiq app.workers`) |
 | `make migrate` | Run Alembic migrations |
@@ -120,6 +120,12 @@ v0.5 adds provider-neutral object storage with signed uploads and a durable Dram
 - see all of the organisation's files in a table (status badge, size, uploaded-at, actions) and delete or download them (download is another short-lived signed URL).
 
 Files and jobs are org-scoped like every other resource and gated by the existing `documents.read` / `documents.upload` / `documents.delete` permissions (ADR-0014). Everything runs with the `.env.example` defaults: MinIO at `http://localhost:9000` with the `minioadmin` dev credentials and bucket `app-files`. For the raw API, see `API_CONVENTIONS.md` → Files and jobs, or the `/docs` page.
+
+## Notifications and observability (v0.6)
+
+v0.6 closes the operations story (ADR-0015, ADR-0016). From the notification bell in the header (unread badge, recent notifications, mark-read) or the `/notifications` page (sidebar entry) an organisation member can see their in-app notifications; holders of `notifications.manage` (owner/administrator/manager) can send a test notification from the page. A test send creates an in-app notification and delivers an email through the Dramatiq worker — email is always sent from worker tasks, never from an HTTP handler. Locally, `make dev` starts **Mailhog** (web UI at `http://localhost:8025`), which catches every outbound message on port 1025; in production, the SMTP adapter (standard library, `EMAIL_PROVIDER=smtp`) targets any transactional provider's SMTP relay.
+
+Observability completes blueprint §28: every JSON log line carries `request_id` (plus `user_id`/`organisation_id` on authenticated requests and `job_id`/`resource_id` in the worker), Sentry captures unhandled request and worker errors when `SENTRY_DSN` is set, and `GET /metrics` serves Prometheus metrics (request + job counters). Deployment, scaling, monitoring and alerts: `docs/operations.md`.
 
 ## Platform Admin Centre
 

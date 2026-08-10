@@ -12,6 +12,11 @@ dependencies = [
     "pydantic>=2.0.0",
     "pydantic-settings>=2.14.2",
     "pyjwt>=2.10.0",
+    # v0.6 observability (Scope §6.1, blueprint §28): Prometheus text-format
+    # metrics on GET /metrics; sentry-sdk for error tracking, initialised only
+    # when SENTRY_DSN is set. Both are pinned by uv.lock and justified in
+    # ADR-0015 (dependency additions; the edge rate-limit module
+    # caddy-ratelimit v0.1.0 is pinned separately in deploy/caddy/Dockerfile).
     "prometheus-client>=0.20.0",
     "redis==6.4.0",
     "sentry-sdk>=2.0.0",

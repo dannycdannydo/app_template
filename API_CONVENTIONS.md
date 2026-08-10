@@ -120,6 +120,9 @@ Services raise domain exceptions; central FastAPI exception handlers translate t
 
 - Every request carries a `request_id`, generated at the edge and propagated through logs and error responses.
 - Structured JSON logging is used; see `ARCHITECTURE.md` and the blueprint §28.
+- Authenticated `/api/v1` requests additionally bind `user_id` and `organisation_id` to every log line (cleared per request); worker tasks bind `job_id` and `resource_id`; every line carries a consistent `event` name.
+- The BP §28 never-log list (passwords, tokens, authorisation headers, signed URLs, full connection strings) is enforced by test.
+- `GET /metrics` is public (like `/health` and `/ready`) and returns Prometheus text format — request counters/latency histograms plus job counters (enqueued/succeeded/failed).
 
 ## Response schemas
 
@@ -199,3 +202,16 @@ Jobs are durable records the client polls while background work runs; the file-p
 | `GET /api/v1/jobs/{job_id}` | `documents.read` | Job detail: status + progress (0–100) | cross-org id → `404`; terminal states never re-run |
 
 Job statuses: `queued`, `running`, `succeeded`, `failed`, `cancelled`.
+
+## Notifications (v0.6)
+
+Notifications are org-scoped resources under `/api/v1` (ADR-0016, blueprint §20), gated by the `notifications.read` / `notifications.manage` permission codes added to the catalogue in v0.6 (owner/administrator/manager: both; member: `read`; viewer: none — default-deny). All four routes are in the security suite's `PROTECTED_ROUTES` table.
+
+| Method & path | Permission | Purpose | Notes |
+| --- | --- | --- | --- |
+| `GET /api/v1/notifications` | `notifications.read` | Paginated list of the **caller's own** notifications in the caller's organisation; standard envelope plus `unread_count`; optional `type` filter | `?page=1&page_size=50&type=file.ready` |
+| `GET /api/v1/notifications/unread-count` | `notifications.read` | The caller's unread count (feeds the bell badge; poll-friendly) | |
+| `PATCH /api/v1/notifications/{notification_id}/read` | `notifications.read` | Marks the notification read (`read_at`); idempotent | foreign or other-user id → `404` |
+| `POST /api/v1/notifications/test` | `notifications.manage` | Creates an in-app notification for the caller and enqueues the email delivery job — the demonstrable "send a test notification" | `201`; audited |
+
+Notification types: `file.ready`, `file.failed`, `notification.test_sent`. Deliveries run as durable jobs (`job_type="notification.email"`) — email is never sent from an HTTP handler. The unread count is also carried in the list envelope, so the bell can use either the count endpoint or the list response.
