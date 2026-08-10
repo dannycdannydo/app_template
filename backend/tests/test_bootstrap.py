@@ -31,13 +31,17 @@ from tests.context_helpers import (
     FakeSession,
     build_context_app,
     context_client,
+    make_membership,
+    make_organisation,
+    make_owner_role,
     make_platform_admin_role,
     make_user,
 )
 
 from app.core.security import UserProfile
 from app.db.base import Base
-from app.modules.audit.service import ACTION_PLATFORM_BOOTSTRAP_GRANTED
+from app.modules.audit.service import ACTION_ORGANISATION_CREATED, ACTION_PLATFORM_BOOTSTRAP_GRANTED
+from app.modules.organisations.models import MembershipStatus
 from app.modules.permissions.constants import PLATFORM_ADMIN_ROLE_CODE
 from app.modules.platform_admin import service
 from app.modules.platform_admin.models import (
@@ -49,12 +53,19 @@ from app.modules.platform_admin.models import (
 BOOTSTRAP_EMAIL = "admin@example.com"
 
 
-def _configured_email(monkeypatch: pytest.MonkeyPatch, email: str) -> None:
-    """Point the service's settings accessor at a bootstrap email."""
+def _configured_email(
+    monkeypatch: pytest.MonkeyPatch,
+    email: str,
+    org: str = "",
+) -> None:
+    """Point the service's settings accessor at a bootstrap email (and org)."""
     monkeypatch.setattr(
         service,
         "get_settings",
-        lambda: SimpleNamespace(bootstrap_platform_admin_email=email),
+        lambda: SimpleNamespace(
+            bootstrap_platform_admin_email=email,
+            bootstrap_platform_admin_org=org,
+        ),
     )
 
 
@@ -303,6 +314,129 @@ async def test_missing_platform_role_surfaces_as_503(
     assert excinfo.value.code == "platform_bootstrap_failed"
     assert state.platform_memberships == []
     assert state.bootstrap_states == []
+
+
+# --- Bootstrap organisation provisioning (BOOTSTRAP_PLATFORM_ADMIN_ORG) ---
+
+
+async def test_bootstrap_grant_also_creates_configured_organisation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The grant provisions the admin's tenant: org + owner membership atomically."""
+    _configured_email(monkeypatch, BOOTSTRAP_EMAIL, org="Trakr")
+    state = ContextState()
+    state.profile = UserProfile(email=BOOTSTRAP_EMAIL, name="Ada Lovelace", email_verified=True)
+    private_key, _ = generate_key_pair()
+    app = build_context_app(private_key=private_key, state=state)
+    # user miss -> provision; bootstrap miss; platform role; org miss; owner role
+    state.lookup_queue = [
+        None,
+        None,
+        make_platform_admin_role(),
+        None,
+        make_owner_role(),
+    ]
+    state.scalars_queue = [[], [], ["platform_admin"]]
+
+    async with context_client(app) as client:
+        response = await _get_me(client, make_token(private_key))
+
+    assert response.status_code == 200
+    assert response.json()["platform_roles"] == ["platform_admin"]
+    assert len(state.organisations) == 1
+    assert state.organisations[0].name == "Trakr"
+    assert len(state.memberships) == 1
+    assert state.memberships[0].organisation_id == state.organisations[0].id
+    assert state.memberships[0].status == MembershipStatus.ACTIVE
+    provisioned_user = next(iter(state.users.values()))
+    assert state.memberships[0].user_id == provisioned_user.id
+    assert len(state.membership_roles) == 1
+    assert state.membership_roles[0].membership_id == state.memberships[0].id
+    actions = [event.action for event in state.audit_events]
+    assert ACTION_ORGANISATION_CREATED in actions
+    assert ACTION_PLATFORM_BOOTSTRAP_GRANTED in actions
+
+
+async def test_bootstrap_grant_reuses_an_existing_organisation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An organisation with the configured name is reused, never duplicated."""
+    _configured_email(monkeypatch, BOOTSTRAP_EMAIL, org="Trakr")
+    state = ContextState()
+    state.profile = UserProfile(email=BOOTSTRAP_EMAIL, name="Ada", email_verified=True)
+    org = make_organisation(name="Trakr")
+    state.organisations = [org]
+    session: AsyncSession = cast(AsyncSession, FakeSession(state))
+    user = make_user(workos_user_id="user_bootstrap_existing_org")
+    # bootstrap miss; platform role; org found; membership miss; owner role
+    state.lookup_queue = [
+        None,
+        make_platform_admin_role(),
+        org,
+        None,
+        make_owner_role(),
+    ]
+
+    membership = await service.maybe_grant_bootstrap_platform_admin(
+        session, user, FakeProfileClient(state)
+    )
+
+    assert membership is not None
+    assert state.organisations == [org]  # reused, not duplicated
+    assert len(state.memberships) == 1
+    assert state.memberships[0].organisation_id == org.id
+    assert len(state.membership_roles) == 1
+    actions = [event.action for event in state.audit_events]
+    assert ACTION_ORGANISATION_CREATED not in actions
+    assert ACTION_PLATFORM_BOOTSTRAP_GRANTED in actions
+
+
+async def test_bootstrap_grant_skips_an_existing_membership(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A user already in the organisation is left untouched (idempotent)."""
+    _configured_email(monkeypatch, BOOTSTRAP_EMAIL, org="Trakr")
+    state = ContextState()
+    state.profile = UserProfile(email=BOOTSTRAP_EMAIL, name="Ada", email_verified=True)
+    user = make_user(workos_user_id="user_bootstrap_member")
+    org = make_organisation(name="Trakr")
+    state.organisations = [org]
+    existing = make_membership(user, org.id)
+    state.memberships = [existing]
+    session: AsyncSession = cast(AsyncSession, FakeSession(state))
+    # bootstrap miss; platform role; org found; membership found -> no-op
+    state.lookup_queue = [None, make_platform_admin_role(), org, existing]
+
+    membership = await service.maybe_grant_bootstrap_platform_admin(
+        session, user, FakeProfileClient(state)
+    )
+
+    assert membership is not None
+    assert state.memberships == [existing]
+    assert state.membership_roles == []
+    actions = [event.action for event in state.audit_events]
+    assert ACTION_ORGANISATION_CREATED not in actions
+    assert ACTION_PLATFORM_BOOTSTRAP_GRANTED in actions
+
+
+async def test_bootstrap_grant_without_owner_role_surfaces_as_503(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing owner-role seed fails loudly, before any organisation row."""
+    _configured_email(monkeypatch, BOOTSTRAP_EMAIL, org="Trakr")
+    state = ContextState()
+    state.profile = UserProfile(email=BOOTSTRAP_EMAIL, name="Ada", email_verified=True)
+    session: AsyncSession = cast(AsyncSession, FakeSession(state))
+    user = make_user(workos_user_id="user_bootstrap_owner_missing")
+    # bootstrap miss; platform role; org miss; owner role miss
+    state.lookup_queue = [None, make_platform_admin_role(), None, None]
+
+    with pytest.raises(service.ServiceUnavailableError) as excinfo:
+        await service.maybe_grant_bootstrap_platform_admin(session, user, FakeProfileClient(state))
+
+    assert excinfo.value.code == "platform_bootstrap_failed"
+    assert state.organisations == []
+    assert state.memberships == []
 
 
 def test_bootstrap_granted_action_is_stable() -> None:

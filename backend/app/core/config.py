@@ -78,6 +78,15 @@ class Settings(BaseSettings):
             "shared with the frontend"
         ),
     )
+    bootstrap_platform_admin_org: str = Field(
+        default="",
+        description=(
+            "Name of the organisation the one-time platform bootstrap also creates "
+            "and makes the bootstrap admin an owner of, so the default admin is never "
+            "left without an organisation (org-scoped screens otherwise have no "
+            "tenant to act within). Empty disables org creation (Scope §6.4)"
+        ),
+    )
     workos_webhook_secret: str = Field(
         default="",
         description=(

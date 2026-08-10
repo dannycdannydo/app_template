@@ -183,7 +183,7 @@ services:
       SMTP_USE_TLS: ${SMTP_USE_TLS:-false}
       WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-8}
     command: >
-      sh -c "dramatiq app.workers --threads $${WORKER_CONCURRENCY:-8}"
+      sh -c "dramatiq app.workers --processes 1 --threads $${WORKER_CONCURRENCY:-8} --worker-shutdown-timeout 10000"
 
   frontend:
     profiles: ["fullstack"]

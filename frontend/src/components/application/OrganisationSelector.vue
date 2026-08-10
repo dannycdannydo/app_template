@@ -24,8 +24,6 @@ import { useOrganisationStore } from '@/stores/organisation'
  * by the client middleware on every subsequent request (blueprint §14 client-
  * state boundary).
  *
- * The backend `/me` payload carries only membership ids, not organisation
- * names (v0.2 contract), so entries are labelled with a short form of the id.
  * If the persisted selection is no longer among the memberships (revoked,
  * removed, fresh account) the first active membership is selected instead.
  */
@@ -66,11 +64,6 @@ function selectOrganisation(value: unknown): void {
     organisation.setSelectedOrganisation(id)
   }
 }
-
-/** Short, stable label for a membership whose organisation name is not in `/me`. */
-function formatOrganisationLabel(organisationId: string): string {
-  return `Organisation ${organisationId.slice(0, 8)}`
-}
 </script>
 
 <template>
@@ -87,7 +80,7 @@ function formatOrganisationLabel(organisationId: string): string {
           <template v-if="isPending">Loading…</template>
           <template v-else-if="isError">Unavailable</template>
           <template v-else-if="current">
-            {{ formatOrganisationLabel(current.organisation_id) }}
+            {{ current.organisation_name }}
           </template>
           <template v-else>No organisation</template>
         </span>
@@ -108,7 +101,7 @@ function formatOrganisationLabel(organisationId: string): string {
           :value="membership.organisation_id"
           data-testid="org-selector-option"
         >
-          {{ formatOrganisationLabel(membership.organisation_id) }}
+          {{ membership.organisation_name }}
         </DropdownMenuRadioItem>
       </DropdownMenuRadioGroup>
     </DropdownMenuContent>

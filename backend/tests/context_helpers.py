@@ -430,6 +430,13 @@ class FakeSession:
         return None
 
     async def scalars(self, statement: object) -> _ScalarsResult:
+        return await self.execute(statement)
+
+    async def execute(self, statement: object) -> _ScalarsResult:
+        # The /me memberships projection runs through ``execute`` (it selects
+        # ``(membership, organisation_name)`` rows, which ``scalars`` would
+        # unwrap to the first column only); the same row-answer logic serves
+        # both so the queue order and entity fallbacks stay identical.
         self._state.scalars_calls += 1
         # The invitation queries (pending-at-login and the platform listing)
         # answer from the staged invitations before the scalars_queue: the

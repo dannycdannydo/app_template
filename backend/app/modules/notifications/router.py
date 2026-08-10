@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.dependencies import get_current_user, get_db, require_permission
 from app.modules.notifications import service
 from app.modules.notifications.schemas import (
+    MarkAllReadResponse,
     NotificationListItem,
     NotificationListResponse,
     UnreadCountResponse,
@@ -103,6 +104,22 @@ async def mark_read_endpoint(
         notification_id=notification_id,
     )
     return NotificationListItem.model_validate(notification)
+
+
+@router.patch("/notifications/read-all", response_model=MarkAllReadResponse)
+async def mark_all_read_endpoint(
+    session: Annotated[AsyncSession, Depends(get_db)],
+    membership: Annotated[
+        OrganisationMembership, Depends(require_permission("notifications.read"))
+    ],
+) -> MarkAllReadResponse:
+    """Mark every unread notification belonging to the caller as read."""
+    marked_count = await service.mark_all_read(
+        session,
+        organisation_id=membership.organisation_id,
+        user_id=membership.user_id,
+    )
+    return MarkAllReadResponse(marked_count=marked_count)
 
 
 @router.post("/notifications/test", response_model=NotificationListItem, status_code=201)

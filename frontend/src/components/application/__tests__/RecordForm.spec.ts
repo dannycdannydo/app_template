@@ -215,4 +215,16 @@ describe('RecordForm (v0.3 Scope §6.6 standard form + toast)', () => {
     expect(formEmits(wrapper, 'cancel')).toBeDefined()
     expect(postMock).not.toHaveBeenCalled()
   })
+
+  it('navigates to the list route on cancel when a list route is given', async () => {
+    const wrapper = mountForm({ listRouteName: 'records' })
+
+    const cancelButton = wrapper.findAll('button').find((b) => b.text().includes('Cancel'))
+    expect(cancelButton).toBeDefined()
+    await cancelButton!.trigger('click')
+
+    expect(formEmits(wrapper, 'cancel')).toBeDefined()
+    expect(postMock).not.toHaveBeenCalled()
+    await vi.waitFor(() => expect(router.currentRoute.value.name).toBe('records'))
+  })
 })

@@ -42,6 +42,7 @@ function me(roles: string[]): MeResponse {
       {
         id: 'm1',
         organisation_id: ORG_ID,
+        organisation_name: 'Example Organisation',
         user_id: 'u1',
         status: 'active',
         created_at: '2026-01-01T00:00:00Z',

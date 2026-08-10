@@ -121,8 +121,8 @@ async def test_memberships_for_user_statement_orders_oldest_first(migrated_datab
             session.add_all([first, second])
             await session.commit()
 
-            memberships = (await session.scalars(memberships_for_user_statement(user.id))).all()
-            assert [m.id for m in memberships] == [first.id, second.id]
+            memberships = (await session.execute(memberships_for_user_statement(user.id))).all()
+            assert [membership.id for membership, _name in memberships] == [first.id, second.id]
     finally:
         await engine.dispose()
 

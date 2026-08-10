@@ -128,6 +128,12 @@ def test_bootstrap_email_defaults_to_disabled() -> None:
     assert settings.bootstrap_platform_admin_email == ""
 
 
+def test_bootstrap_org_defaults_to_disabled() -> None:
+    """Unset BOOTSTRAP_PLATFORM_ADMIN_ORG means the grant skips org creation."""
+    settings = Settings(app_env="development", database_url="postgresql+asyncpg://x")
+    assert settings.bootstrap_platform_admin_org == ""
+
+
 def test_bootstrap_email_is_normalised() -> None:
     """Scope §6.4: whitespace and case are folded so the login match is stable."""
     settings = Settings(

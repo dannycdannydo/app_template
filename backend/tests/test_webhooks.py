@@ -476,7 +476,7 @@ async def test_login_without_any_webhook_delivery_still_links(
     # user; the linking pass resolves the role, finds no membership, grants it
     state.lookup_queue = [invitee, member_role, None]
     # /me payload: memberships, org role codes, platform role codes
-    state.scalars_queue = [[membership], ["member"], []]
+    state.scalars_queue = [[(membership, organisation.name)], ["member"], []]
     private_key, _ = generate_key_pair()
     app = build_context_app(private_key=private_key, state=state)
 

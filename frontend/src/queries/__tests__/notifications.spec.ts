@@ -17,6 +17,7 @@ import { client } from '@/api/client'
 import type { components } from '@/api/generated/openapi'
 import {
   notificationsQueryKeys,
+  useMarkAllNotificationsReadMutation,
   useMarkNotificationReadMutation,
   useNotificationsQuery,
   useSendTestNotificationMutation,
@@ -68,6 +69,7 @@ let captured!: {
   list: ReturnType<typeof useNotificationsQuery>
   unread: ReturnType<typeof useUnreadNotificationsCountQuery>
   markRead: ReturnType<typeof useMarkNotificationReadMutation>
+  markAllRead: ReturnType<typeof useMarkAllNotificationsReadMutation>
   sendTest: ReturnType<typeof useSendTestNotificationMutation>
 }
 
@@ -78,6 +80,7 @@ function mountQueries(): void {
         list: useNotificationsQuery({ page: 1, pageSize: 50 }),
         unread: useUnreadNotificationsCountQuery(),
         markRead: useMarkNotificationReadMutation(),
+        markAllRead: useMarkAllNotificationsReadMutation(),
         sendTest: useSendTestNotificationMutation(),
       }
       return {}
@@ -189,6 +192,32 @@ describe('notifications query composables', () => {
     expect(patchMock).toHaveBeenCalledWith('/api/v1/notifications/{notification_id}/read', {
       params: { path: { notification_id: NOTIFICATION_ID } },
     })
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: notificationsQueryKeys.lists(ORG_A),
+    })
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: notificationsQueryKeys.unreadCount(ORG_A),
+    })
+  })
+
+  it('mark-all-read mutation PATCHes the bulk endpoint and invalidates notification state', async () => {
+    const organisation = useOrganisationStore()
+    organisation.setSelectedOrganisation(ORG_A)
+    getMock.mockResolvedValue({ data: listEnvelope([notification], 1), error: undefined })
+    patchMock.mockResolvedValue({
+      data: { marked_count: 1 },
+      error: undefined,
+      response: new Response(),
+    })
+
+    mountQueries()
+    await flushPromises()
+    await flushPromises()
+
+    await captured.markAllRead.mutateAsync()
+    await flushPromises()
+
+    expect(patchMock).toHaveBeenCalledWith('/api/v1/notifications/read-all')
     expect(invalidateSpy).toHaveBeenCalledWith({
       queryKey: notificationsQueryKeys.lists(ORG_A),
     })

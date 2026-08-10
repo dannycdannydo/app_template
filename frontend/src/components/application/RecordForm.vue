@@ -88,6 +88,11 @@ function navigateToList(): void {
   }
 }
 
+function onCancel(): void {
+  emit('cancel')
+  navigateToList()
+}
+
 const createMutation = useCreateRecordMutation({
   onSuccess: (record) => {
     showSuccessToast('Record created')
@@ -154,7 +159,7 @@ const onSubmit = handleSubmit(async (values) => {
     </FormField>
 
     <div class="flex justify-end gap-2">
-      <Button type="button" variant="outline" :disabled="isSubmitting" @click="emit('cancel')">
+      <Button type="button" variant="outline" :disabled="isSubmitting" @click="onCancel">
         Cancel
       </Button>
       <Button type="submit" :disabled="isSubmitting" data-testid="record-form-submit">

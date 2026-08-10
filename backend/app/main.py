@@ -13,6 +13,7 @@ from time import perf_counter
 from typing import Any, cast
 from uuid import uuid4
 
+import dramatiq
 import structlog
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -25,6 +26,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.responses import Response
 
 from app.api.health import router as health_router
+from app.broker import build_broker
 from app.core.config import get_settings
 from app.core.exceptions import APIError, ErrorDetail, ErrorResponse
 from app.core.logging import bind_identity_context, configure_logging, current_request_id
@@ -241,6 +243,10 @@ def create_app() -> FastAPI:
     """Build and configure the FastAPI application."""
     settings = get_settings()
     configure_logging(log_level=settings.log_level, json_logs=not settings.debug)
+    # API actors enqueue through the process-wide broker.  Importing the
+    # worker entrypoint here would also register task modules as a side effect,
+    # so both processes instead share the side-effect-free broker factory.
+    dramatiq.set_broker(build_broker())
     if settings.sentry_dsn:
         initialise_sentry(
             dsn=settings.sentry_dsn,

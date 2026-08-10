@@ -11,8 +11,9 @@ record tenant boundary. ``type`` is the only approved filter field (BP §12).
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, Update, func, select, update
 
 from app.modules.notifications.models import Notification
 
@@ -73,4 +74,22 @@ def unread_notifications_count_statement(
             Notification.user_id == user_id,
             Notification.read_at.is_(None),
         )
+    )
+
+
+def mark_all_notifications_read_statement(
+    organisation_id: uuid.UUID,
+    user_id: uuid.UUID,
+    *,
+    read_at: datetime,
+) -> Update:
+    """Mark every unread notification for one org/user pair as read."""
+    return (
+        update(Notification)
+        .where(
+            Notification.organisation_id == organisation_id,
+            Notification.user_id == user_id,
+            Notification.read_at.is_(None),
+        )
+        .values(read_at=read_at)
     )
