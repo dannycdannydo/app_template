@@ -1,183 +1,643 @@
-"""Task, prompt and model registry interfaces (v0.7 Scope §6.1, ADR-0017).
+"""Checked-in AI task, prompt and model registries (v0.7 Scope §6.2).
 
-The three registries are the checked-in configuration that makes the AI layer
-provider-neutral: a task names a prompt version and required capabilities, the
-prompt registry resolves the prompt, and the model registry/router resolves a
-model that satisfies the task's hard requirements under organisation policy
-(Scope §6.2). This module defines the typed records and the abstract registry
-interfaces; the checked-in YAML/JSON-backed implementations and the
-deterministic capability/cost router ship in Scope §6.2. Concrete registries
-must validate duplicates, versions and references so a misconfiguration fails
-fast at startup and in CI (acceptance criterion §5.2).
+Definitions are validated Pydantic records loaded with PyYAML's safe loader.
+The bundle validator resolves every task → prompt → schema → model reference,
+so invalid reviewed configuration fails at application startup and in CI.
 """
 
 from __future__ import annotations
 
+import importlib
+import re
+import string
 from abc import ABC, abstractmethod
+from collections.abc import Iterable, Mapping
 from datetime import date
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any
+from pathlib import Path
+from typing import cast
 
-from pydantic import BaseModel, Field
+import yaml
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+
+MAX_REGISTRY_FILE_BYTES = 256 * 1024
+MAX_PROMPT_INSTRUCTIONS_LENGTH = 16 * 1024
+MAX_PROMPT_TEMPLATE_LENGTH = 64 * 1024
+MAX_RENDERED_PROMPT_LENGTH = 128 * 1024
+CHARS_PER_ESTIMATED_TOKEN = 4
+ALLOWED_SCHEMA_PREFIXES = ("app.ai.tasks.schemas.", "app.modules.")
+ALLOWED_PARAMETERS = frozenset({"max_tokens", "temperature"})
+_VARIABLE_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+_SECRET_NAME = re.compile(
+    r"(?:secret|password|passwd|token|api[_-]?key|authorization|credential)", re.IGNORECASE
+)
+
+
+class RegistryValidationError(ValueError):
+    """A safe, actionable checked-in registry configuration error."""
 
 
 class Capability(StrEnum):
-    """Capabilities a model may declare and a task may require."""
-
     STRUCTURED_OUTPUT = "structured_output"
     VISION = "vision"
     TOOLS = "tools"
     REASONING = "reasoning"
 
 
+class QualityTier(StrEnum):
+    ECONOMY = "economy"
+    STANDARD = "standard"
+    PREMIUM = "premium"
+
+
+class LatencyTier(StrEnum):
+    INTERACTIVE = "interactive"
+    BALANCED = "balanced"
+    BATCH = "batch"
+
+
+_QUALITY_RANK = {
+    QualityTier.ECONOMY: 0,
+    QualityTier.STANDARD: 1,
+    QualityTier.PREMIUM: 2,
+}
+
+
 class PricingBasis(BaseModel):
-    """Reviewed pricing metadata for one model (Scope §6.2).
-
-    Prices are configuration, never scraped at runtime; every entry records an
-    owner and an effective date so a price change is a reviewed, auditable
-    change (acceptance criterion §5.9). Currency is ISO-4217.
-    """
-
-    currency: str = Field(default="USD", min_length=3, max_length=3)
+    currency: str = Field(default="USD", min_length=3, max_length=3, pattern=r"^[A-Z]{3}$")
     input_price_per_million_tokens: Decimal = Field(ge=0, max_digits=18, decimal_places=6)
     output_price_per_million_tokens: Decimal = Field(ge=0, max_digits=18, decimal_places=6)
     effective_date: date
-    owner: str = Field(min_length=1, description="Person/team accountable for this pricing basis")
+    owner: str = Field(min_length=1, max_length=128)
 
 
 class RetryPolicy(BaseModel):
-    """Bounded retry policy for one task (Scope §6.4).
-
-    Transient provider errors may retry up to ``max_attempts`` total attempts;
-    malformed output may trigger at most ``repair_attempts`` repair requests;
-    permanent validation/policy failures never retry. Kept deliberately small
-    so a misconfigured task cannot create a retry storm or unbounded cost.
-    """
-
     max_attempts: int = Field(default=3, ge=1, le=10)
-    repair_attempts: int = Field(default=1, ge=0, le=3)
+    repair_attempts: int = Field(default=1, ge=0, le=1)
 
 
 class FallbackPolicy(BaseModel):
-    """Whether and how the router may fall back (Scope §6.2).
-
-    Fallback is explicit and reviewed: ``allowed`` gates provider/model
-    fallback entirely, ``prefer_same_provider`` restricts cross-provider
-    fallback (the router never silently falls back across a provider when a
-    task or organisation disallows it), and ``allow_local`` gates fallback to
-    the local/OpenAI-compatible adapter.
-    """
-
     allowed: bool = False
     prefer_same_provider: bool = True
     allow_local: bool = False
 
 
 class TaskDefinition(BaseModel):
-    """One canonical, versioned task (Scope §6.2).
-
-    Fields follow Scope §2: canonical name, prompt name/version, input
-    variables, required capabilities, parameter defaults, output schema import
-    path, retry and fallback policy. ``output_schema`` is a dotted import path
-    to a Pydantic model; ``declares_text_result`` opts into free text (Scope
-    §6.4) — by default a task is structured-output.
-    """
-
     name: str = Field(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9._-]*$")
-    prompt_name: str = Field(min_length=1, max_length=128)
+    prompt_name: str = Field(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9._-]*$")
     prompt_version: int = Field(ge=1)
-    input_variables: list[str] = Field(default_factory=lambda: [])
-    required_capabilities: list[Capability] = Field(default_factory=lambda: [])
-    parameter_defaults: dict[str, Any] = Field(default_factory=dict)
+    input_variables: list[str] = Field(default_factory=list, max_length=32)
+    required_capabilities: list[Capability] = Field(default_factory=lambda: list[Capability]())
+    parameter_defaults: dict[str, int | float] = Field(default_factory=lambda: {"max_tokens": 1024})
     output_schema: str | None = Field(default=None, max_length=512)
     declares_text_result: bool = False
     retry_policy: RetryPolicy = Field(default_factory=RetryPolicy)
     fallback_policy: FallbackPolicy = Field(default_factory=FallbackPolicy)
+    model_preferences: list[str] = Field(default_factory=list)
+    quality_tier: QualityTier = QualityTier.STANDARD
+    latency_tier: LatencyTier = LatencyTier.BALANCED
+    max_input_tokens: int = Field(default=16_384, ge=1, le=2_000_000)
+    max_estimated_cost: Decimal | None = Field(default=None, ge=0, max_digits=18, decimal_places=6)
+
+    @field_validator("input_variables")
+    @classmethod
+    def _validate_variables(cls, values: list[str]) -> list[str]:
+        _validate_variable_names(values, context="task")
+        return values
+
+    @field_validator("model_preferences")
+    @classmethod
+    def _validate_model_preferences(cls, values: list[str]) -> list[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("model_preferences must not contain duplicates")
+        return values
+
+    @field_validator("parameter_defaults")
+    @classmethod
+    def _validate_parameters(cls, values: dict[str, int | float]) -> dict[str, int | float]:
+        unknown = set(values) - ALLOWED_PARAMETERS
+        if unknown:
+            raise ValueError(f"unsupported task parameters: {sorted(unknown)}")
+        max_tokens = values.get("max_tokens")
+        if max_tokens is not None and (
+            not isinstance(max_tokens, int) or not 1 <= max_tokens <= 128_000
+        ):
+            raise ValueError("max_tokens must be an integer between 1 and 128000")
+        temperature = values.get("temperature")
+        if temperature is not None and not 0 <= temperature <= 2:
+            raise ValueError("temperature must be between 0 and 2")
+        return values
+
+    @model_validator(mode="after")
+    def _validate_result_contract(self) -> TaskDefinition:
+        if (self.output_schema is None) == (not self.declares_text_result):
+            raise ValueError("task must declare exactly one of output_schema or text result")
+        return self
 
 
 class PromptDefinition(BaseModel):
-    """One immutable, versioned prompt (Scope §6.2).
-
-    Prompt versions are append-only: correcting a prompt creates a new
-    ``*_vN`` file rather than editing a released version. ``system_instructions``
-    is the static system text; ``input_variables`` must be a subset of the
-    task's input variables; the template engine is a safe, allowlisted
-    renderer (no arbitrary template execution, Scope §6.2).
-    """
-
-    name: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9._-]*$")
     version: int = Field(ge=1)
-    system_instructions: str = Field(min_length=1)
-    input_variables: list[str] = Field(default_factory=lambda: [])
-    # Optional user-facing template containing {variable} placeholders; the
-    # template is rendered with allowlisted variables only.
-    user_template: str = ""
+    system_instructions: str = Field(min_length=1, max_length=MAX_PROMPT_INSTRUCTIONS_LENGTH)
+    input_variables: list[str] = Field(default_factory=list, max_length=32)
+    user_template: str = Field(min_length=1, max_length=MAX_PROMPT_TEMPLATE_LENGTH)
+    output_contract: str = Field(min_length=1, max_length=512)
+
+    @field_validator("input_variables")
+    @classmethod
+    def _validate_variables(cls, values: list[str]) -> list[str]:
+        _validate_variable_names(values, context="prompt")
+        return values
+
+    @model_validator(mode="after")
+    def _validate_template(self) -> PromptDefinition:
+        placeholders = _template_variables(self.user_template)
+        declared = set(self.input_variables)
+        if placeholders != declared:
+            missing = sorted(declared - placeholders)
+            undeclared = sorted(placeholders - declared)
+            raise ValueError(
+                f"template variables do not match declarations; missing={missing}, undeclared={undeclared}"
+            )
+        if _template_variables(self.system_instructions):
+            raise ValueError("system_instructions must be static and contain no interpolation")
+        return self
+
+    def render(self, variables: Mapping[str, str]) -> str:
+        """Render only declared simple placeholders; never evaluate expressions."""
+        supplied = set(variables)
+        declared = set(self.input_variables)
+        if supplied != declared:
+            raise RegistryValidationError(
+                f"prompt variables do not match declarations; missing={sorted(declared - supplied)}, "
+                f"unexpected={sorted(supplied - declared)}"
+            )
+        rendered = self.user_template.format_map(dict(variables))
+        prompt = f"{self.system_instructions}\n{rendered}"
+        if len(prompt) > MAX_RENDERED_PROMPT_LENGTH:
+            raise RegistryValidationError("rendered prompt exceeds the configured length limit")
+        return prompt
 
 
 class ModelDefinition(BaseModel):
-    """One model in the model registry (Scope §6.2).
-
-    ``provider`` is the adapter/provider id, ``model`` the provider's model
-    identifier, ``capabilities`` the capabilities the adapter actually
-    supports (never pretended), ``context_window`` in tokens, and ``pricing``
-    the reviewed pricing basis. ``available`` allows a reviewed temporary
-    disable without deleting the definition.
-    """
-
-    provider: str = Field(min_length=1, max_length=128)
-    model: str = Field(min_length=1, max_length=128)
-    capabilities: list[Capability] = Field(default_factory=lambda: [])
-    context_window: int = Field(ge=1)
+    id: str = Field(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9._-]*$")
+    provider: str = Field(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9._-]*$")
+    model: str = Field(min_length=1, max_length=256)
+    capabilities: list[Capability] = Field(default_factory=lambda: list[Capability]())
+    context_window: int = Field(ge=1, le=2_000_000)
+    supported_parameters: list[str] = Field(default_factory=list)
+    quality_tier: QualityTier = QualityTier.STANDARD
+    latency_tier: LatencyTier = LatencyTier.BALANCED
+    priority: int = Field(default=100, ge=0, le=10_000)
     pricing: PricingBasis
     available: bool = True
 
+    @field_validator("supported_parameters")
+    @classmethod
+    def _validate_supported_parameters(cls, values: list[str]) -> list[str]:
+        unknown = set(values) - ALLOWED_PARAMETERS
+        if unknown:
+            raise ValueError(f"unknown supported parameters: {sorted(unknown)}")
+        return values
+
+
+class RoutingDecision(BaseModel):
+    model: ModelDefinition
+    reason: str
+    fallback_used: bool = False
+    estimated_input_tokens: int = Field(ge=0)
+    estimated_max_cost: Decimal = Field(ge=0)
+
 
 class TaskRegistry(ABC):
-    """Registry of canonical task definitions (Scope §6.2)."""
+    @abstractmethod
+    def get(self, name: str) -> TaskDefinition: ...
 
     @abstractmethod
-    def get(self, name: str) -> TaskDefinition:
-        """Return the task with the given name; raise KeyError when unknown."""
-
-    @abstractmethod
-    def all(self) -> list[TaskDefinition]:
-        """Return every registered task definition."""
+    def all(self) -> list[TaskDefinition]: ...
 
 
 class PromptRegistry(ABC):
-    """Registry of versioned prompt definitions (Scope §6.2)."""
+    @abstractmethod
+    def get(self, name: str, version: int) -> PromptDefinition: ...
 
     @abstractmethod
-    def get(self, name: str, version: int) -> PromptDefinition:
-        """Return the prompt version; raise KeyError when unknown."""
-
-    @abstractmethod
-    def all(self) -> list[PromptDefinition]:
-        """Return every registered prompt definition."""
+    def all(self) -> list[PromptDefinition]: ...
 
 
 class ModelRegistry(ABC):
-    """Registry of model definitions and capability/cost routing (Scope §6.2).
-
-    ``resolve`` is the deterministic router entry point: it returns a model
-    that satisfies the task's hard capability requirements under the
-    organisation's allowed providers/models and the task's fallback policy,
-    or raises when none can. It never silently crosses a provider boundary
-    the task/organisation disallows and never picks a model that cannot meet
-    a hard requirement.
-    """
+    @abstractmethod
+    def get(self, provider: str, model: str) -> ModelDefinition: ...
 
     @abstractmethod
-    def get(self, provider: str, model: str) -> ModelDefinition:
-        """Return one model definition; raise KeyError when unknown."""
-
-    @abstractmethod
-    def all(self) -> list[ModelDefinition]:
-        """Return every registered model definition."""
+    def all(self) -> list[ModelDefinition]: ...
 
     @abstractmethod
     def resolve(
         self, task: TaskDefinition, *, allowed_providers: list[str] | None = None
+    ) -> ModelDefinition: ...
+
+    def route(
+        self,
+        task: TaskDefinition,
+        *,
+        allowed_providers: list[str] | None = None,
+        allowed_model_ids: list[str] | None = None,
+        model_override: str | None = None,
+        estimated_input_tokens: int = 0,
+        maximum_estimated_cost: Decimal | None = None,
+        excluded_model_ids: Iterable[str] = (),
+    ) -> RoutingDecision:
+        """Compatibility route for custom registries implementing ``resolve``.
+
+        Production uses the checked-in capability/cost implementation below;
+        this default keeps test/application registry substitutions behind the
+        same interface while enforcing caller-supplied hard constraints.
+        """
+        if excluded_model_ids:
+            raise ValueError(f"fallback is unsupported by registry for task {task.name}")
+        if estimated_input_tokens > task.max_input_tokens:
+            raise ValueError(f"input exceeds token budget for task {task.name}")
+        model = self.resolve(task, allowed_providers=allowed_providers)
+        if allowed_model_ids is not None and model.id not in allowed_model_ids:
+            raise ValueError(f"model is not allowed for task {task.name}")
+        if model_override is not None and model.id != model_override:
+            raise ValueError(f"model override is unavailable for task {task.name}")
+        cost = estimate_maximum_cost(task, model, estimated_input_tokens)
+        cost_limit = maximum_estimated_cost
+        if task.max_estimated_cost is not None:
+            cost_limit = (
+                min(cost_limit, task.max_estimated_cost)
+                if cost_limit is not None
+                else task.max_estimated_cost
+            )
+        if cost_limit is not None and cost > cost_limit:
+            raise ValueError(f"estimated cost exceeds limit for task {task.name}")
+        return RoutingDecision(
+            model=model,
+            reason=f"resolved via model registry for task {task.name}",
+            estimated_input_tokens=estimated_input_tokens,
+            estimated_max_cost=cost,
+        )
+
+
+class FileTaskRegistry(TaskRegistry):
+    def __init__(self, tasks: Iterable[TaskDefinition]) -> None:
+        self._tasks: dict[str, TaskDefinition] = {}
+        for task in tasks:
+            if task.name in self._tasks:
+                raise RegistryValidationError(f"duplicate task name: {task.name}")
+            self._tasks[task.name] = task
+
+    @classmethod
+    def from_directory(cls, directory: Path) -> FileTaskRegistry:
+        tasks: list[TaskDefinition] = []
+        for path in _yaml_files(directory):
+            try:
+                tasks.append(TaskDefinition.model_validate(_read_yaml_mapping(path)))
+            except ValidationError as exc:
+                raise RegistryValidationError(
+                    f"invalid task definition {path}: {registry_error_message(exc)}"
+                ) from exc
+        return cls(tasks)
+
+    def get(self, name: str) -> TaskDefinition:
+        try:
+            return self._tasks[name]
+        except KeyError as exc:
+            raise KeyError(f"unknown task: {name}") from exc
+
+    def all(self) -> list[TaskDefinition]:
+        return list(self._tasks.values())
+
+
+class FilePromptRegistry(PromptRegistry):
+    def __init__(self, prompts: Iterable[PromptDefinition]) -> None:
+        self._prompts: dict[tuple[str, int], PromptDefinition] = {}
+        for prompt in prompts:
+            key = (prompt.name, prompt.version)
+            if key in self._prompts:
+                raise RegistryValidationError(
+                    f"duplicate prompt version: {prompt.name} v{prompt.version}"
+                )
+            self._prompts[key] = prompt
+
+    @classmethod
+    def from_directory(cls, directory: Path) -> FilePromptRegistry:
+        prompts: list[PromptDefinition] = []
+        for path in _yaml_files(directory):
+            try:
+                prompt = PromptDefinition.model_validate(_read_yaml_mapping(path))
+            except ValidationError as exc:
+                raise RegistryValidationError(
+                    f"invalid prompt definition {path}: {registry_error_message(exc)}"
+                ) from exc
+            name_parts = prompt.name.split(".")
+            expected_path = (
+                Path(*name_parts[:-1]) / f"{name_parts[-1]}_v{prompt.version}{path.suffix}"
+            )
+            if path.relative_to(directory) != expected_path:
+                raise RegistryValidationError(
+                    f"prompt filename must match its name and version ({expected_path}): {path}"
+                )
+            prompts.append(prompt)
+        return cls(prompts)
+
+    def get(self, name: str, version: int) -> PromptDefinition:
+        try:
+            return self._prompts[(name, version)]
+        except KeyError as exc:
+            raise KeyError(f"unknown prompt: {name} v{version}") from exc
+
+    def all(self) -> list[PromptDefinition]:
+        return list(self._prompts.values())
+
+
+class CapabilityCostModelRegistry(ModelRegistry):
+    """Deterministic capability, context, tier and maximum-cost router."""
+
+    def __init__(self, models: Iterable[ModelDefinition]) -> None:
+        self._models_by_id: dict[str, ModelDefinition] = {}
+        self._models_by_provider_key: dict[tuple[str, str], ModelDefinition] = {}
+        for model in models:
+            provider_key = (model.provider, model.model)
+            if model.id in self._models_by_id:
+                raise RegistryValidationError(f"duplicate model id: {model.id}")
+            if provider_key in self._models_by_provider_key:
+                raise RegistryValidationError(
+                    f"duplicate provider/model: {model.provider}/{model.model}"
+                )
+            self._models_by_id[model.id] = model
+            self._models_by_provider_key[provider_key] = model
+
+    @classmethod
+    def from_directory(cls, directory: Path) -> CapabilityCostModelRegistry:
+        models: list[ModelDefinition] = []
+        for path in _yaml_files(directory):
+            raw = _read_yaml(path)
+            if isinstance(raw, Mapping) and "models" in raw:
+                mapping = cast(Mapping[str, object], raw)
+                entries_value = mapping["models"]
+                if not isinstance(entries_value, list):
+                    raise RegistryValidationError(f"models must be a list: {path}")
+                entries = cast(list[object], entries_value)
+                for entry in entries:
+                    try:
+                        models.append(ModelDefinition.model_validate(entry))
+                    except ValidationError as exc:
+                        raise RegistryValidationError(
+                            f"invalid model definition {path}: {registry_error_message(exc)}"
+                        ) from exc
+            else:
+                try:
+                    models.append(ModelDefinition.model_validate(raw))
+                except ValidationError as exc:
+                    raise RegistryValidationError(
+                        f"invalid model definition {path}: {registry_error_message(exc)}"
+                    ) from exc
+        return cls(models)
+
+    def get(self, provider: str, model: str) -> ModelDefinition:
+        try:
+            return self._models_by_provider_key[(provider, model)]
+        except KeyError as exc:
+            raise KeyError(f"unknown model: {provider}/{model}") from exc
+
+    def get_by_id(self, model_id: str) -> ModelDefinition:
+        try:
+            return self._models_by_id[model_id]
+        except KeyError as exc:
+            raise KeyError(f"unknown model id: {model_id}") from exc
+
+    def all(self) -> list[ModelDefinition]:
+        return list(self._models_by_id.values())
+
+    def resolve(
+        self, task: TaskDefinition, *, allowed_providers: list[str] | None = None
     ) -> ModelDefinition:
-        """Resolve a model for the task under the given provider allowlist."""
+        return self.route(task, allowed_providers=allowed_providers).model
+
+    def route(
+        self,
+        task: TaskDefinition,
+        *,
+        allowed_providers: list[str] | None = None,
+        allowed_model_ids: list[str] | None = None,
+        model_override: str | None = None,
+        estimated_input_tokens: int = 0,
+        maximum_estimated_cost: Decimal | None = None,
+        excluded_model_ids: Iterable[str] = (),
+    ) -> RoutingDecision:
+        excluded = set(excluded_model_ids)
+        if excluded and not task.fallback_policy.allowed:
+            raise RegistryValidationError(f"fallback is disabled for task {task.name}")
+        if estimated_input_tokens > task.max_input_tokens:
+            raise RegistryValidationError(f"input exceeds token budget for task {task.name}")
+        if maximum_estimated_cost is not None and maximum_estimated_cost < 0:
+            raise RegistryValidationError("maximum estimated cost must not be negative")
+
+        candidates = [model for model in self.all() if self._eligible(task, model)]
+        if allowed_providers is not None:
+            candidates = [model for model in candidates if model.provider in allowed_providers]
+        if allowed_model_ids is not None:
+            candidates = [model for model in candidates if model.id in allowed_model_ids]
+        if model_override is not None:
+            if model_override not in self._models_by_id:
+                raise RegistryValidationError(f"unknown model override: {model_override}")
+            candidates = [model for model in candidates if model.id == model_override]
+        candidates = [model for model in candidates if model.id not in excluded]
+
+        if excluded and task.fallback_policy.prefer_same_provider:
+            providers = {
+                self._models_by_id[item].provider for item in excluded if item in self._models_by_id
+            }
+            candidates = [model for model in candidates if model.provider in providers]
+        if excluded and not task.fallback_policy.allow_local:
+            candidates = [model for model in candidates if model.provider != "local"]
+
+        preference = {model_id: index for index, model_id in enumerate(task.model_preferences)}
+        candidates.sort(
+            key=lambda model: (preference.get(model.id, len(preference)), model.priority, model.id)
+        )
+        cost_limit = maximum_estimated_cost
+        if task.max_estimated_cost is not None:
+            cost_limit = (
+                min(cost_limit, task.max_estimated_cost)
+                if cost_limit is not None
+                else task.max_estimated_cost
+            )
+        for model in candidates:
+            cost = estimate_maximum_cost(task, model, estimated_input_tokens)
+            if cost_limit is not None and cost > cost_limit:
+                continue
+            fallback_used = bool(excluded)
+            reason = (
+                f"organisation override {model.id}"
+                if model_override
+                else f"ordered fallback to {model.id}"
+                if fallback_used
+                else f"first eligible configured model {model.id}"
+            )
+            return RoutingDecision(
+                model=model,
+                reason=reason,
+                fallback_used=fallback_used,
+                estimated_input_tokens=estimated_input_tokens,
+                estimated_max_cost=cost,
+            )
+        raise RegistryValidationError(f"no model satisfies task {task.name}")
+
+    @staticmethod
+    def _eligible(task: TaskDefinition, model: ModelDefinition) -> bool:
+        output_tokens = int(task.parameter_defaults.get("max_tokens", 0))
+        return (
+            model.available
+            and set(task.required_capabilities).issubset(model.capabilities)
+            and set(task.parameter_defaults).issubset(model.supported_parameters)
+            and _QUALITY_RANK[model.quality_tier] >= _QUALITY_RANK[task.quality_tier]
+            and model.latency_tier == task.latency_tier
+            and task.max_input_tokens + output_tokens <= model.context_window
+        )
+
+
+class RegistryBundle(BaseModel):
+    model_config = {"arbitrary_types_allowed": True}
+    tasks: FileTaskRegistry
+    prompts: FilePromptRegistry
+    models: CapabilityCostModelRegistry
+
+
+def load_registry_bundle(root: Path | None = None) -> RegistryBundle:
+    ai_root = root or Path(__file__).resolve().parent
+    bundle = RegistryBundle(
+        tasks=FileTaskRegistry.from_directory(ai_root / "tasks"),
+        prompts=FilePromptRegistry.from_directory(ai_root / "prompts"),
+        models=CapabilityCostModelRegistry.from_directory(ai_root / "models"),
+    )
+    validate_registry_bundle(bundle)
+    return bundle
+
+
+def validate_registry_bundle(bundle: RegistryBundle) -> None:
+    if not bundle.tasks.all():
+        raise RegistryValidationError("task registry is empty")
+    if not bundle.prompts.all():
+        raise RegistryValidationError("prompt registry is empty")
+    if not bundle.models.all():
+        raise RegistryValidationError("model registry is empty")
+    for task in bundle.tasks.all():
+        try:
+            prompt = bundle.prompts.get(task.prompt_name, task.prompt_version)
+        except KeyError as exc:
+            raise RegistryValidationError(
+                f"task {task.name} references missing prompt {task.prompt_name} v{task.prompt_version}"
+            ) from exc
+        if set(prompt.input_variables) != set(task.input_variables):
+            raise RegistryValidationError(f"task/prompt variables differ for {task.name}")
+        expected_contract = task.output_schema or "text"
+        if expected_contract != prompt.output_contract:
+            raise RegistryValidationError(f"task/prompt output contract differs for {task.name}")
+        if task.output_schema is not None:
+            resolve_output_schema(task.output_schema)
+        for model_id in task.model_preferences:
+            try:
+                bundle.models.get_by_id(model_id)
+            except KeyError as exc:
+                raise RegistryValidationError(
+                    f"task {task.name} references unknown preferred model {model_id}"
+                ) from exc
+            bundle.models.route(
+                task,
+                model_override=model_id,
+                estimated_input_tokens=task.max_input_tokens,
+            )
+        bundle.models.route(task, estimated_input_tokens=task.max_input_tokens)
+
+
+def estimate_tokens(text: str) -> int:
+    return max(1, (len(text) + CHARS_PER_ESTIMATED_TOKEN - 1) // CHARS_PER_ESTIMATED_TOKEN)
+
+
+def estimate_maximum_cost(
+    task: TaskDefinition, model: ModelDefinition, estimated_input_tokens: int
+) -> Decimal:
+    output_tokens = int(task.parameter_defaults.get("max_tokens", 0))
+    return (
+        model.pricing.input_price_per_million_tokens * Decimal(estimated_input_tokens)
+        + model.pricing.output_price_per_million_tokens * Decimal(output_tokens)
+    ) / Decimal(1_000_000)
+
+
+def _validate_variable_names(values: list[str], *, context: str) -> None:
+    if len(values) != len(set(values)):
+        raise ValueError(f"duplicate {context} input variable")
+    for value in values:
+        if not _VARIABLE_NAME.fullmatch(value):
+            raise ValueError(f"unsafe {context} input variable: {value!r}")
+        if _SECRET_NAME.search(value):
+            raise ValueError(f"secret-like {context} input variable is forbidden: {value!r}")
+
+
+def _template_variables(template: str) -> set[str]:
+    variables: set[str] = set()
+    try:
+        parsed = string.Formatter().parse(template)
+        for _, field_name, format_spec, conversion in parsed:
+            if field_name is None:
+                continue
+            if not _VARIABLE_NAME.fullmatch(field_name) or format_spec or conversion:
+                raise ValueError(f"unsafe prompt placeholder: {field_name!r}")
+            if _SECRET_NAME.search(field_name):
+                raise ValueError(f"secret-like prompt placeholder is forbidden: {field_name!r}")
+            variables.add(field_name)
+    except ValueError as exc:
+        raise ValueError(f"invalid prompt template: {exc}") from exc
+    return variables
+
+
+def _yaml_files(directory: Path) -> list[Path]:
+    if not directory.is_dir():
+        raise RegistryValidationError(f"registry directory does not exist: {directory}")
+    files = sorted((*directory.rglob("*.yaml"), *directory.rglob("*.yml")))
+    if not files:
+        raise RegistryValidationError(f"registry directory contains no YAML files: {directory}")
+    return files
+
+
+def _read_yaml(path: Path) -> object:
+    if path.stat().st_size > MAX_REGISTRY_FILE_BYTES:
+        raise RegistryValidationError(f"registry file is too large: {path}")
+    try:
+        return yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        raise RegistryValidationError(f"cannot read registry YAML: {path}") from exc
+
+
+def _read_yaml_mapping(path: Path) -> Mapping[str, object]:
+    raw = _read_yaml(path)
+    if not isinstance(raw, Mapping):
+        raise RegistryValidationError(f"registry document must be a mapping: {path}")
+    return cast(Mapping[str, object], raw)
+
+
+def resolve_output_schema(path: str) -> type[BaseModel]:
+    """Resolve an allowlisted dotted path to a Pydantic output model."""
+    if not path.startswith(ALLOWED_SCHEMA_PREFIXES):
+        raise RegistryValidationError("output schema is outside the allowlisted AI schema package")
+    module_name, _, attribute = path.rpartition(".")
+    try:
+        module = importlib.import_module(module_name)
+        schema = getattr(module, attribute)
+    except (ImportError, AttributeError) as exc:
+        raise RegistryValidationError(f"cannot resolve output schema: {path}") from exc
+    if not isinstance(schema, type) or not issubclass(schema, BaseModel):
+        raise RegistryValidationError(f"output schema is not a Pydantic model: {path}")
+    return schema
+
+
+def registry_error_message(exc: ValidationError) -> str:
+    """Keep Pydantic's location detail while avoiding registry payload echo."""
+    return "; ".join(
+        f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}" for error in exc.errors()
+    )

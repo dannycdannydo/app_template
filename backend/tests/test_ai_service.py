@@ -16,7 +16,7 @@ from uuid import uuid4
 
 import pytest
 from pydantic import BaseModel
-from tests.ai_test_helpers import InMemoryRegistries
+from tests.ai_test_helpers import InMemoryPromptRegistry, InMemoryRegistries
 
 from app.ai.errors import (
     AIInputValidationError,
@@ -34,6 +34,7 @@ from app.ai.registry import (
     ModelDefinition,
     ModelRegistry,
     PricingBasis,
+    PromptDefinition,
     TaskDefinition,
 )
 from app.ai.schemas import AIRequest, TokenUsage
@@ -147,6 +148,34 @@ async def test_missing_input_variable_raises_input_validation_error() -> None:
     service, _ = _service()
     with pytest.raises(AIInputValidationError):
         await service.execute(_request(metadata={}))
+
+
+async def test_task_input_form_must_match_prompt_variable() -> None:
+    registries = InMemoryRegistries.default()
+    registries.tasks.register(
+        TaskDefinition(
+            name="document.classify",
+            prompt_name="classify",
+            prompt_version=1,
+            input_variables=["text"],
+            output_schema="demo.ClassificationResult",
+        )
+    )
+    registries.prompts = InMemoryPromptRegistry(
+        {
+            ("classify", 1): PromptDefinition(
+                name="classify",
+                version=1,
+                system_instructions="Classify input.",
+                input_variables=["text"],
+                user_template="{text}",
+                output_contract="demo.ClassificationResult",
+            )
+        }
+    )
+    service, _ = _service(registries)
+    with pytest.raises(AIInputValidationError, match="text input"):
+        await service.execute(_request(text=None, storage_reference="private://document/1"))
 
 
 async def test_disallowed_provider_raises_model_not_available() -> None:
@@ -277,10 +306,12 @@ class _PricedModelRegistry(ModelRegistry):
 
     def __init__(self) -> None:
         self._model = ModelDefinition(
+            id="fake.document-classifier",
             provider="fake",
             model="fake-model-document.classify",
             capabilities=[Capability.STRUCTURED_OUTPUT],
             context_window=128_000,
+            supported_parameters=[],
             pricing=PricingBasis(
                 currency="USD",
                 input_price_per_million_tokens=Decimal("1.00"),

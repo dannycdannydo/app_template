@@ -64,6 +64,10 @@ Provider SDKs live only in `app/ai/providers/` adapters behind a typed
 `LLMProvider` interface with a normalised `ProviderResponse` and error
 taxonomy. A fake deterministic provider is the default test adapter, mirroring
 the storage (ADR-0006) and email (`app/email/`, ADR-0015 pending v0.6) precedents.
+The checked-in registries use PyYAML's safe loader. PyYAML is a small explicit
+runtime dependency because prompt assets are required to be readable,
+reviewable YAML; object construction is never enabled and file size/schema
+validation happens before definitions enter the application.
 
 ## Decision
 

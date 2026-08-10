@@ -1,0 +1,26 @@
+name: document.classify
+prompt_name: document.classify
+prompt_version: 1
+input_variables:
+  - text
+required_capabilities:
+  - structured_output
+parameter_defaults:
+  max_tokens: 256
+  temperature: 0
+output_schema: app.ai.tasks.schemas.DocumentClassificationResult
+declares_text_result: false
+retry_policy:
+  max_attempts: 3
+  repair_attempts: 1
+fallback_policy:
+  allowed: true
+  prefer_same_provider: false
+  allow_local: true
+model_preferences:
+  - fake.document-classifier
+  - local.document-classifier
+quality_tier: economy
+latency_tier: interactive
+max_input_tokens: 4096
+max_estimated_cost: "0.01"

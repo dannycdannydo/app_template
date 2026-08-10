@@ -77,18 +77,25 @@ class FakeLLMProvider(LLMProvider):
         # produce identical content.
         structured: dict[str, Any] | None = None
         if request.output_schema:
-            structured = {
-                "schema": request.output_schema,
-                "task": request.task,
-                "prompt_hash": _deterministic_hash(request.prompt)[:16],
-                "variables": dict(sorted(request.metadata.items())),
-            }
+            if request.output_schema == "app.ai.tasks.schemas.DocumentClassificationResult":
+                structured = {
+                    "category": "lease",
+                    "confidence": 0.99,
+                    "summary": "A deterministic, non-sensitive fixture classification.",
+                }
+            else:
+                structured = {
+                    "schema": request.output_schema,
+                    "task": request.task,
+                    "prompt_hash": _deterministic_hash(request.prompt)[:16],
+                    "variables": dict(sorted(request.metadata.items())),
+                }
             content = json.dumps(structured, sort_keys=True)
         else:
             content = f"{request.task}:{_deterministic_hash(request.prompt)}"
 
         return ProviderResponse(
-            model=f"fake-model-{request.task}",
+            model=request.model,
             content=content,
             structured=structured,
             usage=TokenUsage(

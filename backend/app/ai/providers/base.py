@@ -31,6 +31,7 @@ class ProviderRequest(BaseModel):
     """
 
     task: str = Field(min_length=1, max_length=128)
+    model: str = Field(min_length=1, max_length=256)
     prompt: str = Field(min_length=1)
     output_schema: str | None = Field(default=None, max_length=512)
     max_tokens: int | None = Field(default=None, ge=1, le=128_000)
