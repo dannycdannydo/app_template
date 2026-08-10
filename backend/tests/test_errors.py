@@ -128,7 +128,10 @@ async def test_cors_allows_only_configured_browser_origins() -> None:
 async def test_api_security_headers_and_untrusted_hosts_are_rejected() -> None:
     async with _client_for(create_app()) as client:
         response = await client.get("/health")
-        denied = await client.get("/health", headers={"Host": "evil.example"})
+        # The public health/metrics surface (backup-and-recovery run B, defect
+        # D3) is exempt from the Host allowlist so infrastructure probes can
+        # reach it with a container-local Host; every other path is rejected.
+        denied = await client.get("/definitely-not-a-public-path", headers={"Host": "evil.example"})
 
     assert response.headers["x-content-type-options"] == "nosniff"
     assert response.headers["referrer-policy"] == "strict-origin-when-cross-origin"

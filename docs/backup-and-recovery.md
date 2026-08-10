@@ -417,7 +417,11 @@ application data.**
 Blueprint §39: backups are not valid until restore procedures have been
 tested. The two procedures requiring scratch infrastructure were executed on
 2026-08-10 against throwaway containers on a development machine; the exact
-commands and results are recorded below. Re-run these on the schedule in
+commands and results are recorded below. The environment-recreation run
+failed on its first execution against the shipped §6.6 artifacts (defects
+D1/D2 below), was fixed in the §6.8 release-gate follow-up (plus defect D3
+the re-run itself surfaced), and re-run to **PASS** — a backup procedure is
+not valid until the recorded run passes. Re-run these on the schedule in
 [Backup verification schedule](#backup-verification-schedule).
 
 ### Tested run A: database logical restore on scratch PostgreSQL
@@ -462,30 +466,61 @@ the release checkout.
 | Full stack up | `docker compose up -d` | Redis healthy; **API and worker crash-loop** — see defect D1; **Caddy crash-loops** — see defect D2 |
 | `/ready` wait | `docker compose exec -T api python -c "urllib.request.urlopen('http://localhost:8000/ready')"` | blocked by D1 (API never boots) |
 
-**Result: FAIL on the shipped artifacts — two production-blocking defects
+**Result: FAIL on the shipped artifacts — production-blocking defects D1/D2
 recorded below.** The recreation procedure itself (artifact restore,
 configuration validation, external-service wiring, image pull path, migration
 invocation, service recreation) was exercised up to the point the shipped
-configuration contract rejects the environment; the defects are in the
-shipped §6.6 profile, not in the recreation procedure's steps.
+configuration contract rejects the environment; the defects were in the
+shipped §6.6 profile, not in the recreation procedure's steps. Both were
+fixed in the §6.8 release-gate follow-up (infrastructure/secret changes,
+human-reviewed) and the run re-executed to PASS below.
 
-### Open defects from the tested runs
+### Tested run B (re-run): environment recreation passes after the defect fixes
 
-These were surfaced by the §6.7 tested-run requirement (blueprint §39) and
-must be resolved — with human review, per AGENTS.md (infrastructure change) —
-before a production deployment of the shipped profile can boot. Both belong to
-the §6.6 deployment profile and are tracked through the §6.8 governance
-sections.
+Environment identical to the first run: fresh scratch directory, the shipped
+`compose.hybrid-vps.yml` and `Caddyfile` from the repository, a scratch
+`.env.production` built from the updated `.env.production.example` (now
+including the required `ACME_EMAIL`), a scratch `postgres:16-alpine` on the
+compose network, and the backend and Caddy images built from the fixed
+release checkout (the fixes are in `config.py`, `compose.hybrid-vps.yml`,
+`main.py` and the example env files).
 
-**D1 — production requires `rediss://` Redis, the profile ships plain
-`redis://` (blocks every production boot, the migration step, and the deploy
-workflow).** `backend/app/core/config.py` rejects any `REDIS_URL` that is not
+| Step | Command | Result |
+| --- | --- | --- |
+| Restore artifacts | copy compose file, Caddyfile, env file into fresh `$DEPLOY_ROOT` | **PASS** |
+| Validate configuration | `docker compose -f compose.hybrid-vps.yml --env-file .env.production config --quiet` | **PASS** |
+| Start private Redis | `docker compose up -d redis` | **PASS** (`redis-cli ping` → `PONG`, healthy) |
+| Stand up scratch managed PostgreSQL | `docker run -d --network app-template-prod_default --name scratch-pg-recreate -e POSTGRES_USER=app -e POSTGRES_PASSWORD=app -e POSTGRES_DB=app postgres:16-alpine` | **PASS** (reachable as `scratch-pg-recreate:5432`) |
+| Run exactly one migration | `docker compose run --rm --no-deps api alembic upgrade head` | **PASS** — full chain applied, `alembic_version` = `9e4f5c6a7d8b` (head) |
+| Full stack up | `docker compose up -d` | **PASS** — all four services healthy: `redis`, `api`, `worker`, `caddy` |
+| `/ready` wait | `docker compose exec -T api python -c "urllib.request.urlopen('http://localhost:8000/ready')"` | **PASS** — HTTP 200 |
+| Edge liveness | Caddy healthcheck (308 auto-HTTPS probe on :80) | **PASS** — `caddy` healthy |
+
+**Result: PASS.** The environment-recreation procedure completes end to end
+against the shipped artifacts: artifacts restored, configuration validated,
+external services wired, exactly one deliberate migration applied, the full
+stack booted with all services healthy, and `/ready` answered 200 both from
+inside the container (compose healthcheck / orchestrator probe) and through
+the edge's auto-HTTPS liveness contract. The `https://$DOMAIN/ready` deploy-
+workflow wait needs real DNS + Let's Encrypt issuance on a live host and is
+covered by the same `/ready` response behind the edge.
+
+### Defects surfaced by the tested runs (resolved in the §6.8 follow-up)
+
+These were surfaced by the §6.7 tested-run requirement (blueprint §39) and by
+the re-run. All three belong to the §6.6 deployment profile and were fixed —
+with human review, per AGENTS.md (infrastructure/secret changes) — in the
+§6.8 release-gate follow-up; the re-run above records the fixes passing.
+
+**D1 — production required `rediss://` Redis while the profile ships plain
+`redis://` (blocked every production boot, the migration step, and the deploy
+workflow).** `backend/app/core/config.py` rejected any `REDIS_URL` that is not
 `rediss://` when `APP_ENV=production` (the "Harden WorkOS authentication and
 API safeguards" commit, predating §6.6), while the shipped
 `.env.production.example` and `deploy/compose/compose.hybrid-vps.yml` run a
 non-TLS private Redis and document `REDIS_URL=redis://...`. Every production
 container (API, worker, and the deploy workflow's one-off `alembic upgrade
-head` run) therefore fails `Settings` validation at boot:
+head` run) therefore failed `Settings` validation at boot:
 
 ```text
 pydantic_core._pydantic_core.ValidationError: 1 validation error for Settings
@@ -493,31 +528,47 @@ pydantic_core._pydantic_core.ValidationError: 1 validation error for Settings
 ```
 
 §6.6 CI never exercised a booted production environment (compose validation
-uses `ENV_FILE=/dev/null`), so the mismatch shipped unreviewed. Resolution
-options (both need human review): (a) make the profile's Redis
-TLS-terminating and set `REDIS_URL=rediss://...` — the application's redis-py
-client verifies certificates against the system CA store, so the CA must be
-installed in the backend image or the relay must use a public-CA certificate;
-or (b) reconcile the production rule with the private-network deployment —
-e.g. allow non-TLS Redis only on a non-published compose network, with the
-`rediss://` requirement kept for externally reachable Redis. Until resolved,
-the environment-recreation and lost-host procedures above cannot complete
-their final `/ready` step on a real host.
+uses `ENV_FILE=/dev/null`), so the mismatch shipped unreviewed. **Fix
+(option b of the original analysis):** the production rule now accepts plain
+`redis://` for loopback and single-label compose-network hosts (the profile's
+private, non-published Redis, documented in `config.py`
+`_redis_url_is_production_safe`), and still rejects it for any externally
+reachable Redis — dotted hostname or IP — which must use `rediss://`. The
+rule is covered by `test_config.py`; `.env.example` and
+`.env.production.example` document it.
 
-**D2 — Caddy fails to start when `ACME_EMAIL` is unset, and the example env
-does not document it.** The compose file defaults `ACME_EMAIL` to empty and
-`.env.production.example` does not list it at all; the shipped Caddyfile's
-global `email {$ACME_EMAIL}` then fails to adapt:
+**D2 — Caddy failed to start when `ACME_EMAIL` was unset, and the example env
+did not document it.** The compose file defaulted `ACME_EMAIL` to empty and
+`.env.production.example` did not list it at all; the shipped Caddyfile's
+global `email {$ACME_EMAIL}` then failed to adapt:
 
 ```text
 Error: adapting config using caddyfile: parsing caddyfile tokens for 'email':
 wrong argument count or unexpected line ending after 'email', at /etc/caddy/Caddyfile:20
 ```
 
-Setting `ACME_EMAIL` (e.g. `ops@example.com`) in the environment file makes
-Caddy start and pass its health check (verified in the scratch run). Fix:
-document `ACME_EMAIL` in `.env.production.example` and require it (fail-fast,
-like `REDIS_PASSWORD`), or make the Caddyfile tolerate an empty value.
+**Fix:** `ACME_EMAIL` is now required, fail-fast like `REDIS_PASSWORD` —
+`compose.hybrid-vps.yml` uses `${ACME_EMAIL:?set ACME_EMAIL in the environment
+file}`, `.env.production.example` documents it under a new "Edge (Caddy)"
+section, and the CI compose-validation job exports a placeholder. A host can
+never start Caddy with an empty Let's Encrypt contact again.
+
+**D3 — the API container's healthcheck (and any orchestrator/load-balancer
+probe) was rejected by the Host allowlist.** Surfaced by the re-run: the
+compose `api` healthcheck calls `http://localhost:8000/ready` with a
+container-local Host header, which is not in production `TRUSTED_HOSTS`, so
+Starlette's `TrustedHostMiddleware` answered every probe with `400 Invalid
+host header` and the API never went healthy:
+
+```text
+{"method": "GET", "path": "/ready", "status_code": 400, ...}
+```
+
+**Fix:** the Host allowlist now exempts the public, non-sensitive surface —
+`/health`, `/ready`, `/metrics` — via `_TrustedHostWithPublicExemptMiddleware`
+in `backend/app/main.py`; every other path keeps the strict allowlist
+(DNS-rebinding / Host-header injection protection unchanged). Covered by
+`test_health.py`.
 
 ---
 

@@ -406,6 +406,105 @@ def test_production_accepts_complete_s3_configuration() -> None:
     assert settings.storage_public_endpoint_url == "https://s3.example.test"
 
 
+def test_production_accepts_private_compose_network_redis_without_tls() -> None:
+    """Scope §6.6 / backup-and-recovery run B (defect D1): the hybrid VPS
+    profile runs a private, password-protected Redis on the compose network,
+    reachable only by the single-label service name ``redis`` and never
+    published, so plain ``redis://`` over that private network is acceptable
+    in production."""
+    settings = Settings(
+        app_env="production",
+        database_url="postgresql+asyncpg://x",
+        workos_api_key="sk_test",
+        workos_client_id="client_1",
+        cors_allowed_origins=["https://app.example.test"],
+        trusted_hosts=["api.example.test"],
+        redis_url="redis://:secret@redis:6379/0",
+        storage_provider="s3",
+        storage_access_key_id="ak_test",
+        storage_secret_access_key="sk_storage_test",
+        storage_bucket="files",
+        storage_endpoint_url="https://s3.example.test",
+        email_provider="smtp",
+        email_from="no-reply@example.com",
+        smtp_host="smtp.example.test",
+        smtp_port=587,
+    )
+    assert settings.redis_url.startswith("redis://")
+
+
+def test_production_accepts_loopback_redis_without_tls() -> None:
+    settings = Settings(
+        app_env="production",
+        database_url="postgresql+asyncpg://x",
+        workos_api_key="sk_test",
+        workos_client_id="client_1",
+        cors_allowed_origins=["https://app.example.test"],
+        trusted_hosts=["api.example.test"],
+        redis_url="redis://localhost:6379/0",
+        storage_provider="s3",
+        storage_access_key_id="ak_test",
+        storage_secret_access_key="sk_storage_test",
+        storage_bucket="files",
+        storage_endpoint_url="https://s3.example.test",
+        email_provider="smtp",
+        email_from="no-reply@example.com",
+        smtp_host="smtp.example.test",
+        smtp_port=587,
+    )
+    assert settings.redis_url.startswith("redis://")
+
+
+def test_production_requires_tls_for_external_redis() -> None:
+    """Any externally reachable Redis host (a dotted hostname or an IP) still
+    requires TLS in production."""
+    with pytest.raises(ValidationError, match="rediss"):
+        Settings(
+            app_env="production",
+            database_url="postgresql+asyncpg://x",
+            workos_api_key="sk_test",
+            workos_client_id="client_1",
+            cors_allowed_origins=["https://app.example.test"],
+            trusted_hosts=["api.example.test"],
+            redis_url="redis://redis.example.test:6379/0",
+            storage_provider="s3",
+            storage_access_key_id="ak_test",
+            storage_secret_access_key="sk_storage_test",
+            storage_bucket="files",
+            storage_endpoint_url="https://s3.example.test",
+            email_provider="smtp",
+            email_from="no-reply@example.com",
+            smtp_host="smtp.example.test",
+            smtp_port=587,
+        )
+
+
+def test_production_requires_tls_for_public_ipv6_redis() -> None:
+    """A non-loopback IPv6 literal contains no dot, so the single-label
+    compose-network heuristic must not mistake it for a private host (review
+    should-fix on the D1 rule): plain ``redis://`` to a public IPv6 address is
+    rejected in production."""
+    with pytest.raises(ValidationError, match="rediss"):
+        Settings(
+            app_env="production",
+            database_url="postgresql+asyncpg://x",
+            workos_api_key="sk_test",
+            workos_client_id="client_1",
+            cors_allowed_origins=["https://app.example.test"],
+            trusted_hosts=["api.example.test"],
+            redis_url="redis://[2001:db8::1]:6379/0",
+            storage_provider="s3",
+            storage_access_key_id="ak_test",
+            storage_secret_access_key="sk_storage_test",
+            storage_bucket="files",
+            storage_endpoint_url="https://s3.example.test",
+            email_provider="smtp",
+            email_from="no-reply@example.com",
+            smtp_host="smtp.example.test",
+            smtp_port=587,
+        )
+
+
 # --- Email settings (Scope §6.2, blueprint §20, ADR-0015) ---
 
 

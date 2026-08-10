@@ -7,7 +7,9 @@ production configuration.
 
 from __future__ import annotations
 
+import ipaddress
 from functools import lru_cache
+from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -304,8 +306,11 @@ class Settings(BaseSettings):
             raise ValueError(
                 "trusted_hosts must be explicitly configured in the production environment"
             )
-        if self.app_env == "production" and not self.redis_url.startswith("rediss://"):
-            raise ValueError("redis_url must use rediss in the production environment")
+        if self.app_env == "production" and not self._redis_url_is_production_safe():
+            raise ValueError(
+                "redis_url must use rediss in the production environment unless "
+                "Redis is on loopback or a private compose-network host"
+            )
         if self.app_env == "production" and any(
             not origin.startswith("https://") for origin in self.cors_allowed_origins
         ):
@@ -357,6 +362,32 @@ class Settings(BaseSettings):
                     f"in the production environment: {', '.join(missing_email)}"
                 )
         return self
+
+    def _redis_url_is_production_safe(self) -> bool:
+        """TLS is required for production Redis unless it is unreachable from
+        the public network.
+
+        The hybrid VPS profile (Scope §6.6) runs a private, password-protected
+        Redis on the compose network, reachable only by the single-label
+        service name ``redis`` and never published; loopback covers local
+        containers. Any other Redis host (a managed/external instance, a
+        dotted hostname, or any non-loopback IP address, IPv4 or IPv6) is
+        reachable over a network an attacker may observe, so plaintext
+        ``redis://`` is rejected there.
+        """
+        if self.redis_url.startswith("rediss://"):
+            return True
+        host = (urlsplit(self.redis_url).hostname or "").lower()
+        if host in {"localhost", "127.0.0.1", "::1"}:
+            return True
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            ip = None
+        if ip is not None and not ip.is_loopback:
+            return False
+        # Single-label hostnames resolve only on the private compose network.
+        return "." not in host
 
 
 @lru_cache

@@ -183,6 +183,39 @@ jobs:
       - name: Test the S3 adapter against MinIO
         run: uv run pytest -m storage_integration
 
+  # Mailhog-backed email integration tests (v0.6 Scope §6.8, blueprint §20):
+  # the SMTP adapter is proven against a real relay — a full SMTP round trip
+  # through Mailhog with the provider message id preserved, and the failure
+  # path against an unreachable relay. The tests carry the `email_integration`
+  # marker and are excluded from the default `make test` suite (see
+  # backend/pyproject.toml), so this dedicated service-backed job is where
+  # that marker runs.
+  email-integration:
+    name: Email integration tests (Mailhog)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      mailhog:
+        image: mailhog/mailhog:v1.0.1
+        ports:
+          - 1025:1025
+          - 8025:8025
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-python: true
+      - name: Sync dependencies from lockfile
+        run: uv sync --frozen
+      - name: Test the SMTP adapter against Mailhog
+        run: uv run pytest -m email_integration
+
   frontend-format-lint:
     name: Frontend formatting & linting (Prettier + ESLint)
     runs-on: ubuntu-latest
@@ -376,6 +409,7 @@ jobs:
       - name: Validate the generic VPS compose profile
         env:
           REDIS_PASSWORD: ci-validation-placeholder
+          ACME_EMAIL: ci-validation@example.com
           ENV_FILE: /dev/null
         run: docker compose -f deploy/compose/compose.hybrid-vps.yml config --quiet
 

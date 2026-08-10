@@ -10,7 +10,7 @@ The practical baseline is **OWASP ASVS Level 2**. This file records the controls
 - Explicit CORS allowlist and Trusted Host allowlist; neither permits wildcards.
 - CSRF protection where cookie authentication requires it.
 - Input limits on request bodies, string lengths, and upload sizes.
-- Redis-backed, distributed coarse rate limiting for `/api/v1` requests (300 requests per minute per source IP); production fails closed if its TLS Redis service is unavailable.
+- Redis-backed, distributed coarse rate limiting for `/api/v1` requests (300 requests per minute per source IP); production fails closed if its Redis service is unavailable. Production Redis is either private (the hybrid VPS profile's non-published compose-network Redis, ADR-0012) or TLS (`rediss://` for any externally reachable Redis).
 - Secure headers: API responses set MIME-sniffing, frame, referrer and permissions policies; the frontend edge sets CSP as well. HSTS remains the responsibility of the TLS-terminating production edge, not the local HTTP nginx container.
 - Private object storage; no public buckets.
 - Upload scanning hook on all uploaded content.
@@ -137,6 +137,16 @@ An unqualified Caddy `rate_limit` directive is not acceptable because stock Cadd
 - `deploy/caddy/Dockerfile` builds Caddy `v2.11.4` with the pinned `mholt/caddy-ratelimit v0.1.0` module via xcaddy; both versions are pinned and the upgrade procedure is documented in the Dockerfile.
 - `deploy/caddy/Caddyfile` applies per-client-IP zones: 600 events/min for `/api/*`, `/health` and `/metrics` (looser than the application's 300/min so the app stays authoritative), 2400 events/min for static assets, and no limit on `/ready` so deployment health checks are never throttled.
 - CI builds the image and runs `caddy validate`; the rate limiting itself was verified functionally (200 × 3 then 429 on the fourth request). An external WAF (e.g. Cloudflare) may sit in front instead; if one is used, keep the Caddy security headers and TLS termination behind it and document the WAF rules in `docs/operations.md`.
+
+## Email and notification security (v0.6)
+
+Email and notifications follow the same default-deny, tenant-scoped, worker-isolated rules as every other capability (ADR-0015, ADR-0016):
+
+- **Email is sent only from Dramatiq worker tasks, never from an HTTP handler** (blueprint §20, ADR-0004) — proven by test. A slow or failing SMTP relay can never block an API request, and the durable delivery-row lifecycle (queued → running → succeeded/failed) with bounded, idempotent retries prevents double-sends.
+- **SMTP credentials are server-side secrets**: they live only in the environment file / secret store, are never logged (BP §28 never-log list), and are never sent to the frontend. Production fails fast: `EMAIL_PROVIDER=fake` is rejected, and `EMAIL_PROVIDER=smtp` requires explicit `SMTP_HOST`/`SMTP_PORT`/`EMAIL_FROM`. STARTTLS is used for port 587 relays (`SMTP_USE_TLS=true`).
+- **Sentry DSN is an optional secret**: the SDK is initialised only when `SENTRY_DSN` is set; the never-log list keeps tokens, passwords, authorisation headers, signed URLs and full connection strings out of Sentry payloads.
+- **Notifications are org-scoped**: the API returns only the caller's own notifications in the caller's organisation; a foreign or other-user notification id resolves to 404; the new `notifications.read` / `notifications.manage` permission codes follow default-deny (owner/administrator/manager: both; member: read; viewer: none). All four notification routes are in the mandatory security suite's `PROTECTED_ROUTES` matrix (unauth/invalid-session/disabled/viewer-write/cross-org/stack-trace cases).
+- **Delivery failures are audited**: a failed email delivery writes a `failed` delivery row and an audit event; test-send is audited too.
 
 ## Reporting a vulnerability
 

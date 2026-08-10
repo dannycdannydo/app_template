@@ -69,3 +69,34 @@ async def test_ready_returns_503_when_database_unreachable() -> None:
         assert body["code"] == "database_unavailable"
         assert body["message"]
         assert body["request_id"]
+
+
+async def test_public_health_surface_ignores_host_allowlist_for_probes() -> None:
+    """backup-and-recovery run B (defect D3): infrastructure probes — the
+    compose healthcheck, load balancers, orchestrators — hit ``/health``,
+    ``/ready`` and ``/metrics`` with a container-local Host header that is
+    not in ``TRUSTED_HOSTS``. The public, non-sensitive surface must not be
+    rejected by the Host allowlist; everything else keeps it."""
+    app = create_app()
+    app.dependency_overrides[get_db] = _override_get_db_ok
+    async with AsyncClient(
+        transport=ASGITransport(app=app, raise_app_exceptions=False),
+        base_url="http://probe",
+    ) as client:
+        ready: Response = await client.get("/ready")
+        assert ready.status_code == 200
+        health: Response = await client.get("/health")
+        assert health.status_code == 200
+        metrics: Response = await client.get("/metrics")
+        assert metrics.status_code == 200
+
+
+async def test_host_allowlist_still_rejects_non_public_paths() -> None:
+    app = create_app()
+    app.dependency_overrides[get_db] = _override_get_db_ok
+    async with AsyncClient(
+        transport=ASGITransport(app=app, raise_app_exceptions=False),
+        base_url="http://probe",
+    ) as client:
+        response: Response = await client.get("/definitely-not-a-public-path")
+        assert response.status_code == 400

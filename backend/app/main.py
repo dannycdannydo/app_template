@@ -189,6 +189,31 @@ def _register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(Exception, _handle_unexpected_exception)
 
 
+class _TrustedHostWithPublicExemptMiddleware:
+    """Host-header allowlist that exempts the public health/metrics surface.
+
+    Starlette's ``TrustedHostMiddleware`` rejects any Host header outside the
+    configured allowlist (DNS-rebinding / Host-header injection protection).
+    The public, non-sensitive endpoints (``/health``, ``/ready``,
+    ``/metrics``) must stay reachable from infrastructure probes — the
+    compose healthcheck, load balancers and orchestrators target the
+    container directly and cannot present the public Host header — so they
+    skip the allowlist check; every other path keeps the strict allowlist.
+    """
+
+    _PUBLIC_EXEMPT_PATHS = frozenset({"/health", "/ready", "/metrics"})
+
+    def __init__(self, app: Any, *, allowed_hosts: list[str]) -> None:
+        self.app = app
+        self._host_check = TrustedHostMiddleware(app, allowed_hosts=allowed_hosts)
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] == "http" and scope.get("path") in self._PUBLIC_EXEMPT_PATHS:
+            await self.app(scope, receive, send)
+            return
+        await self._host_check(scope, receive, send)
+
+
 def _register_middleware(
     app: FastAPI, *, cors_allowed_origins: list[str], trusted_hosts: list[str]
 ) -> None:
@@ -201,7 +226,10 @@ def _register_middleware(
         allow_headers=["Authorization", "Content-Type", "X-Org-Id", "X-Request-ID"],
         expose_headers=["X-Request-ID"],
     )
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=trusted_hosts)
+    app.add_middleware(
+        _TrustedHostWithPublicExemptMiddleware,
+        allowed_hosts=trusted_hosts,
+    )
     # Metrics instrument the whole request path (rate limits and auth failures
     # included) but skip the /metrics scrape itself.
     app.add_middleware(BaseHTTPMiddleware, dispatch=metrics_middleware)

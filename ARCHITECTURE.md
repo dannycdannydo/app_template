@@ -271,12 +271,55 @@ job `succeeded`, file `ready`                     job `failed` + error_code/erro
 
 Retries are bounded: transient errors retry up to `MAX_ATTEMPTS` total attempts; permanent validation errors are not retried. Terminal states (`succeeded` / `failed` / `cancelled`) are never re-run, and completion/failure is idempotent. The org-scoped job endpoints `GET /api/v1/jobs` (list, paginated, `status` / `job_type` filters) and `GET /api/v1/jobs/{job_id}` (status + progress 0–100) let the frontend poll a processing file to completion; they are gated by `documents.read` (ADR-0014 — the files module is the only job producer today, so a generic `jobs.*` permission waits for a second producer).
 
+## Observability (v0.6)
+
+Blueprint §28 is complete: structured JSON logging, Sentry, and basic metrics, on the v0.1 request-id foundation.
+
+- **Logging context**: every JSON log line carries `request_id`; authenticated `/api/v1` requests additionally bind `user_id` and `organisation_id` (cleared per request), worker tasks bind `job_id` and `resource_id` for file/job/notification operations, and every line has a consistent `event` name. The BP §28 never-log list (passwords, tokens, authorisation headers, signed URLs, full connection strings) is enforced by test. See `API_CONVENTIONS.md` → Request IDs and logging.
+- **Sentry**: `sentry-sdk` is initialised in `create_app()` only when `SENTRY_DSN` is set (`SENTRY_ENVIRONMENT` defaults to `APP_ENV`, `SENTRY_TRACES_SAMPLE_RATE` configurable); unhandled request exceptions and unhandled worker exceptions are captured (worker capture mirrors the durable job failure record). With no DSN the app boots without the SDK.
+- **Metrics**: `GET /metrics` (public, like `/health` and `/ready`) returns Prometheus text format — request counter + latency histogram middleware plus job counters (enqueued/succeeded/failed), labelled with low-cardinality route/job-type identifiers. The edge (Caddy) and the metrics scrapers documented in `docs/operations.md` consume it.
+
+## Email provider interface (v0.6)
+
+Email is provider-neutral (ADR-0015, blueprint §20), parallel to the ADR-0006 storage contract. `app/email/` defines one `EmailProvider` interface — `send_email(*, from_address, to_address, subject, text_body, html_body=None) -> EmailDeliveryResult(provider_message_id, status)` — and exactly two adapters: `SmtpEmailProvider` (standard library `smtplib`, `EMAIL_PROVIDER=smtp`) and `FakeEmailProvider` (in-memory, test-only). `get_email_provider()` is an `lru_cache` singleton wired from settings; no module outside `app/email/` imports a provider SDK.
+
+**Email is only ever sent from Dramatiq tasks, never from an HTTP handler** (blueprint §20, ADR-0004), proven by test. Locally, Mailhog (compose `mailhog` service, SMTP 1025 / UI 8025) catches outbound mail so `make dev` shows real messages; Mailhog-backed SMTP tests carry the `email_integration` marker, excluded from the default suite like `storage_integration`. Production fails fast: `EMAIL_PROVIDER=fake` is rejected and `EMAIL_PROVIDER=smtp` requires explicit SMTP host/port/from; SMTP credentials are server-side secrets.
+
+## Notifications flow (v0.6)
+
+Notifications are org-scoped records (ADR-0016, blueprint §20) in the `notifications` and `notification_deliveries` tables (Alembic migration, §10 conventions). The `modules/notifications/` module follows the standard pattern; the permission catalogue gained `notifications.read` and `notifications.manage` (owner/administrator/manager: both; member: read; viewer: none — default-deny, human-reviewed).
+
+```text
+GET /api/v1/notifications                    notifications.read — own notifications in the
+                                             caller's org, paginated envelope with unread_count,
+                                             optional type filter
+GET /api/v1/notifications/unread-count       notifications.read — count for the bell
+PATCH /api/v1/notifications/{id}/read        notifications.read — sets read_at; foreign/other-user id → 404
+POST /api/v1/notifications/test              notifications.manage — in-app notification for the
+                                             caller + enqueues the email delivery job
+```
+
+Delivery is the durable-job loop the release exists to demonstrate:
+
+```text
+POST /api/v1/notifications/test  (or process_file completing)
+        │   service writes notification + notification_deliveries row (queued), then enqueues
+        ▼
+send_notification_email task (job_type "notification.email", input_reference = delivery id)
+        │   queued → running → succeeded/failed; records provider_message_id; idempotent on
+        │   retry (status/attempt check before sending); failure → delivery failed + audit
+        ▼
+EmailProvider.send_email (ADR-0015 adapter, worker-thread, never blocks the event loop)
+```
+
+A completed file (`ready` or `failed`) produces a `file.ready` / `file.failed` notification for the uploader with its email delivery enqueued — the files ↔ jobs ↔ notifications loop. Delivery failures are audited; test-send is audited.
+
 ## Cross-cutting conventions
 
 - **API**: REST, JSON, OpenAPI, `/api/v1` prefix (see `API_CONVENTIONS.md`).
 - **Errors**: one structured error format with `code`, `message`, `details`, `request_id` (see `API_CONVENTIONS.md`).
 - **Database**: SQLAlchemy 2 models + Pydantic 2 schemas, Alembic migrations, shared naming/timestamp/UUIDv7 conventions (blueprint §7, §10).
 - **Configuration**: typed `pydantic-settings` model, fail-fast on invalid production config.
-- **Abuse controls**: Redis provides a distributed, fail-closed coarse `/api/v1` rate limit (ADR-0012); production uses TLS Redis (`rediss://`).
-- **Observability**: structured JSON logging with request IDs (blueprint §28).
+- **Abuse controls**: Redis provides a distributed, fail-closed coarse `/api/v1` rate limit (ADR-0012); production Redis is either private (the hybrid VPS profile's non-published compose-network Redis) or TLS (`rediss://` for any externally reachable Redis).
+- **Observability**: structured JSON logging with request IDs and the full BP §28 context (user/org/job/resource ids, consistent `event` names), Sentry error tracking when `SENTRY_DSN` is set, and public `GET /metrics` (blueprint §28).
 - **Security**: baseline controls in `SECURITY.md`, aligned with OWASP ASVS Level 2.
