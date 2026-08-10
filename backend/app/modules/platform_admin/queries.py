@@ -19,12 +19,13 @@ from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.organisations.models import Organisation, OrganisationMembership
-from app.modules.permissions.models import Permission
+from app.modules.permissions.models import MembershipRole, Permission, Role
 from app.modules.platform_admin.models import (
     PlatformMembership,
     PlatformRole,
     PlatformRolePermission,
 )
+from app.modules.users.models import User
 
 
 async def platform_permission_codes_for_user(
@@ -82,6 +83,23 @@ def memberships_count_statement(*, organisation_id: uuid.UUID) -> Select[tuple[i
     return select(func.count()).select_from(
         memberships_statement(organisation_id=organisation_id).subquery()
     )
+
+
+def users_for_ids_statement(user_ids: set[uuid.UUID]) -> Select[tuple[User]]:
+    """Return the users needed to render one page of memberships."""
+    return select(User).where(User.id.in_(user_ids))
+
+
+def membership_roles_for_membership_ids_statement(
+    membership_ids: set[uuid.UUID],
+) -> Select[tuple[MembershipRole]]:
+    """Return all role grants for one page of organisation memberships."""
+    return select(MembershipRole).where(MembershipRole.membership_id.in_(membership_ids))
+
+
+def roles_for_ids_statement(role_ids: set[uuid.UUID]) -> Select[tuple[Role]]:
+    """Return the role catalogue rows referenced by one membership page."""
+    return select(Role).where(Role.id.in_(role_ids))
 
 
 def organisations_statement() -> Select[tuple[Organisation]]:

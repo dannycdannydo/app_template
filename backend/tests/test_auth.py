@@ -249,10 +249,10 @@ async def test_me_reuses_existing_user_on_second_login(auth_app: AuthApp) -> Non
 
     assert response.status_code == 200
     assert response.json()["user"]["id"] == str(existing.id)
-    # Invitation reconciliation always uses the current verified provider
-    # email, so an existing user can accept an invitation after an email
-    # change without relying on webhook delivery.
-    assert state.profile_calls == [WORKOS_USER_ID]
+    # The existing local identity is refreshed from WorkOS before invitation
+    # reconciliation uses the verified provider email, so an email change can
+    # link a pending invitation without waiting for webhook delivery.
+    assert state.profile_calls == [WORKOS_USER_ID, WORKOS_USER_ID]
 
 
 async def test_me_never_trusts_identity_fields_from_token(auth_app: AuthApp) -> None:

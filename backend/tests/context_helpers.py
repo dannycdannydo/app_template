@@ -125,6 +125,8 @@ class ContextState:
     )
     # The next commit raises an IntegrityError (bootstrap race simulation).
     fail_commits: int = 0
+    scalar_calls: int = 0
+    scalars_calls: int = 0
     # Optional profile the fake profile client returns (bootstrap grant tests);
     # defaults to the verified ada@example.com profile.
     profile: UserProfile | None = None
@@ -421,12 +423,14 @@ class FakeSession:
         }
 
     async def scalar(self, statement: object) -> Any:
+        self._state.scalar_calls += 1
         self._track_invitation_statuses()
         if self._state.lookup_queue:
             return self._state.lookup_queue.pop(0)
         return None
 
     async def scalars(self, statement: object) -> _ScalarsResult:
+        self._state.scalars_calls += 1
         # The invitation queries (pending-at-login and the platform listing)
         # answer from the staged invitations before the scalars_queue: the
         # login-time linking service runs inside get_current_user, i.e.
@@ -460,6 +464,8 @@ class FakeSession:
             return _ScalarsResult(list(self._state.membership_roles))
         if entity is Role:
             return _ScalarsResult(list(self._state.roles))
+        if entity is User:
+            return _ScalarsResult(list(self._state.users.values()))
         if entity is OrganisationFeature:
             # Scope §6.7: the feature-flag queries answer from the staged
             # overrides; the enforcement helper and the management service
@@ -601,6 +607,12 @@ class FakeSession:
                 membership_role
                 for membership_role in self._state.membership_roles
                 if membership_role.membership_id != instance.id
+            ]
+        elif isinstance(instance, PlatformMembership):
+            self._state.platform_memberships = [
+                membership
+                for membership in self._state.platform_memberships
+                if membership.id != instance.id
             ]
         else:
             self._state.records = [

@@ -656,6 +656,34 @@ async def test_list_memberships_service_returns_details_and_total() -> None:
     assert details[0].roles == ["member"]
 
 
+async def test_list_memberships_uses_a_bounded_number_of_queries() -> None:
+    """A 100-row page must not turn user and role rendering into N+1 reads."""
+    state = ContextState(owner_role=make_role("owner", "Owner"))
+    organisation = make_organisation(workos_organisation_id="org_workos_acme")
+    role = make_role("member", "Member")
+    state.roles = [role]
+    for index in range(100):
+        user = _make_member(
+            state,
+            workos_user_id=f"user_{index}",
+            email=f"member_{index}@example.com",
+        )
+        membership = make_membership(user, organisation.id)
+        state.memberships.append(membership)
+        state.membership_roles.append(make_membership_role(membership.id, role.id))
+    session = cast(AsyncSession, FakeSession(state))
+    state.lookup_queue = [organisation, 100]
+
+    details, total = await list_memberships(
+        session, organisation_id=organisation.id, page=1, page_size=100
+    )
+
+    assert total == 100
+    assert len(details) == 100
+    assert state.scalar_calls == 2
+    assert state.scalars_calls == 4
+
+
 async def test_membership_mutations_are_idempotent_and_race_safe() -> None:
     """No-op paths never audit: steady-state administration is silent."""
     state = ContextState(owner_role=make_role("owner", "Owner"))
