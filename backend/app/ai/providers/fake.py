@@ -36,6 +36,7 @@ class FakeLLMProvider(LLMProvider):
     """Deterministic, test-only :class:`LLMProvider` implementation."""
 
     provider_id = "fake"
+    supports_structured_output = True
 
     def __init__(self) -> None:
         self.requests: list[ProviderRequest] = []

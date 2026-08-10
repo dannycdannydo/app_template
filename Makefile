@@ -28,7 +28,7 @@ define load_env
 	set -a; [ -f .env ] && . ./.env; set +a;
 endef
 
-.PHONY: dev dev-docker worker migrate provision-admin provision-admin-delete lint typecheck test e2e format generate-client validate-ai-registries check
+.PHONY: dev dev-docker worker migrate provision-admin provision-admin-delete lint typecheck test test-ai-contracts e2e format generate-client validate-ai-registries check
 
 ## Start PostgreSQL + Redis + MinIO + Mailhog in Docker, then run the API, the
 ## Dramatiq worker and the frontend natively with live reload (ADR-0008).
@@ -93,6 +93,15 @@ test:
 ## they skip, so copy `.env.example` first.
 e2e:
 	cd frontend && pnpm test:e2e
+
+## Opt-in live AI provider contract tests (v0.7 Scope §4, §6.3). Runs only the
+## ai_contracts-marked tests; each skips cleanly when its dedicated
+## non-production credentials are absent, so the target is a no-op (with
+## skips) in CI until provider secrets are deliberately configured. Google
+## tests use a dedicated project/location and Vertex credentials only, never a
+## Gemini API key (ADR-0018).
+test-ai-contracts:
+	cd backend && uv run pytest -m ai_contracts
 
 ## Ruff format (backend) + Prettier (frontend).
 format:

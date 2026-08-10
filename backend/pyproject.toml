@@ -9,6 +9,21 @@ dependencies = [
     "boto3>=1.38.0",
     "dramatiq[redis]>=1.18.0",
     "fastapi>=0.141.1",
+    # v0.7 AI provider adapters (Scope §6.3, ADR-0017) are pinned HTTP REST
+    # clients instead of provider SDKs: the OpenAI, Anthropic, DeepSeek,
+    # Azure OpenAI, Vertex AI and local OpenAI-compatible wire formats are
+    # implemented over httpx (promoted from a dev dependency), so the
+    # provider-SDK import boundary stays airtight and the fake-provider
+    # default plus opt-in contract tests share one transport. No provider SDK
+    # (openai, anthropic, google-cloud-aiplatform, ...) is a dependency; that
+    # is a deliberate, reviewed decision (ADR-0017 consequences).
+    "httpx>=0.28.1",
+    # v0.7 Vertex AI adapter (Scope §6.3, ADR-0018): google-auth supplies
+    # Application Default Credentials / service-account credentials for the
+    # Vertex generateContent endpoint. Token refresh uses the urllib3
+    # transport already provided by boto3, so no extra HTTP client is pulled
+    # in. Imported only inside app/ai/providers/vertex.py.
+    "google-auth>=2.35.0",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.14.2",
     # v0.7 prompt/task/model registries are reviewed YAML assets. PyYAML's
@@ -33,7 +48,6 @@ dependencies = [
 [dependency-groups]
 dev = [
     "cryptography>=44.0.0",
-    "httpx>=0.28.1",
     "pyright>=1.1.402",
     "pytest>=8.4.0",
     "pytest-asyncio>=1.3.0",
@@ -76,15 +90,17 @@ reportMissingTypeStubs = false
 testpaths = ["tests"]
 pythonpath = ["."]
 # The default suite must stay provider-free (Scope §6.2): MinIO-backed S3
-# adapter tests carry the storage_integration marker and Mailhog-backed SMTP
-# adapter tests carry the email_integration marker; both are excluded unless
+# adapter tests carry the storage_integration marker, Mailhog-backed SMTP
+# adapter tests carry the email_integration marker, and live AI provider
+# contract tests carry the ai_contracts marker; all are excluded unless
 # explicitly requested with `uv run pytest -m storage_integration` /
-# `uv run pytest -m email_integration`. A CLI -m overrides this expression,
-# so either marker can be run on its own.
-addopts = "-ra -m 'not storage_integration and not email_integration'"
+# `uv run pytest -m email_integration` / `uv run pytest -m ai_contracts`.
+# A CLI -m overrides this expression, so each marker can be run on its own.
+addopts = "-ra -m 'not storage_integration and not email_integration and not ai_contracts'"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = [
     "storage_integration: S3 adapter tests that need a live S3-compatible service (MinIO); skipped when unreachable",
     "email_integration: SMTP adapter tests that need a live SMTP relay (Mailhog); skipped when unreachable",
+    "ai_contracts: opt-in live AI provider contract tests that need dedicated non-production credentials (Scope §6.3); skipped when credentials are absent",
 ]

@@ -92,6 +92,27 @@ def test_checked_in_registry_bundle_is_complete_and_executable() -> None:
     assert bundle.models.resolve(task).id == "fake.document-classifier"
 
 
+def test_task_can_move_between_real_providers_by_reviewed_configuration() -> None:
+    """Acceptance criterion §5.2: allowed_providers moves the demo task to
+    each real provider's registered model without any feature-code change."""
+    bundle = load_registry_bundle()
+    task = bundle.tasks.get("document.classify")
+
+    expected = {
+        "openai": "openai.gpt-4o-mini",
+        "anthropic": "anthropic.claude-3-5-haiku",
+        "deepseek": "deepseek.deepseek-chat",
+        "azure_openai": "azure_openai.gpt-4o-mini",
+        "vertex": "vertex.gemini-2.0-flash",
+        "local": "local.document-classifier",
+        "fake": "fake.document-classifier",
+    }
+    for provider_id, model_id in expected.items():
+        decision = bundle.models.route(task, allowed_providers=[provider_id])
+        assert decision.model.id == model_id
+        assert decision.model.provider == provider_id
+
+
 async def test_checked_in_demo_task_runs_through_service() -> None:
     bundle = load_registry_bundle()
     service = AIService(
