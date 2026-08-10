@@ -28,6 +28,12 @@ from sqlalchemy.pool import NullPool
 
 from app.core.security import UserProfile, UserProfileClient
 from app.modules.audit.models import AuditEvent
+from app.modules.organisations.models import (
+    MembershipStatus,
+    Organisation,
+    OrganisationMembership,
+)
+from app.modules.permissions.models import OWNER_ROLE_CODE, MembershipRole, Role
 from app.modules.platform_admin import service
 from app.modules.platform_admin.models import (
     BOOTSTRAP_SINGLETON_ID,
@@ -105,11 +111,17 @@ async def _seed_actor(session: AsyncSession) -> User:
     return user
 
 
-def _configured(monkeypatch: pytest.MonkeyPatch) -> None:
+def _configured(
+    monkeypatch: pytest.MonkeyPatch,
+    org: str = "",
+) -> None:
     monkeypatch.setattr(
         service,
         "get_settings",
-        lambda: SimpleNamespace(bootstrap_platform_admin_email=BOOTSTRAP_EMAIL),
+        lambda: SimpleNamespace(
+            bootstrap_platform_admin_email=BOOTSTRAP_EMAIL,
+            bootstrap_platform_admin_org=org,
+        ),
     )
 
 
@@ -302,5 +314,72 @@ async def test_concurrent_first_logins_grant_exactly_once(
 
         memberships, bootstrap_rows, audit_rows = await _grant_counts(session_factory, actor_id)
         assert (memberships, bootstrap_rows, audit_rows) == (1, 1, 1)
+    finally:
+        await engine.dispose()
+
+
+async def test_bootstrap_grant_creates_the_configured_organisation(
+    migrated_database: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BOOTSTRAP_PLATFORM_ADMIN_ORG: the grant provisions the admin's tenant.
+
+    The organisation, the active owner membership and the owner-role grant are
+    persisted with the platform grant, and a repeat login duplicates none of
+    them (find-or-create + membership idempotence).
+    """
+    _configured(monkeypatch, org="Trakr")
+    engine, session_factory = _session_factory(migrated_database)
+    try:
+        await _clean_bootstrap(session_factory)  # free the sentinel for this test
+        async with session_factory() as session:
+            actor = await _seed_actor(session)
+            actor_id = actor.id
+
+            membership = await service.maybe_grant_bootstrap_platform_admin(
+                session,
+                actor,
+                StubProfileClient(email=BOOTSTRAP_EMAIL, email_verified=True),
+            )
+            assert membership is not None
+
+        async with session_factory() as session:
+            org = await session.scalar(select(Organisation).where(Organisation.name == "Trakr"))
+            assert org is not None
+            org_membership = await session.scalar(
+                select(OrganisationMembership).where(
+                    OrganisationMembership.user_id == actor_id,
+                    OrganisationMembership.organisation_id == org.id,
+                )
+            )
+            assert org_membership is not None
+            assert org_membership.status == MembershipStatus.ACTIVE
+            owner_role = await session.scalar(select(Role).where(Role.code == OWNER_ROLE_CODE))
+            assert owner_role is not None
+            role_grant = await session.scalar(
+                select(MembershipRole).where(
+                    MembershipRole.membership_id == org_membership.id,
+                    MembershipRole.role_id == owner_role.id,
+                )
+            )
+            assert role_grant is not None
+
+            # A repeat login duplicates nothing: no second org, membership or grant.
+            again = await service.maybe_grant_bootstrap_platform_admin(
+                session,
+                actor,
+                StubProfileClient(email=BOOTSTRAP_EMAIL, email_verified=True),
+            )
+            assert again is None
+            org_count = await session.scalar(
+                select(func.count()).select_from(Organisation).where(Organisation.name == "Trakr")
+            )
+            assert org_count == 1
+            member_count = await session.scalar(
+                select(func.count())
+                .select_from(OrganisationMembership)
+                .where(OrganisationMembership.user_id == actor_id)
+            )
+            assert member_count == 1
     finally:
         await engine.dispose()

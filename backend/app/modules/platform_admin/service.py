@@ -61,7 +61,7 @@ from app.modules.organisations.models import (
     OrganisationMembership,
 )
 from app.modules.permissions.constants import PLATFORM_ADMIN_ROLE_CODE
-from app.modules.permissions.models import MembershipRole, Role
+from app.modules.permissions.models import OWNER_ROLE_CODE, MembershipRole, Role
 from app.modules.platform_admin.models import (
     BOOTSTRAP_SINGLETON_ID,
     BootstrapState,
@@ -246,13 +246,16 @@ async def maybe_grant_bootstrap_platform_admin(
 
     When the grant fires, the platform membership, the bootstrap record and
     the ``platform.bootstrap_granted`` audit event are written in one
-    transaction and committed together. The bootstrap record's id is a fixed
-    sentinel guarded by a check constraint, so a concurrent first login loses
-    the race with an ``IntegrityError``: the transaction is rolled back and
-    the hook re-checks, then treats the bootstrap as already consumed — no
-    second grant, no second audit row. Any other ``IntegrityError`` (e.g. the
-    seeded ``platform_admin`` role is missing) surfaces as a 503 rather than a
-    silent no-op, so a broken deployment cannot swallow the bootstrap.
+    transaction and committed together. If ``BOOTSTRAP_PLATFORM_ADMIN_ORG`` is
+    configured, the same transaction also creates that organisation and makes
+    the admin its owner (see ``_ensure_bootstrap_organisation``), so the
+    default admin is never left organisation-less. The bootstrap record's id
+    is a fixed sentinel guarded by a check constraint, so a concurrent first
+    login loses the race with an ``IntegrityError``: the transaction is rolled
+    back and the hook re-checks, then treats the bootstrap as already consumed
+    — no second grant, no second audit row. Any other ``IntegrityError`` (e.g.
+    the seeded ``platform_admin`` role is missing) surfaces as a 503 rather
+    than a silent no-op, so a broken deployment cannot swallow the bootstrap.
     """
 
     configured = get_settings().bootstrap_platform_admin_email
@@ -279,6 +282,13 @@ async def maybe_grant_bootstrap_platform_admin(
             code="platform_bootstrap_failed",
             message="The platform bootstrap could not be completed. Please try again.",
         )
+
+    # When configured, the grant also provisions the bootstrap organisation and
+    # makes the admin its owner, so the default admin is never left without a
+    # tenant (org-scoped screens otherwise stay pending forever). Runs inside
+    # the same transaction; a lost race on the bootstrap sentinel rolls this
+    # back with the rest of the grant.
+    await _ensure_bootstrap_organisation(session, user)
 
     membership = PlatformMembership(user_id=user.id, platform_role_id=role.id)
     bootstrap_state = BootstrapState(email=profile.email, consumed_by_user_id=user.id)
@@ -311,6 +321,70 @@ async def maybe_grant_bootstrap_platform_admin(
             message="The platform bootstrap could not be completed. Please try again.",
         ) from None
     return membership
+
+
+async def _ensure_bootstrap_organisation(session: AsyncSession, user: User) -> None:
+    """Find or create the bootstrap organisation and make ``user`` its owner.
+
+    Runs inside the ``maybe_grant_bootstrap_platform_admin`` transaction, so
+    the organisation, membership and owner-role grant commit atomically with
+    the platform membership and the bootstrap record, and a lost race on the
+    bootstrap sentinel rolls them all back together (the winner's rows are
+    the ones that survive).
+
+    Idempotent by construction: an organisation with the configured name is
+    reused rather than duplicated, and a user who already holds a membership
+    in it (e.g. invited before the bootstrap fired) is left untouched, so
+    re-runs and pre-existing data are safe. The WorkOS organisation mapping is
+    deliberately not created here: it is backfilled lazily at the first
+    invitation (``ensure_workos_organisation``), exactly like any other
+    pre-existing organisation. No-op when ``BOOTSTRAP_PLATFORM_ADMIN_ORG`` is
+    unset.
+    """
+    org_name = get_settings().bootstrap_platform_admin_org
+    if not org_name:
+        return
+
+    organisation = await session.scalar(select(Organisation).where(Organisation.name == org_name))
+    if organisation is not None:
+        existing = await session.scalar(
+            select(OrganisationMembership).where(
+                OrganisationMembership.user_id == user.id,
+                OrganisationMembership.organisation_id == organisation.id,
+            )
+        )
+        if existing is not None:
+            return
+
+    owner_role = await session.scalar(select(Role).where(Role.code == OWNER_ROLE_CODE))
+    if owner_role is None:
+        raise ServiceUnavailableError(
+            code="platform_bootstrap_failed",
+            message="The platform bootstrap could not be completed. Please try again.",
+        )
+
+    if organisation is None:
+        organisation = Organisation(name=org_name)
+        session.add(organisation)
+        await session.flush()
+        await record_event(
+            session,
+            organisation_id=organisation.id,
+            actor_user_id=user.id,
+            action=ACTION_ORGANISATION_CREATED,
+            resource_type="organisation",
+            resource_id=str(organisation.id),
+            metadata={"name": org_name, "source": "platform_bootstrap"},
+        )
+
+    membership = OrganisationMembership(
+        user_id=user.id,
+        organisation_id=organisation.id,
+        status=MembershipStatus.ACTIVE,
+    )
+    session.add(membership)
+    await session.flush()
+    session.add(MembershipRole(membership_id=membership.id, role_id=owner_role.id))
 
 
 # --- Membership administration (Scope §6.6) ---

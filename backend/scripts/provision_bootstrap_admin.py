@@ -33,9 +33,8 @@ import asyncio
 import os
 import sys
 from dataclasses import dataclass
-from typing import Any, cast
 
-from sqlalchemy import CursorResult, delete
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ExternalServiceError
@@ -95,23 +94,43 @@ async def delete_bootstrap_admin(
     Deleting the internal ``users`` row cascades to the ``platform_memberships``
     and ``bootstrap_state`` rows, which is what resets the one-time bootstrap:
     the next ``make provision-admin`` + first login of a fresh email can grant
-    ``platform_admin`` again.
+    ``platform_admin`` again. The admin's organisation memberships do not
+    cascade, so their role grants and memberships are removed explicitly first
+    (the bootstrap organisation row itself is left in place: it is a tenant,
+    not a user-scoped record, and may already hold other members).
     """
+    from app.modules.organisations.models import OrganisationMembership
+    from app.modules.permissions.models import MembershipRole
     from app.modules.users.models import User
 
     workos_user = provisioner.find_user_by_email(email)
     if workos_user is not None:
         provisioner.delete_user(workos_user.id)
 
-    result = cast(
-        CursorResult[Any],
-        await session.execute(delete(User).where(User.email == email.lower())),
-    )
+    internal_user = await session.scalar(select(User).where(User.email == email.lower()))
+    if internal_user is not None:
+        membership_ids = (
+            await session.scalars(
+                select(OrganisationMembership.id).where(
+                    OrganisationMembership.user_id == internal_user.id
+                )
+            )
+        ).all()
+        if membership_ids:
+            await session.execute(
+                delete(MembershipRole).where(MembershipRole.membership_id.in_(membership_ids))
+            )
+            await session.execute(
+                delete(OrganisationMembership).where(
+                    OrganisationMembership.user_id == internal_user.id
+                )
+            )
+        await session.execute(delete(User).where(User.id == internal_user.id))
     await session.commit()
 
     return DeleteResult(
         workos_deleted=workos_user is not None,
-        internal_deleted=result.rowcount > 0,
+        internal_deleted=internal_user is not None,
         email=email,
     )
 

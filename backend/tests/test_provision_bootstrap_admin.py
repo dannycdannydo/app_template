@@ -11,6 +11,7 @@ forwarded, existing email reported without a create call).
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
@@ -58,17 +59,41 @@ class FakeResult:
 class FakeSession:
     """Minimal ``AsyncSession`` stand-in: records the delete and the commit."""
 
-    def __init__(self, rowcount: int = 1) -> None:
+    def __init__(
+        self,
+        rowcount: int = 1,
+        *,
+        internal_user: object | None = None,
+        membership_ids: list[object] | None = None,
+    ) -> None:
         self.executed: list[object] = []
         self.committed = False
         self._rowcount = rowcount
+        self._internal_user = internal_user
+        self._membership_ids = membership_ids or []
 
     async def execute(self, statement: object) -> FakeResult:
         self.executed.append(statement)
         return FakeResult(self._rowcount)
 
+    async def scalar(self, statement: object) -> object | None:
+        return self._internal_user
+
+    async def scalars(self, statement: object) -> FakeScalarsResult:
+        return FakeScalarsResult(self._membership_ids)
+
     async def commit(self) -> None:
         self.committed = True
+
+
+class FakeScalarsResult:
+    """Stand-in for an async ``ScalarResult``: carries rows and exposes .all()."""
+
+    def __init__(self, rows: list[object]) -> None:
+        self._rows = rows
+
+    def all(self) -> list[object]:
+        return self._rows
 
 
 def test_creates_a_verified_password_user_when_absent() -> None:
@@ -201,7 +226,7 @@ def test_delete_removes_the_workos_user_and_the_internal_row() -> None:
             "admin@example.com": ProvisionedWorkOSUser(id="user_1", email="admin@example.com")
         }
     )
-    session = FakeSession(rowcount=1)
+    session = FakeSession(rowcount=1, internal_user=SimpleNamespace(id="user_1"))
 
     result = asyncio.run(
         delete_bootstrap_admin(
@@ -214,13 +239,33 @@ def test_delete_removes_the_workos_user_and_the_internal_row() -> None:
     assert result.workos_deleted is True
     assert result.internal_deleted is True
     assert provisioner.deleted == ["user_1"]
-    assert len(session.executed) == 1
+    assert len(session.executed) == 1  # no memberships -> only the user delete
+    assert session.committed is True
+
+
+def test_delete_removes_organisation_memberships_before_the_user() -> None:
+    """The admin's org memberships do not cascade, so they are removed first."""
+    provisioner = FakeProvisioner()
+    session = FakeSession(
+        rowcount=1, internal_user=SimpleNamespace(id="user_1"), membership_ids=["membership-1"]
+    )
+
+    result = asyncio.run(
+        delete_bootstrap_admin(
+            provisioner,
+            session,  # type: ignore[arg-type]
+            email="admin@example.com",
+        )
+    )
+
+    assert result.internal_deleted is True
+    assert len(session.executed) == 3  # role grants, memberships, then the user
     assert session.committed is True
 
 
 def test_delete_is_idempotent_when_nothing_exists() -> None:
     provisioner = FakeProvisioner()
-    session = FakeSession(rowcount=0)
+    session = FakeSession(rowcount=0, internal_user=None)
 
     result = asyncio.run(
         delete_bootstrap_admin(
