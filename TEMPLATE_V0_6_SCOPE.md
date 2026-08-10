@@ -202,7 +202,7 @@ Depends on §6.5 and §6.7 (exercises the release). Closes v0.6.
 
 - [x] ADR-0015 (provider-neutral email interface, SMTP as first adapter, Mailhog locally) and ADR-0016 (basic notifications: durable delivery jobs, delivery tracking, `notifications.*` permission codes and role bundles); new dependencies (`sentry-sdk`, `prometheus-client`, and any edge-rate-limit module) documented with justification and pinned
 - [x] `ARCHITECTURE.md` (observability, email interface, notifications flow), `API_CONVENTIONS.md`, `SECURITY.md` (edge rate limiting, portable VPS protections, email/notification security) and `README.md` (provider-neutral deployment, scaling, monitoring, backup, Mailhog) updated; `.env.example` documents the `SENTRY_*`/`EMAIL_*`/`SMTP_*` settings
-- [ ] CI changes landed and green: `email-integration` job (Mailhog service), generic VPS Compose and Caddy/artifact validation; `make check` green from a clean checkout; generated-client drift clean; Playwright job green including the notifications journey
+- [x] CI changes landed and green: `email-integration` job (Mailhog service), generic VPS Compose and Caddy/artifact validation; `make check` green from a clean checkout; generated-client drift clean; Playwright job green including the notifications journey
 - [ ] Human review recorded for the permission-model change (notifications codes), infrastructure changes (Mailhog, generic VPS Compose, deploy workflow, edge limiter), secret handling (SMTP credentials, Sentry DSN) and major dependency additions per BP §33; architecture audit clean (no CRITICAL/MAJOR)
 
 ---
