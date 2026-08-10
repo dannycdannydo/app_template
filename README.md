@@ -133,8 +133,14 @@ v0.4 adds platform administration (see `PLATFORM_ADMIN_WORKFLOW_PLAN.md` and ADR
 
 The backend remains the enforcement point: every `/api/v1/platform/*` endpoint requires `platform.admin`, the UI gating is cosmetic, and an organisation owner without a platform membership is rejected with `403 platform_admin_required`. Invitation and membership changes are all audited.
 
+## Deployment (hybrid VPS profile)
+
+v0.6 ships the provider-neutral production baseline (blueprint §35.1, ADR-0007): a generic Linux VPS / container-host profile in `deploy/compose/compose.hybrid-vps.yml` (Caddy edge with automatic TLS and edge rate limiting, the static Vue artifact, the FastAPI backend, the Dramatiq worker, and a private Redis) with managed PostgreSQL, object storage, WorkOS, transactional email and monitoring as external services. The deployment runs through `.github/workflows/deploy-vps.yml` (workflow dispatch or `v*` tag): it builds immutable images and a versioned frontend artifact, SSHes to a configurable host, runs exactly one deliberate `alembic upgrade head`, recreates the services, and waits for `/ready`, retaining the previous release for rollback. See `.env.production.example` for every production variable and the environment-separation rules.
+
+Day-to-day operations, scaling, monitoring and alerts: `docs/operations.md`. Backup and recovery (database restore, object-storage recovery, secret recovery, deployment rollback, lost VPS replacement, environment recreation — including the recorded tested runs): `docs/backup-and-recovery.md`. Production hardening: `SECURITY.md` → Hybrid VPS production profile.
+
 ## Releases
 
-The template is versioned and tagged. `make check` passing is the gate for a release. Current release: v0.5 (files and jobs). See `TEMPLATE_V0_5_SCOPE.md` §6 for the progress log.
+The template is versioned and tagged. `make check` passing is the gate for a release. Current release: v0.6 (operations: observability, email, notifications, hybrid VPS deployment). See `TEMPLATE_V0_6_SCOPE.md` §6 for the progress log.
 
 Development follows the branch workflow in `CONTRIBUTING.md`: work units live on `feature/*` branches and reach `main` only through reviewed pull requests, so CI runs once per merged unit rather than on every push.

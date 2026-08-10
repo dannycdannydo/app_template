@@ -193,7 +193,7 @@ Depends on §6.1 (Sentry/health readiness for operations) and the v0.5 backend i
 
 Depends on §6.6 (the deployment profile is what the procedures recover). Closes BP §39.
 
-- [ ] `docs/backup-and-recovery.md`: six procedures with concrete commands — database restore (managed Postgres), object-storage recovery, secret recovery, deployment rollback, lost VPS replacement, environment recreation; RPO/RTO, backup frequency, PostgreSQL PITR, object-storage versioning/replication, secret source-of-truth, Redis recovery semantics, DNS/TLS recovery, and the external-service dependency model stated
+- [x] `docs/backup-and-recovery.md`: six procedures with concrete commands — database restore (managed Postgres), object-storage recovery, secret recovery, deployment rollback, lost VPS replacement, environment recreation; RPO/RTO, backup frequency, PostgreSQL PITR, object-storage versioning/replication, secret source-of-truth, Redis recovery semantics, DNS/TLS recovery, and the external-service dependency model stated
 - [ ] Database-restore and lost-host/environment-recreation procedures executed against scratch infrastructure and the runs recorded in the doc (BP §39 validity rule); README links the doc from the deployment section
 
 ## 6.8 Docs, ADR & Release Governance
