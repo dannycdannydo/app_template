@@ -4,7 +4,7 @@
 
 - `Internal_Custom_Application_Starter_Architecture_v2.md` is the long-term **design standard**.
 - `IMPLEMENTATION_GUIDE.md` is the **build plan** and the incremental release sequence. v0.4 in this guide is *Platform Administration* (Files and Jobs moved to v0.5, Operations to v0.6).
-- `PLATFORM_ADMIN_WORKFLOW_PLAN.md` is the **design source** for this release: the decisions behind the platform authorisation plane, bootstrap, invitations, org mapping, audit and feature flags.
+- `plans/PLATFORM_ADMIN_WORKFLOW_PLAN.md` is the **design source** for this release: the decisions behind the platform authorisation plane, bootstrap, invitations, org mapping, audit and feature flags.
 - This file is the **scoped contract for the v0.4 release**. It defines exact deliverables, exclusions, acceptance tests, and the commands that must work. It also serves as a progress log: check items off as they are completed.
 
 ---
@@ -239,7 +239,7 @@ Line ranges were verified against the blueprint's table of contents and by readi
 | **Scope §6.9** Platform Admin Centre UI | **BP §14** (lines 686–742), **BP §15** (lines 743–778), **BP §16** (lines 779–817), **BP §12** (lines 564–635) | Frontend folder structure and state boundaries (server state in queries, client state in Pinia), generated-client rules (never hand-write duplicates, drift in CI), design-system rules (reusable application components above primitives), pagination/filter conventions for the tables |
 | **Scope §6.10** Docs, ADR & Release Governance | **BP §31** (lines 1523–1575), **BP §32** (lines 1576–1626), **BP §33** (lines 1627–1672), **BP §37** (lines 1865–1907) | Integration-test priority and mandatory security tests, tooling and shared Makefile commands, coding-agent governance and the human-review list, CI checks (Playwright smoke, client drift) |
 
-If a task touches a concern not listed here (e.g. the security baseline details for a specific control), consult the blueprint's table of contents and read only the relevant section. When in doubt, read less rather than more — this file's §2–§5 already encodes the v0.4 contract, and `PLATFORM_ADMIN_WORKFLOW_PLAN.md` carries the design rationale.
+If a task touches a concern not listed here (e.g. the security baseline details for a specific control), consult the blueprint's table of contents and read only the relevant section. When in doubt, read less rather than more — this file's §2–§5 already encodes the v0.4 contract, and `plans/PLATFORM_ADMIN_WORKFLOW_PLAN.md` carries the design rationale.
 
 ---
 

@@ -11,7 +11,8 @@ You are picking up after a review on the current release of the application star
 You need only two things, both already available:
 
 1. The reviewer's structured review (in the recent conversation or session output).
-2. The current scope file — `TEMPLATE_V0_N_SCOPE.md`, the highest-numbered `TEMPLATE_V0_*_SCOPE.md` in the repo root — §6 the progress checklist you will update.
+2. The active execution contract: a ready plan in `plans/`, if one was used
+   for this work; otherwise the current `TEMPLATE_V0_N_SCOPE.md` scope file.
 
 **You do not need to read the architecture blueprint or the implementation guide for this step.** This is a mechanical step: apply fixes, validate, check boxes, commit, merge.
 
@@ -34,9 +35,14 @@ You are the **implementer**, picking up after a review.
    - `make typecheck`
    - `make test`
 
-6. **Update the scope file.** In the current scope file §6, change `[ ]` to `[x]` for every checkbox item now genuinely complete. Leave unchecked any item where a should-fix was skipped — note it in your report.
+6. **Update the active contract.** Change `[ ]` to `[x]` for every genuinely
+   complete checklist item. For a plan in `plans/`, once every implementation
+   task is checked, change its `Status:` line to `Complete`; otherwise retain
+   its active status. Leave unchecked any item where a should-fix was skipped
+   and note it in your report.
 
-7. **Commit.** Stage all relevant changes (implementation files + updated scope file). Write a clear commit message:
+7. **Commit.** Stage all relevant changes (implementation files + updated
+   scope file or plan). Write a clear commit message:
 
    ```
    Implement <subsection name> for template v0.N

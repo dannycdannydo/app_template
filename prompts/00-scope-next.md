@@ -36,7 +36,7 @@ You are the **scope planner**. You produce the contract the daily loop will exec
    - `# 8. Status` — release name, state, started/completed dates.
 
    If the release has a design source in addition to the implementation guide
-   (for example a `*_WORKFLOW_PLAN.md` named by the guide or the prior scope),
+   (for example `plans/*_WORKFLOW_PLAN.md` named by the guide or the prior scope),
    read its deliverable, API-surface and frontend-route sections too. The scope
    file is allowed to be more concise than that source, but it must not silently
    omit a required behaviour.

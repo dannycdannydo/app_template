@@ -19,6 +19,7 @@ Prompt 00 runs **once per release** to draft the next scope file (`TEMPLATE_V0_N
 | `01-implement-next.md` | Starting a new chunk of work | Implementer | Next unchecked task is built, tested, and ready for review |
 | `02-review.md` | After implementation | Reviewer | Structured review with approve / request-changes verdict |
 | `03-apply-and-commit.md` | After review | Implementer | Review feedback applied, task checked off, committed |
+| `05-discuss-and-plan.md` | Before implementation, for a smoke-test sweep or emerging idea | Planning partner | Agreed findings captured and, on request, a standalone implementation plan written |
 
 ## The periodic audit
 
@@ -40,6 +41,11 @@ open PR to main → CI runs on the PR → merge (single CI run on main)
 Prompt 01 starts work on the current branch; prompt 03 commits there. Do not push to `main` directly.
 
 The audit is **not** part of the daily loop. It reads the universal rule sections of the blueprint (§33 agent rules, §10 DB conventions, §12 API design, §13 API errors) and scans the codebase as it stands for drift and cross-cutting violations that a per-diff review cannot catch. A clean audit is a gating acceptance criterion for tagging each release (see scope §5).
+
+`05-discuss-and-plan` is also outside the daily loop. Use it before there is a
+defined work unit—for example, while manually smoke testing. It records and
+clarifies findings, then writes a reusable plan only when the user asks; the
+resulting plan enters the normal implement → review → apply-and-commit process.
 
 ## How to use them
 

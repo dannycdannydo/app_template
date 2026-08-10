@@ -129,7 +129,7 @@ Observability completes blueprint §28: every JSON log line carries `request_id`
 
 ## Platform Admin Centre
 
-v0.4 adds platform administration (see `PLATFORM_ADMIN_WORKFLOW_PLAN.md` and ADR-0013): a dedicated platform authorisation plane — separate from organisation roles — gates the `/platform` section of the app, which is served only to users whose `GET /api/v1/me` reports `platform_roles`. From there a platform admin can:
+v0.4 adds platform administration (see `plans/PLATFORM_ADMIN_WORKFLOW_PLAN.md` and ADR-0013): a dedicated platform authorisation plane — separate from organisation roles — gates the `/platform` section of the app, which is served only to users whose `GET /api/v1/me` reports `platform_roles`. From there a platform admin can:
 
 - create and edit organisations (each mapped 1:1 to a WorkOS Organization for invitations; the mapping is server-side only),
 - view an organisation's memberships, invite users through the WorkOS Invitation API (standard onboarding: the membership is created at the invitee's first verified login), assign/remove roles, suspend/reactivate/remove memberships,

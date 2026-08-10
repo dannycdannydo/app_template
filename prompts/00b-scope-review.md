@@ -15,7 +15,7 @@ Read, in this order:
 3. The corresponding `Template v0.N — <Title>` section in `IMPLEMENTATION_GUIDE.md`.
 4. The previous scope file (for structural and convention comparison).
 5. Every release-specific design source named by the draft, guide or planner
-   handoff (for example `*_WORKFLOW_PLAN.md`) — especially its API-surface and
+   handoff (for example `plans/*_WORKFLOW_PLAN.md`) — especially its API-surface and
    frontend-route tables.
 6. The specific blueprint sections the planner mapped — verify their line ranges are accurate.
 
