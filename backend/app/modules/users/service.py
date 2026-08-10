@@ -30,10 +30,17 @@ async def get_or_provision_user(
 ) -> User:
     """Return the internal user for a validated session, provisioning on first login."""
     user = await session.scalar(user_by_workos_id_statement(validated.workos_user_id))
+    profile = await profiles.get_profile(validated.workos_user_id)
     if user is not None:
+        # WorkOS is the identity source of truth. Refresh a changed verified
+        # email before invitation linking runs, otherwise a pending invitation
+        # to the new address can never match this existing internal user.
+        if profile.email_verified and (user.email != profile.email or user.name != profile.name):
+            user.email = profile.email
+            user.name = profile.name
+            await session.commit()
         return user
 
-    profile = await profiles.get_profile(validated.workos_user_id)
     user = User(
         workos_user_id=validated.workos_user_id,
         email=profile.email,

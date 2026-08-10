@@ -69,10 +69,13 @@ from app.modules.platform_admin.models import (
     PlatformRole,
 )
 from app.modules.platform_admin.queries import (
+    membership_roles_for_membership_ids_statement,
     memberships_count_statement,
     memberships_statement,
     organisations_count_statement,
     organisations_statement,
+    roles_for_ids_statement,
+    users_for_ids_statement,
 )
 from app.modules.users.models import User
 
@@ -603,7 +606,48 @@ async def list_memberships(
         .offset((page - 1) * page_size)
         .limit(page_size)
     )
-    details = [await membership_detail(session, membership) for membership in memberships.all()]
+    membership_rows = list(memberships.all())
+    if not membership_rows:
+        return [], total or 0
+
+    membership_ids = {membership.id for membership in membership_rows}
+    user_ids = {membership.user_id for membership in membership_rows}
+    users = await session.scalars(users_for_ids_statement(user_ids))
+    users_by_id = {user.id: user for user in users.all() if user.id in user_ids}
+    grants = await session.scalars(membership_roles_for_membership_ids_statement(membership_ids))
+    role_ids_by_membership: dict[uuid.UUID, set[uuid.UUID]] = {
+        membership_id: set() for membership_id in membership_ids
+    }
+    for grant in grants.all():
+        if grant.membership_id in role_ids_by_membership:
+            role_ids_by_membership[grant.membership_id].add(grant.role_id)
+    role_ids: set[uuid.UUID] = {
+        role_id
+        for membership_role_ids in role_ids_by_membership.values()
+        for role_id in membership_role_ids
+    }
+    roles_by_id: dict[uuid.UUID, Role] = {}
+    if role_ids:
+        roles = await session.scalars(roles_for_ids_statement(role_ids))
+        roles_by_id = {role.id: role for role in roles.all() if role.id in role_ids}
+
+    details = [
+        MembershipDetail(
+            membership=membership,
+            user_name=users_by_id[membership.user_id].name
+            if membership.user_id in users_by_id
+            else "",
+            user_email=users_by_id[membership.user_id].email
+            if membership.user_id in users_by_id
+            else "",
+            roles=sorted(
+                roles_by_id[role_id].code
+                for role_id in role_ids_by_membership[membership.id]
+                if role_id in roles_by_id
+            ),
+        )
+        for membership in membership_rows
+    ]
     return details, total or 0
 
 
