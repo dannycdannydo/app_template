@@ -61,15 +61,21 @@ class ProviderResponse(BaseModel):
 class LLMProvider(ABC):
     """Minimal contract every LLM provider adapter implements.
 
-    Adapters translate provider SDK errors into the normalised taxonomy in
-    ``app.ai.errors`` (ProviderUnavailableError, ProviderRateLimitError,
-    ProviderTimeoutError, ProviderResponseError) so the service's retry/repair
-    policy (Scope §6.4) can act without knowing the provider. Implementations
-    declare their capabilities through the model registry (Scope §6.2) rather
-    than pretending every provider is interchangeable.
+    Adapters translate provider SDK or HTTP errors into the normalised
+    taxonomy in ``app.ai.errors`` (ProviderUnavailableError,
+    ProviderRateLimitError, ProviderTimeoutError, ProviderResponseError) so
+    the service's retry/repair policy (Scope §6.4) can act without knowing
+    the provider. Each adapter declares ``supports_structured_output`` for the
+    native/JSON-mode structured path (Scope §6.3/§6.4) and the model registry
+    (Scope §6.2) declares the per-model capabilities; adapters never pretend
+    every provider is interchangeable.
     """
 
     provider_id: str
+    #: Whether the adapter can request structured JSON output (native or JSON
+    #: mode) for the task's declared output schema (Scope §6.3). The service
+    #: still validates every result against the Pydantic contract (Scope §6.4).
+    supports_structured_output: bool = False
 
     @abstractmethod
     async def complete(self, request: ProviderRequest) -> ProviderResponse:
@@ -78,3 +84,7 @@ class LLMProvider(ABC):
         Raises a provider error from ``app.ai.errors`` on failure; must not
         leak provider-specific exception types or content to callers.
         """
+
+    async def aclose(self) -> None:
+        """Release adapter-owned resources (HTTP clients); a no-op by default."""
+        return None

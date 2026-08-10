@@ -38,3 +38,108 @@ models:
       effective_date: 2026-08-10
       owner: Template maintainers
     available: true
+  # Real provider models (v0.7 Scope §6.3). These make the documented routing
+  # story true: a reviewed configuration change (allowed_providers /
+  # model_override) moves a task between providers without feature-code
+  # changes (acceptance criterion §5.2). Priorities keep the fake first for
+  # the deterministic test default; availability and pricing are reviewed
+  # configuration with an owner and effective date.
+  - id: openai.gpt-4o-mini
+    provider: openai
+    model: gpt-4o-mini
+    capabilities:
+      - structured_output
+    context_window: 128000
+    supported_parameters:
+      - max_tokens
+      - temperature
+    quality_tier: economy
+    latency_tier: interactive
+    priority: 1000
+    pricing:
+      currency: USD
+      input_price_per_million_tokens: "0.15"
+      output_price_per_million_tokens: "0.60"
+      effective_date: 2026-08-10
+      owner: Template maintainers
+    available: true
+  - id: anthropic.claude-3-5-haiku
+    provider: anthropic
+    model: claude-3-5-haiku-latest
+    capabilities:
+      - structured_output
+    context_window: 200000
+    supported_parameters:
+      - max_tokens
+      - temperature
+    quality_tier: economy
+    latency_tier: interactive
+    priority: 1000
+    pricing:
+      currency: USD
+      input_price_per_million_tokens: "0.80"
+      output_price_per_million_tokens: "4.00"
+      effective_date: 2026-08-10
+      owner: Template maintainers
+    available: true
+  - id: deepseek.deepseek-chat
+    provider: deepseek
+    model: deepseek-chat
+    capabilities:
+      - structured_output
+    context_window: 64000
+    supported_parameters:
+      - max_tokens
+      - temperature
+    quality_tier: economy
+    latency_tier: interactive
+    priority: 1000
+    pricing:
+      currency: USD
+      input_price_per_million_tokens: "0.27"
+      output_price_per_million_tokens: "1.10"
+      effective_date: 2026-08-10
+      owner: Template maintainers
+    available: true
+  # Azure deployment name: the registry's model field is the reviewed
+  # deployment, never a public model id (Scope §6.3).
+  - id: azure_openai.gpt-4o-mini
+    provider: azure_openai
+    model: gpt-4o-mini
+    capabilities:
+      - structured_output
+    context_window: 128000
+    supported_parameters:
+      - max_tokens
+      - temperature
+    quality_tier: economy
+    latency_tier: interactive
+    priority: 1000
+    pricing:
+      currency: USD
+      input_price_per_million_tokens: "0.15"
+      output_price_per_million_tokens: "0.60"
+      effective_date: 2026-08-10
+      owner: Template maintainers
+    available: true
+  # Vertex AI Gemini (ADR-0018): model id is the Vertex model name; the
+  # project/location come from configuration, never from a Gemini API key.
+  - id: vertex.gemini-2.0-flash
+    provider: vertex
+    model: gemini-2.0-flash
+    capabilities:
+      - structured_output
+    context_window: 1000000
+    supported_parameters:
+      - max_tokens
+      - temperature
+    quality_tier: economy
+    latency_tier: interactive
+    priority: 1000
+    pricing:
+      currency: USD
+      input_price_per_million_tokens: "0.10"
+      output_price_per_million_tokens: "0.40"
+      effective_date: 2026-08-10
+      owner: Template maintainers
+    available: true

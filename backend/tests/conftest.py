@@ -31,6 +31,14 @@ os.environ["STORAGE_BUCKET"] = "test-bucket"
 # credentials a developer exported are harmless here because the fake ignores
 # them.
 os.environ["EMAIL_PROVIDER"] = "fake"
+# The AI layer must never touch a real provider in the suite: pin the
+# deterministic fake adapter and a short shared HTTP timeout (Scope §6.3) so
+# ``make check`` needs no provider account. AI_* provider credentials a
+# developer exported are dropped below for the same reason the WorkOS ones
+# are: the settings model reads them from the environment and an exported key
+# would silently enable a real adapter in a test run.
+os.environ["AI_ENABLED_PROVIDERS"] = '["fake"]'
+os.environ["AI_HTTP_TIMEOUT_SECONDS"] = "5"
 # WorkOS credentials are developer-shell exports that must never leak into the
 # suite: config tests assert the empty development defaults and the production
 # fail-fast validation, so drop them before any Settings model is constructed.
@@ -47,6 +55,35 @@ for _var in (
     "WORKOS_JWT_LEEWAY",
     "BOOTSTRAP_PLATFORM_ADMIN_EMAIL",
     "BOOTSTRAP_PLATFORM_ADMIN_PASSWORD",
+    "BOOTSTRAP_PLATFORM_ADMIN_ORG",
+    # AI provider credentials/endpoints: exported values must never leak into
+    # the suite (Scope §6.3); config tests pass explicit values where needed.
+    "AI_OPENAI_API_KEY",
+    "AI_OPENAI_BASE_URL",
+    "AI_ANTHROPIC_API_KEY",
+    "AI_ANTHROPIC_BASE_URL",
+    "AI_DEEPSEEK_API_KEY",
+    "AI_DEEPSEEK_BASE_URL",
+    "AI_AZURE_OPENAI_API_KEY",
+    "AI_AZURE_OPENAI_ENDPOINT",
+    "AI_AZURE_OPENAI_API_VERSION",
+    "AI_VERTEX_PROJECT",
+    "AI_VERTEX_LOCATION",
+    "AI_VERTEX_CREDENTIALS_PATH",
+    "AI_LOCAL_BASE_URL",
+    "AI_LOCAL_API_KEY",
+    # HTTP(S)/proxy variables: httpx.AsyncClient reads these on construction
+    # and raises on a non-standard scheme (e.g. ALL_PROXY=socks://...), which
+    # would break adapter/factory tests in a proxied developer shell (Scope
+    # §6.3). Drop them so the suite is hermetic regardless of the shell.
+    "ALL_PROXY",
+    "all_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "NO_PROXY",
+    "no_proxy",
 ):
     os.environ.pop(_var, None)
 

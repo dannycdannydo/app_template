@@ -1,10 +1,12 @@
-"""Import-boundary tests for the AI layer (v0.7 Scope §6.1, ADR-0017).
+"""Import-boundary tests for the AI layer (v0.7 Scope §6.1/§6.3, ADR-0017).
 
 The provider-neutral contract is enforced structurally: no provider SDK may be
 imported outside ``app/ai/providers/``. This mirrors the storage boto3 rule
 (ADR-0014) and keeps the promise that feature modules call ``AIService`` by
-task name and never see an SDK. Scope §6.3 adds the real adapters; this test
-guards the boundary from day one so a later adapter cannot leak.
+task name and never see an SDK. The Scope §6.3 adapters are thin pinned HTTP
+clients (httpx, google-auth for Vertex credentials only) and any future SDK
+import is confined to the same directory; this test guards the boundary from
+day one so an adapter can never leak.
 """
 
 from __future__ import annotations
@@ -49,23 +51,9 @@ def test_no_provider_sdk_imported_outside_app_ai_providers() -> None:
     violations = [
         (path.relative_to(BACKEND_ROOT).as_posix(), line_number, line)
         for path, line_number, line in _sdk_import_lines()
-        if not path.relative_to(APP_ROOT).as_posix().startswith(ALLOWED_DIR)
+        if not path.relative_to(BACKEND_ROOT).as_posix().startswith(f"{ALLOWED_DIR}/")
     ]
     assert violations == [], (
         "provider SDKs must only be imported inside app/ai/providers/ "
         f"(ADR-0017); found: {violations}"
     )
-
-
-def test_no_provider_sdk_imported_anywhere_before_scope_6_3() -> None:
-    """Scope §6.1 ships no real adapter, so the whole tree is SDK-free.
-
-    When the Scope §6.3 adapters land, this test is replaced by the boundary
-    test above (which then has adapter files to allow). Until then it proves
-    the no-direct-SDK rule holds everywhere from day one.
-    """
-    hits = [
-        (path.relative_to(BACKEND_ROOT).as_posix(), line_number, line)
-        for path, line_number, line in _sdk_import_lines()
-    ]
-    assert hits == [], f"provider SDK imported before Scope §6.3 adapters exist: {hits}"

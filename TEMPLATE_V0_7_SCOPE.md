@@ -136,11 +136,11 @@ Check items off only after review. Work is ordered so contracts and safety contr
 
 ## 6.3 Provider Adapters and Configuration
 
-- [ ] `LLMProvider` contract and normalised provider request/response/error taxonomy (including token/latency data, retryability and structured-output capability)
-- [ ] OpenAI, Anthropic, DeepSeek and Azure OpenAI adapters; SDK/HTTP client imports isolated; provider-specific models, endpoint/deployment naming and errors contained
-- [ ] `VertexAIProvider` for Gemini through the Vertex AI API only; settings for Google Cloud project/location and approved server credentials; no `GEMINI_API_KEY`, Google AI Studio or developer-API endpoint implementation
-- [ ] `LocalOpenAICompatibleProvider` for privately reachable Ollama/vLLM/SGLang-compatible servers, with explicit TLS/network/allowlist safeguards; fake remains the test default
-- [ ] Typed `AI_*` settings, provider factories and production fail-fast validation; pin/document dependencies and add opt-in non-production adapter-contract CI jobs
+- [x] `LLMProvider` contract and normalised provider request/response/error taxonomy (including token/latency data, retryability and structured-output capability)
+- [x] OpenAI, Anthropic, DeepSeek and Azure OpenAI adapters; SDK/HTTP client imports isolated; provider-specific models, endpoint/deployment naming and errors contained
+- [x] `VertexAIProvider` for Gemini through the Vertex AI API only; settings for Google Cloud project/location and approved server credentials; no `GEMINI_API_KEY`, Google AI Studio or developer-API endpoint implementation
+- [x] `LocalOpenAICompatibleProvider` for privately reachable Ollama/vLLM/SGLang-compatible servers, with explicit TLS/network/allowlist safeguards; fake remains the test default
+- [x] Typed `AI_*` settings, provider factories and production fail-fast validation; pin/document dependencies and add opt-in non-production adapter-contract CI jobs
 
 ## 6.4 Structured Outputs, Retry and Safety Controls
 

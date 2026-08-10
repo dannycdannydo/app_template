@@ -1,6 +1,7 @@
 """Tests for typed configuration and fail-fast validation (§27)."""
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -60,6 +61,7 @@ def test_production_requires_workos_credentials() -> None:
         email_from="no-reply@example.com",
         smtp_host="smtp.example.test",
         smtp_port=587,
+        ai_enabled_providers=[],
     )
     assert settings.workos_api_base_url == "https://api.workos.com/"
     assert settings.workos_jwt_leeway == 30.0
@@ -185,6 +187,7 @@ def test_production_accepts_a_valid_bootstrap_email() -> None:
         smtp_host="smtp.example.test",
         smtp_port=587,
         bootstrap_platform_admin_email="admin@example.com",
+        ai_enabled_providers=[],
     )
     assert settings.bootstrap_platform_admin_email == "admin@example.com"
 
@@ -223,6 +226,7 @@ def test_production_accepts_a_webhook_secret() -> None:
         smtp_host="smtp.example.test",
         smtp_port=587,
         workos_webhook_secret="whsec_prod",
+        ai_enabled_providers=[],
     )
     assert settings.workos_webhook_secret == "whsec_prod"
 
@@ -415,6 +419,7 @@ def test_production_accepts_complete_s3_configuration() -> None:
         email_from="no-reply@example.com",
         smtp_host="smtp.example.test",
         smtp_port=587,
+        ai_enabled_providers=[],
     )
     assert settings.storage_provider == "s3"
     assert settings.storage_public_endpoint_url == "https://s3.example.test"
@@ -443,6 +448,7 @@ def test_production_accepts_private_compose_network_redis_without_tls() -> None:
         email_from="no-reply@example.com",
         smtp_host="smtp.example.test",
         smtp_port=587,
+        ai_enabled_providers=[],
     )
     assert settings.redis_url.startswith("redis://")
 
@@ -465,6 +471,7 @@ def test_production_accepts_loopback_redis_without_tls() -> None:
         email_from="no-reply@example.com",
         smtp_host="smtp.example.test",
         smtp_port=587,
+        ai_enabled_providers=[],
     )
     assert settings.redis_url.startswith("redis://")
 
@@ -663,6 +670,7 @@ def test_production_accepts_complete_smtp_configuration() -> None:
         smtp_username="smtp-user",
         smtp_password="smtp-secret",
         smtp_use_tls=True,
+        ai_enabled_providers=[],
     )
     assert settings.email_provider == "smtp"
     assert settings.email_from == "no-reply@example.com"
@@ -671,3 +679,204 @@ def test_production_accepts_complete_smtp_configuration() -> None:
     assert settings.smtp_username == "smtp-user"
     assert settings.smtp_password == "smtp-secret"
     assert settings.smtp_use_tls is True
+
+
+# --- AI provider settings (Scope §6.3, blueprint §27, ADR-0017/0018) ---
+
+
+def _prod_ai(**overrides: Any) -> Settings:
+    """A fully valid production Settings with AI providers configurable.
+    Callers must pass ``ai_enabled_providers`` explicitly."""
+    return Settings(
+        app_env="production",
+        database_url="postgresql+asyncpg://x",
+        workos_api_key="sk_test",
+        workos_client_id="client_1",
+        cors_allowed_origins=["https://app.example.test"],
+        trusted_hosts=["api.example.test"],
+        redis_url="rediss://redis.example.test:6380/0",
+        storage_provider="s3",
+        storage_access_key_id="ak_test",
+        storage_secret_access_key="sk_storage_test",
+        storage_bucket="files",
+        storage_endpoint_url="https://s3.example.test",
+        email_provider="smtp",
+        email_from="no-reply@example.com",
+        smtp_host="smtp.example.test",
+        smtp_port=587,
+        **overrides,
+    )
+
+
+def test_ai_settings_defaults() -> None:
+    """The fake provider is the default test adapter; bounds are dev-sane."""
+    settings = Settings(
+        app_env="test",
+        database_url="postgresql+asyncpg://x",
+        ai_enabled_providers=["fake"],
+        ai_http_timeout_seconds=60.0,
+    )
+    assert settings.ai_enabled_providers == ["fake"]
+    assert settings.ai_http_timeout_seconds == 60.0
+    assert settings.ai_openai_api_key == ""
+    assert settings.ai_openai_base_url == ""
+    assert settings.ai_anthropic_api_key == ""
+    assert settings.ai_deepseek_base_url == "https://api.deepseek.com"
+    assert settings.ai_azure_openai_api_version == "2024-08-01-preview"
+    assert settings.ai_vertex_project == ""
+    assert settings.ai_vertex_location == ""
+    assert settings.ai_local_base_url == ""
+    assert settings.ai_local_api_key == ""
+
+
+def test_ai_enabled_providers_rejects_unknown_and_duplicate_values() -> None:
+    with pytest.raises(ValidationError, match="unknown AI providers"):
+        Settings(
+            app_env="test",
+            database_url="postgresql+asyncpg://x",
+            ai_enabled_providers=["mistral"],
+        )
+    with pytest.raises(ValidationError, match="duplicates"):
+        Settings(
+            app_env="test",
+            database_url="postgresql+asyncpg://x",
+            ai_enabled_providers=["fake", "fake"],
+        )
+
+
+def test_ai_http_timeout_is_bounded() -> None:
+    with pytest.raises(ValidationError, match="ai_http_timeout_seconds"):
+        Settings(
+            app_env="test",
+            database_url="postgresql+asyncpg://x",
+            ai_http_timeout_seconds=0,
+        )
+    with pytest.raises(ValidationError, match="ai_http_timeout_seconds"):
+        Settings(
+            app_env="test",
+            database_url="postgresql+asyncpg://x",
+            ai_http_timeout_seconds=601,
+        )
+
+
+def test_enabled_ai_provider_requires_configuration() -> None:
+    """An enabled provider must be fully configured in every environment
+    (Scope §6.3/§6.7 fail-fast, never at request time)."""
+    with pytest.raises(ValidationError, match="AI_OPENAI_API_KEY"):
+        Settings(
+            app_env="development",
+            database_url="postgresql+asyncpg://x",
+            ai_enabled_providers=["openai"],
+        )
+    with pytest.raises(ValidationError, match="AI_ANTHROPIC_API_KEY"):
+        Settings(
+            app_env="development",
+            database_url="postgresql+asyncpg://x",
+            ai_enabled_providers=["anthropic"],
+        )
+    with pytest.raises(ValidationError, match="AI_DEEPSEEK_API_KEY"):
+        Settings(
+            app_env="development",
+            database_url="postgresql+asyncpg://x",
+            ai_enabled_providers=["deepseek"],
+        )
+    with pytest.raises(ValidationError, match="AI_AZURE_OPENAI_ENDPOINT"):
+        Settings(
+            app_env="development",
+            database_url="postgresql+asyncpg://x",
+            ai_enabled_providers=["azure_openai"],
+            ai_azure_openai_api_key="az-test",
+        )
+    with pytest.raises(ValidationError, match="AI_VERTEX_PROJECT"):
+        Settings(
+            app_env="development",
+            database_url="postgresql+asyncpg://x",
+            ai_enabled_providers=["vertex"],
+            ai_vertex_location="europe-west1",
+        )
+    with pytest.raises(ValidationError, match="AI_LOCAL_BASE_URL"):
+        Settings(
+            app_env="development",
+            database_url="postgresql+asyncpg://x",
+            ai_enabled_providers=["local"],
+        )
+    # A fully configured provider is accepted outside production too.
+    settings = Settings(
+        app_env="development",
+        database_url="postgresql+asyncpg://x",
+        ai_enabled_providers=["openai", "vertex"],
+        ai_openai_api_key="sk-test",
+        ai_vertex_project="demo-project",
+        ai_vertex_location="europe-west1",
+    )
+    assert settings.ai_enabled_providers == ["openai", "vertex"]
+
+
+def test_production_rejects_fake_ai_provider() -> None:
+    with pytest.raises(ValidationError, match="must not include 'fake'"):
+        _prod_ai(ai_enabled_providers=["fake"])
+
+
+def test_production_accepts_enabled_real_provider() -> None:
+    settings = _prod_ai(
+        ai_enabled_providers=["openai"],
+        ai_openai_api_key="sk-test",
+    )
+    assert settings.ai_enabled_providers == ["openai"]
+
+
+def test_ai_azure_endpoint_must_be_https() -> None:
+    with pytest.raises(ValidationError, match="https"):
+        Settings(
+            app_env="test",
+            database_url="postgresql+asyncpg://x",
+            ai_azure_openai_endpoint="http://my-resource.openai.azure.com",
+        )
+    settings = Settings(
+        app_env="test",
+        database_url="postgresql+asyncpg://x",
+        ai_azure_openai_endpoint="https://my-resource.openai.azure.com/",
+    )
+    assert settings.ai_azure_openai_endpoint == "https://my-resource.openai.azure.com"
+
+
+def test_ai_azure_api_version_must_match_the_pinned_format() -> None:
+    with pytest.raises(ValidationError, match="api_version"):
+        Settings(
+            app_env="test",
+            database_url="postgresql+asyncpg://x",
+            ai_azure_openai_api_version="latest",
+        )
+
+
+def test_ai_local_endpoint_safety_in_settings() -> None:
+    """Plain HTTP to a public host is rejected in every environment."""
+    with pytest.raises(ValidationError, match="ai_local_base_url"):
+        Settings(
+            app_env="development",
+            database_url="postgresql+asyncpg://x",
+            ai_enabled_providers=["local"],
+            ai_local_base_url="http://ollama.example.com",
+        )
+    settings = Settings(
+        app_env="development",
+        database_url="postgresql+asyncpg://x",
+        ai_enabled_providers=["local"],
+        ai_local_base_url="http://127.0.0.1:11434/v1",
+    )
+    assert settings.ai_local_base_url == "http://127.0.0.1:11434/v1"
+
+
+def test_ai_provider_base_url_overrides_require_private_http_or_https() -> None:
+    with pytest.raises(ValidationError, match="ai_openai_base_url"):
+        Settings(
+            app_env="development",
+            database_url="postgresql+asyncpg://x",
+            ai_openai_base_url="http://openai-proxy.example.com",
+        )
+    settings = Settings(
+        app_env="development",
+        database_url="postgresql+asyncpg://x",
+        ai_openai_base_url="https://openai-proxy.example.com/v1",
+    )
+    assert settings.ai_openai_base_url == "https://openai-proxy.example.com/v1"

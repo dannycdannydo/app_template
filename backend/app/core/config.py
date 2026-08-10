@@ -8,11 +8,41 @@ production configuration.
 from __future__ import annotations
 
 import ipaddress
+import re
 from functools import lru_cache
 from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.core.endpoint_safety import validate_local_endpoint
+
+# Every AI provider adapter the typed settings can enable (v0.7 Scope §6.3).
+# The factory re-exports this set so configuration and construction can never
+# disagree about what a valid provider id is.
+AI_KNOWN_PROVIDER_IDS = frozenset(
+    {"fake", "openai", "anthropic", "deepseek", "azure_openai", "vertex", "local"}
+)
+
+# Required configuration per enabled provider: (env var name, settings field).
+# An enabled provider missing any of these fails fast at configuration time in
+# every environment (Scope §6.3/§6.7), never at request time. Keys and Google
+# credential material stay server-side secrets.
+_AI_PROVIDER_REQUIRED_SETTINGS: dict[str, list[tuple[str, str]]] = {
+    "fake": [],
+    "openai": [("AI_OPENAI_API_KEY", "ai_openai_api_key")],
+    "anthropic": [("AI_ANTHROPIC_API_KEY", "ai_anthropic_api_key")],
+    "deepseek": [("AI_DEEPSEEK_API_KEY", "ai_deepseek_api_key")],
+    "azure_openai": [
+        ("AI_AZURE_OPENAI_ENDPOINT", "ai_azure_openai_endpoint"),
+        ("AI_AZURE_OPENAI_API_KEY", "ai_azure_openai_api_key"),
+    ],
+    "vertex": [
+        ("AI_VERTEX_PROJECT", "ai_vertex_project"),
+        ("AI_VERTEX_LOCATION", "ai_vertex_location"),
+    ],
+    "local": [("AI_LOCAL_BASE_URL", "ai_local_base_url")],
+}
 
 
 class Settings(BaseSettings):
@@ -209,6 +239,95 @@ class Settings(BaseSettings):
         default=False,
         description="Enable STARTTLS when connecting to the SMTP relay",
     )
+    # AI layer (v0.7 Scope §6.3, ADR-0017): provider enablement plus
+    # endpoint/project/deployment identifiers only. Keys, Azure credentials and
+    # Google credential material are server-side secrets — they live in these
+    # settings (read from environment/.env) but never in the API, frontend,
+    # logs, Sentry or audit metadata. The fake provider is the default test
+    # adapter and is rejected in production (Scope §6.7).
+    ai_enabled_providers: list[str] = Field(
+        default_factory=lambda: ["fake"],
+        description=(
+            "Enabled AI provider adapters, from: fake, openai, anthropic, deepseek, "
+            "azure_openai, vertex, local. 'fake' is the deterministic test adapter "
+            "and is rejected in the production environment."
+        ),
+    )
+    ai_http_timeout_seconds: float = Field(
+        default=60.0,
+        ge=1.0,
+        le=600.0,
+        description="Per-request timeout for every AI provider adapter (seconds)",
+    )
+    ai_openai_api_key: str = Field(
+        default="",
+        description="OpenAI API key (server-side secret, backend-only)",
+    )
+    ai_openai_base_url: str = Field(
+        default="",
+        description="Optional OpenAI-compatible base URL override; empty uses https://api.openai.com/v1",
+    )
+    ai_anthropic_api_key: str = Field(
+        default="",
+        description="Anthropic API key (server-side secret, backend-only)",
+    )
+    ai_anthropic_base_url: str = Field(
+        default="",
+        description="Optional Anthropic base URL override; empty uses https://api.anthropic.com",
+    )
+    ai_deepseek_api_key: str = Field(
+        default="",
+        description="DeepSeek API key (server-side secret, backend-only)",
+    )
+    ai_deepseek_base_url: str = Field(
+        default="https://api.deepseek.com",
+        description="DeepSeek OpenAI-compatible base URL",
+    )
+    ai_azure_openai_api_key: str = Field(
+        default="",
+        description="Azure OpenAI resource key (server-side secret, backend-only)",
+    )
+    ai_azure_openai_endpoint: str = Field(
+        default="",
+        description=(
+            "Azure OpenAI resource endpoint, e.g. https://my-resource.openai.azure.com; "
+            "the registry's model field names the deployment"
+        ),
+    )
+    ai_azure_openai_api_version: str = Field(
+        default="2024-08-01-preview",
+        description="Pinned Azure OpenAI api-version query parameter (reviewed configuration)",
+    )
+    ai_vertex_project: str = Field(
+        default="",
+        description="Google Cloud project id for Vertex AI Gemini (data-residency scoped)",
+    )
+    ai_vertex_location: str = Field(
+        default="",
+        description=(
+            "Vertex AI location, e.g. europe-west1; explicit so deployments pin a "
+            "data-residency region (ADR-0018)"
+        ),
+    )
+    ai_vertex_credentials_path: str = Field(
+        default="",
+        description=(
+            "Optional path to a service-account key JSON injected via the deployment "
+            "secret mechanism; empty uses Application Default Credentials (ADR-0018)"
+        ),
+    )
+    ai_local_base_url: str = Field(
+        default="",
+        description=(
+            "Private OpenAI-compatible endpoint (Ollama/vLLM/SGLang), e.g. "
+            "http://127.0.0.1:11434/v1; http is allowed only for loopback/private "
+            "hosts, never exposed to browsers"
+        ),
+    )
+    ai_local_api_key: str = Field(
+        default="",
+        description="Optional API key for the private local provider (vLLM deployments)",
+    )
 
     @field_validator("cors_allowed_origins")
     @classmethod
@@ -278,6 +397,56 @@ class Settings(BaseSettings):
         if not 0 <= port <= 65535:
             raise ValueError("smtp_port must be between 0 and 65535")
         return port
+
+    @field_validator("ai_enabled_providers")
+    @classmethod
+    def _validate_ai_enabled_providers(cls, providers: list[str]) -> list[str]:
+        cleaned = [provider.strip().lower() for provider in providers]
+        if len(cleaned) != len(set(cleaned)):
+            raise ValueError("ai_enabled_providers must not contain duplicates")
+        unknown = set(cleaned) - AI_KNOWN_PROVIDER_IDS
+        if unknown:
+            raise ValueError(
+                f"unknown AI providers in ai_enabled_providers: {sorted(unknown)}; "
+                f"known: {sorted(AI_KNOWN_PROVIDER_IDS)}"
+            )
+        return cleaned
+
+    @field_validator("ai_azure_openai_endpoint")
+    @classmethod
+    def _validate_ai_azure_openai_endpoint(cls, endpoint: str) -> str:
+        if not endpoint:
+            return ""
+        if not endpoint.startswith("https://") or not urlsplit(endpoint).hostname:
+            raise ValueError("ai_azure_openai_endpoint must be an https URL")
+        return endpoint.rstrip("/")
+
+    @field_validator("ai_azure_openai_api_version")
+    @classmethod
+    def _validate_ai_azure_openai_api_version(cls, version: str) -> str:
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}(-preview)?", version):
+            raise ValueError("ai_azure_openai_api_version must look like YYYY-MM-DD(-preview)")
+        return version
+
+    @field_validator("ai_openai_base_url", "ai_anthropic_base_url", "ai_deepseek_base_url")
+    @classmethod
+    def _validate_ai_provider_base_url(cls, base_url: str) -> str:
+        """Provider base-url overrides must be https or a private http endpoint.
+
+        The same safety rule as the local provider: a public plain-HTTP
+        endpoint would ship API keys over an unauthenticated link (Scope §6.3,
+        §6.7 fail-fast list).
+        """
+        if not base_url:
+            return ""
+        return validate_local_endpoint(base_url)
+
+    @field_validator("ai_local_base_url")
+    @classmethod
+    def _validate_ai_local_base_url(cls, base_url: str) -> str:
+        if not base_url:
+            return ""
+        return validate_local_endpoint(base_url)
 
     @field_validator("bootstrap_platform_admin_email")
     @classmethod
@@ -370,6 +539,25 @@ class Settings(BaseSettings):
                     "email_provider=smtp requires explicit email configuration "
                     f"in the production environment: {', '.join(missing_email)}"
                 )
+        # AI providers (v0.7 Scope §6.3/§6.7): an enabled provider must be
+        # fully configured in every environment (fail fast at startup, never
+        # at request time), and the fake test adapter is rejected in
+        # production alongside test/fake provider configurations.
+        for provider_id in self.ai_enabled_providers:
+            missing_ai = [
+                env_name
+                for env_name, field_name in _AI_PROVIDER_REQUIRED_SETTINGS[provider_id]
+                if not getattr(self, field_name)
+            ]
+            if missing_ai:
+                raise ValueError(
+                    f"AI provider {provider_id!r} is enabled but requires configuration: "
+                    f"{', '.join(missing_ai)}"
+                )
+        if self.app_env == "production" and "fake" in self.ai_enabled_providers:
+            raise ValueError(
+                "ai_enabled_providers must not include 'fake' in the production environment"
+            )
         return self
 
     def _redis_url_is_production_safe(self) -> bool:
