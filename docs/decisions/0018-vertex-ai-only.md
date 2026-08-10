@@ -1,6 +1,6 @@
 # ADR 0018: Google Gemini through Vertex AI Only (No Gemini Developer API / Google AI Studio)
 
-Status: Accepted
+Status: Accepted (amended 2026-08-10: regional configuration truthfulness and in-region attachments; v0.7 Scope §6.1/§6.3)
 
 ## Context
 
@@ -73,5 +73,28 @@ against a dedicated Google Cloud project/location only.
 - The opt-in `test-ai-contracts` CI job uses dedicated non-production Google
   credentials and a dedicated project/location; it skips cleanly when those are
   absent.
+
+### Amendment (v0.7 regional configuration truthfulness, Scope §6.1/§6.3)
+
+- **Explicit region everywhere**: the same "region is reviewed configuration,
+  never implicit" rule that pins Vertex to its location setting applies to
+  every provider. OpenAI region and Anthropic inference geography are typed,
+  validated settings; Azure's region is inherent in its configured resource
+  endpoint; DeepSeek documents that it offers no template-controlled regional
+  pinning; local and fake providers inherit their operator-controlled
+  location. Defaults must be honest for ordinary accounts — regional endpoints
+  that require provider approval are explicit opt-ins — and unsupported
+  regions fail configuration validation.
+- **No implicit cross-region fallback**: routing/fallback never moves a request
+  across regions, and provider fallback never changes region implicitly.
+  Routing metadata records the configured or observed region only where the
+  provider exposes it, without increasing label cardinality.
+- **In-region attachments**: v0.7 inline attachments resolved from storage are
+  sent only to the provider endpoint the deployment actually configured; for
+  Vertex this means the adapter serves attachments through the same
+  project/location that the request targets. No attachment path stages bytes
+  to, or reads from, another region, and no adapter receives a signed URL or
+  storage credential (large-file and provider-reference modes are deferred to
+  v0.8).
 
 ---

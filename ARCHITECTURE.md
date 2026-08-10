@@ -68,6 +68,27 @@ AIService.execute(task=...)          app/ai/service.py
   location settings plus server-side ADC / workload-identity / service-account
   credentials; no `GEMINI_API_KEY` or Google AI Studio / developer-API path
   exists.
+- **Bounded inline attachments** (v0.7 Scope §6.1): a feature supplies a
+  private storage reference; the service/job boundary resolves it server-side
+  into a provider-neutral `Attachment` (validated display name, MIME type,
+  bytes, SHA-256 digest; 5 MB per file, 10 MB combined). Capable adapters map
+  it to their native inline request form, gated by the `documents` model
+  capability and per-model ceilings; unsupported modality/MIME/size fails
+  before dispatch. Bytes never reach the database, job broker, logs or audit
+  metadata, and no adapter receives a storage credential or signed URL.
+- **Storage and lifecycle ownership** (v0.7 Scope §6.1): keep-flow objects
+  remain feature-owned; temporary analyse-only objects use the
+  organisation-scoped AI scratch namespace governed by the v0.7 retention job;
+  `ai_requests`/`ai_outputs` persist references and digests, never bytes.
+- **Regional configuration truthfulness** (v0.7 Scope §6.1/§6.3): OpenAI
+  region and Anthropic inference geography are typed settings, Azure's region
+  is its configured endpoint, Vertex is pinned by location, DeepSeek documents
+  no pinning, and local/fake inherit their operator location; unsupported
+  regions fail config validation and fallback never changes region implicitly.
+- **Large-file and provider-reference transfer modes** (v0.7 Scope
+  §6.1/§6.8-boundary): provider uploads, file identifiers, `gs://` references,
+  URL inputs and larger ceilings are deferred to v0.8
+  (`plans/AI_LARGE_ATTACHMENTS_V0_8_PLAN.md`); inline is the only v0.7 mode.
 - Small bounded tasks run synchronously; document-scale work enqueues an
   `ai.execute` job on the `ai` queue with the durable record-then-enqueue
   lifecycle. Organisation AI settings are default-off, budget-enforced in
