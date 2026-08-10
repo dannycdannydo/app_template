@@ -290,7 +290,7 @@ sessions, invitation delivery); the application remains the source of truth
 for organisations, memberships, roles, permissions, feature flags and audit
 history. The platform plane is deliberately separate from the organisation
 permission system — no global admin bypass. Design source:
-`PLATFORM_ADMIN_WORKFLOW_PLAN.md`.
+`plans/PLATFORM_ADMIN_WORKFLOW_PLAN.md`.
 
 ## Template v0.5 — Files and Jobs
 
