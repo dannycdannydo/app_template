@@ -114,15 +114,18 @@ def default_prompt() -> PromptDefinition:
         system_instructions="You extract structured facts from documents.",
         input_variables=["document_id"],
         user_template="Classify document {document_id}.",
+        output_contract="demo.ClassificationResult",
     )
 
 
 def default_model() -> ModelDefinition:
     return ModelDefinition(
+        id="fake.document-classifier",
         provider="fake",
         model=_FAKE_MODEL,
         capabilities=[Capability.STRUCTURED_OUTPUT, Capability.REASONING],
         context_window=128_000,
+        supported_parameters=[],
         pricing=PricingBasis(
             currency="USD",
             input_price_per_million_tokens=Decimal("1.00"),

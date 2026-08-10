@@ -25,6 +25,7 @@ AI_METADATA_MAX_KEY_LENGTH = 64
 AI_METADATA_MAX_VALUE_LENGTH = 512
 
 MAX_TEXT_LENGTH = 64 * 1024  # 64 KiB of user text per synchronous request
+MAX_MESSAGE_LENGTH = 8 * 1024
 
 
 class ChatMessage(BaseModel):
@@ -36,7 +37,7 @@ class ChatMessage(BaseModel):
     """
 
     role: Literal["system", "user", "assistant"]
-    content: str = Field(min_length=1)
+    content: str = Field(min_length=1, max_length=MAX_MESSAGE_LENGTH)
 
 
 class AIRequest(BaseModel):
@@ -71,6 +72,10 @@ class AIRequest(BaseModel):
         ]
         if len(supplied) != 1:
             raise ValueError("exactly one of text, messages or storage_reference must be supplied")
+        if self.messages is not None:
+            total_length = sum(len(message.content) for message in self.messages)
+            if total_length > MAX_TEXT_LENGTH:
+                raise ValueError(f"message content must not exceed {MAX_TEXT_LENGTH} characters")
         return self
 
     @field_validator("output_schema")

@@ -129,10 +129,10 @@ Check items off only after review. Work is ordered so contracts and safety contr
 
 ## 6.2 Prompt, Task and Model Registries
 
-- [ ] Versioned YAML prompt registry under `app/ai/prompts/` and checked-in task/model configurations under `app/ai/tasks/` / `app/ai/models/`; definitions include all fields in §2 and carry explicit schema identifiers
-- [ ] Safe template rendering: allowlisted variables, no arbitrary template execution, length/input limits and no secret interpolation; startup/CI validation for duplicate versions, unresolved variables and incompatible requirements
-- [ ] Initial `document.classify` task + Pydantic output schema + fixture prompts, models and test data; use only non-sensitive sample content
-- [ ] Deterministic capability/cost router with ordered fallback, context/input budget calculation and reviewed pricing metadata
+- [x] Versioned YAML prompt registry under `app/ai/prompts/` and checked-in task/model configurations under `app/ai/tasks/` / `app/ai/models/`; definitions include all fields in §2 and carry explicit schema identifiers
+- [x] Safe template rendering: allowlisted variables, no arbitrary template execution, length/input limits and no secret interpolation; startup/CI validation for duplicate versions, unresolved variables and incompatible requirements
+- [x] Initial `document.classify` task + Pydantic output schema + fixture prompts, models and test data; use only non-sensitive sample content
+- [x] Deterministic capability/cost router with ordered fallback, context/input budget calculation and reviewed pricing metadata
 
 ## 6.3 Provider Adapters and Configuration
 

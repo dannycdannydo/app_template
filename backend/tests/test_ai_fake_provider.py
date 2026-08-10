@@ -21,6 +21,7 @@ def _request(
 ) -> ProviderRequest:
     return ProviderRequest(
         task=task,
+        model=f"fake-model-{task}",
         prompt="Classify: {document_id}",
         output_schema=output_schema,
         metadata={"document_id": "doc-1"},

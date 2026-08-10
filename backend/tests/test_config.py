@@ -1,5 +1,7 @@
 """Tests for typed configuration and fail-fast validation (§27)."""
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -123,13 +125,19 @@ def test_trusted_hosts_are_explicit_and_non_wildcard() -> None:
         )
 
 
-def test_bootstrap_email_defaults_to_disabled() -> None:
+def test_bootstrap_email_defaults_to_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
     settings = Settings(app_env="development", database_url="postgresql+asyncpg://x")
     assert settings.bootstrap_platform_admin_email == ""
 
 
-def test_bootstrap_org_defaults_to_disabled() -> None:
+def test_bootstrap_org_defaults_to_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Unset BOOTSTRAP_PLATFORM_ADMIN_ORG means the grant skips org creation."""
+    monkeypatch.chdir(tmp_path)
     settings = Settings(app_env="development", database_url="postgresql+asyncpg://x")
     assert settings.bootstrap_platform_admin_org == ""
 

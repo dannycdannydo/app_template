@@ -25,6 +25,7 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.responses import Response
 
+from app.ai.registry import load_registry_bundle
 from app.api.health import router as health_router
 from app.broker import build_broker
 from app.core.config import get_settings
@@ -241,6 +242,9 @@ def _register_middleware(
 
 def create_app() -> FastAPI:
     """Build and configure the FastAPI application."""
+    # Checked-in AI configuration is an application contract, so invalid
+    # task/prompt/schema/model references fail before the process accepts work.
+    load_registry_bundle()
     settings = get_settings()
     configure_logging(log_level=settings.log_level, json_logs=not settings.debug)
     # API actors enqueue through the process-wide broker.  Importing the

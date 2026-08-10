@@ -11,9 +11,7 @@ metadata. Provider SDKs never appear here (BP §33, ADR-0017).
 
 from __future__ import annotations
 
-import importlib
 import json
-import re
 from collections.abc import Callable
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -34,12 +32,17 @@ from app.ai.errors import (
     TaskNotFoundError,
 )
 from app.ai.providers.base import LLMProvider, ProviderRequest
-from app.ai.registry import ModelRegistry, PromptRegistry, TaskRegistry
+from app.ai.registry import (
+    ModelRegistry,
+    PromptDefinition,
+    PromptRegistry,
+    RegistryValidationError,
+    TaskDefinition,
+    TaskRegistry,
+    estimate_tokens,
+    resolve_output_schema,
+)
 from app.ai.schemas import AIRequest, AIResult, CostEstimate, RoutingMetadata, TokenUsage
-
-# Matches only simple identifier placeholders ({name}) so template rendering
-# can never reach arbitrary Python/attribute access (Scope §6.2 safe rendering).
-_VARIABLE_PATTERN = re.compile(r"\{([A-Za-z0-9_]+)\}")
 
 SchemaResolver = Callable[[str], type[BaseModel]]
 
@@ -53,17 +56,10 @@ def import_schema(path: str) -> type[BaseModel]:
     Pydantic model — fail fast, never fall back to unvalidated data.
     """
 
-    module_name, separator, attribute = path.rpartition(".")
-    if not separator:
-        raise OutputSchemaError(f"output schema must be a dotted import path: {path!r}")
     try:
-        module = importlib.import_module(module_name)
-    except ImportError as exc:
-        raise OutputSchemaError(f"cannot import output schema module {module_name!r}") from exc
-    schema = getattr(module, attribute, None)
-    if not isinstance(schema, type) or not issubclass(schema, BaseModel):
-        raise OutputSchemaError(f"{path!r} does not name a Pydantic model")
-    return schema
+        return resolve_output_schema(path)
+    except RegistryValidationError as exc:
+        raise OutputSchemaError(str(exc)) from exc
 
 
 class AIService:
@@ -94,6 +90,9 @@ class AIService:
         request: AIRequest,
         *,
         allowed_providers: list[str] | None = None,
+        allowed_model_ids: list[str] | None = None,
+        model_override: str | None = None,
+        maximum_estimated_cost: Decimal | None = None,
     ) -> AIResult:
         """Execute one task request and return a validated result.
 
@@ -109,22 +108,45 @@ class AIService:
         request_id = uuid4().hex
         task = self._resolve_task(request.task)
         prompt = self._resolve_prompt(task.prompt_name, task.prompt_version)
-        model = self._resolve_model(task, allowed_providers=allowed_providers)
-
         rendered = self._render_prompt(prompt, request)
+        try:
+            decision = self._model_registry.route(
+                task,
+                allowed_providers=allowed_providers,
+                allowed_model_ids=allowed_model_ids,
+                model_override=model_override,
+                estimated_input_tokens=estimate_tokens(rendered),
+                maximum_estimated_cost=maximum_estimated_cost,
+            )
+        except (KeyError, ValueError) as exc:
+            raise ModelNotAvailableError(f"no model satisfies task {task.name}") from exc
+        model = decision.model
+        if model.provider != self._provider.provider_id:
+            raise ModelNotAvailableError(
+                "resolved model provider is not configured for this service"
+            )
         # Resolve the effective output schema exactly once: a request override
         # wins, and an empty-string override is treated as "no override" so the
         # provider request and output validation can never disagree (Scope §6.1).
         effective_output_schema = request.output_schema or task.output_schema
+        configured_max_tokens = task.parameter_defaults.get("max_tokens")
+        configured_temperature = task.parameter_defaults.get("temperature")
         provider_request = ProviderRequest(
             task=task.name,
+            model=model.model,
             prompt=rendered,
             output_schema=effective_output_schema,
-            max_tokens=task.parameter_defaults.get("max_tokens"),
-            temperature=task.parameter_defaults.get("temperature"),
+            max_tokens=configured_max_tokens if isinstance(configured_max_tokens, int) else None,
+            temperature=(
+                float(configured_temperature)
+                if isinstance(configured_temperature, (int, float))
+                else None
+            ),
             metadata=request.metadata,
         )
         response = await self._call_provider(provider_request)
+        if response.model != model.model:
+            raise ProviderResponseError("provider response model did not match the routed model")
 
         output = self._validate_output(
             effective_output_schema,
@@ -140,8 +162,8 @@ class AIService:
                 model=response.model,
                 prompt_name=prompt.name,
                 prompt_version=prompt.version,
-                reason=f"resolved via model registry for task {task.name}",
-                fallback_used=False,
+                reason=decision.reason,
+                fallback_used=decision.fallback_used,
             ),
             output=output,
             usage=response.usage,
@@ -149,29 +171,24 @@ class AIService:
                 model.pricing.input_price_per_million_tokens,
                 model.pricing.output_price_per_million_tokens,
                 response.usage,
+                currency=model.pricing.currency,
             ),
             completed_at=datetime.now(UTC),
         )
 
-    def _resolve_task(self, name: str) -> Any:
+    def _resolve_task(self, name: str) -> TaskDefinition:
         try:
             return self._task_registry.get(name)
         except KeyError as exc:
             raise TaskNotFoundError(f"unknown task: {name}") from exc
 
-    def _resolve_prompt(self, name: str, version: int) -> Any:
+    def _resolve_prompt(self, name: str, version: int) -> PromptDefinition:
         try:
             return self._prompt_registry.get(name, version)
         except KeyError as exc:
             raise PromptNotFoundError(f"unknown prompt: {name} v{version}") from exc
 
-    def _resolve_model(self, task: Any, *, allowed_providers: list[str] | None) -> Any:
-        try:
-            return self._model_registry.resolve(task, allowed_providers=allowed_providers)
-        except (KeyError, ValueError) as exc:
-            raise ModelNotAvailableError(f"no model satisfies task {task.name}") from exc
-
-    def _render_prompt(self, prompt: Any, request: AIRequest) -> str:
+    def _render_prompt(self, prompt: PromptDefinition, request: AIRequest) -> str:
         """Render the prompt template with allowlisted variables only.
 
         Only identifiers the prompt declares are substituted; undeclared
@@ -185,28 +202,27 @@ class AIService:
             if variable in request.metadata:
                 values[variable] = request.metadata[variable]
             elif variable == "text":
-                values[variable] = request.text or ""
+                if request.text is None:
+                    raise AIInputValidationError("task requires text input")
+                values[variable] = request.text
             elif variable == "messages":
+                if request.messages is None:
+                    raise AIInputValidationError("task requires message input")
                 values[variable] = "\n".join(
-                    f"{message.role}: {message.content}" for message in (request.messages or [])
+                    f"{message.role}: {message.content}" for message in request.messages
                 )
             elif variable == "storage_reference":
-                values[variable] = request.storage_reference or ""
+                if request.storage_reference is None:
+                    raise AIInputValidationError("task requires a storage reference")
+                values[variable] = request.storage_reference
             else:
                 raise AIInputValidationError(f"task requires input variable {variable!r}")
 
-        def replace(match: re.Match[str]) -> str:
-            return values.get(match.group(1), match.group(0))
-
-        user = _VARIABLE_PATTERN.sub(replace, prompt.user_template) if prompt.user_template else ""
-        lines = [f"Task: {request.task}"]
-        if prompt.system_instructions:
-            lines.append(prompt.system_instructions)
-        if user:
-            lines.append(user)
-        for name, value in values.items():
-            lines.append(f"{name}: {value}")
-        return "\n".join(lines)
+        try:
+            rendered = prompt.render(values)
+        except ValueError as exc:
+            raise AIInputValidationError("prompt input failed safe rendering") from exc
+        return f"Task: {request.task}\n{rendered}"
 
     async def _call_provider(self, provider_request: ProviderRequest) -> Any:
         try:
@@ -254,7 +270,9 @@ class AIService:
         input_price_per_million: Decimal,
         output_price_per_million: Decimal,
         usage: TokenUsage,
+        *,
+        currency: str = "USD",
     ) -> CostEstimate:
         input_cost = input_price_per_million * Decimal(usage.input_tokens) / Decimal(1_000_000)
         output_cost = output_price_per_million * Decimal(usage.output_tokens) / Decimal(1_000_000)
-        return CostEstimate(amount=input_cost + output_cost)
+        return CostEstimate(amount=input_cost + output_cost, currency=currency)

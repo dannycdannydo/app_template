@@ -1,0 +1,40 @@
+models:
+  - id: fake.document-classifier
+    provider: fake
+    model: fake-model-document.classify
+    capabilities:
+      - structured_output
+      - reasoning
+    context_window: 16384
+    supported_parameters:
+      - max_tokens
+      - temperature
+    quality_tier: economy
+    latency_tier: interactive
+    priority: 0
+    pricing:
+      currency: USD
+      input_price_per_million_tokens: "0"
+      output_price_per_million_tokens: "0"
+      effective_date: 2026-08-10
+      owner: Template maintainers
+    available: true
+  - id: local.document-classifier
+    provider: local
+    model: local-document-classifier
+    capabilities:
+      - structured_output
+    context_window: 16384
+    supported_parameters:
+      - max_tokens
+      - temperature
+    quality_tier: economy
+    latency_tier: interactive
+    priority: 100
+    pricing:
+      currency: USD
+      input_price_per_million_tokens: "0"
+      output_price_per_million_tokens: "0"
+      effective_date: 2026-08-10
+      owner: Template maintainers
+    available: true
