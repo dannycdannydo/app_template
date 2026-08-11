@@ -11,11 +11,19 @@ know whether Sentry is on.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import sentry_sdk
 from dramatiq.middleware import Middleware
 from sentry_sdk.integrations.fastapi import FastApiIntegration
+from sentry_sdk.types import Event, Hint
+
+from app.core.logging import redact_sensitive_data
+
+
+def _before_send(event: Event, hint: Hint) -> Event | None:
+    """Apply the same bounded secret policy used by application logging."""
+    return cast("Event", redact_sensitive_data(event))
 
 
 def initialise_sentry(*, dsn: str, environment: str, traces_sample_rate: float) -> None:
@@ -29,6 +37,8 @@ def initialise_sentry(*, dsn: str, environment: str, traces_sample_rate: float) 
         dsn=dsn,
         environment=environment,
         traces_sample_rate=traces_sample_rate,
+        send_default_pii=False,
+        before_send=_before_send,
         integrations=[FastApiIntegration()],
     )
 

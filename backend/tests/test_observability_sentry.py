@@ -84,6 +84,37 @@ def test_create_app_initialises_sentry_when_dsn_set(monkeypatch: MonkeyPatch) ->
     assert call["dsn"] == "https://example@sentry.example/1"
     assert call["environment"] == "staging"
     assert call["traces_sample_rate"] == 0.25
+    assert call["send_default_pii"] is False
+    assert callable(call["before_send"])
+
+
+def test_sentry_before_send_redacts_sensitive_event_data(monkeypatch: MonkeyPatch) -> None:
+    fake = _FakeSentrySDK()
+    monkeypatch.setattr("app.observability.sentry.sentry_sdk", fake)
+    _with_dsn(monkeypatch)
+    try:
+        create_app()
+    finally:
+        get_settings.cache_clear()
+
+    before_send = fake.init_calls[0]["before_send"]
+    event = {
+        "request": {
+            "headers": {"Authorization": "Bearer sentry-token"},
+            "cookies": {"session": "cookie-secret"},
+        },
+        "extra": {
+            "database_url": "postgresql://app:db-secret@db.example/app",
+            "message": "https://s3.example/file?X-Amz-Signature=signed-secret",
+        },
+    }
+
+    redacted = before_send(event, {})
+    serialised = str(redacted)
+    assert "sentry-token" not in serialised
+    assert "cookie-secret" not in serialised
+    assert "db-secret" not in serialised
+    assert "signed-secret" not in serialised
 
 
 def test_sentry_environment_defaults_to_app_env(monkeypatch: MonkeyPatch) -> None:

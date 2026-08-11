@@ -752,3 +752,96 @@ async def test_send_notification_email_task_is_idempotent_on_redelivery(
             assert delivery.provider_message_id.startswith("fake-")
     finally:
         await engine.dispose()
+
+
+async def test_send_notification_email_rejects_cross_org_durable_context(
+    migrated_database: str,
+    task_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A job cannot use a notification whose tenant differs from the job."""
+    engine = create_async_engine(migrated_database, poolclass=NullPool)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    stub_task = _stub_task()
+    provider_called = False
+
+    class _ProviderMustNotRun:
+        async def send_email(self, **kwargs: Any) -> Any:
+            nonlocal provider_called
+            provider_called = True
+            raise AssertionError("provider must not run for mismatched tenant context")
+
+    monkeypatch.setattr(notifications_tasks, "get_email_provider", lambda: _ProviderMustNotRun())
+    try:
+        async with session_factory() as session:
+            job_org, user = await _seed_org_and_user(session)
+            foreign_org = Organisation(name="Foreign Notifications Ltd")
+            session.add(foreign_org)
+            await session.commit()
+            notification, delivery, job = await notifications_service.send_test_notification(
+                session,
+                organisation_id=job_org.id,
+                user_id=user.id,
+                recipient_email=user.email,
+                actor_user_id=user.id,
+                delivery_task=stub_task,
+            )
+            notification.organisation_id = foreign_org.id
+            await session.commit()
+            job_id = job.id
+            delivery_id = delivery.id
+
+        with pytest.raises(jobs_service.JobPermanentError):
+            await notifications_tasks.send_notification_email(str(job_id))
+
+        assert provider_called is False
+        async with session_factory() as session:
+            job = await session.get(Job, job_id)
+            delivery = await session.get(NotificationDelivery, delivery_id)
+            assert job is not None
+            assert job.status == JobStatus.FAILED
+            assert job.error_code == notifications_tasks.ERROR_CODE_INVALID_JOB_CONTEXT
+            assert delivery is not None
+            assert delivery.status == NotificationDeliveryStatus.QUEUED
+            assert delivery.attempt_count == 0
+    finally:
+        await engine.dispose()
+
+
+async def test_send_notification_email_rejects_wrong_job_type(
+    migrated_database: str,
+    task_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The email actor cannot execute a durable job owned by another task."""
+    engine = create_async_engine(migrated_database, poolclass=NullPool)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    stub_task = _stub_task()
+    try:
+        async with session_factory() as session:
+            org, user = await _seed_org_and_user(session)
+            _notification, delivery, job = await notifications_service.send_test_notification(
+                session,
+                organisation_id=org.id,
+                user_id=user.id,
+                recipient_email=user.email,
+                actor_user_id=user.id,
+                delivery_task=stub_task,
+            )
+            job.job_type = "file.processing"
+            await session.commit()
+            job_id = job.id
+            delivery_id = delivery.id
+
+        with pytest.raises(jobs_service.JobPermanentError):
+            await notifications_tasks.send_notification_email(str(job_id))
+
+        async with session_factory() as session:
+            job = await session.get(Job, job_id)
+            delivery = await session.get(NotificationDelivery, delivery_id)
+            assert job is not None
+            assert job.status == JobStatus.FAILED
+            assert job.error_code == notifications_tasks.ERROR_CODE_INVALID_JOB_CONTEXT
+            assert delivery is not None
+            assert delivery.status == NotificationDeliveryStatus.QUEUED
+    finally:
+        await engine.dispose()

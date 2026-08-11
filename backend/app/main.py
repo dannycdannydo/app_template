@@ -7,6 +7,7 @@ the OpenAPI export used by the generated client pipeline.
 
 from __future__ import annotations
 
+import re
 from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager
 from time import perf_counter
@@ -123,7 +124,7 @@ async def _handle_unexpected_exception(request: Request, exc: Exception) -> JSON
     # Blueprint §13: unexpected exceptions return a safe generic message and
     # are recorded in Sentry (blueprint §28 worker/API failure visibility).
     # capture_exception is a no-op when no DSN is configured.
-    logger.exception("unhandled_exception", error=str(exc))
+    logger.exception("unhandled_exception")
     capture_exception(exc)
     response = ErrorResponse(
         code="internal_error",
@@ -135,7 +136,12 @@ async def _handle_unexpected_exception(request: Request, exc: Exception) -> JSON
 
 async def _request_id_middleware(request: Request, call_next: RequestResponseEndpoint) -> Response:
     """Bind a request ID to the logging context and echo it on the response."""
-    request_id = request.headers.get("x-request-id") or uuid4().hex
+    supplied_request_id = request.headers.get("x-request-id")
+    request_id = (
+        supplied_request_id
+        if supplied_request_id and re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", supplied_request_id)
+        else uuid4().hex
+    )
     structlog.contextvars.clear_contextvars()
     structlog.contextvars.bind_contextvars(request_id=request_id)
     started = perf_counter()

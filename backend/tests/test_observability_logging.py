@@ -29,7 +29,12 @@ from tests.context_helpers import (
     make_user,
 )
 
-from app.core.logging import bind_identity_context, bind_worker_context
+from app.core.logging import (
+    REDACTED,
+    bind_identity_context,
+    bind_worker_context,
+    redact_sensitive_data,
+)
 
 logger = structlog.get_logger()
 
@@ -199,25 +204,15 @@ async def test_worker_tasks_emit_context_bound_log_lines(
     assert recorded == [jobs_service.ERROR_CODE_RETRIES_EXHAUSTED]
 
 
-async def test_never_log_list_is_enforced() -> None:
-    """Secrets placed in headers never appear in any captured log line.
-
-    Blueprint §28's never-log list (passwords, tokens, authorisation headers,
-    signed URLs, full connection strings) is enforced by construction: the
-    middleware and dependencies log method/path/status and identity ids only.
-    This test pins that guarantee against regression by spraying candidate
-    secrets into a request and asserting none reach the logs.
-    """
+async def test_untrusted_request_id_is_replaced_before_logging() -> None:
+    """A client cannot inject arbitrary or oversized content into log context."""
     app, state, private_key = build_context_app_fixture()
     user = make_user()
     state.users[user.workos_user_id] = user
     organisation_id = uuid.uuid4()
     state.lookup_queue = [user, make_membership(user, organisation_id)]
 
-    bearer_candidate = "super-secret-bearer-token-7f3a"
-    password_candidate = "super-secret-password-9c21"
-    signed_url_candidate = "X-Amz-Signature=abc123secret"
-    connection_string_candidate = "postgresql+asyncpg://app:db-secret@db.example/db"
+    injected_request_id = "Bearer super-secret-bearer-token-7f3a"
 
     with _capture_logs() as logs:
         async with context_client(app) as client:
@@ -226,21 +221,43 @@ async def test_never_log_list_is_enforced() -> None:
                 headers={
                     "Authorization": f"Bearer {make_token(private_key)}",
                     "X-Org-Id": str(organisation_id),
-                    "X-Request-ID": "req-123",
+                    "X-Request-ID": injected_request_id,
                 },
             )
 
     assert response.status_code == 200
     serialised = json.dumps(logs)
+    assert injected_request_id not in serialised
+    finished = [entry for entry in logs if entry["event"] == "request_finished"]
+    assert finished
+    assert finished[0]["request_id"] != injected_request_id
+    assert len(str(finished[0]["request_id"])) == 32
+
+
+def test_never_log_list_is_actually_redacted() -> None:
+    """Sensitive keys and values are removed from the serialized event."""
+    candidates = {
+        "authorization": "Bearer super-secret-bearer-token-7f3a",
+        "password": "super-secret-password-9c21",
+        "nested": {
+            "database_url": "postgresql+asyncpg://app:db-secret@db.example/db",
+            "error": "upload failed for https://s3.example/file?X-Amz-Signature=abc123secret",
+        },
+    }
+
+    redacted = redact_sensitive_data(candidates)
+    serialised = json.dumps(redacted)
+
+    assert redacted["authorization"] == REDACTED
+    assert redacted["password"] == REDACTED
+    assert redacted["nested"]["database_url"] == REDACTED
     for candidate in (
-        bearer_candidate,
-        password_candidate,
-        signed_url_candidate,
-        connection_string_candidate,
+        "super-secret-bearer-token-7f3a",
+        "super-secret-password-9c21",
         "db-secret",
+        "abc123secret",
     ):
         assert candidate not in serialised
-    assert logs  # the flow really did emit log lines to check
 
 
 def test_production_json_line_keeps_core_processors(
@@ -268,3 +285,27 @@ def test_production_json_line_keeps_core_processors(
     assert line["request_id"] == "req-prod-1"
     assert line["level"] == "info"
     assert "timestamp" in line
+
+
+def test_production_exception_line_redacts_secret_values(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The real processor runs after traceback formatting and scrubs its text."""
+    from app.core.logging import configure_logging
+
+    configure_logging(log_level="INFO", json_logs=True)
+    try:
+        raise RuntimeError(
+            "password=exception-secret "
+            "Bearer exception-token "
+            "postgresql://app:database-secret@db.example/app"
+        )
+    except RuntimeError:
+        structlog.get_logger().exception("production_failure_probe")
+
+    out, _ = capsys.readouterr()
+    line = out.strip().splitlines()[-1]
+    assert "exception-secret" not in line
+    assert "exception-token" not in line
+    assert "database-secret" not in line
+    assert REDACTED in line

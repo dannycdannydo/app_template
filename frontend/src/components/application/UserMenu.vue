@@ -13,9 +13,9 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { clearLocalSession } from '@/features/auth/localSession'
 import { signOut } from '@/features/auth/workos'
 import { useMeQuery } from '@/queries/me'
-import { useSessionStore } from '@/stores/session'
 
 /**
  * User menu in the shell header (Scope §6.3, acceptance §5.5).
@@ -26,7 +26,6 @@ import { useSessionStore } from '@/stores/session'
  * `/login`; the router guard then treats every other route as public.
  */
 const { data } = useMeQuery()
-const session = useSessionStore()
 const router = useRouter()
 
 const isSigningOut = ref(false)
@@ -46,7 +45,7 @@ async function handleSignOut(): Promise<void> {
   if (isSigningOut.value) return
   isSigningOut.value = true
   const logoutNavigationStarted = await signOut()
-  session.clearSession()
+  clearLocalSession()
   if (!logoutNavigationStarted) {
     void router.push('/login')
   }

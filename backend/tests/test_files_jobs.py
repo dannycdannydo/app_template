@@ -67,6 +67,52 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 _QUEUE = "test-files-jobs"
 
 
+async def test_file_worker_rejects_wrong_durable_job_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The document actor fails before touching storage for another task type."""
+    job_id = uuid.UUID("00000000-0000-7000-8000-000000000041")
+    failed: list[tuple[str, str]] = []
+
+    class _Session:
+        async def __aenter__(self) -> _Session:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    class _WrongTypeJob:
+        input_reference = "00000000-0000-7000-8000-000000000042"
+        status = JobStatus.QUEUED
+        job_type = notifications_tasks.JOB_TYPE_NOTIFICATION_EMAIL
+
+    async def _get_job(session: object, *, job_id: uuid.UUID) -> _WrongTypeJob:
+        return _WrongTypeJob()
+
+    async def _fail(
+        session: object,
+        *,
+        job_id: uuid.UUID,
+        error_code: str,
+        error_message: str,
+    ) -> None:
+        failed.append((error_code, error_message))
+
+    monkeypatch.setattr(files_tasks, "async_session_factory", _Session)
+    monkeypatch.setattr(jobs_service, "get_job_for_task", _get_job)
+    monkeypatch.setattr(jobs_service, "fail", _fail)
+
+    with pytest.raises(jobs_service.JobPermanentError):
+        await files_tasks.process_file(str(job_id))
+
+    assert failed == [
+        (
+            files_tasks.ERROR_CODE_INVALID_JOB_CONTEXT,
+            "The file job has an invalid task type.",
+        )
+    ]
+
+
 def _database_reachable(database_url: str) -> bool:
     """Probe the configured database with a short async engine connect."""
 

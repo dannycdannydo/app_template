@@ -8,8 +8,85 @@ request by the middleware in ``app.main`` and merged into every log line by
 from __future__ import annotations
 
 import logging
+import re
+from collections.abc import Mapping
+from typing import Any, cast
 
 import structlog
+
+REDACTED = "[REDACTED]"
+
+_SENSITIVE_KEYS = {
+    "authorization",
+    "cookie",
+    "cookies",
+    "set_cookie",
+    "password",
+    "passwd",
+    "token",
+    "access_token",
+    "refresh_token",
+    "api_key",
+    "secret",
+    "client_secret",
+    "dsn",
+    "database_url",
+    "connection_string",
+    "signed_url",
+    "upload_url",
+    "download_url",
+}
+_BEARER_RE = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
+_CONNECTION_URL_RE = re.compile(
+    r"(?i)\b(?:postgres(?:ql)?(?:\+[a-z0-9]+)?|mysql(?:\+[a-z0-9]+)?|redis)://[^\s]+"
+)
+_SIGNED_URL_RE = re.compile(
+    r"(?i)https?://[^\s]+(?:x-amz-signature|x-goog-signature|signature=|token=)[^\s]*"
+)
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b(password|passwd|token|secret|api[_-]?key|client[_-]?secret)\s*[:=]\s*[^\s,;&]+"
+)
+
+
+def _is_sensitive_key(key: object) -> bool:
+    normalised = str(key).strip().lower().replace("-", "_")
+    return normalised in _SENSITIVE_KEYS or normalised.endswith(("_password", "_token", "_secret"))
+
+
+def _redact_string(value: str) -> str:
+    value = _BEARER_RE.sub(f"Bearer {REDACTED}", value)
+    value = _CONNECTION_URL_RE.sub(REDACTED, value)
+    value = _SIGNED_URL_RE.sub(REDACTED, value)
+    return _SECRET_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}={REDACTED}", value)
+
+
+def redact_sensitive_data(value: Any) -> Any:
+    """Return a recursively redacted copy suitable for logs or error reporting."""
+    if isinstance(value, Mapping):
+        items = cast("Mapping[object, Any]", value)
+        return {
+            key: REDACTED if _is_sensitive_key(key) else redact_sensitive_data(item)
+            for key, item in items.items()
+        }
+    if isinstance(value, list):
+        items = cast("list[Any]", value)
+        return [redact_sensitive_data(item) for item in items]
+    if isinstance(value, tuple):
+        items = cast("tuple[Any, ...]", value)
+        return tuple(redact_sensitive_data(item) for item in items)
+    if isinstance(value, str):
+        return _redact_string(value)
+    return value
+
+
+def redact_log_event(
+    logger: object,
+    method_name: str,
+    event_dict: structlog.typing.EventDict,
+) -> structlog.typing.EventDict:
+    """Structlog processor applying the shared recursive redaction policy."""
+    return redact_sensitive_data(event_dict)
+
 
 _LOG_LEVELS: dict[str, int] = {
     "DEBUG": logging.DEBUG,
@@ -28,6 +105,7 @@ _CORE_PROCESSORS: tuple[structlog.typing.Processor, ...] = (
     structlog.processors.TimeStamper(fmt="iso"),
     structlog.processors.StackInfoRenderer(),
     structlog.processors.format_exc_info,
+    redact_log_event,
 )
 
 # The process-wide processor chain. ``configure_logging`` mutates this one

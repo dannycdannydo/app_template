@@ -183,7 +183,10 @@ async def test_assign_role_links_membership_and_role(context_app: ContextApp) ->
     state.lookup_queue = [role, membership]
 
     await assign_role(
-        cast(AsyncSession, FakeSession(state)), membership_id=membership.id, role_code="manager"
+        cast(AsyncSession, FakeSession(state)),
+        organisation_id=membership.organisation_id,
+        membership_id=membership.id,
+        role_code="manager",
     )
 
     (link,) = state.membership_roles
@@ -199,7 +202,10 @@ async def test_assign_role_rejects_unknown_membership(context_app: ContextApp) -
 
     with pytest.raises(NotFoundError):
         await assign_role(
-            cast(AsyncSession, FakeSession(state)), membership_id=uuid.uuid4(), role_code="manager"
+            cast(AsyncSession, FakeSession(state)),
+            organisation_id=uuid.uuid4(),
+            membership_id=uuid.uuid4(),
+            role_code="manager",
         )
     assert state.membership_roles == []
 
@@ -211,6 +217,9 @@ async def test_assign_role_rejects_unknown_role(context_app: ContextApp) -> None
 
     with pytest.raises(NotFoundError):
         await assign_role(
-            cast(AsyncSession, FakeSession(state)), membership_id=membership.id, role_code="nobody"
+            cast(AsyncSession, FakeSession(state)),
+            organisation_id=membership.organisation_id,
+            membership_id=membership.id,
+            role_code="nobody",
         )
     assert state.membership_roles == []

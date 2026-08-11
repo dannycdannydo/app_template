@@ -22,14 +22,23 @@ from app.modules.permissions.models import MembershipRole, Role
 
 async def list_membership_roles(
     session: AsyncSession,
+    *,
+    organisation_id: uuid.UUID,
     membership_id: uuid.UUID,
 ) -> list[Role]:
-    """Return the roles currently assigned to a membership, by role code."""
+    """Return roles for a membership proven to belong to the organisation."""
     return list(
         await session.scalars(
             select(Role)
             .join(MembershipRole, MembershipRole.role_id == Role.id)
-            .where(MembershipRole.membership_id == membership_id)
+            .join(
+                OrganisationMembership,
+                OrganisationMembership.id == MembershipRole.membership_id,
+            )
+            .where(
+                MembershipRole.membership_id == membership_id,
+                OrganisationMembership.organisation_id == organisation_id,
+            )
             .order_by(Role.code)
         )
     )
@@ -38,6 +47,7 @@ async def list_membership_roles(
 async def assign_role(
     session: AsyncSession,
     *,
+    organisation_id: uuid.UUID,
     membership_id: uuid.UUID,
     role_code: str,
 ) -> None:
@@ -55,7 +65,10 @@ async def assign_role(
             message="The role does not exist.",
         )
     membership = await session.scalar(
-        select(OrganisationMembership).where(OrganisationMembership.id == membership_id)
+        select(OrganisationMembership).where(
+            OrganisationMembership.id == membership_id,
+            OrganisationMembership.organisation_id == organisation_id,
+        )
     )
     if membership is None:
         raise NotFoundError(
@@ -76,6 +89,7 @@ async def assign_role(
 async def remove_role(
     session: AsyncSession,
     *,
+    organisation_id: uuid.UUID,
     membership_id: uuid.UUID,
     role_code: str,
 ) -> None:
@@ -85,6 +99,17 @@ async def remove_role(
         raise NotFoundError(
             code="role_not_found",
             message="The role does not exist.",
+        )
+    membership = await session.scalar(
+        select(OrganisationMembership).where(
+            OrganisationMembership.id == membership_id,
+            OrganisationMembership.organisation_id == organisation_id,
+        )
+    )
+    if membership is None:
+        raise NotFoundError(
+            code="membership_not_found",
+            message="The membership does not exist.",
         )
     link = await session.scalar(
         select(MembershipRole).where(
