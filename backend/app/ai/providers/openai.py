@@ -50,6 +50,7 @@ class OpenAIAdapter(OpenAICompatibleAdapter):
     provider_id = "openai"
     default_base_url = "https://api.openai.com/v1"
     supports_documents = True
+    supports_native_structured_output = True
     supported_attachment_mime_types = OPENAI_INLINE_ATTACHMENT_MIME_TYPES
 
     def __init__(

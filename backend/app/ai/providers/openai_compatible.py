@@ -10,9 +10,14 @@ and finish-reason parsing — and each subclass overrides only its
 provider-specific URL, headers, error surface and model echo behaviour.
 
 Structured output: when ``ProviderRequest.output_schema`` is set the adapter
-requests JSON mode (``response_format={"type": "json_object"}``) and appends
-an explicit JSON instruction to the user message, which OpenAI JSON mode
-requires; the full native JSON-schema path is a Scope §6.4 concern. The
+requests structured JSON output. Adapters that truthfully declare
+``supports_native_structured_output`` (OpenAI, and Azure deployments pinned to
+an api-version at or after ``2024-08-01-preview``, using the JSON Schema the
+service generated from the Pydantic output model) request OpenAI's native
+``response_format={"type": "json_schema", ...}`` (Scope §6.4); all others
+(DeepSeek, local, older Azure api-versions) fall back to JSON mode
+(``response_format={"type": "json_object"}``) plus an explicit JSON
+instruction to the user message, which OpenAI JSON mode requires. The
 adapter best-effort parses the JSON object; the service always validates
 against the declared Pydantic contract.
 """
@@ -42,6 +47,12 @@ from app.ai.schemas import TokenUsage
 # rendered task prompt is a reviewed asset that must not depend on it, so the
 # adapter appends this explicit instruction when structured output is asked.
 _JSON_INSTRUCTION = "\n\nRespond with a single JSON object."
+# Native JSON-schema structured output name (Scope §6.4). ``strict=False`` is
+# deliberate: the service generates the schema from the feature's Pydantic
+# model, which may contain optional fields a strict subset would reject, and
+# the service always re-validates the provider output against that model, so
+# the schema is a strong shape hint rather than the safety boundary.
+_NATIVE_OUTPUT_NAME = "structured_output"
 
 
 # Native inline attachment forms (v0.7 Scope §6.3 attachment amendment,
@@ -190,7 +201,21 @@ class OpenAICompatibleAdapter(LLMProvider):
         if request.temperature is not None:
             payload["temperature"] = request.temperature
         if request.output_schema:
-            payload["response_format"] = {"type": "json_object"}
+            # Native JSON-schema structured output when the adapter truthfully
+            # supports it and the service supplied the generated schema (Scope
+            # §6.4); otherwise the JSON-mode prompt contract. The service
+            # re-validates against the Pydantic model either way.
+            if self.supports_native_structured_output and request.output_json_schema:
+                payload["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": _NATIVE_OUTPUT_NAME,
+                        "schema": request.output_json_schema,
+                        "strict": False,
+                    },
+                }
+            else:
+                payload["response_format"] = {"type": "json_object"}
         return payload
 
     def _response_model(self, data: dict[str, Any], request: ProviderRequest) -> str:

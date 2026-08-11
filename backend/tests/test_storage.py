@@ -109,6 +109,31 @@ async def test_head_object_missing_returns_none(storage: FakeObjectStorage) -> N
     assert await storage.head_object("organisations/org-1/documents/missing/original.pdf") is None
 
 
+async def test_read_object_returns_stored_bytes(storage: FakeObjectStorage) -> None:
+    """The server-side read seam the AI layer resolves references through
+    (v0.7 Scope §6.4): bytes round-trip and never leave memory."""
+    content = b"%PDF-1.7 analysis fixture"
+    await storage.put(_OBJECT_KEY, content, content_type="application/pdf")
+    assert await storage.read_object(_OBJECT_KEY) == content
+
+
+async def test_read_object_missing_raises_key_error(storage: FakeObjectStorage) -> None:
+    """A missing object is a KeyError so the AI resolver can translate it into
+    its safe error without echoing the reference (v0.7 Scope §6.4)."""
+    with pytest.raises(KeyError):
+        await storage.read_object("organisations/org-1/documents/missing/original.pdf")
+
+
+async def test_read_object_is_bounded_by_max_bytes(storage: FakeObjectStorage) -> None:
+    """The bounded read cap (v0.7 Scope §6.4): requesting fewer bytes than the
+    stored object fails with ValueError instead of returning the full body, so
+    a head/read race can never allocate unbounded worker memory."""
+    await storage.put(_OBJECT_KEY, b"x" * 32, content_type="application/pdf")
+    assert await storage.read_object(_OBJECT_KEY, max_bytes=32) == b"x" * 32
+    with pytest.raises(ValueError, match="read limit"):
+        await storage.read_object(_OBJECT_KEY, max_bytes=31)
+
+
 async def test_delete_object_is_idempotent(storage: FakeObjectStorage) -> None:
     await storage.put(_OBJECT_KEY, b"content")
     await storage.delete_object(_OBJECT_KEY)

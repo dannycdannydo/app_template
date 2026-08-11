@@ -196,6 +196,49 @@ class S3Storage(ObjectStorage):
             checksum=checksum,
         )
 
+    async def read_object(self, object_key: str, *, max_bytes: int | None = None) -> bytes:
+        """Read one object's bytes server-side, bounded when asked.
+
+        The AI layer resolves private storage references into bounded
+        in-memory attachments through this seam (v0.7 Scope §6.4, ADR-0017):
+        bytes are fetched into memory for one provider call and never persist
+        anywhere. Missing objects raise :class:`KeyError` so the AI resolver
+        can translate them into its safe error without leaking the reference.
+
+        When ``max_bytes`` is given, the read is capped *during* the body
+        read: ``StreamingBody.read`` fetches at most ``max_bytes + 1`` bytes
+        and a longer body raises :class:`ValueError`, so an object that grew
+        or changed after ``head_object`` (a head/read race) can never pull
+        unbounded bytes into worker memory (Scope §6.4/§5.8). The streaming
+        body is always closed, including on bounded-read failures, so repeated
+        AI reads never leak HTTP connections.
+        """
+        try:
+            response = await asyncio.to_thread(
+                self._client.get_object,
+                Bucket=self._bucket,
+                Key=object_key,
+            )
+        except ClientError as exc:
+            if _error_code(exc) in _MISSING_OBJECT_CODES:
+                raise KeyError(f"object not found: {object_key}") from exc
+            raise
+        body = response.get("Body")
+        if body is None:
+            raise ValueError(f"provider returned no body for object: {object_key}")
+        try:
+            if max_bytes is not None:
+                data = await asyncio.to_thread(body.read, max_bytes + 1)
+                if len(data) > max_bytes:
+                    raise ValueError(
+                        f"object exceeds the {max_bytes} byte read limit: {object_key}"
+                    )
+            else:
+                data = await asyncio.to_thread(body.read)
+        finally:
+            await asyncio.to_thread(body.close)
+        return bytes(data)
+
     async def delete_object(self, object_key: str) -> None:
         try:
             await asyncio.to_thread(

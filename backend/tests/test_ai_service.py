@@ -232,26 +232,52 @@ async def test_unexpected_provider_failure_is_normalised() -> None:
 
 async def test_malformed_provider_json_fails_validation() -> None:
     """The provider returned garbage JSON: an OutputValidationError, never a
-    success — acceptance criterion §5.4."""
+    success — acceptance criterion §5.4. The default task's retry policy
+    allows one bounded repair then bounded task retries (Scope §6.4,
+    ADR-0017), so the original, the repair and every retried dispatch must
+    fail for the terminal error; exactly max_attempts dispatches plus the one
+    repair happen and no repair storm occurs."""
     provider = FakeLLMProvider()
-    provider.set_next_response(_canned_response(content="not json at all", structured=None))
-    service, _ = _service(provider=provider)
-    with pytest.raises(OutputValidationError):
-        await service.execute(_request())
-
-
-async def test_schema_mismatch_fails_validation() -> None:
-    """Valid JSON that does not match the schema is rejected."""
-    provider = FakeLLMProvider()
-    provider.set_next_response(
-        _canned_response(
-            content='{"task": "document.classify"}',
-            structured={"task": "document.classify"},
-        )
+    provider.queue_responses(
+        _canned_response(content="not json at all", structured=None),
+        _canned_response(content="still not json", structured=None),
+        _canned_response(content="still not json", structured=None),
+        _canned_response(content="still not json", structured=None),
     )
     service, _ = _service(provider=provider)
     with pytest.raises(OutputValidationError):
         await service.execute(_request())
+    assert len(provider.requests) == 4
+    assert [request.repair for request in provider.requests] == [False, True, False, False]
+
+
+async def test_schema_mismatch_fails_validation() -> None:
+    """Valid JSON that does not match the schema is rejected — the repair
+    request and the retried dispatches get the same malformed shape, so the
+    terminal failure fires after exactly one repair."""
+    provider = FakeLLMProvider()
+    provider.queue_responses(
+        _canned_response(
+            content='{"task": "document.classify"}',
+            structured={"task": "document.classify"},
+        ),
+        _canned_response(
+            content='{"task": "document.classify"}',
+            structured={"task": "document.classify"},
+        ),
+        _canned_response(
+            content='{"task": "document.classify"}',
+            structured={"task": "document.classify"},
+        ),
+        _canned_response(
+            content='{"task": "document.classify"}',
+            structured={"task": "document.classify"},
+        ),
+    )
+    service, _ = _service(provider=provider)
+    with pytest.raises(OutputValidationError):
+        await service.execute(_request())
+    assert len(provider.requests) == 4
 
 
 async def test_unknown_output_schema_raises_output_schema_error() -> None:

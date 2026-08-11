@@ -22,6 +22,17 @@ from app.ai.providers.openai_compatible import OpenAICompatibleAdapter
 
 __all__ = ["AzureOpenAIAdapter"]
 
+#: The first Azure OpenAI api-version that ships OpenAI's native ``json_schema``
+#: response format (Microsoft structured-outputs contract). Lexicographic
+#: comparison is safe for zero-padded ``YYYY-MM-DD[-preview]`` version strings,
+#: so a pinned version >= this constant truthfully declares native support and
+#: an older pinned version stays on the JSON-mode prompt contract (Scope §6.4).
+_STRUCTURED_OUTPUTS_MIN_API_VERSION = "2024-08-01-preview"
+
+
+def _api_version_supports_structured_outputs(api_version: str) -> bool:
+    return api_version >= _STRUCTURED_OUTPUTS_MIN_API_VERSION
+
 
 class AzureOpenAIAdapter(OpenAICompatibleAdapter):
     """Azure OpenAI chat-completions adapter over deployment URLs.
@@ -38,6 +49,12 @@ class AzureOpenAIAdapter(OpenAICompatibleAdapter):
 
     provider_id = "azure_openai"
     supports_documents = True
+    # The class default stays False; each instance derives the truth from its
+    # pinned api-version, because Microsoft documented structured outputs
+    # arriving in ``2024-08-01-preview`` (Scope §6.4). A deployment pinned to
+    # an older version therefore never pretends to support native
+    # ``json_schema`` and truthfully uses the JSON-mode prompt contract.
+    supports_native_structured_output = False
     supported_attachment_mime_types = OPENAI_INLINE_ATTACHMENT_MIME_TYPES
 
     def __init__(
@@ -51,6 +68,9 @@ class AzureOpenAIAdapter(OpenAICompatibleAdapter):
     ) -> None:
         self._endpoint = endpoint.rstrip("/")
         self._api_version = api_version
+        self.supports_native_structured_output = _api_version_supports_structured_outputs(
+            api_version
+        )
         super().__init__(
             base_url=self._endpoint,
             api_key=api_key,

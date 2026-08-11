@@ -121,6 +121,14 @@ class FakeObjectStorage(ObjectStorage):
             checksum=hashlib.sha256(stored.content).hexdigest(),
         )
 
+    async def read_object(self, object_key: str, *, max_bytes: int | None = None) -> bytes:
+        stored = self._objects.get(object_key)
+        if stored is None:
+            raise KeyError(f"object not found: {object_key}")
+        if max_bytes is not None and len(stored.content) > max_bytes:
+            raise ValueError(f"object exceeds the {max_bytes} byte read limit")
+        return stored.content
+
     async def delete_object(self, object_key: str) -> None:
         self._objects.pop(object_key, None)
         self._declared.pop(object_key, None)
