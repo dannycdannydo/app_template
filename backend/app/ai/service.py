@@ -12,7 +12,7 @@ metadata. Provider SDKs never appear here (BP §33, ADR-0017).
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -20,6 +20,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ValidationError
 
+from app.ai.attachments import Attachment, validate_attachment_set
 from app.ai.errors import (
     AIError,
     AIInputValidationError,
@@ -93,6 +94,7 @@ class AIService:
         allowed_model_ids: list[str] | None = None,
         model_override: str | None = None,
         maximum_estimated_cost: Decimal | None = None,
+        attachments: Sequence[Attachment] | None = None,
     ) -> AIResult:
         """Execute one task request and return a validated result.
 
@@ -101,11 +103,22 @@ class AIService:
         organisation restriction (the default in Scope §6.1 until
         ``organisation_ai_settings`` lands).
 
+        ``attachments`` are bounded inline attachments already resolved from a
+        private storage reference at the service/job boundary (ADR-0017
+        amendment; the resolver itself is Scope §6.4). They are validated
+        against the template limits (5 MB per file / 10 MB combined), the
+        router only selects models declaring the ``documents`` capability with
+        sufficient per-model ceilings, image attachments additionally require
+        the model's ``vision`` capability, and the configured adapter must
+        declare document support — every incompatible modality, MIME type and
+        size combination fails before provider dispatch.
+
         Raises an :class:`~app.ai.errors.AIError` subclass with a safe code on
         every failure; unvalidated structured data is never returned.
         """
 
         request_id = uuid4().hex
+        resolved_attachments = self._validate_attachments(attachments)
         task = self._resolve_task(request.task)
         prompt = self._resolve_prompt(task.prompt_name, task.prompt_version)
         rendered = self._render_prompt(prompt, request)
@@ -117,6 +130,7 @@ class AIService:
                 model_override=model_override,
                 estimated_input_tokens=estimate_tokens(rendered),
                 maximum_estimated_cost=maximum_estimated_cost,
+                attachments=resolved_attachments,
             )
         except (KeyError, ValueError) as exc:
             raise ModelNotAvailableError(f"no model satisfies task {task.name}") from exc
@@ -124,6 +138,10 @@ class AIService:
         if model.provider != self._provider.provider_id:
             raise ModelNotAvailableError(
                 "resolved model provider is not configured for this service"
+            )
+        if resolved_attachments and not self._provider.supports_documents:
+            raise ModelNotAvailableError(
+                "resolved model provider does not support document attachments"
             )
         # Resolve the effective output schema exactly once: a request override
         # wins, and an empty-string override is treated as "no override" so the
@@ -143,6 +161,7 @@ class AIService:
                 else None
             ),
             metadata=request.metadata,
+            attachments=resolved_attachments,
         )
         response = await self._call_provider(provider_request)
         if response.model != model.model:
@@ -175,6 +194,25 @@ class AIService:
             ),
             completed_at=datetime.now(UTC),
         )
+
+    @staticmethod
+    def _validate_attachments(
+        attachments: Sequence[Attachment] | None,
+    ) -> list[Attachment]:
+        """Validate the resolved attachment set against the template limits.
+
+        Each :class:`Attachment` is already validated at construction (MIME
+        allowlist, per-file size, digest); this enforces the bounded count and
+        combined 10 MB ceiling and translates a safe ``ValueError`` into the
+        AI input-validation taxonomy before any routing or dispatch.
+        """
+
+        if not attachments:
+            return []
+        try:
+            return validate_attachment_set(attachments)
+        except ValueError as exc:
+            raise AIInputValidationError(str(exc)) from exc
 
     def _resolve_task(self, name: str) -> TaskDefinition:
         try:

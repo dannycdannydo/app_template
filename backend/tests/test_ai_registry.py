@@ -8,6 +8,7 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 
+from app.ai.attachments import MAX_ATTACHMENT_BYTES, MAX_TOTAL_ATTACHMENT_BYTES, Attachment
 from app.ai.errors import ModelNotAvailableError
 from app.ai.providers.fake import FakeLLMProvider
 from app.ai.registry import (
@@ -42,6 +43,8 @@ def _model(
     context_window: int = 16_384,
     input_price: str = "1",
     output_price: str = "2",
+    max_attachment_bytes: int | None = None,
+    max_total_attachment_bytes: int | None = None,
 ) -> ModelDefinition:
     return ModelDefinition(
         id=model_id,
@@ -53,6 +56,8 @@ def _model(
         quality_tier=QualityTier.ECONOMY,
         latency_tier=LatencyTier.INTERACTIVE,
         priority=priority,
+        max_attachment_bytes=max_attachment_bytes,
+        max_total_attachment_bytes=max_total_attachment_bytes,
         pricing=PricingBasis(
             currency="USD",
             input_price_per_million_tokens=Decimal(input_price),
@@ -327,3 +332,147 @@ output_contract: app.ai.tasks.schemas.DocumentClassificationResult
     )
     with pytest.raises(RegistryValidationError, match="filename"):
         FilePromptRegistry.from_directory(prompt_dir)
+
+
+# --- v0.7 attachment amendment: documents capability and inline ceilings ---
+
+
+def _document_model(
+    model_id: str,
+    *,
+    priority: int = 100,
+    max_attachment_bytes: int | None = MAX_ATTACHMENT_BYTES,
+    max_total_attachment_bytes: int | None = MAX_TOTAL_ATTACHMENT_BYTES,
+    capabilities: list[Capability] | None = None,
+) -> ModelDefinition:
+    return _model(
+        model_id,
+        priority=priority,
+        capabilities=capabilities or [Capability.STRUCTURED_OUTPUT, Capability.DOCUMENTS],
+        max_attachment_bytes=max_attachment_bytes,
+        max_total_attachment_bytes=max_total_attachment_bytes,
+    )
+
+
+def _attachment(
+    *,
+    name: str = "lease.pdf",
+    mime_type: str = "application/pdf",
+    content: bytes = b"%PDF-1.7 fixture",
+) -> Attachment:
+    return Attachment(display_name=name, mime_type=mime_type, content=content)
+
+
+def test_checked_in_document_models_declare_inline_ceilings() -> None:
+    bundle = load_registry_bundle()
+    for model in bundle.models.all():
+        if Capability.DOCUMENTS in model.capabilities:
+            assert model.max_attachment_bytes is not None
+            assert model.max_total_attachment_bytes is not None
+            assert model.max_attachment_bytes <= MAX_ATTACHMENT_BYTES
+            assert model.max_total_attachment_bytes <= MAX_TOTAL_ATTACHMENT_BYTES
+    # Acceptance criterion §5.2: document input must not route to DeepSeek.
+    deepseek = bundle.models.get("deepseek", "deepseek-chat")
+    assert Capability.DOCUMENTS not in deepseek.capabilities
+
+
+def test_documents_capability_and_ceilings_must_be_declared_together() -> None:
+    with pytest.raises(ValidationError, match="ceilings"):
+        _model("missing-ceilings", capabilities=[Capability.DOCUMENTS])
+    # Partial ceilings are not a contract: both per-file and combined must be
+    # declared for a documents-capable model, or neither for a text-only one.
+    with pytest.raises(ValidationError, match="ceilings"):
+        _model(
+            "per-file-only",
+            capabilities=[Capability.DOCUMENTS],
+            max_attachment_bytes=1024,
+        )
+    with pytest.raises(ValidationError, match="ceilings"):
+        _model(
+            "combined-only",
+            capabilities=[Capability.DOCUMENTS],
+            max_total_attachment_bytes=2048,
+        )
+    with pytest.raises(ValidationError, match="documents capability"):
+        _model("stray-ceilings", max_attachment_bytes=1024, max_total_attachment_bytes=2048)
+    with pytest.raises(ValidationError, match="max_total"):
+        _document_model("inverted", max_attachment_bytes=2048, max_total_attachment_bytes=1024)
+    with pytest.raises(ValidationError, match="less than or equal to 5242880"):
+        _document_model("too-big", max_attachment_bytes=MAX_ATTACHMENT_BYTES + 1)
+
+
+def test_router_rejects_models_without_documents_capability() -> None:
+    router = CapabilityCostModelRegistry([_model("text-only"), _document_model("doc")])
+    task = _task()
+    decision = router.route(task, attachments=[_attachment()])
+    assert decision.model.id == "doc"
+    # A registry with only non-document models cannot carry attachments.
+    text_only = CapabilityCostModelRegistry([_model("text-only")])
+    with pytest.raises(RegistryValidationError, match="carry the supplied attachments"):
+        text_only.route(task, attachments=[_attachment()])
+
+
+def test_router_rejects_attachments_over_the_model_ceilings() -> None:
+    task = _task()
+    router = CapabilityCostModelRegistry([_document_model("small-file", max_attachment_bytes=512)])
+    with pytest.raises(RegistryValidationError, match="carry the supplied attachments"):
+        router.route(task, attachments=[_attachment(content=b"x" * 1024)])
+
+    total_router = CapabilityCostModelRegistry(
+        [_document_model("small-total", max_attachment_bytes=1024, max_total_attachment_bytes=1024)]
+    )
+    with pytest.raises(RegistryValidationError, match="carry the supplied attachments"):
+        total_router.route(
+            task,
+            attachments=[
+                _attachment(name="a.txt", mime_type="text/plain", content=b"x" * 600),
+                _attachment(name="b.txt", mime_type="text/plain", content=b"x" * 600),
+            ],
+        )
+
+
+def test_router_fallback_considers_attachment_capacity() -> None:
+    """A preferred text-only model is skipped when attachments are present and
+    the fallback document-capable model is selected instead."""
+    router = CapabilityCostModelRegistry(
+        [
+            _model("preferred-text", priority=0),
+            _document_model("doc-fallback", priority=100),
+        ]
+    )
+    task = _task(model_preferences=["preferred-text", "doc-fallback"])
+    decision = router.route(task, attachments=[_attachment()])
+    assert decision.model.id == "doc-fallback"
+    assert decision.fallback_used is False  # a capacity filter, not a failure fallback
+
+
+def test_router_requires_vision_for_image_attachments() -> None:
+    """An image is a separate modality from a document: a documents-capable
+    model without the ``vision`` capability must be rejected before dispatch,
+    and a model declaring both carries it (v0.7 Scope §6.2)."""
+    image = _attachment(name="scan.png", mime_type="image/png", content=b"\x89PNG fixture")
+    task = _task()
+
+    documents_only = CapabilityCostModelRegistry([_document_model("doc-only")])
+    with pytest.raises(RegistryValidationError, match="carry the supplied attachments"):
+        documents_only.route(task, attachments=[image])
+
+    vision_and_documents = CapabilityCostModelRegistry(
+        [
+            _document_model(
+                "vision-doc",
+                capabilities=[
+                    Capability.STRUCTURED_OUTPUT,
+                    Capability.DOCUMENTS,
+                    Capability.VISION,
+                ],
+            )
+        ]
+    )
+    decision = vision_and_documents.route(task, attachments=[image])
+    assert decision.model.id == "vision-doc"
+
+    # Vision is only required when the set actually contains an image: the
+    # same documents-only model still carries a plain document.
+    decision = documents_only.route(task, attachments=[_attachment()])
+    assert decision.model.id == "doc-only"

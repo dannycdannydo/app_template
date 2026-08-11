@@ -141,7 +141,7 @@ Check items off only after review. Work is ordered so contracts and safety contr
 - [x] Safe template rendering: allowlisted variables, no arbitrary template execution, length/input limits and no secret interpolation; startup/CI validation for duplicate versions, unresolved variables and incompatible requirements
 - [x] Initial `document.classify` task + Pydantic output schema + fixture prompts, models and test data; use only non-sensitive sample content
 - [x] Deterministic capability/cost router with ordered fallback, context/input budget calculation and reviewed pricing metadata
-- [ ] v0.7 attachment amendment: add `documents` capability and per-model inline attachment ceilings; reject incompatible modality, MIME type and size combinations before provider dispatch
+- [x] v0.7 attachment amendment: add `documents` capability and per-model inline attachment ceilings; reject incompatible modality, MIME type and size combinations before provider dispatch
 
 ## 6.3 Provider Adapters and Configuration
 
