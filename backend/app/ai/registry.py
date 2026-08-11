@@ -104,6 +104,12 @@ class TaskDefinition(BaseModel):
     parameter_defaults: dict[str, int | float] = Field(default_factory=lambda: {"max_tokens": 1024})
     output_schema: str | None = Field(default=None, max_length=512)
     declares_text_result: bool = False
+    # v0.7 Scope §2 retention choice: whether this task may retain the (already
+    # validated, redacted) output content in ``ai_outputs``. The default is
+    # off — records store references/digests only — and even when a task opts
+    # in, the organisation must configure a retention policy for content to be
+    # stored (both controls are required).
+    retains_output_content: bool = False
     retry_policy: RetryPolicy = Field(default_factory=RetryPolicy)
     fallback_policy: FallbackPolicy = Field(default_factory=FallbackPolicy)
     model_preferences: list[str] = Field(default_factory=list)

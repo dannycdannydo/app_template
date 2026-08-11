@@ -124,6 +124,7 @@ def _service(
         schema_resolver=_resolver,
         attachment_resolver=attachment_resolver,
         redactor=redactor,
+        allow_unmanaged_execution=True,
     )
     return service, provider
 
@@ -652,6 +653,7 @@ def _two_provider_service(
         model_registry=registries.models,
         providers={"fake": fake_provider, "fake2": second_provider},
         schema_resolver=_resolver,
+        allow_unmanaged_execution=True,
     )
 
 
@@ -708,6 +710,7 @@ async def test_unconfigured_resolved_provider_is_rejected() -> None:
         model_registry=registries.models,
         providers={"fake": fake_provider},
         schema_resolver=_resolver,
+        allow_unmanaged_execution=True,
     )
     with pytest.raises(ModelNotAvailableError):
         await service.execute(_request(), allowed_model_ids=["fake2.document-classifier"])

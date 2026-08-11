@@ -58,6 +58,7 @@ _ORG_ID = str(uuid.uuid4())
 _INVITATION_ID = str(uuid.uuid4())
 _MEMBERSHIP_ID = str(uuid.uuid4())
 _FEATURE_FLAG_ORG_ID = str(uuid.uuid4())
+_AI_SETTINGS_ORG_ID = str(uuid.uuid4())
 _FILE_ID = str(uuid.uuid4())
 _JOB_ID = str(uuid.uuid4())
 _NOTIFICATION_ID = str(uuid.uuid4())
@@ -301,6 +302,32 @@ PROTECTED_ROUTES: list[RouteSpec] = [
         org_scoped=False,
         request_body={"organisation_id": _FEATURE_FLAG_ORG_ID, "enabled": True},
         path_values={"feature_key": "records.deletion"},
+    ),
+    # AI organisation settings (Scope §6.5): platform-gated, never org-scoped;
+    # the organisation id comes from the path and the policy from the PUT body.
+    # The PUT body carries only management fields (enabled, allowlists,
+    # overrides, budget, retention) — no provider credentials or raw provider
+    # configuration ever crosses the API (ADR-0017, BP §27).
+    _route(
+        "GET",
+        "/api/v1/platform/organisations/{organisation_id}/ai-settings",
+        org_scoped=False,
+        path_values={"organisation_id": _AI_SETTINGS_ORG_ID},
+    ),
+    _route(
+        "PUT",
+        "/api/v1/platform/organisations/{organisation_id}/ai-settings",
+        org_scoped=False,
+        request_body={
+            "enabled": True,
+            "allowed_provider_ids": ["fake"],
+            "allowed_model_ids": [],
+            "provider_override": None,
+            "model_override": None,
+            "monthly_budget": None,
+            "retention_policy_days": None,
+        },
+        path_values={"organisation_id": _AI_SETTINGS_ORG_ID},
     ),
 ]
 

@@ -72,6 +72,16 @@ class BudgetExceededError(AIError):
     error_code = "budget_exceeded"
 
 
+class AIRequestReplayError(AIError):
+    """The caller re-used an execution id that already has a durable row.
+
+    Provider work is not repeated: the durable job/result owner must return
+    its previously persisted outcome instead (v0.7 Scope §6.5/§6.6).
+    """
+
+    error_code = "ai_request_already_exists"
+
+
 class ProviderError(AIError):
     """Base class for provider-adapter failures (normalised taxonomy).
 

@@ -26,6 +26,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from app.ai.persistence.models import OrganisationAISettings
 from app.core.security import UserProfile, UserProfileClient
 from app.modules.audit.models import AuditEvent
 from app.modules.organisations.models import (
@@ -199,6 +200,44 @@ async def test_bootstrap_grant_writes_membership_state_and_audit(
             assert memberships == 1
             assert bootstrap_rows == 1
             assert audit_rows == 1
+    finally:
+        await engine.dispose()
+
+
+async def test_bootstrap_organisation_gets_default_off_ai_settings(
+    migrated_database: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v0.7 Scope §6.5: the platform bootstrap is a third production
+    organisation-creation path — its organisation must also get the default-off
+    AI settings row in the same transaction (one-row-per-org invariant)."""
+    org_name = f"Bootstrap Org {uuid.uuid4().hex[:8]}"
+    _configured(monkeypatch, org=org_name)
+    engine, session_factory = _session_factory(migrated_database)
+    try:
+        await _clean_bootstrap(session_factory)  # free the sentinel for this test
+        async with session_factory() as session:
+            actor = await _seed_actor(session)
+            membership = await service.maybe_grant_bootstrap_platform_admin(
+                session,
+                actor,
+                StubProfileClient(email=BOOTSTRAP_EMAIL, email_verified=True),
+            )
+            assert membership is not None
+
+            organisation = await session.scalar(
+                select(Organisation).where(Organisation.name == org_name)
+            )
+            assert organisation is not None
+            settings_row = await session.scalar(
+                select(OrganisationAISettings).where(
+                    OrganisationAISettings.organisation_id == organisation.id
+                )
+            )
+            assert settings_row is not None
+            assert settings_row.enabled is False
+            assert settings_row.allowed_provider_ids == []
+            assert settings_row.allowed_model_ids == []
     finally:
         await engine.dispose()
 

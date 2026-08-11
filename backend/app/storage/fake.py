@@ -30,6 +30,7 @@ _DEFAULT_CONTENT_TYPE = "application/octet-stream"
 class _StoredObject:
     content: bytes
     content_type: str
+    created_at: datetime
 
 
 class FakeObjectStorage(ObjectStorage):
@@ -108,7 +109,11 @@ class FakeObjectStorage(ObjectStorage):
                 f"for object {object_key!r}"
             )
         actual_content_type = content_type or (declared[0] if declared else _DEFAULT_CONTENT_TYPE)
-        self._objects[object_key] = _StoredObject(content=content, content_type=actual_content_type)
+        self._objects[object_key] = _StoredObject(
+            content=content,
+            content_type=actual_content_type,
+            created_at=datetime.now(UTC),
+        )
 
     async def head_object(self, object_key: str) -> ObjectInfo | None:
         stored = self._objects.get(object_key)
@@ -132,3 +137,37 @@ class FakeObjectStorage(ObjectStorage):
     async def delete_object(self, object_key: str) -> None:
         self._objects.pop(object_key, None)
         self._declared.pop(object_key, None)
+
+    async def list_objects(
+        self,
+        prefix: str,
+        *,
+        limit: int = 1000,
+        start_after: str | None = None,
+    ) -> list[ObjectInfo]:
+        """Return metadata for stored objects whose key starts with ``prefix``.
+
+        Keys sort lexicographically and the result is bounded by ``limit``,
+        mirroring the S3 adapter's listing contract (v0.7 Scope §6.5 retention
+        sweep). ``start_after`` is the exclusive marker of the last key the
+        caller already processed, so the sweep pages over a namespace of any
+        size without re-reading fresh objects. ``last_modified`` is the fake's
+        ``created_at`` so the sweep's age-based deletion works identically
+        against the fake and the real adapter.
+        """
+        matches = sorted(key for key in self._objects if key.startswith(prefix))
+        if start_after is not None:
+            matches = [key for key in matches if key > start_after]
+        result: list[ObjectInfo] = []
+        for key in matches[:limit]:
+            stored = self._objects[key]
+            result.append(
+                ObjectInfo(
+                    object_key=key,
+                    size_bytes=len(stored.content),
+                    content_type=stored.content_type,
+                    checksum=hashlib.sha256(stored.content).hexdigest(),
+                    last_modified=stored.created_at,
+                )
+            )
+        return result

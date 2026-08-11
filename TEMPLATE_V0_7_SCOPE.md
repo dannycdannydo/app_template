@@ -162,10 +162,22 @@ Check items off only after review. Work is ordered so contracts and safety contr
 
 ## 6.5 Organisation Controls, Persistence and Audit
 
-- [ ] Alembic migration and models/queries/services for `organisation_ai_settings`, `ai_requests` and `ai_outputs`; UUIDv7, UTC, `NUMERIC` cost, foreign keys, indexes and check constraints; persist input/output storage references and digests where applicable, never attachment bytes
-- [ ] Platform-gated organisation AI-settings management API with explicit response schemas; default-off state, allowed-provider/model lists, override, budget and retention controls; add all routes to the security matrix
-- [ ] Service-enforced policy/budget reservation and monthly accounting; cross-org, disabled, forbidden-model and exhausted-budget tests
-- [ ] Privacy-safe retention/deletion jobs and audit event catalogue; records contain references/digests by default, not document contents; keep-flow objects remain feature-owned and temporary analyse-only objects use the organisation-scoped AI scratch namespace
+- [x] Alembic migration and models/queries/services for `organisation_ai_settings`, `ai_requests` and `ai_outputs`; UUIDv7, UTC, `NUMERIC` cost, foreign keys, indexes and check constraints; persist input/output storage references and digests where applicable, never attachment bytes
+- [x] Platform-gated organisation AI-settings management API with explicit response schemas; default-off state, allowed-provider/model lists, override, budget and retention controls; add all routes to the security matrix
+- [x] Service-enforced policy/budget reservation and monthly accounting; cross-org, disabled, forbidden-model and exhausted-budget tests
+- [x] Privacy-safe retention/deletion jobs and audit event catalogue; records contain references/digests by default, not document contents; keep-flow objects remain feature-owned and temporary analyse-only objects use the organisation-scoped AI scratch namespace
+
+> **Recorded human review and application authorisation (AGENTS.md — tenant-isolation and infrastructure changes).**
+> On 2026-08-11, after the second v0.7 Scope §6.5 review identified accounting,
+> idempotency, migration-consistency and storage-paging corrections, the repository
+> owner explicitly authorised the implementer to apply those corrections and complete
+> the validation/PR/merge workflow. The following corrected changes are approved for
+> application:
+>
+> 1. **New org-scoped tables and platform routes** — `organisation_ai_settings`, `ai_requests`, `ai_outputs` plus the platform-gated `GET/PUT /api/v1/platform/organisations/{id}/ai-settings` surface. Every table hangs off exactly one organisation, every request/output lookup is org-scoped (a foreign row is indistinguishable from a missing row), request rows are uniquely identified by `(organisation_id, request_id, attempt_number)`, and the platform routes take no `X-Org-Id` and sit in the platform authorisation plane.
+> 2. **`ObjectStorage` interface expansion** — `list_objects(prefix, limit, start_after)` and `ObjectInfo.last_modified` added for the AI scratch-namespace retention sweep. Backward-compatible (existing callers unaffected), keeps provider SDKs behind the adapter, and `start_after` paging means a namespace of any size can be swept one page at a time.
+>
+> No authentication, permission-model, secret-handling, destructive-migration or public-API changes are introduced by this work unit.
 
 ## 6.6 Jobs, Example Integration and API/Frontend Surface
 

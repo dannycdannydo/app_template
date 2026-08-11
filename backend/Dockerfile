@@ -33,7 +33,12 @@ COPY --from=ghcr.io/astral-sh/uv:0.12.1 /uv /uvx /bin/
 ARG UV_VERBOSE=
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project --no-group dev ${UV_VERBOSE}
+    uv sync --frozen --no-install-project --no-group dev ${UV_VERBOSE} && \
+    python -m pip uninstall --yes pip
+
+# Runtime dependency installation is deliberately unavailable: uv installs the
+# locked environment above, and removing the base image's otherwise-unused pip
+# also removes its vendored packages from the production attack surface.
 
 # Put the project virtualenv on PATH so runtime commands (uvicorn, alembic,
 # and later the Dramatiq worker) run directly. Avoids invoking `uv run` at

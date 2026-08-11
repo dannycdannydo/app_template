@@ -718,6 +718,30 @@ export interface paths {
     patch?: never
     trace?: never
   }
+  '/api/v1/platform/organisations/{organisation_id}/ai-settings': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /**
+     * Get Ai Settings Endpoint
+     * @description View one organisation's AI policy (platform-gated, not org-scoped).
+     */
+    get: operations['get_ai_settings_endpoint_api_v1_platform_organisations__organisation_id__ai_settings_get']
+    /**
+     * Update Ai Settings Endpoint
+     * @description Replace one organisation's AI policy (validated, audited).
+     */
+    put: operations['update_ai_settings_endpoint_api_v1_platform_organisations__organisation_id__ai_settings_put']
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
   '/api/v1/webhooks/workos': {
     parameters: {
       query?: never
@@ -1508,6 +1532,71 @@ export interface components {
      */
     PlatformMembershipStatusUpdate: {
       status: components['schemas']['MembershipStatus']
+    }
+    /**
+     * PlatformOrganisationAISettingsResponse
+     * @description One organisation's AI policy as the admin centre sees it.
+     *
+     *     ``reserved_budget`` is deliberately absent: the in-flight reservation is
+     *     internal accounting (v0.7 Scope §6.5), not a management control.
+     */
+    PlatformOrganisationAISettingsResponse: {
+      /**
+       * Organisation Id
+       * Format: uuid
+       */
+      organisation_id: string
+      /** Enabled */
+      enabled: boolean
+      /** Allowed Provider Ids */
+      allowed_provider_ids: string[]
+      /** Allowed Model Ids */
+      allowed_model_ids: string[]
+      /** Provider Override */
+      provider_override: string | null
+      /** Model Override */
+      model_override: string | null
+      /** Monthly Budget */
+      monthly_budget: string | null
+      /** Retention Policy Days */
+      retention_policy_days: number | null
+      /** Updated By User Id */
+      updated_by_user_id: string | null
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string
+      /**
+       * Updated At
+       * Format: date-time
+       */
+      updated_at: string
+    }
+    /**
+     * PlatformOrganisationAISettingsUpdate
+     * @description Request payload for replacing one organisation's AI policy.
+     *
+     *     ``allowed_provider_ids`` / ``allowed_model_ids`` are the registry-validated
+     *     allowlists; an empty list means "no restriction from this knob".
+     *     ``monthly_budget`` ``None`` disables the budget; ``retention_policy_days``
+     *     ``None`` disables scheduled retention deletion.
+     */
+    PlatformOrganisationAISettingsUpdate: {
+      /** Enabled */
+      enabled: boolean
+      /** Allowed Provider Ids */
+      allowed_provider_ids?: string[]
+      /** Allowed Model Ids */
+      allowed_model_ids?: string[]
+      /** Provider Override */
+      provider_override?: string | null
+      /** Model Override */
+      model_override?: string | null
+      /** Monthly Budget */
+      monthly_budget?: number | string | null
+      /** Retention Policy Days */
+      retention_policy_days?: number | null
     }
     /**
      * PlatformOrganisationCreate
@@ -3150,6 +3239,76 @@ export interface operations {
         }
         content: {
           'application/json': components['schemas']['PlatformFeatureFlagItem']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  get_ai_settings_endpoint_api_v1_platform_organisations__organisation_id__ai_settings_get: {
+    parameters: {
+      query?: never
+      header?: {
+        authorization?: string | null
+      }
+      path: {
+        organisation_id: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['PlatformOrganisationAISettingsResponse']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  update_ai_settings_endpoint_api_v1_platform_organisations__organisation_id__ai_settings_put: {
+    parameters: {
+      query?: never
+      header?: {
+        authorization?: string | null
+      }
+      path: {
+        organisation_id: string
+      }
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['PlatformOrganisationAISettingsUpdate']
+      }
+    }
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['PlatformOrganisationAISettingsResponse']
         }
       }
       /** @description Validation Error */

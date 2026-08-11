@@ -28,9 +28,13 @@ class ObjectInfo:
     ``checksum`` is provider dependent: S3 exposes the object ETag while the
     fake adapter returns a SHA-256 of the stored bytes. It is opaque to
     application code, which only ever compares it for equality (Scope §6.3).
+    ``last_modified`` is the provider's last-modification timestamp (``None``
+    when unavailable); the AI retention job uses it to age out orphaned
+    analyse-only scratch objects (v0.7 Scope §6.5).
     """
 
     object_key: str
     size_bytes: int
     content_type: str | None
     checksum: str | None
+    last_modified: datetime | None = None

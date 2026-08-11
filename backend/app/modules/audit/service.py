@@ -103,6 +103,26 @@ ACTION_JOB_FAILED = "job.failed"
 ACTION_NOTIFICATION_TEST_SENT = "notification.test_sent"
 ACTION_NOTIFICATION_DELIVERY_FAILED = "notification.delivery_failed"
 
+# AI platform events (Scope §6.5, BP §29, ADR-0017): the audit events identify
+# actor, task, request id, routing decision, completion/failure and budget
+# denial. They never duplicate prompts, document contents, provider headers or
+# raw responses (BP §28 never-log list).
+#
+# ``ai.settings_updated`` is written by the platform settings PUT with the
+# changed policy in the metadata (resource type ``organisation_ai_settings``);
+# ``ai.request_completed`` / ``ai.request_failed`` are written by the budget
+# settlement in the same transaction as the terminal ``ai_requests`` row, with
+# the request id, task, provider/model and cost/error code (resource type
+# ``ai_request``); ``ai.budget_denied`` is written by the reservation when the
+# estimated cost would overrun the monthly budget; ``ai.retention_deleted`` is
+# written by the retention job for each organisation it purged (resource type
+# ``ai_output``).
+ACTION_AI_SETTINGS_UPDATED = "ai.settings_updated"
+ACTION_AI_REQUEST_COMPLETED = "ai.request_completed"
+ACTION_AI_REQUEST_FAILED = "ai.request_failed"
+ACTION_AI_BUDGET_DENIED = "ai.budget_denied"
+ACTION_AI_RETENTION_DELETED = "ai.retention_deleted"
+
 
 async def record_event(
     session: AsyncSession,
