@@ -487,7 +487,9 @@ class AIService:
                         # policy, so a retry-heavy execution can never
                         # collectively overrun the budget after passing a
                         # per-attempt check (v0.7 Scope §6.5).
-                        bounded_estimate = Decimal(max_attempts + repair_budget) * decision.estimated_max_cost
+                        bounded_estimate = (
+                            Decimal(max_attempts + repair_budget) * decision.estimated_max_cost
+                        )
                         reservation = await recorder.reserve(
                             organisation_id=request.organisation_id,
                             user_id=request.user_id,
@@ -552,9 +554,7 @@ class AIService:
                         excluded_model_ids.append(model.id)
                     continue
                 finally:
-                    pending_attempt.latency_ms = round(
-                        (perf_counter() - dispatch_started) * 1000
-                    )
+                    pending_attempt.latency_ms = round((perf_counter() - dispatch_started) * 1000)
                 pending_attempt.usage = TokenUsage(
                     input_tokens=response.usage.input_tokens,
                     output_tokens=response.usage.output_tokens,

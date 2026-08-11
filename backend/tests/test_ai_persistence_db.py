@@ -971,12 +971,8 @@ async def test_reused_request_id_is_organisation_scoped(migrated_database: str) 
                 estimated_cost=Decimal("0.000100"),
             )
             assert id_a != id_b
-            row_a = await session.scalar(
-                select(AIRequestRecord).where(AIRequestRecord.id == id_a)
-            )
-            row_b = await session.scalar(
-                select(AIRequestRecord).where(AIRequestRecord.id == id_b)
-            )
+            row_a = await session.scalar(select(AIRequestRecord).where(AIRequestRecord.id == id_a))
+            row_b = await session.scalar(select(AIRequestRecord).where(AIRequestRecord.id == id_b))
             assert row_a is not None and row_a.organisation_id == org_a.id
             assert row_b is not None and row_b.organisation_id == org_b.id
     finally:
@@ -1013,9 +1009,7 @@ async def test_cross_org_settle_is_denied(migrated_database: str) -> None:
                     status="succeeded",
                 )
             # Org A's row is untouched and still running.
-            row = await session.scalar(
-                select(AIRequestRecord).where(AIRequestRecord.id == id_a)
-            )
+            row = await session.scalar(select(AIRequestRecord).where(AIRequestRecord.id == id_a))
             assert row is not None and row.status == AIRequestStatus.RUNNING
     finally:
         await engine.dispose()
@@ -1231,9 +1225,7 @@ async def test_concurrent_duplicate_request_id_reservations_are_safe(
                     )
                     return reservation.row_id, reservation.created
 
-            reservations = await asyncio.gather(
-                _concurrent_reserve(), _concurrent_reserve()
-            )
+            reservations = await asyncio.gather(_concurrent_reserve(), _concurrent_reserve())
             assert reservations[0][0] == reservations[1][0]
             assert sorted(created for _, created in reservations) == [False, True]
             rows = await _request_rows(session, organisation.id)
@@ -1333,9 +1325,7 @@ async def test_scratch_sweep_pages_past_the_first_listing(migrated_database: str
             for index in range(ai_persistence.SCRATCH_SWEEP_PAGE_SIZE):
                 storage._objects[f"{prefix}fresh-{index:05d}.pdf"].created_at = now  # type: ignore[reportPrivateUsage]
 
-            summary = await ai_persistence.enforce_ai_retention(
-                session, storage, now=now
-            )
+            summary = await ai_persistence.enforce_ai_retention(session, storage, now=now)
             assert summary["scratch_objects_deleted"] == 1
             assert await storage.head_object(expired_key) is None
             assert await storage.head_object(f"{prefix}fresh-00000.pdf") is not None

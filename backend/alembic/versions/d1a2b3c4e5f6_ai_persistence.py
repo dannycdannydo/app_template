@@ -117,9 +117,7 @@ def upgrade() -> None:
     # backfilled ids use the application's uuid7 generator; the insert is
     # executed as a Python loop so it works on every PostgreSQL version.
     connection = op.get_bind()
-    organisation_ids = connection.execute(
-        sa.text("SELECT id FROM organisations")
-    ).scalars().all()
+    organisation_ids = connection.execute(sa.text("SELECT id FROM organisations")).scalars().all()
     for organisation_id in organisation_ids:
         connection.execute(
             sa.text(
@@ -137,9 +135,7 @@ def upgrade() -> None:
         sa.Column("organisation_id", sa.Uuid(), nullable=False),
         sa.Column("user_id", sa.Uuid(), nullable=True),
         sa.Column("request_id", sa.String(length=32), nullable=False),
-        sa.Column(
-            "attempt_number", sa.Integer(), server_default=sa.text("1"), nullable=False
-        ),
+        sa.Column("attempt_number", sa.Integer(), server_default=sa.text("1"), nullable=False),
         sa.Column("task", sa.String(length=128), nullable=False),
         sa.Column("provider", sa.String(length=128), nullable=False),
         sa.Column("model", sa.String(length=256), nullable=False),
@@ -218,16 +214,12 @@ def upgrade() -> None:
             name="ck_ai_requests_ai_request_status",
         ),
         sa.CheckConstraint("input_tokens >= 0", name="ck_ai_requests_non_negative_input_tokens"),
-        sa.CheckConstraint(
-            "output_tokens >= 0", name="ck_ai_requests_non_negative_output_tokens"
-        ),
+        sa.CheckConstraint("output_tokens >= 0", name="ck_ai_requests_non_negative_output_tokens"),
         sa.CheckConstraint(
             "estimated_cost >= 0", name="ck_ai_requests_non_negative_estimated_cost"
         ),
         sa.CheckConstraint("cost >= 0", name="ck_ai_requests_non_negative_cost"),
-        sa.CheckConstraint(
-            "latency_ms >= 0", name="ck_ai_requests_non_negative_latency_ms"
-        ),
+        sa.CheckConstraint("latency_ms >= 0", name="ck_ai_requests_non_negative_latency_ms"),
     )
     op.create_index(
         op.f("ix_ai_requests_organisation_id"),

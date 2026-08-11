@@ -204,7 +204,6 @@ async def test_bootstrap_grant_writes_membership_state_and_audit(
         await engine.dispose()
 
 
-
 async def test_bootstrap_organisation_gets_default_off_ai_settings(
     migrated_database: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -241,6 +240,7 @@ async def test_bootstrap_organisation_gets_default_off_ai_settings(
             assert settings_row.allowed_model_ids == []
     finally:
         await engine.dispose()
+
 
 async def test_bootstrap_table_shape_and_sentinel_constraint(
     migrated_database: str,
