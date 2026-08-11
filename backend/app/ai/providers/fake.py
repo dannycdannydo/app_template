@@ -15,6 +15,7 @@ import hashlib
 import json
 from typing import Any
 
+from app.ai.attachments import OPENAI_INLINE_ATTACHMENT_MIME_TYPES
 from app.ai.errors import ProviderUnavailableError
 from app.ai.providers.base import LLMProvider, ProviderRequest, ProviderResponse
 from app.ai.schemas import TokenUsage
@@ -44,6 +45,9 @@ class FakeLLMProvider(LLMProvider):
     provider_id = "fake"
     supports_structured_output = True
     supports_documents = True
+    # The fake accepts the full template allowlist: it has no wire format, so
+    # every validated attachment the router permits is recordable.
+    supported_attachment_mime_types = OPENAI_INLINE_ATTACHMENT_MIME_TYPES
 
     def __init__(self) -> None:
         self.requests: list[ProviderRequest] = []
@@ -113,4 +117,5 @@ class FakeLLMProvider(LLMProvider):
             ),
             latency_ms=1.0,
             finish_reason="stop",
+            region=self.region,
         )

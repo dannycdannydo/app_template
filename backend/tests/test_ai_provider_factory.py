@@ -163,6 +163,36 @@ def test_factory_requires_azure_endpoint_when_azure_enabled() -> None:
         factory.create("azure_openai")
 
 
+def test_factory_wires_openai_region_and_anthropic_inference_geography() -> None:
+    """Regional settings reach the adapters (v0.7 Scope §6.3 amendment)."""
+    settings = _unvalidated(
+        ai_enabled_providers=["openai", "anthropic"],
+        ai_openai_api_key="sk-test",
+        ai_openai_region="eu",
+        ai_anthropic_api_key="ant-test",
+        ai_anthropic_inference_geography="us",
+    )
+    factory = ProviderFactory(settings)
+    openai = factory.create("openai")
+    assert openai.region == "eu"
+    # The regional endpoint derivation is asserted in test_ai_adapters
+    # (test_openai_region_routes_through_the_regional_endpoint); the factory's
+    # contract here is that the setting reaches the adapter.
+    anthropic = factory.create("anthropic")
+    assert anthropic.region == "us"
+
+
+def test_factory_defaults_regions_when_unset() -> None:
+    settings = _unvalidated(
+        ai_enabled_providers=["openai", "anthropic"],
+        ai_openai_api_key="sk-test",
+        ai_anthropic_api_key="ant-test",
+    )
+    factory = ProviderFactory(settings)
+    assert factory.create("openai").region == ""
+    assert factory.create("anthropic").region == ""
+
+
 def test_factory_requires_vertex_project_when_vertex_enabled() -> None:
     settings = _unvalidated(
         ai_enabled_providers=["vertex"],

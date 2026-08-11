@@ -24,6 +24,21 @@ AI_KNOWN_PROVIDER_IDS = frozenset(
     {"fake", "openai", "anthropic", "deepseek", "azure_openai", "vertex", "local"}
 )
 
+# Validated OpenAI data-processing regions (v0.7 Scope §6.3 regional
+# amendment, ADR-0017). OpenAI regional projects are served by the
+# corresponding regional domain (``eu.api.openai.com`` / ``us.api.openai.com``),
+# so the region derives the endpoint; an explicit base URL override must name
+# the same regional domain or configuration fails fast. Empty means "the
+# provider default (global endpoint)".
+AI_OPENAI_SUPPORTED_REGIONS = frozenset({"us", "eu"})
+
+# Validated Anthropic inference geographies (v0.7 Scope §6.3 regional
+# amendment, ADR-0017). ``inference_geo`` is a top-level ``POST /v1/messages``
+# field (never a header) and only ``global`` and ``us`` exist; empty means
+# "the provider default (global)". Only Claude 4.6+ models accept the field,
+# so the registry pins a compatible model.
+AI_ANTHROPIC_SUPPORTED_INFERENCE_GEOGRAPHIES = frozenset({"global", "us"})
+
 # Required configuration per enabled provider: (env var name, settings field).
 # An enabled provider missing any of these fails fast at configuration time in
 # every environment (Scope §6.3/§6.7), never at request time. Keys and Google
@@ -267,6 +282,17 @@ class Settings(BaseSettings):
         default="",
         description="Optional OpenAI-compatible base URL override; empty uses https://api.openai.com/v1",
     )
+    ai_openai_region: str = Field(
+        default="",
+        description=(
+            "Validated OpenAI data-processing region: 'us' or 'eu' (approved-account "
+            "data-residency opt-in), or empty for the provider default. A set region "
+            "derives the regional endpoint (us.api.openai.com / eu.api.openai.com); an "
+            "explicit AI_OPENAI_BASE_URL must name the same domain. Recorded in AI "
+            "routing metadata; never implicitly changed by fallback (v0.7 Scope §6.3 "
+            "regional amendment, ADR-0017)"
+        ),
+    )
     ai_anthropic_api_key: str = Field(
         default="",
         description="Anthropic API key (server-side secret, backend-only)",
@@ -274,6 +300,16 @@ class Settings(BaseSettings):
     ai_anthropic_base_url: str = Field(
         default="",
         description="Optional Anthropic base URL override; empty uses https://api.anthropic.com",
+    )
+    ai_anthropic_inference_geography: str = Field(
+        default="",
+        description=(
+            "Validated Anthropic inference geography: 'global' (provider default) or "
+            "'us' (US-only inference); sent as the top-level inference_geo field on "
+            "POST /v1/messages, which only Claude 4.6+ models accept. Recorded in "
+            "AI routing metadata; never implicitly changed by fallback (v0.7 Scope §6.3 "
+            "regional amendment, ADR-0017)"
+        ),
     )
     ai_deepseek_api_key: str = Field(
         default="",
@@ -441,6 +477,42 @@ class Settings(BaseSettings):
             return ""
         return validate_local_endpoint(base_url)
 
+    @field_validator("ai_openai_region")
+    @classmethod
+    def _validate_ai_openai_region(cls, region: str) -> str:
+        """OpenAI regions are explicit, validated deployment configuration.
+
+        Empty is the honest ordinary-account default (US); any other value must
+        be a reviewed supported region so a typo can never silently route data
+        to an unintended processing location (v0.7 Scope §6.3 regional
+        amendment, ADR-0017).
+        """
+        value = region.lower()
+        if value and value not in AI_OPENAI_SUPPORTED_REGIONS:
+            raise ValueError(
+                f"ai_openai_region must be empty or one of "
+                f"{sorted(AI_OPENAI_SUPPORTED_REGIONS)}, got {region!r}"
+            )
+        return value
+
+    @field_validator("ai_anthropic_inference_geography")
+    @classmethod
+    def _validate_ai_anthropic_inference_geography(cls, geography: str) -> str:
+        """Anthropic inference geographies are explicit, validated configuration.
+
+        Empty means the provider default (global); supported values map to the
+        top-level ``inference_geo`` field. An unsupported value fails fast so
+        data residency is never silently misconfigured (v0.7 Scope §6.3
+        regional amendment, ADR-0017).
+        """
+        value = geography.lower()
+        if value and value not in AI_ANTHROPIC_SUPPORTED_INFERENCE_GEOGRAPHIES:
+            raise ValueError(
+                "ai_anthropic_inference_geography must be empty or one of "
+                f"{sorted(AI_ANTHROPIC_SUPPORTED_INFERENCE_GEOGRAPHIES)}, got {geography!r}"
+            )
+        return value
+
     @field_validator("ai_local_base_url")
     @classmethod
     def _validate_ai_local_base_url(cls, base_url: str) -> str:
@@ -558,6 +630,19 @@ class Settings(BaseSettings):
             raise ValueError(
                 "ai_enabled_providers must not include 'fake' in the production environment"
             )
+        # A set OpenAI region must never be mislabelled: requests are routed
+        # through the matching regional domain, so an explicit base URL
+        # override that points elsewhere is a configuration conflict, not a
+        # silent mis-routing (v0.7 Scope §6.3 regional amendment, ADR-0017).
+        if self.ai_openai_region and self.ai_openai_base_url:
+            base_host = urlsplit(self.ai_openai_base_url).hostname or ""
+            expected_host = f"{self.ai_openai_region}.api.openai.com"
+            if base_host != expected_host:
+                raise ValueError(
+                    "ai_openai_base_url host "
+                    f"{base_host!r} conflicts with ai_openai_region {self.ai_openai_region!r}; "
+                    f"regional requests must use https://{expected_host}/v1"
+                )
         return self
 
     def _redis_url_is_production_safe(self) -> bool:

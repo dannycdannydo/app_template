@@ -15,11 +15,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
 
+from app.ai.attachments import ALLOWED_ATTACHMENT_MIME_TYPES, Attachment
 from app.ai.errors import (
     AIInputValidationError,
     ProviderRateLimitError,
@@ -269,7 +270,7 @@ async def test_anthropic_contract_normalised_response() -> None:
                 "content": [{"type": "text", "text": '{"category": "lease"}'}],
                 "stop_reason": "end_turn",
                 "usage": {"input_tokens": 12, "output_tokens": 4},
-                "model": "claude-3-5-haiku-20241022",
+                "model": "claude-sonnet-4-6-20260219",
             }
         )
 
@@ -443,11 +444,13 @@ def test_provider_document_support_declarations_are_truthful(
 ) -> None:
     """Adapters declare the modalities they actually support (ADR-0017).
 
-    DeepSeek rejects attachments and the local adapter has no reviewed
-    document capability yet, so both must declare ``supports_documents=False``.
-    OpenAI/Azure, Anthropic and Vertex gain inline mapping in Scope §6.3; until
-    that mapping exists they must not claim document support either, or the
-    service would dispatch attachments an adapter silently drops.
+    OpenAI/Azure, Anthropic and Vertex now map bounded inline attachments to
+    their native request forms (v0.7 Scope §6.3 attachment amendment), so they
+    declare ``supports_documents=True``. DeepSeek rejects attachments and the
+    local adapter has no reviewed document capability yet, so both must remain
+    ``False``: the service/router refuse to dispatch attachments to them, and
+    the shared payload builder fails an attachment-bearing request before
+    dispatch rather than silently dropping the input.
     """
     monkeypatch.setattr("app.ai.providers.vertex.google_auth_default", _fake_google_auth)
     assert DeepSeekAdapter(api_key="ds-test").supports_documents is False
@@ -455,23 +458,57 @@ def test_provider_document_support_declarations_are_truthful(
         LocalOpenAICompatibleAdapter(base_url="http://127.0.0.1:11434/v1").supports_documents
         is False
     )
-    assert OpenAIAdapter(api_key="sk-test").supports_documents is False
+    assert OpenAIAdapter(api_key="sk-test").supports_documents is True
     assert (
         AzureOpenAIAdapter(
             endpoint="https://my-resource.openai.azure.com",
             api_key="az-test",
             api_version="2024-08-01-preview",
         ).supports_documents
-        is False
+        is True
     )
-    assert AnthropicAdapter(api_key="ant-test").supports_documents is False
+    assert AnthropicAdapter(api_key="ant-test").supports_documents is True
     assert (
         VertexAIAdapter(
             project="demo-project",
             location="us-central1",
             client=_client(_empty_response_handler),
         ).supports_documents
-        is False
+        is True
+    )
+    # Truthful MIME capabilities (v0.7 Scope §6.3 attachment amendment): the
+    # declared inline sets mirror what each native wire format can carry.
+    assert OpenAIAdapter(api_key="sk-test").supported_attachment_mime_types == set(
+        ALLOWED_ATTACHMENT_MIME_TYPES
+    )
+    assert AzureOpenAIAdapter(
+        endpoint="https://my-resource.openai.azure.com",
+        api_key="az-test",
+        api_version="2024-08-01-preview",
+    ).supported_attachment_mime_types == set(ALLOWED_ATTACHMENT_MIME_TYPES)
+    assert AnthropicAdapter(api_key="ant-test").supported_attachment_mime_types == {
+        "application/pdf",
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+    }
+    assert VertexAIAdapter(
+        project="demo-project",
+        location="us-central1",
+        client=_client(_empty_response_handler),
+    ).supported_attachment_mime_types == {
+        "application/pdf",
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+        "text/plain",
+    }
+    assert DeepSeekAdapter(api_key="ds-test").supported_attachment_mime_types == set()
+    assert (
+        LocalOpenAICompatibleAdapter(
+            base_url="http://127.0.0.1:11434/v1"
+        ).supported_attachment_mime_types
+        == set()
     )
 
 
@@ -493,3 +530,467 @@ def test_provider_request_carries_bounded_attachments() -> None:
     )
     assert with_attachments.attachments == [attachment]
     assert with_attachments.attachments[0].sha256_digest
+
+
+# --- v0.7 attachment amendment: native inline mappings ---
+
+
+def _attachment(*, display_name: str, mime_type: str, content: bytes | None = None) -> Attachment:
+    return Attachment(
+        display_name=display_name,
+        mime_type=mime_type,
+        content=content or b"fixture-bytes",
+    )
+
+
+def _content_parts(content: Any) -> list[dict[str, Any]]:
+    assert isinstance(content, list), "attachment-bearing requests use content parts"
+    return cast(list[dict[str, Any]], content)
+
+
+async def test_openai_maps_attachments_to_native_inline_parts() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return _json_response(_canned_openai_response(content='{"category": "lease"}'))
+
+    adapter = OpenAIAdapter(api_key="sk-test", client=_client(handler))
+    response = await adapter.complete(
+        _request(
+            output_schema="demo.ClassificationResult",
+            attachments=[
+                _attachment(display_name="lease.pdf", mime_type="application/pdf"),
+                _attachment(
+                    display_name="page.png",
+                    mime_type="image/png",
+                    content=b"\x89PNG\r\n\x1a\nfixture",
+                ),
+            ],
+        )
+    )
+    sent = captured[0]
+    body = json.loads(sent.content)
+    parts = _content_parts(body["messages"][0]["content"])
+    assert parts[0]["type"] == "text"
+    assert parts[0]["text"].endswith("Respond with a single JSON object.")
+
+    document = parts[1]
+    assert document["type"] == "file"
+    assert document["file"]["filename"] == "lease.pdf"
+    assert document["file"]["file_data"].startswith("data:application/pdf;base64,")
+
+    image = parts[2]
+    assert image["type"] == "image_url"
+    assert image["image_url"]["url"].startswith("data:image/png;base64,")
+
+    serialized = json.dumps(body)
+    # Inline-only: no signed URL, storage reference or credential in the payload.
+    assert "https://" not in serialized and "http://" not in serialized
+    assert "storage" not in serialized and "signed" not in serialized
+    assert response.structured == {"category": "lease"}
+
+
+async def test_openai_maps_text_document_attachments_to_file_parts() -> None:
+    """OpenAI's file part carries plain text too (the file-inputs contract), so
+    the full template allowlist is representable across the two part kinds."""
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return _json_response(_canned_openai_response(content='{"category": "lease"}'))
+
+    adapter = OpenAIAdapter(api_key="sk-test", client=_client(handler))
+    await adapter.complete(
+        _request(
+            output_schema="demo.ClassificationResult",
+            attachments=[_attachment(display_name="notes.md", mime_type="text/markdown")],
+        )
+    )
+    parts = _content_parts(json.loads(captured[0].content)["messages"][0]["content"])
+    assert parts[1]["type"] == "file"
+    assert parts[1]["file"]["filename"] == "notes.md"
+    assert parts[1]["file"]["file_data"].startswith("data:text/markdown;base64,")
+
+
+async def test_azure_maps_attachments_to_native_inline_parts() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return _json_response(_canned_openai_response(content='{"category": "lease"}'))
+
+    adapter = AzureOpenAIAdapter(
+        endpoint="https://my-resource.openai.azure.com",
+        api_key="az-test",
+        api_version="2024-08-01-preview",
+        client=_client(handler),
+    )
+    await adapter.complete(
+        _request(
+            model="gpt-4o-mini",
+            output_schema="demo.ClassificationResult",
+            attachments=[
+                _attachment(
+                    display_name="lease.pdf",
+                    mime_type="application/pdf",
+                ),
+                _attachment(
+                    display_name="page.png",
+                    mime_type="image/png",
+                    content=b"\x89PNG\r\n\x1a\nfixture",
+                ),
+            ],
+        )
+    )
+    sent = captured[0]
+    assert (
+        sent.url == "https://my-resource.openai.azure.com/openai/deployments/gpt-4o-mini/chat/"
+        "completions?api-version=2024-08-01-preview"
+    )
+    parts = _content_parts(json.loads(sent.content)["messages"][0]["content"])
+    # Azure serves the same chat-completions wire format: documents as
+    # ``type=file`` parts and images as ``image_url`` data-URI parts.
+    assert parts[1]["type"] == "file"
+    assert parts[1]["file"]["filename"] == "lease.pdf"
+    assert parts[1]["file"]["file_data"].startswith("data:application/pdf;base64,")
+    assert parts[2]["type"] == "image_url"
+    assert parts[2]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+async def test_anthropic_maps_attachments_to_native_base64_blocks() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return _json_response(
+            {
+                "content": [{"type": "text", "text": '{"category": "lease"}'}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 12, "output_tokens": 4},
+                "model": "claude-sonnet-4-6-20260219",
+            }
+        )
+
+    adapter = AnthropicAdapter(api_key="ant-test", client=_client(handler))
+    await adapter.complete(
+        _request(
+            output_schema="demo.ClassificationResult",
+            attachments=[
+                _attachment(display_name="lease.pdf", mime_type="application/pdf"),
+                _attachment(
+                    display_name="page.png",
+                    mime_type="image/png",
+                    content=b"\x89PNG\r\n\x1a\nfixture",
+                ),
+            ],
+        )
+    )
+    sent = captured[0]
+    body = json.loads(sent.content)
+    blocks = _content_parts(body["messages"][0]["content"])
+    assert blocks[0]["type"] == "text"
+    document = blocks[1]
+    assert document["type"] == "document"
+    assert document["title"] == "lease.pdf"
+    assert document["source"]["type"] == "base64"
+    assert document["source"]["media_type"] == "application/pdf"
+    assert document["source"]["data"]
+    image = blocks[2]
+    assert image["type"] == "image"
+    assert image["source"]["media_type"] == "image/png"
+    assert image["source"]["data"]
+
+
+async def test_vertex_maps_attachments_to_native_inline_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[httpx.Request] = []
+    monkeypatch.setattr(
+        "app.ai.providers.vertex.google_auth_default",
+        _fake_google_auth,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return _json_response(
+            {
+                "candidates": [
+                    {
+                        "content": {"parts": [{"text": '{"category": "lease"}'}]},
+                        "finishReason": "STOP",
+                    }
+                ],
+                "usageMetadata": {"promptTokenCount": 9, "candidatesTokenCount": 3},
+            }
+        )
+
+    adapter = VertexAIAdapter(
+        project="demo-project",
+        location="europe-west1",
+        client=_client(handler),
+    )
+    await adapter.complete(
+        _request(
+            model="gemini-2.0-flash",
+            output_schema="demo.ClassificationResult",
+            attachments=[_attachment(display_name="lease.pdf", mime_type="application/pdf")],
+        )
+    )
+    sent = captured[0]
+    body = json.loads(sent.content)
+    parts = body["contents"][0]["parts"]
+    assert parts[0]["text"]
+    inline = parts[1]["inlineData"]
+    assert inline["mimeType"] == "application/pdf"
+    assert inline["data"]
+    serialized = json.dumps(body)
+    assert "https://" not in serialized and "signed" not in serialized
+
+
+async def test_vertex_maps_text_plain_attachments_to_inline_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Vertex inlineData carries plain text documents too (the blob contract),
+    so text/plain is part of the declared MIME set."""
+    captured: list[httpx.Request] = []
+    monkeypatch.setattr(
+        "app.ai.providers.vertex.google_auth_default",
+        _fake_google_auth,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return _json_response(
+            {
+                "candidates": [
+                    {
+                        "content": {"parts": [{"text": '{"category": "lease"}'}]},
+                        "finishReason": "STOP",
+                    }
+                ],
+                "usageMetadata": {"promptTokenCount": 9, "candidatesTokenCount": 3},
+            }
+        )
+
+    adapter = VertexAIAdapter(
+        project="demo-project",
+        location="europe-west1",
+        client=_client(handler),
+    )
+    await adapter.complete(
+        _request(
+            model="gemini-2.0-flash",
+            output_schema="demo.ClassificationResult",
+            attachments=[_attachment(display_name="notes.txt", mime_type="text/plain")],
+        )
+    )
+    parts = json.loads(captured[0].content)["contents"][0]["parts"]
+    assert parts[1]["inlineData"]["mimeType"] == "text/plain"
+    assert parts[1]["inlineData"]["data"]
+
+
+async def test_deepseek_and_local_reject_attachments_before_dispatch() -> None:
+    from app.ai.errors import AIInputValidationError
+
+    deepseek = DeepSeekAdapter(api_key="ds-test", client=_client(_empty_response_handler))
+    with pytest.raises(AIInputValidationError, match="does not support document"):
+        await deepseek.complete(
+            _request(
+                attachments=[_attachment(display_name="lease.pdf", mime_type="application/pdf")]
+            )
+        )
+
+    local = LocalOpenAICompatibleAdapter(
+        base_url="http://127.0.0.1:11434/v1", client=_client(_empty_response_handler)
+    )
+    with pytest.raises(AIInputValidationError, match="does not support document"):
+        await local.complete(
+            _request(
+                attachments=[_attachment(display_name="lease.pdf", mime_type="application/pdf")]
+            )
+        )
+
+
+async def test_anthropic_rejects_plain_text_attachments_before_dispatch() -> None:
+    """A MIME type the template allowlist permits globally but Anthropic's
+    base64 document source cannot carry (PDF only) fails before dispatch,
+    instead of reaching the provider as an invalid document block (v0.7 Scope
+    §6.3 attachment amendment)."""
+    adapter = AnthropicAdapter(api_key="ant-test", client=_client(_empty_response_handler))
+    for mime_type in ("text/plain", "text/csv", "text/markdown", "application/json"):
+        with pytest.raises(AIInputValidationError, match="does not support attachment MIME"):
+            await adapter.complete(
+                _request(attachments=[_attachment(display_name="notes", mime_type=mime_type)])
+            )
+    # Images and PDF remain supported by the same guard.
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return _json_response(
+            {
+                "content": [{"type": "text", "text": "ok"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+                "model": "claude-sonnet-4-6-20260219",
+            }
+        )
+
+    await AnthropicAdapter(api_key="ant-test", client=_client(handler)).complete(
+        _request(attachments=[_attachment(display_name="lease.pdf", mime_type="application/pdf")])
+    )
+    assert len(captured) == 1
+
+
+async def test_vertex_rejects_mime_types_outside_inline_data_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Vertex inlineData carries images, PDF and plain text; CSV/Markdown/JSON
+    are outside that contract and fail before dispatch (v0.7 Scope §6.3
+    attachment amendment)."""
+    monkeypatch.setattr("app.ai.providers.vertex.google_auth_default", _fake_google_auth)
+    adapter = VertexAIAdapter(
+        project="demo-project",
+        location="europe-west1",
+        client=_client(_empty_response_handler),
+    )
+    for mime_type in ("text/csv", "text/markdown", "application/json"):
+        with pytest.raises(AIInputValidationError, match="does not support attachment MIME"):
+            await adapter.complete(
+                _request(
+                    model="gemini-2.0-flash",
+                    attachments=[_attachment(display_name="notes", mime_type=mime_type)],
+                )
+            )
+
+
+# --- v0.7 regional amendment: configured region reporting and headers ---
+
+
+async def test_openai_region_routes_through_the_regional_endpoint() -> None:
+    """A validated region selects the regional domain; the request must never
+    stay on the global endpoint while being labelled regional (v0.7 Scope §6.3
+    regional amendment)."""
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return _json_response(_canned_openai_response(content="ok"))
+
+    adapter = OpenAIAdapter(api_key="sk-test", region="eu", client=_client(handler))
+    response = await adapter.complete(_request())
+    assert captured[0].url == "https://eu.api.openai.com/v1/chat/completions"
+    assert response.region == "eu"
+
+
+def test_openai_region_conflicts_with_base_url_override() -> None:
+    """A regional label with a global (or foreign) endpoint is a configuration
+    conflict: the adapter fails fast instead of mislabelling traffic."""
+    with pytest.raises(AIInputValidationError, match="conflicts with region"):
+        OpenAIAdapter(api_key="sk-test", region="eu", base_url="https://api.openai.com/v1")
+    with pytest.raises(AIInputValidationError, match="conflicts with region"):
+        OpenAIAdapter(api_key="sk-test", region="us", base_url="https://eu.api.openai.com/v1")
+    # A matching regional override is fine and still reports the region.
+    adapter = OpenAIAdapter(api_key="sk-test", region="eu", base_url="https://eu.api.openai.com/v1")
+    assert adapter.region == "eu"
+
+
+async def test_anthropic_sends_inference_geo_field_and_reports_observed_region() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return _json_response(
+            {
+                "content": [{"type": "text", "text": "ok"}],
+                "stop_reason": "end_turn",
+                "usage": {
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                    "inference_geo": "us",
+                },
+                "model": "claude-sonnet-4-6-20260219",
+            }
+        )
+
+    adapter = AnthropicAdapter(
+        api_key="ant-test",
+        inference_geography="us",
+        client=_client(handler),
+    )
+    response = await adapter.complete(_request())
+    body = json.loads(captured[0].content)
+    # inference_geo is a top-level request field, never a header.
+    assert "inference_geo" not in captured[0].headers
+    assert body["inference_geo"] == "us"
+    # The response reports where inference actually ran; the adapter prefers
+    # that observed fact over the configured geography for routing metadata.
+    assert response.region == "us"
+
+
+async def test_anthropic_reports_configured_region_when_usage_omits_it() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return _json_response(
+            {
+                "content": [{"type": "text", "text": "ok"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+                "model": "claude-sonnet-4-6-20260219",
+            }
+        )
+
+    adapter = AnthropicAdapter(
+        api_key="ant-test",
+        inference_geography="global",
+        client=_client(handler),
+    )
+    response = await adapter.complete(_request())
+    assert json.loads(captured[0].content)["inference_geo"] == "global"
+    assert response.region == "global"
+
+
+async def test_anthropic_default_sends_no_inference_geo_field() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return _json_response(
+            {
+                "content": [{"type": "text", "text": "ok"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+                "model": "claude-sonnet-4-6-20260219",
+            }
+        )
+
+    adapter = AnthropicAdapter(api_key="ant-test", client=_client(handler))
+    await adapter.complete(_request())
+    body = json.loads(captured[0].content)
+    assert "inference_geo" not in body
+    assert "anthropic-region" not in captured[0].headers
+
+
+def test_vertex_and_azure_regions_are_derived_from_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.ai.providers.vertex.google_auth_default", _fake_google_auth)
+    vertex = VertexAIAdapter(
+        project="demo-project",
+        location="europe-west1",
+        client=_client(_empty_response_handler),
+    )
+    assert vertex.region == "europe-west1"
+    azure = AzureOpenAIAdapter(
+        endpoint="https://my-resource.openai.azure.com",
+        api_key="az-test",
+        api_version="2024-08-01-preview",
+    )
+    assert azure.region == ""  # region is inherent in the endpoint, not a setting
+    assert OpenAIAdapter(api_key="sk-test").region == ""
+    assert AnthropicAdapter(api_key="ant-test").region == ""
+    assert DeepSeekAdapter(api_key="ds-test").region == ""
+    assert LocalOpenAICompatibleAdapter(base_url="http://127.0.0.1:11434/v1").region == ""

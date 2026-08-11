@@ -131,6 +131,10 @@ class AIService:
                 estimated_input_tokens=estimate_tokens(rendered),
                 maximum_estimated_cost=maximum_estimated_cost,
                 attachments=resolved_attachments,
+                # The single configured provider's region pins routing: even a
+                # reviewed fallback can never implicitly change region (v0.7
+                # Scope §6.3 regional amendment, ADR-0017).
+                region_of_provider={self._provider.provider_id: self._provider.region},
             )
         except (KeyError, ValueError) as exc:
             raise ModelNotAvailableError(f"no model satisfies task {task.name}") from exc
@@ -183,6 +187,7 @@ class AIService:
                 prompt_version=prompt.version,
                 reason=decision.reason,
                 fallback_used=decision.fallback_used,
+                region=response.region,
             ),
             output=output,
             usage=response.usage,

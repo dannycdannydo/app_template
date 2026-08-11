@@ -57,7 +57,10 @@ class ProviderResponse(BaseModel):
     ``None``. ``usage`` carries provider-reported token counts when available
     (the fake adapter and well-behaved providers report them; adapters must
     never fabricate counts from content). ``model`` is the provider's model
-    identifier actually used, ``latency_ms`` the measured duration.
+    identifier actually used, ``latency_ms`` the measured duration. ``region``
+    is the adapter's configured deployment region (v0.7 Scope §6.3 regional
+    amendment); it is recorded in routing metadata without increasing label
+    cardinality — the adapter reports it, it is never derived from content.
     """
 
     model: str = Field(min_length=1)
@@ -66,6 +69,10 @@ class ProviderResponse(BaseModel):
     usage: TokenUsage
     latency_ms: float = Field(ge=0)
     finish_reason: str = ""
+    #: Configured deployment region reported for routing metadata; empty when
+    #: the provider has no template-controlled region pinning (DeepSeek, local,
+    #: fake) or the region is inherent in another setting (Azure endpoint).
+    region: str = ""
 
 
 class LLMProvider(ABC):
@@ -89,10 +96,25 @@ class LLMProvider(ABC):
     #: Whether the adapter can carry bounded inline document attachments in
     #: their native request form (v0.7 Scope §6.2/§6.3 amendment). The service
     #: refuses to dispatch attachments to an adapter that does not declare
-    #: support — DeepSeek and local remain ``False`` until a reviewed
-    #: capability exists (ADR-0017) — so unsupported documents always fail
-    #: before dispatch rather than being silently dropped.
+    #: support — DeepSeek and local remain ``False`` (ADR-0017) — so
+    #: unsupported documents always fail before dispatch rather than being
+    #: silently dropped.
     supports_documents: bool = False
+    #: The attachment MIME types this adapter can carry natively in its wire
+    #: format (v0.7 Scope §6.3 attachment amendment). Empty means no
+    #: attachments; document-capable adapters declare exactly the reviewed set
+    #: from :mod:`app.ai.attachments`, and the registry model declarations must
+    #: stay subsets of it. The shared router check runs first; this declaration
+    #: backs the adapter's own pre-dispatch guard so a directly constructed
+    #: adapter fails closed on an unsupported MIME type.
+    supported_attachment_mime_types: frozenset[str] = frozenset()
+    #: The adapter's configured deployment region (v0.7 Scope §6.3 regional
+    #: amendment): OpenAI's validated region setting, Anthropic's inference
+    #: geography, Vertex's location, or empty where the provider has no
+    #: template-controlled pinning (DeepSeek, local, fake) or the region is
+    #: inherent in the endpoint (Azure). Instances set this in ``__init__``;
+    #: it is reported in ``ProviderResponse.region``.
+    region: str = ""
 
     @abstractmethod
     async def complete(self, request: ProviderRequest) -> ProviderResponse:

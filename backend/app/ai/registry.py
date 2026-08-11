@@ -22,8 +22,10 @@ import yaml
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from app.ai.attachments import (
+    ALLOWED_ATTACHMENT_MIME_TYPES,
     MAX_ATTACHMENT_BYTES,
     MAX_TOTAL_ATTACHMENT_BYTES,
+    PROVIDER_INLINE_ATTACHMENT_MIME_TYPES,
     Attachment,
 )
 
@@ -215,6 +217,16 @@ class ModelDefinition(BaseModel):
         le=MAX_TOTAL_ATTACHMENT_BYTES,
         description="Combined inline ceiling for one request",
     )
+    # Per-model inline MIME capability set (v0.7 Scope §6.3 attachment
+    # amendment). Models declaring the ``documents`` capability must declare a
+    # non-empty subset of the template allowlist that the provider's adapter
+    # can actually carry in its native wire form; models without it must not
+    # declare one. The router rejects an attachment whose MIME type is outside
+    # the routed model's set before any provider dispatch.
+    attachment_mime_types: list[str] | None = Field(
+        default=None,
+        description="MIME types this model can carry as native inline attachments",
+    )
 
     @field_validator("supported_parameters")
     @classmethod
@@ -222,6 +234,20 @@ class ModelDefinition(BaseModel):
         unknown = set(values) - ALLOWED_PARAMETERS
         if unknown:
             raise ValueError(f"unknown supported parameters: {sorted(unknown)}")
+        return values
+
+    @field_validator("attachment_mime_types")
+    @classmethod
+    def _validate_attachment_mime_types(cls, values: list[str] | None) -> list[str] | None:
+        if values is None:
+            return None
+        if not values:
+            raise ValueError("attachment_mime_types must be empty or absent, not an empty list")
+        unknown = set(values) - ALLOWED_ATTACHMENT_MIME_TYPES
+        if unknown:
+            raise ValueError(f"unknown attachment MIME types: {sorted(unknown)}")
+        if len(set(values)) != len(values):
+            raise ValueError("attachment_mime_types must not contain duplicates")
         return values
 
     @model_validator(mode="after")
@@ -242,6 +268,12 @@ class ModelDefinition(BaseModel):
             and self.max_total_attachment_bytes < self.max_attachment_bytes
         ):
             raise ValueError("max_total_attachment_bytes must not be below max_attachment_bytes")
+        if supports_documents and not self.attachment_mime_types:
+            raise ValueError(
+                "models declaring the documents capability must declare attachment_mime_types"
+            )
+        if not supports_documents and self.attachment_mime_types:
+            raise ValueError("attachment_mime_types require the documents capability")
         return self
 
 
@@ -292,12 +324,16 @@ class ModelRegistry(ABC):
         maximum_estimated_cost: Decimal | None = None,
         excluded_model_ids: Iterable[str] = (),
         attachments: Iterable[Attachment] = (),
+        region_of_provider: Mapping[str, str] | None = None,
     ) -> RoutingDecision:
         """Compatibility route for custom registries implementing ``resolve``.
 
         Production uses the checked-in capability/cost implementation below;
         this default keeps test/application registry substitutions behind the
         same interface while enforcing caller-supplied hard constraints.
+        ``region_of_provider`` (provider id → configured region, Scope §6.3
+        regional amendment) is accepted for interface parity; this default
+        rejects fallback outright, so it can never change region.
         """
         if excluded_model_ids:
             raise ValueError(f"fallback is unsupported by registry for task {task.name}")
@@ -476,6 +512,7 @@ class CapabilityCostModelRegistry(ModelRegistry):
         maximum_estimated_cost: Decimal | None = None,
         excluded_model_ids: Iterable[str] = (),
         attachments: Iterable[Attachment] = (),
+        region_of_provider: Mapping[str, str] | None = None,
     ) -> RoutingDecision:
         excluded = set(excluded_model_ids)
         if excluded and not task.fallback_policy.allowed:
@@ -508,6 +545,42 @@ class CapabilityCostModelRegistry(ModelRegistry):
             candidates = [model for model in candidates if model.provider in providers]
         if excluded and not task.fallback_policy.allow_local:
             candidates = [model for model in candidates if model.provider != "local"]
+        if excluded:
+            # Cross-region fallback prohibition (v0.7 Scope §6.3 regional
+            # amendment, ADR-0017): a configured fallback may move between
+            # models but never implicitly to a different pinned region, and a
+            # caller must not be able to bypass the rule by omitting the
+            # region map. The region of the originally selected model(s) pins
+            # the fallback candidate set: when the primary selection is pinned
+            # (non-empty region), only candidates demonstrably in the same
+            # region qualify — a provider with an unknown or empty region is
+            # *not* eligible, because dispatching to it would move the request
+            # to an unverifiable processing location. When the primary
+            # selection is unpinned, fallback is unrestricted. If nothing
+            # survives the constraint the route fails instead of silently
+            # changing region.
+            if region_of_provider is None:
+                raise RegistryValidationError(
+                    f"fallback for task {task.name} requires region_of_provider so "
+                    "routing can never implicitly move a request across regions"
+                )
+            excluded_providers = {
+                self._models_by_id[item].provider for item in excluded if item in self._models_by_id
+            }
+            if not excluded_providers.issubset(region_of_provider):
+                raise RegistryValidationError(
+                    f"fallback for task {task.name} requires every originally selected "
+                    "provider's region to be declared in region_of_provider"
+                )
+            primary_regions = {region_of_provider[provider] for provider in excluded_providers} - {
+                ""
+            }
+            if primary_regions:
+                candidates = [
+                    model
+                    for model in candidates
+                    if region_of_provider.get(model.provider) in primary_regions
+                ]
 
         preference = {model_id: index for index, model_id in enumerate(task.model_preferences)}
         candidates.sort(
@@ -610,15 +683,35 @@ def validate_registry_bundle(bundle: RegistryBundle) -> None:
                 estimated_input_tokens=task.max_input_tokens,
             )
         bundle.models.route(task, estimated_input_tokens=task.max_input_tokens)
+    for model in bundle.models.all():
+        if Capability.DOCUMENTS not in model.capabilities:
+            continue
+        # Truthful provider/model MIME capabilities (v0.7 Scope §6.3
+        # attachment amendment): a model's declared MIME set must be one the
+        # provider's adapter can actually carry in its native wire format, or
+        # the router could route a document the adapter would have to reject.
+        adapter_types = PROVIDER_INLINE_ATTACHMENT_MIME_TYPES.get(model.provider)
+        if adapter_types is None:
+            raise RegistryValidationError(
+                f"model {model.id} provider {model.provider!r} declares no inline "
+                "attachment MIME capability"
+            )
+        declared = set(model.attachment_mime_types or ())
+        if not declared <= adapter_types:
+            raise RegistryValidationError(
+                f"model {model.id} declares attachment MIME types its provider cannot "
+                f"carry inline: {sorted(declared - adapter_types)}"
+            )
 
 
 def _model_can_carry_attachments(model: ModelDefinition, attachments: Sequence[Attachment]) -> bool:
     """Whether one model can carry an attachment set under its reviewed
-    ceilings: it must declare the ``documents`` capability and both inline
-    ceilings, each file must fit the per-file ceiling and the combined size
-    must fit the combined ceiling. Image attachments additionally require the
-    ``vision`` capability, so an image can never route to a documents-only
-    model before dispatch (v0.7 Scope §6.2 amendment)."""
+    declarations: it must declare the ``documents`` capability, both inline
+    ceilings and a MIME set covering every attachment's type, each file must
+    fit the per-file ceiling and the combined size must fit the combined
+    ceiling. Image attachments additionally require the ``vision`` capability,
+    so an image can never route to a documents-only model before dispatch
+    (v0.7 Scope §6.2/§6.3 amendment)."""
     if Capability.DOCUMENTS not in model.capabilities:
         return False
     if model.max_attachment_bytes is None or model.max_total_attachment_bytes is None:
@@ -626,6 +719,9 @@ def _model_can_carry_attachments(model: ModelDefinition, attachments: Sequence[A
     if any(attachment.size > model.max_attachment_bytes for attachment in attachments):
         return False
     if sum(attachment.size for attachment in attachments) > model.max_total_attachment_bytes:
+        return False
+    supported_mime_types = model.attachment_mime_types or ()
+    if any(attachment.mime_type not in supported_mime_types for attachment in attachments):
         return False
     return not any(
         attachment.is_image and Capability.VISION not in model.capabilities

@@ -16,6 +16,7 @@ from typing import Any
 
 import httpx
 
+from app.ai.attachments import OPENAI_INLINE_ATTACHMENT_MIME_TYPES
 from app.ai.providers.base import ProviderRequest
 from app.ai.providers.openai_compatible import OpenAICompatibleAdapter
 
@@ -23,9 +24,21 @@ __all__ = ["AzureOpenAIAdapter"]
 
 
 class AzureOpenAIAdapter(OpenAICompatibleAdapter):
-    """Azure OpenAI chat-completions adapter over deployment URLs."""
+    """Azure OpenAI chat-completions adapter over deployment URLs.
+
+    Declares inline document support (v0.7 Scope §6.3 attachment amendment):
+    Azure serves the same chat-completions wire format as OpenAI, so images
+    use native inline ``image_url`` parts and documents use ``type=file``
+    parts (the pinned ``api-version`` gates model/file support and is
+    reviewed configuration, never user input). The Azure region is inherent in
+    the configured resource endpoint and is never a separate setting
+    (regional amendment); the adapter reports no region because it is not
+    reliably derivable from the endpoint hostname.
+    """
 
     provider_id = "azure_openai"
+    supports_documents = True
+    supported_attachment_mime_types = OPENAI_INLINE_ATTACHMENT_MIME_TYPES
 
     def __init__(
         self,

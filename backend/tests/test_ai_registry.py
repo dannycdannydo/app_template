@@ -8,7 +8,12 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 
-from app.ai.attachments import MAX_ATTACHMENT_BYTES, MAX_TOTAL_ATTACHMENT_BYTES, Attachment
+from app.ai.attachments import (
+    ALLOWED_ATTACHMENT_MIME_TYPES,
+    MAX_ATTACHMENT_BYTES,
+    MAX_TOTAL_ATTACHMENT_BYTES,
+    Attachment,
+)
 from app.ai.errors import ModelNotAvailableError
 from app.ai.providers.fake import FakeLLMProvider
 from app.ai.registry import (
@@ -45,6 +50,7 @@ def _model(
     output_price: str = "2",
     max_attachment_bytes: int | None = None,
     max_total_attachment_bytes: int | None = None,
+    attachment_mime_types: list[str] | None = None,
 ) -> ModelDefinition:
     return ModelDefinition(
         id=model_id,
@@ -58,6 +64,7 @@ def _model(
         priority=priority,
         max_attachment_bytes=max_attachment_bytes,
         max_total_attachment_bytes=max_total_attachment_bytes,
+        attachment_mime_types=attachment_mime_types,
         pricing=PricingBasis(
             currency="USD",
             input_price_per_million_tokens=Decimal(input_price),
@@ -105,7 +112,7 @@ def test_task_can_move_between_real_providers_by_reviewed_configuration() -> Non
 
     expected = {
         "openai": "openai.gpt-4o-mini",
-        "anthropic": "anthropic.claude-3-5-haiku",
+        "anthropic": "anthropic.claude-sonnet-4-6",
         "deepseek": "deepseek.deepseek-chat",
         "azure_openai": "azure_openai.gpt-4o-mini",
         "vertex": "vertex.gemini-2.0-flash",
@@ -242,7 +249,13 @@ def test_router_fallback_is_ordered_and_policy_bounded() -> None:
         [_model("primary", provider="openai", priority=0), _model("fallback", provider="anthropic")]
     )
     task = _task(model_preferences=["primary", "fallback"])
-    decision = router.route(task, excluded_model_ids=["primary"])
+    # Both providers are unpinned here, so fallback is unrestricted; the region
+    # map is still mandatory (fail-closed, v0.7 §6.3 regional amendment).
+    decision = router.route(
+        task,
+        excluded_model_ids=["primary"],
+        region_of_provider={"openai": "", "anthropic": ""},
+    )
     assert decision.model.id == "fallback"
     assert decision.fallback_used is True
 
@@ -250,7 +263,123 @@ def test_router_fallback_is_ordered_and_policy_bounded() -> None:
         router.route(
             _task(fallback_policy=FallbackPolicy(allowed=False)),
             excluded_model_ids=["primary"],
+            region_of_provider={"openai": "", "anthropic": ""},
         )
+
+
+# --- v0.7 regional amendment: no implicit cross-region fallback ---
+
+
+def test_router_fallback_never_changes_region_implicitly() -> None:
+    """Fallback may move between models but never to a different pinned region.
+
+    ``region_of_provider`` is the deployment's configured region per provider
+    (v0.7 Scope §6.3 regional amendment, ADR-0017). With OpenAI pinned to ``eu``
+    and Anthropic pinned to ``us``, a fallback from an OpenAI model must not
+    silently land on Anthropic even when the task's fallback policy allows
+    cross-provider fallback.
+    """
+    router = CapabilityCostModelRegistry(
+        [
+            _model("openai-eu", provider="openai", priority=0),
+            _model("anthropic-us", provider="anthropic", priority=1),
+        ]
+    )
+    task = _task(model_preferences=["openai-eu", "anthropic-us"])
+    regions = {"openai": "eu", "anthropic": "us"}
+
+    with pytest.raises(RegistryValidationError, match="no model satisfies"):
+        router.route(task, excluded_model_ids=["openai-eu"], region_of_provider=regions)
+
+
+def test_router_fallback_within_the_same_region_is_allowed() -> None:
+    router = CapabilityCostModelRegistry(
+        [
+            _model("openai-eu-a", provider="openai", priority=0),
+            _model("openai-eu-b", provider="openai", priority=1),
+        ]
+    )
+    task = _task(model_preferences=["openai-eu-a", "openai-eu-b"])
+    decision = router.route(
+        task,
+        excluded_model_ids=["openai-eu-a"],
+        region_of_provider={"openai": "eu"},
+    )
+    assert decision.model.id == "openai-eu-b"
+    assert decision.fallback_used is True
+
+
+def test_router_fallback_from_a_pinned_provider_fails_closed() -> None:
+    """A request pinned to OpenAI EU must not fall back to a provider whose
+    processing location is unknown (DeepSeek/local/fake declare no region):
+    dispatching there would move the request across an unverifiable region, so
+    the route fails closed (v0.7 Scope §6.3 regional amendment, ADR-0017)."""
+    router = CapabilityCostModelRegistry(
+        [
+            _model("openai-eu", provider="openai", priority=0),
+            _model("deepseek", provider="deepseek", priority=1),
+        ]
+    )
+    task = _task(model_preferences=["openai-eu", "deepseek"])
+    with pytest.raises(RegistryValidationError, match="no model satisfies"):
+        router.route(
+            task,
+            excluded_model_ids=["openai-eu"],
+            region_of_provider={"openai": "eu", "deepseek": ""},
+        )
+
+
+def test_router_fallback_requires_a_region_map() -> None:
+    """Omitting ``region_of_provider`` cannot bypass the cross-region rule:
+    without region knowledge the router cannot prove a fallback stays in
+    region, so it fails closed instead of silently moving the request (v0.7
+    Scope §6.3 regional amendment)."""
+    router = CapabilityCostModelRegistry(
+        [
+            _model("openai-eu", provider="openai", priority=0),
+            _model("anthropic-us", provider="anthropic", priority=1),
+        ]
+    )
+    task = _task(model_preferences=["openai-eu", "anthropic-us"])
+    with pytest.raises(RegistryValidationError, match="requires region_of_provider"):
+        router.route(task, excluded_model_ids=["openai-eu"])
+
+
+def test_router_fallback_requires_every_primary_provider_in_the_region_map() -> None:
+    """A caller cannot omit the pinned provider itself from the map: if the
+    originally selected provider's region is undeclared, the router cannot
+    prove the fallback stays in region and fails closed."""
+    router = CapabilityCostModelRegistry(
+        [
+            _model("openai-eu", provider="openai", priority=0),
+            _model("anthropic-us", provider="anthropic", priority=1),
+        ]
+    )
+    task = _task(model_preferences=["openai-eu", "anthropic-us"])
+    with pytest.raises(RegistryValidationError, match="declared in region_of_provider"):
+        router.route(
+            task,
+            excluded_model_ids=["openai-eu"],
+            region_of_provider={"anthropic": "us"},
+        )
+
+
+def test_router_fallback_from_an_unpinned_provider_is_unrestricted() -> None:
+    """An unpinned primary (empty region) never *required* a location, so
+    fallback may move anywhere; the region map is still mandatory."""
+    router = CapabilityCostModelRegistry(
+        [
+            _model("deepseek", provider="deepseek", priority=0),
+            _model("anthropic-us", provider="anthropic", priority=1),
+        ]
+    )
+    task = _task(model_preferences=["deepseek", "anthropic-us"])
+    decision = router.route(
+        task,
+        excluded_model_ids=["deepseek"],
+        region_of_provider={"deepseek": "", "anthropic": "us"},
+    )
+    assert decision.model.id == "anthropic-us"
 
 
 def test_duplicate_registry_entries_fail_fast() -> None:
@@ -311,6 +440,53 @@ def test_bundle_rejects_missing_prompt_unsafe_schema_and_incompatible_model() ->
         validate_registry_bundle(incompatible)
 
 
+def test_bundle_rejects_model_mime_types_the_provider_cannot_carry() -> None:
+    """A model's declared MIME set must be one its provider's adapter can
+    carry natively, or the router could route a document the adapter would
+    reject at dispatch (v0.7 Scope §6.3 attachment amendment)."""
+    valid_prompt = PromptDefinition(
+        name="document.classify",
+        version=1,
+        system_instructions="Static.",
+        input_variables=["text"],
+        user_template="{text}",
+        output_contract="app.ai.tasks.schemas.DocumentClassificationResult",
+    )
+    # Anthropic's base64 document source carries PDF only; declaring text/plain
+    # for an anthropic model is reviewed-configuration drift and must fail.
+    bad_mimes = RegistryBundle(
+        tasks=FileTaskRegistry([_task()]),
+        prompts=FilePromptRegistry([valid_prompt]),
+        models=CapabilityCostModelRegistry(
+            [
+                _document_model(
+                    "anthropic-text",
+                    provider="anthropic",
+                    attachment_mime_types=["application/pdf", "text/plain"],
+                )
+            ]
+        ),
+    )
+    with pytest.raises(RegistryValidationError, match="cannot carry inline"):
+        validate_registry_bundle(bad_mimes)
+    # An unknown provider cannot declare document capability at all.
+    unknown_provider = RegistryBundle(
+        tasks=FileTaskRegistry([_task()]),
+        prompts=FilePromptRegistry([valid_prompt]),
+        models=CapabilityCostModelRegistry(
+            [
+                _document_model(
+                    "mystery-doc",
+                    provider="mystery",
+                    attachment_mime_types=["application/pdf"],
+                )
+            ]
+        ),
+    )
+    with pytest.raises(RegistryValidationError, match="declares no inline"):
+        validate_registry_bundle(unknown_provider)
+
+
 def test_yaml_loader_rejects_non_mapping_and_bad_prompt_filename(tmp_path: Path) -> None:
     task_dir = tmp_path / "tasks"
     task_dir.mkdir()
@@ -340,17 +516,25 @@ output_contract: app.ai.tasks.schemas.DocumentClassificationResult
 def _document_model(
     model_id: str,
     *,
+    provider: str = "fake",
     priority: int = 100,
     max_attachment_bytes: int | None = MAX_ATTACHMENT_BYTES,
     max_total_attachment_bytes: int | None = MAX_TOTAL_ATTACHMENT_BYTES,
     capabilities: list[Capability] | None = None,
+    attachment_mime_types: list[str] | None = None,
 ) -> ModelDefinition:
     return _model(
         model_id,
+        provider=provider,
         priority=priority,
         capabilities=capabilities or [Capability.STRUCTURED_OUTPUT, Capability.DOCUMENTS],
         max_attachment_bytes=max_attachment_bytes,
         max_total_attachment_bytes=max_total_attachment_bytes,
+        attachment_mime_types=(
+            attachment_mime_types
+            if attachment_mime_types is not None
+            else sorted(ALLOWED_ATTACHMENT_MIME_TYPES)
+        ),
     )
 
 
@@ -371,6 +555,9 @@ def test_checked_in_document_models_declare_inline_ceilings() -> None:
             assert model.max_total_attachment_bytes is not None
             assert model.max_attachment_bytes <= MAX_ATTACHMENT_BYTES
             assert model.max_total_attachment_bytes <= MAX_TOTAL_ATTACHMENT_BYTES
+            # The MIME set is a non-empty allowlist subset (v0.7 §6.3).
+            assert model.attachment_mime_types
+            assert set(model.attachment_mime_types) <= set(ALLOWED_ATTACHMENT_MIME_TYPES)
     # Acceptance criterion §5.2: document input must not route to DeepSeek.
     deepseek = bundle.models.get("deepseek", "deepseek-chat")
     assert Capability.DOCUMENTS not in deepseek.capabilities
@@ -399,6 +586,63 @@ def test_documents_capability_and_ceilings_must_be_declared_together() -> None:
         _document_model("inverted", max_attachment_bytes=2048, max_total_attachment_bytes=1024)
     with pytest.raises(ValidationError, match="less than or equal to 5242880"):
         _document_model("too-big", max_attachment_bytes=MAX_ATTACHMENT_BYTES + 1)
+
+
+def test_documents_capability_and_mime_types_must_be_declared_together() -> None:
+    """The MIME declaration is part of the attachment contract (v0.7 Scope §6.3
+    attachment amendment): a documents-capable model must declare the MIME set
+    it can carry, and a text-only model must not (the router would otherwise
+    route a document the adapter could not represent)."""
+    with pytest.raises(ValidationError, match="attachment_mime_types"):
+        _model(
+            "doc-without-mimes",
+            capabilities=[Capability.DOCUMENTS],
+            max_attachment_bytes=1024,
+            max_total_attachment_bytes=2048,
+        )
+    with pytest.raises(ValidationError, match="require the documents capability"):
+        _model("text-with-mimes", attachment_mime_types=["application/pdf"])
+    with pytest.raises(ValidationError, match="unknown attachment MIME types"):
+        _document_model(
+            "mime-outside-allowlist", attachment_mime_types=["application/x-msdownload"]
+        )
+    with pytest.raises(ValidationError, match="must not contain duplicates"):
+        _document_model(
+            "duplicate-mimes", attachment_mime_types=["application/pdf", "application/pdf"]
+        )
+    with pytest.raises(ValidationError, match="empty or absent"):
+        _document_model("empty-mimes", attachment_mime_types=[])
+
+
+def test_router_rejects_attachments_outside_the_model_mime_set() -> None:
+    """The router refuses to select a model whose declared MIME set cannot
+    carry the attachment, before any provider dispatch (v0.7 Scope §6.3
+    attachment amendment)."""
+    router = CapabilityCostModelRegistry(
+        [
+            _document_model("pdf-only", attachment_mime_types=["application/pdf"]),
+            _document_model("full", priority=10),
+        ]
+    )
+    task = _task()
+    # A globally allowed text/plain attachment cannot route to the pdf-only
+    # model; the full-allowlist model carries it instead.
+    decision = router.route(
+        task,
+        attachments=[_attachment(name="notes.txt", mime_type="text/plain", content=b"plain notes")],
+    )
+    assert decision.model.id == "full"
+    # When every model lacks the required MIME type the route fails closed.
+    pdf_only = CapabilityCostModelRegistry(
+        [_document_model("pdf-only", attachment_mime_types=["application/pdf"])]
+    )
+    with pytest.raises(RegistryValidationError, match="carry the supplied attachments"):
+        pdf_only.route(
+            task,
+            attachments=[
+                _attachment(name="notes.txt", mime_type="text/plain", content=b"plain notes")
+            ],
+        )
 
 
 def test_router_rejects_models_without_documents_capability() -> None:

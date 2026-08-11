@@ -56,6 +56,44 @@ IMAGE_ATTACHMENT_MIME_TYPES = frozenset(
     mime_type for mime_type in ALLOWED_ATTACHMENT_MIME_TYPES if mime_type.startswith("image/")
 )
 
+# Canonical per-provider inline MIME capability sets (v0.7 Scope §6.3
+# attachment amendment, ADR-0017). Each set mirrors exactly what the matching
+# adapter can carry natively in its wire format — the official provider
+# contracts below — and is the single source of truth for both the registry
+# model declarations (router-side) and the adapter pre-dispatch guards
+# (defense in depth), so the two can never drift.
+#
+# - OpenAI/Azure chat completions: images ride ``image_url`` data-URI parts and
+#   documents ride ``type=file`` parts whose file types include PDF, CSV, text,
+#   Markdown and JSON (official contract:
+#   https://developers.openai.com/api/docs/guides/file-inputs).
+# - Anthropic Messages API: base64 ``image``/``document`` sources accept images
+#   and PDF only; plain-text formats require a different representation and are
+#   rejected before dispatch (official contract:
+#   https://platform.claude.com/docs/en/build-with-claude/pdf-support).
+# - Vertex AI ``generateContent``: ``inlineData`` accepts images, PDF and
+#   plain text (official contract:
+#   https://cloud.google.com/vertex-ai/generative-ai/docs/multimodal/document-understanding).
+OPENAI_INLINE_ATTACHMENT_MIME_TYPES = frozenset(ALLOWED_ATTACHMENT_MIME_TYPES)
+ANTHROPIC_INLINE_ATTACHMENT_MIME_TYPES = frozenset(
+    {"application/pdf", "image/jpeg", "image/png", "image/webp"}
+)
+VERTEX_INLINE_ATTACHMENT_MIME_TYPES = frozenset(
+    {"application/pdf", "image/jpeg", "image/png", "image/webp", "text/plain"}
+)
+
+#: Provider id → adapter inline MIME capability set. The fake accepts the full
+#: allowlist (it records attachments deterministically without a wire format);
+#: DeepSeek and local are intentionally absent because they declare no document
+#: capability at all (ADR-0017).
+PROVIDER_INLINE_ATTACHMENT_MIME_TYPES: dict[str, frozenset[str]] = {
+    "openai": OPENAI_INLINE_ATTACHMENT_MIME_TYPES,
+    "azure_openai": OPENAI_INLINE_ATTACHMENT_MIME_TYPES,
+    "anthropic": ANTHROPIC_INLINE_ATTACHMENT_MIME_TYPES,
+    "vertex": VERTEX_INLINE_ATTACHMENT_MIME_TYPES,
+    "fake": OPENAI_INLINE_ATTACHMENT_MIME_TYPES,
+}
+
 
 class Attachment(BaseModel):
     """A validated, bounded, immutable document attachment in provider-neutral form.
