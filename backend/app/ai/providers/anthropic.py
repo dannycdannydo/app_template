@@ -87,6 +87,10 @@ class AnthropicAdapter(LLMProvider):
 
     provider_id = "anthropic"
     supports_structured_output = True
+    # Native structured output would be tool-use based and is not implemented
+    # in v0.7; the JSON-mode prompt contract plus Pydantic validation applies
+    # (Scope §6.4), which ``supports_structured_output`` truthfully covers.
+    supports_native_structured_output = False
     supports_documents = True
     supported_attachment_mime_types = ANTHROPIC_INLINE_ATTACHMENT_MIME_TYPES
     default_base_url = "https://api.anthropic.com"

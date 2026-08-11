@@ -21,6 +21,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from app.ai.attachments import MAX_ATTACHMENT_BYTES
 from app.core.config import Settings
 from app.storage import ObjectStorage, S3Storage
 from app.storage.base import DEFAULT_SIGNED_URL_TTL
@@ -166,6 +167,67 @@ async def test_head_object_reports_other_errors() -> None:
     storage = _storage_with_mocked_clients(client=client)
     with pytest.raises(Exception, match="AccessDenied"):
         await storage.head_object(_KEY)
+
+
+async def test_read_object_reads_the_body_off_thread() -> None:
+    """read_object reads get_object's body through asyncio.to_thread so the
+    event loop is never blocked (v0.7 Scope §6.4 AI storage-reference seam)."""
+    client = Mock()
+    body = Mock()
+    body.read.return_value = b"%PDF-1.7 analysis fixture"
+    client.get_object.return_value = {"Body": body}
+    storage = _storage_with_mocked_clients(client=client)
+    data = await storage.read_object(_KEY)
+    client.get_object.assert_called_once_with(Bucket=_BUCKET, Key=_KEY)
+    body.read.assert_called_once_with()
+    body.close.assert_called_once_with()
+    assert data == b"%PDF-1.7 analysis fixture"
+
+
+async def test_read_object_is_bounded_by_max_bytes() -> None:
+    """The bounded read (v0.7 Scope §6.4): the body is read with a hard cap, an
+    oversized body raises ValueError instead of being allocated, and the
+    streaming body is closed even on the bounded-read failure so repeated AI
+    reads never leak HTTP connections."""
+    client = Mock()
+    body = Mock()
+    body.read.return_value = b"x" * (MAX_ATTACHMENT_BYTES + 1)
+    client.get_object.return_value = {"Body": body}
+    storage = _storage_with_mocked_clients(client=client)
+    with pytest.raises(ValueError, match="read limit"):
+        await storage.read_object(_KEY, max_bytes=MAX_ATTACHMENT_BYTES)
+    # The body was read with the cap, not fully: at most max_bytes + 1 bytes.
+    body.read.assert_called_once_with(MAX_ATTACHMENT_BYTES + 1)
+    body.close.assert_called_once_with()
+
+
+async def test_read_object_within_the_bound_returns_the_body_and_closes_it() -> None:
+    client = Mock()
+    body = Mock()
+    body.read.return_value = b"%PDF-1.7 analysis fixture"
+    client.get_object.return_value = {"Body": body}
+    storage = _storage_with_mocked_clients(client=client)
+    data = await storage.read_object(_KEY, max_bytes=1024)
+    body.read.assert_called_once_with(1025)
+    body.close.assert_called_once_with()
+    assert data == b"%PDF-1.7 analysis fixture"
+
+
+async def test_read_object_missing_raises_key_error() -> None:
+    for code in ("404", "NoSuchKey", "NotFound"):
+        client = Mock()
+        client.get_object.side_effect = _client_error(code)
+        storage = _storage_with_mocked_clients(client=client)
+        with pytest.raises(KeyError):
+            await storage.read_object(_KEY)
+
+
+async def test_read_object_reports_other_errors() -> None:
+    client = Mock()
+    client.get_object.side_effect = _client_error("AccessDenied")
+    storage = _storage_with_mocked_clients(client=client)
+    with pytest.raises(Exception, match="AccessDenied"):
+        await storage.read_object(_KEY)
 
 
 async def test_delete_object_is_idempotent() -> None:

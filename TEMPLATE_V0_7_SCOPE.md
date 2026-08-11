@@ -155,10 +155,10 @@ Check items off only after review. Work is ordered so contracts and safety contr
 
 ## 6.4 Structured Outputs, Retry and Safety Controls
 
-- [ ] Native structured-output path plus JSON extraction/Pydantic validation fallback; text result opt-in is explicit in the task definition
-- [ ] Bounded repair attempt and retry policy separated between malformed output, transient provider error and permanent validation/policy failure; no retry storm or unbounded cost
-- [ ] Input normalisation, max-size/context checks and redaction hook before external dispatch; resolve private storage references into validated attachments, enforce 5 MB per-file / 10 MB combined limits, compute SHA-256 digests and propagate only approved metadata to adapters
-- [ ] Unit/integration tests for successful validation, malformed output, repair success/failure, timeout/rate-limit error translation, idempotency and no content leakage
+- [x] Native structured-output path plus JSON extraction/Pydantic validation fallback; text result opt-in is explicit in the task definition
+- [x] Bounded repair attempt and retry policy separated between malformed output, transient provider error and permanent validation/policy failure; no retry storm or unbounded cost
+- [x] Input normalisation, max-size/context checks and redaction hook before external dispatch; resolve private storage references into validated attachments, enforce 5 MB per-file / 10 MB combined limits, compute SHA-256 digests and propagate only approved metadata to adapters
+- [x] Unit/integration tests for successful validation, malformed output, repair success/failure, timeout/rate-limit error translation, idempotency and no content leakage
 
 ## 6.5 Organisation Controls, Persistence and Audit
 

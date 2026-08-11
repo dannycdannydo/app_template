@@ -31,6 +31,10 @@ class LocalOpenAICompatibleAdapter(OpenAICompatibleAdapter):
 
     provider_id = "local"
     default_base_url = ""
+    # Local OpenAI-compatible servers have no reviewed native JSON-schema
+    # structured-output contract across Ollama/vLLM/SGLang, so structured
+    # output stays on the JSON-mode prompt contract (Scope §6.4).
+    supports_native_structured_output = False
 
     def __init__(
         self,

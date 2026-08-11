@@ -54,6 +54,9 @@ class FakeLLMProvider(LLMProvider):
         self._fail_next = 0
         self._fail_error: type[Exception] = ProviderUnavailableError
         self._queued_response: ProviderResponse | None = None
+        self._queued_responses: list[ProviderResponse] = []
+        self._queued_failures = 0
+        self._queued_failure_error: type[Exception] = ProviderUnavailableError
 
     def fail_next_call(self, count: int = 1, *, error: type[Exception] | None = None) -> None:
         """Arm the next ``count`` calls to raise ``error`` (default:
@@ -64,6 +67,22 @@ class FakeLLMProvider(LLMProvider):
         if error is not None:
             self._fail_error = error
 
+    def queue_transient_failure(
+        self, count: int = 1, *, error: type[Exception] = ProviderUnavailableError
+    ) -> None:
+        """Queue ``count`` transient failures raised *after* any already-queued
+        canned responses are consumed.
+
+        ``fail_next_call`` fires before canned responses; this helper fires
+        after them, so a test can exercise a transient provider failure inside
+        the repair path (Scope §6.4), where a malformed canned response
+        precedes the failing repair call.
+        """
+        if count < 1:
+            raise ValueError("queue_transient_failure count must be at least 1")
+        self._queued_failures += count
+        self._queued_failure_error = error
+
     def set_next_response(self, response: ProviderResponse) -> None:
         """Queue one canned response returned by the next call.
 
@@ -72,15 +91,28 @@ class FakeLLMProvider(LLMProvider):
         """
         self._queued_response = response
 
+    def queue_responses(self, *responses: ProviderResponse) -> None:
+        """Queue several canned responses returned in order by the next calls.
+
+        Used to simulate, for example, two consecutive malformed outputs so
+        the repair path can be exercised to its terminal failure (Scope §6.4).
+        """
+        self._queued_responses.extend(responses)
+
     async def complete(self, request: ProviderRequest) -> ProviderResponse:
         self.requests.append(request)
         if self._fail_next > 0:
             self._fail_next -= 1
             raise self._fail_error("simulated provider failure")
+        if self._queued_responses:
+            return self._queued_responses.pop(0)
         if self._queued_response is not None:
             response = self._queued_response
             self._queued_response = None
             return response
+        if self._queued_failures > 0:
+            self._queued_failures -= 1
+            raise self._queued_failure_error("simulated provider failure")
 
         # Deterministic structured output derived from the request: the task,
         # the requested schema, a stable prompt hash and the approved metadata

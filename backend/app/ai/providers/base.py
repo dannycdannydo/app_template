@@ -25,23 +25,34 @@ class ProviderRequest(BaseModel):
 
     ``prompt`` is the rendered prompt (system instructions + variables, safe
     template rendering — Scope §6.2). ``output_schema`` is a hint the adapter
-    uses to request native structured output where supported; the adapter must
-    never receive source content beyond the rendered prompt or approved
-    metadata. ``max_tokens`` / ``temperature`` are optional parameter
-    overrides bounded by the task's parameter defaults. ``attachments`` carries
-    the validated bounded inline attachments (v0.7 Scope §6.2 amendment) when
-    the task routes to a model with the ``documents`` capability; adapters that
-    declare ``supports_documents`` map them to their native inline request form
-    (Scope §6.3). Attachment bytes exist only for this request.
+    uses to request structured output where supported; the adapter must never
+    receive source content beyond the rendered prompt or approved metadata.
+    ``output_json_schema`` is the JSON Schema the service generated from the
+    task's declared Pydantic output model (Scope §6.4); adapters that
+    truthfully declare ``supports_native_structured_output`` map it to their
+    native structured-output form (OpenAI ``json_schema``, Vertex
+    ``responseJsonSchema``), others fall back to the documented JSON-mode prompt
+    contract. ``max_tokens`` / ``temperature`` are optional parameter
+    overrides bounded by the task's parameter defaults. ``repair`` marks a
+    bounded repair request issued after the first response failed Pydantic
+    validation (Scope §6.4); the prompt then carries the repair instruction and
+    the adapter reuses the exact same structured-output contract. ``attachments``
+    carries the validated bounded inline attachments (v0.7 Scope §6.2
+    amendment) when the task routes to a model with the ``documents``
+    capability; adapters that declare ``supports_documents`` map them to their
+    native inline request form (Scope §6.3). Attachment bytes exist only for
+    this request.
     """
 
     task: str = Field(min_length=1, max_length=128)
     model: str = Field(min_length=1, max_length=256)
     prompt: str = Field(min_length=1)
     output_schema: str | None = Field(default=None, max_length=512)
+    output_json_schema: dict[str, Any] | None = Field(default=None)
     max_tokens: int | None = Field(default=None, ge=1, le=128_000)
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
     metadata: dict[str, str] = Field(default_factory=dict)
+    repair: bool = False
     # The lambda default avoids a Pyright strict-mode "partially unknown" false
     # positive that a bare ``list`` factory produces for model-element types.
     attachments: list[Attachment] = Field(
@@ -93,6 +104,18 @@ class LLMProvider(ABC):
     #: mode) for the task's declared output schema (Scope §6.3). The service
     #: still validates every result against the Pydantic contract (Scope §6.4).
     supports_structured_output: bool = False
+    #: Whether the adapter can request **native** structured output from its
+    #: wire format — OpenAI ``json_schema`` response format, Vertex
+    #: ``responseJsonSchema`` — given the JSON Schema the service generates from
+    #: the Pydantic output model (Scope §6.4). ``False`` adapters use the
+    #: documented JSON-mode prompt contract instead and the service's Pydantic
+    #: validation remains the safety net either way. Adapters declare only
+    #: what their provider actually supports: Anthropic (tool-use based native
+    #: output is not implemented here), DeepSeek/local (JSON mode only) keep
+    #: ``False``; Azure derives the declaration from its pinned api-version
+    #: (structured outputs arrived in ``2024-08-01-preview``), so an older
+    #: pinned version never pretends to support native ``json_schema``.
+    supports_native_structured_output: bool = False
     #: Whether the adapter can carry bounded inline document attachments in
     #: their native request form (v0.7 Scope §6.2/§6.3 amendment). The service
     #: refuses to dispatch attachments to an adapter that does not declare

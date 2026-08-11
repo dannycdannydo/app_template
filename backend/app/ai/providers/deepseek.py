@@ -22,7 +22,14 @@ __all__ = ["DeepSeekAdapter"]
 
 
 class DeepSeekAdapter(OpenAICompatibleAdapter):
-    """DeepSeek chat-completions adapter (OpenAI-compatible wire format)."""
+    """DeepSeek chat-completions adapter (OpenAI-compatible wire format).
+
+    Remains its own adapter despite API compatibility (Scope §6.3): DeepSeek
+    has no native ``json_schema`` response format, so structured output stays
+    on the JSON-mode prompt contract (Scope §6.4) and attachments are rejected
+    before dispatch.
+    """
 
     provider_id = "deepseek"
     default_base_url = "https://api.deepseek.com"
+    supports_native_structured_output = False

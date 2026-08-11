@@ -92,6 +92,7 @@ class VertexAIAdapter(LLMProvider):
 
     provider_id = "vertex"
     supports_structured_output = True
+    supports_native_structured_output = True
     supports_documents = True
     supported_attachment_mime_types = VERTEX_INLINE_ATTACHMENT_MIME_TYPES
 
@@ -179,6 +180,16 @@ class VertexAIAdapter(LLMProvider):
             generation_config["temperature"] = request.temperature
         if request.output_schema:
             generation_config["responseMimeType"] = "application/json"
+            # Native structured output (Scope §6.4): the service generates the
+            # JSON Schema from the task's Pydantic output model, which may use
+            # JSON-Schema-specific shapes (``$defs``, ``anyOf``, ...). Vertex
+            # splits the contract into two fields: ``responseSchema`` accepts
+            # only an OpenAPI-schema subset, while ``responseJsonSchema``
+            # accepts a full JSON Schema value, so the generated Pydantic JSON
+            # Schema goes through ``responseJsonSchema``. The service re-
+            # validates the response against the model either way.
+            if request.output_json_schema is not None:
+                generation_config["responseJsonSchema"] = request.output_json_schema
         parts: list[dict[str, Any]] = [{"text": request.prompt}]
         if request.attachments:
             parts.extend(_vertex_inline_parts(list(request.attachments)))

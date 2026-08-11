@@ -61,7 +61,28 @@ class ObjectStorage(ABC):
         """Return provider metadata for one object, or ``None`` when missing.
 
         Used by the upload-completion step to verify the browser really stored
-        the object and that its size matches the declared size (Scope §6.3).
+        the object and that its size matches the declared size (Scope §6.3),
+        and by the AI layer to validate a storage reference before reading it
+        (v0.7 Scope §6.4).
+        """
+
+    @abstractmethod
+    async def read_object(self, object_key: str, *, max_bytes: int | None = None) -> bytes:
+        """Return one object's full bytes, read server-side.
+
+        The AI layer uses this to resolve a private storage reference into a
+        bounded in-memory :class:`~app.ai.attachments.Attachment` at the
+        service/job boundary (v0.7 Scope §6.4, ADR-0017): bytes exist only in
+        memory for one provider call and are never persisted, placed on the
+        broker or logged. Raises :class:`KeyError` when the object does not
+        exist; callers that care should ``head_object`` first so the AI
+        resolver can translate the missing reference into its safe error.
+
+        ``max_bytes`` caps the amount read *during the read itself*: when the
+        object is larger the read raises :class:`ValueError` without pulling
+        the whole body into memory, so a head/read race (the object grew or
+        changed after ``head_object``) still fails bounded (Scope §6.4
+        bounded-memory contract, §5.8).
         """
 
     @abstractmethod
