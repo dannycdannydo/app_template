@@ -67,6 +67,7 @@ _PROGRESS_PROCESSING = 80
 # Permanent error codes the file-processing job records on the durable row.
 ERROR_CODE_FILE_NOT_FOUND = "file_not_found"
 ERROR_CODE_VERIFICATION_FAILED = "file_verification_failed"
+ERROR_CODE_INVALID_JOB_CONTEXT = "invalid_file_job_context"
 
 logger = structlog.get_logger()
 
@@ -93,6 +94,20 @@ async def process_file(job_id: str) -> None:
             # never re-run (acceptance §5.7), so this attempt is a no-op.
             logger.info("file.processing.skipped", reason="terminal_state")
             return
+
+        if job.job_type != JOB_TYPE_FILE_PROCESSING:
+            await jobs_service.fail(
+                session,
+                job_id=job_uuid,
+                error_code=ERROR_CODE_INVALID_JOB_CONTEXT,
+                error_message="The file job has an invalid task type.",
+            )
+            logger.warning(
+                "file.processing.failed",
+                error_code=ERROR_CODE_INVALID_JOB_CONTEXT,
+                reason="wrong_job_type",
+            )
+            raise jobs_service.JobPermanentError("the file job context is invalid")
 
         await jobs_service.mark_running(session, job_id=job_uuid)
         file_id = uuid.UUID(job.input_reference)

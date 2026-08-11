@@ -153,9 +153,15 @@ async def test_assign_and_remove_role_changes_grants(migrated_database: str) -> 
             # Capture the ids up front: assign_role's conflict path rolls back,
             # which expires session instances and breaks lazy attribute access.
             membership_id = membership.id
+            organisation_id = organisation.id
             user_id = user.id
 
-            await assign_role(session, membership_id=membership_id, role_code="viewer")
+            await assign_role(
+                session,
+                organisation_id=organisation_id,
+                membership_id=membership_id,
+                role_code="viewer",
+            )
             assert await permission_codes_for_membership(session, membership_id) == {
                 "records.read",
                 "properties.read",
@@ -164,18 +170,63 @@ async def test_assign_and_remove_role_changes_grants(migrated_database: str) -> 
 
             # Duplicate assignment conflicts with the unique constraint.
             with pytest.raises(ConflictError):
-                await assign_role(session, membership_id=membership_id, role_code="viewer")
+                await assign_role(
+                    session,
+                    organisation_id=organisation_id,
+                    membership_id=membership_id,
+                    role_code="viewer",
+                )
 
             # Unknown role codes are not found.
             with pytest.raises(NotFoundError):
-                await assign_role(session, membership_id=membership_id, role_code="superadmin")
+                await assign_role(
+                    session,
+                    organisation_id=organisation_id,
+                    membership_id=membership_id,
+                    role_code="superadmin",
+                )
 
             # Unknown memberships are not found (never a misleading conflict).
             with pytest.raises(NotFoundError):
-                await assign_role(session, membership_id=uuid.uuid4(), role_code="viewer")
+                await assign_role(
+                    session,
+                    organisation_id=organisation_id,
+                    membership_id=uuid.uuid4(),
+                    role_code="viewer",
+                )
 
-            roles = await list_membership_roles(session, membership_id)
+            roles = await list_membership_roles(
+                session,
+                organisation_id=organisation_id,
+                membership_id=membership_id,
+            )
             assert [role.code for role in roles] == ["viewer"]
+
+            # A valid membership id cannot be reused under a foreign tenant
+            # context for either reads or mutations.
+            foreign_organisation_id = uuid.uuid4()
+            assert (
+                await list_membership_roles(
+                    session,
+                    organisation_id=foreign_organisation_id,
+                    membership_id=membership_id,
+                )
+                == []
+            )
+            with pytest.raises(NotFoundError):
+                await assign_role(
+                    session,
+                    organisation_id=foreign_organisation_id,
+                    membership_id=membership_id,
+                    role_code="member",
+                )
+            with pytest.raises(NotFoundError):
+                await remove_role(
+                    session,
+                    organisation_id=foreign_organisation_id,
+                    membership_id=membership_id,
+                    role_code="viewer",
+                )
 
             # /me (v0.2 Scope §6.4) surfaces the same role codes the permission
             # checks enforce. Re-fetch the user because the conflict-path
@@ -186,11 +237,21 @@ async def test_assign_and_remove_role_changes_grants(migrated_database: str) -> 
             assert me_roles == ["viewer"]
             assert me_platform_roles == []  # no platform memberships in this flow
 
-            await remove_role(session, membership_id=membership_id, role_code="viewer")
+            await remove_role(
+                session,
+                organisation_id=organisation_id,
+                membership_id=membership_id,
+                role_code="viewer",
+            )
             assert await permission_codes_for_membership(session, membership_id) == set()
 
             # Removing a role the member does not hold is not found.
             with pytest.raises(NotFoundError):
-                await remove_role(session, membership_id=membership_id, role_code="viewer")
+                await remove_role(
+                    session,
+                    organisation_id=organisation_id,
+                    membership_id=membership_id,
+                    role_code="viewer",
+                )
     finally:
         await engine.dispose()

@@ -19,6 +19,8 @@ vi.mock('@/features/auth/workos', () => ({
 
 import UserMenu from '@/components/application/UserMenu.vue'
 import { signOut } from '@/features/auth/workos'
+import { queryClient } from '@/queries/queryClient'
+import { useOrganisationStore } from '@/stores/organisation'
 import { useSessionStore } from '@/stores/session'
 
 const signOutMock = vi.mocked(signOut)
@@ -59,6 +61,7 @@ describe('UserMenu', () => {
     signOutMock.mockReset()
     signOutMock.mockResolvedValue(false)
     mockUseMeQuery.mockReset()
+    queryClient.clear()
   })
 
   afterEach(() => {
@@ -89,10 +92,13 @@ describe('UserMenu', () => {
     )
   })
 
-  it('signs out, clears the session and returns to /login', async () => {
+  it('signs out, clears all local user state and returns to /login', async () => {
     const { wrapper, router } = await mountUserMenu()
     const session = useSessionStore()
+    const organisation = useOrganisationStore()
     session.setSession('token-123')
+    organisation.setSelectedOrganisation('org-a')
+    queryClient.setQueryData(['records', 'org-a'], { items: [{ id: 'record-a' }] })
 
     await wrapper.find('[data-testid="user-menu-trigger"]').trigger('click')
     await flushPromises()
@@ -104,6 +110,8 @@ describe('UserMenu', () => {
 
     expect(signOutMock).toHaveBeenCalledOnce()
     expect(session.token).toBeNull()
+    expect(organisation.selectedOrganisationId).toBeNull()
+    expect(queryClient.getQueryCache().getAll()).toHaveLength(0)
     expect(router.currentRoute.value.path).toBe('/login')
   })
 })

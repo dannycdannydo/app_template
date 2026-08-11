@@ -1,5 +1,6 @@
 import createClient, { type Middleware } from 'openapi-fetch'
 
+import { clearLocalSession } from '@/features/auth/localSession'
 import { useOrganisationStore } from '@/stores/organisation'
 import { useSessionStore } from '@/stores/session'
 import { signOutForInvalidSession } from '@/features/auth/workos'
@@ -34,10 +35,7 @@ async function handleUnauthorized(): Promise<void> {
   if (handlingUnauthorized) return
   handlingUnauthorized = true
 
-  const session = useSessionStore()
-  const organisation = useOrganisationStore()
-  session.clearSession()
-  organisation.setSelectedOrganisation(null)
+  clearLocalSession()
 
   // Pinia is only this app's in-memory state. AuthKit persists its own session
   // and cookie, so an invalid session must leave through WorkOS's logout page.

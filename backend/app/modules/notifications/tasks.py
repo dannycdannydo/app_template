@@ -32,6 +32,7 @@ import uuid
 
 import dramatiq
 import structlog
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.logging import bind_worker_context
@@ -53,6 +54,7 @@ HANDLER_QUEUE = "emails"
 
 # Permanent error code the email-delivery job records on the durable row.
 ERROR_CODE_EMAIL_DELIVERY_FAILED = "email_delivery_failed"
+ERROR_CODE_INVALID_JOB_CONTEXT = "invalid_notification_job_context"
 
 logger = structlog.get_logger()
 
@@ -81,10 +83,22 @@ async def send_notification_email(job_id: str) -> None:
             logger.info("notification.email.skipped", reason="terminal_state")
             return
 
-        await jobs_service.mark_running(session, job_id=job_uuid)
+        if job.job_type != JOB_TYPE_NOTIFICATION_EMAIL:
+            await _fail_invalid_context(session, job_id=job_uuid, reason="wrong_job_type")
+
         delivery = await notifications_service.get_delivery_for_task(
             session, delivery_id=uuid.UUID(job.input_reference)
         )
+        notification = await notifications_service.get_notification_for_task(
+            session, notification_id=delivery.notification_id
+        )
+        if notification.organisation_id != job.organisation_id:
+            await _fail_invalid_context(
+                session,
+                job_id=job_uuid,
+                reason="organisation_mismatch",
+            )
+
         if notifications_service.is_delivery_terminal(delivery.status):
             # A re-delivered message for an already-finished delivery: terminal
             # deliveries are never re-sent (Scope §6.4 idempotency rule), so
@@ -93,10 +107,10 @@ async def send_notification_email(job_id: str) -> None:
             logger.info("notification.email.skipped", reason="delivery_terminal")
             return
 
+        # Establish the complete durable-reference context before either row is
+        # moved to running or an external provider can be called.
+        await jobs_service.mark_running(session, job_id=job_uuid)
         await notifications_service.mark_delivery_running(session, delivery_id=delivery.id)
-        notification = await notifications_service.get_notification_for_task(
-            session, notification_id=delivery.notification_id
-        )
         settings = get_settings()
         provider = get_email_provider()
         try:
@@ -138,6 +152,27 @@ async def send_notification_email(job_id: str) -> None:
             "notification.email.succeeded",
             provider_message_id=result.provider_message_id,
         )
+
+
+async def _fail_invalid_context(
+    session: AsyncSession,
+    *,
+    job_id: uuid.UUID,
+    reason: str,
+) -> None:
+    """Fail a malformed durable notification reference without provider work."""
+    await jobs_service.fail(
+        session,
+        job_id=job_id,
+        error_code=ERROR_CODE_INVALID_JOB_CONTEXT,
+        error_message="The notification job references inconsistent tenant data.",
+    )
+    logger.warning(
+        "notification.email.failed",
+        error_code=ERROR_CODE_INVALID_JOB_CONTEXT,
+        reason=reason,
+    )
+    raise jobs_service.JobPermanentError("the notification job context is invalid")
 
 
 send_notification_email_actor = dramatiq.actor(
