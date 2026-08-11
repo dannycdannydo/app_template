@@ -18,12 +18,12 @@ dependencies = [
     # (openai, anthropic, google-cloud-aiplatform, ...) is a dependency; that
     # is a deliberate, reviewed decision (ADR-0017 consequences).
     "httpx>=0.28.1",
-    # v0.7 Vertex AI adapter (Scope §6.3, ADR-0018): google-auth supplies
+    # v0.7 Vertex AI adapter (v0.7 Scope §6.3, ADR-0018): google-auth supplies
     # Application Default Credentials / service-account credentials for the
     # Vertex generateContent endpoint. Token refresh uses the urllib3
     # transport already provided by boto3, so no extra HTTP client is pulled
     # in. Imported only inside app/ai/providers/vertex.py.
-    "google-auth>=2.35.0",
+    "google-auth[urllib3]>=2.35.0",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.14.2",
     # v0.7 prompt/task/model registries are reviewed YAML assets. PyYAML's
