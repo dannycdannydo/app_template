@@ -15,9 +15,10 @@ from decimal import Decimal
 from uuid import uuid4
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from tests.ai_test_helpers import InMemoryPromptRegistry, InMemoryRegistries
 
+from app.ai.attachments import MAX_ATTACHMENT_BYTES, MAX_TOTAL_ATTACHMENT_BYTES, Attachment
 from app.ai.errors import (
     AIInputValidationError,
     ModelNotAvailableError,
@@ -27,7 +28,7 @@ from app.ai.errors import (
     ProviderResponseError,
     TaskNotFoundError,
 )
-from app.ai.providers.base import ProviderResponse
+from app.ai.providers.base import LLMProvider, ProviderRequest, ProviderResponse
 from app.ai.providers.fake import FakeLLMProvider
 from app.ai.registry import (
     Capability,
@@ -47,6 +48,7 @@ class ClassificationResult(BaseModel):
     task: str
     prompt_hash: str
     variables: dict[str, str]
+    attachments: list[str] = Field(default_factory=list)
 
 
 _ORG_ID = uuid4()
@@ -343,3 +345,167 @@ class _PricedModelRegistry(ModelRegistry):
 def test_token_usage_total_property() -> None:
     usage = TokenUsage(input_tokens=10, output_tokens=5)
     assert usage.total_tokens == 15
+
+
+# --- v0.7 attachment amendment: service-side rejection before dispatch ---
+
+
+def _attachment(
+    *,
+    name: str = "lease.pdf",
+    mime_type: str = "application/pdf",
+    content: bytes = b"%PDF-1.7 fixture",
+) -> Attachment:
+    return Attachment(display_name=name, mime_type=mime_type, content=content)
+
+
+class _DocumentModelRegistry(ModelRegistry):
+    """Model registry with one fake model that declares document support."""
+
+    def __init__(self, *, capabilities: list[Capability] | None = None) -> None:
+        self._capabilities = capabilities or [
+            Capability.STRUCTURED_OUTPUT,
+            Capability.DOCUMENTS,
+        ]
+        self._model = ModelDefinition(
+            id="fake.document-classifier",
+            provider="fake",
+            model="fake-model-document.classify",
+            capabilities=self._capabilities,
+            context_window=128_000,
+            supported_parameters=[],
+            max_attachment_bytes=MAX_ATTACHMENT_BYTES,
+            max_total_attachment_bytes=MAX_TOTAL_ATTACHMENT_BYTES,
+            pricing=PricingBasis(
+                currency="USD",
+                input_price_per_million_tokens=Decimal("1.00"),
+                output_price_per_million_tokens=Decimal("2.00"),
+                effective_date=date(2026, 1, 1),
+                owner="tests",
+            ),
+        )
+
+    def get(self, provider: str, model: str) -> ModelDefinition:
+        if (provider, model) != ("fake", self._model.model):
+            raise KeyError(model)
+        return self._model
+
+    def all(self) -> list[ModelDefinition]:
+        return [self._model]
+
+    def resolve(
+        self,
+        task: TaskDefinition,
+        *,
+        allowed_providers: list[str] | None = None,
+    ) -> ModelDefinition:
+        return self._model
+
+
+class _NoDocumentsProvider(LLMProvider):
+    """A provider that truthfully cannot carry documents."""
+
+    provider_id = "fake"
+    supports_structured_output = True
+    supports_documents = False
+
+    async def complete(self, request: ProviderRequest) -> ProviderResponse:
+        raise NotImplementedError  # pragma: no cover - never reached
+
+
+async def test_execute_routes_attachments_to_document_model_and_passes_them() -> None:
+    registries = InMemoryRegistries.default()
+    registries.models = _DocumentModelRegistry()
+    service, provider = _service(registries)
+    attachment = _attachment()
+
+    result = await service.execute(_request(), attachments=[attachment])
+
+    assert result.routing.model == "fake-model-document.classify"
+    assert result.output.attachments == [attachment.sha256_digest]
+    assert len(provider.requests) == 1
+    assert provider.requests[0].attachments == [attachment]
+
+
+async def test_execute_rejects_attachments_when_provider_lacks_document_support() -> None:
+    """The model may declare the documents capability, but the configured
+    adapter must truthfully support it too — otherwise fail before dispatch."""
+    registries = InMemoryRegistries.default()
+    registries.models = _DocumentModelRegistry()
+    service = AIService(
+        task_registry=registries.tasks,
+        prompt_registry=registries.prompts,
+        model_registry=registries.models,
+        provider=_NoDocumentsProvider(),
+        schema_resolver=_resolver,
+    )
+
+    with pytest.raises(ModelNotAvailableError, match="does not support document"):
+        await service.execute(_request(), attachments=[_attachment()])
+
+
+async def test_execute_rejects_attachments_when_no_model_can_carry_them() -> None:
+    service, _ = _service()  # default registry has no documents-capable model
+    with pytest.raises(ModelNotAvailableError, match="no model satisfies"):
+        await service.execute(_request(), attachments=[_attachment()])
+
+
+async def test_execute_rejects_oversized_attachment_set_before_dispatch() -> None:
+    registries = InMemoryRegistries.default()
+    registries.models = _DocumentModelRegistry()
+    service, provider = _service(registries)
+    oversized = [
+        _attachment(name=f"part-{i}.txt", content=b"x" * MAX_ATTACHMENT_BYTES) for i in range(3)
+    ]
+
+    with pytest.raises(AIInputValidationError, match="combined"):
+        await service.execute(_request(), attachments=oversized)
+    assert provider.requests == []  # nothing was dispatched
+
+
+async def test_execute_rejects_unallowlisted_attachment_mime_before_dispatch() -> None:
+    registries = InMemoryRegistries.default()
+    registries.models = _DocumentModelRegistry()
+    service, provider = _service(registries)
+    with pytest.raises(ValueError, match="MIME"):
+        _attachment(name="payload.exe", mime_type="application/octet-stream", content=b"MZ...")
+
+    # A valid set reaches the adapter; an invalid one never does.
+    result = await service.execute(_request(), attachments=[_attachment()])
+    assert result.routing.model == "fake-model-document.classify"
+    assert provider.requests[0].attachments == [_attachment()]
+
+
+async def test_execute_rejects_image_attachments_when_model_lacks_vision() -> None:
+    """An image must not route to a documents-only model: the service rejects
+    the set before dispatch, so the adapter never sees the request."""
+    registries = InMemoryRegistries.default()
+    registries.models = _DocumentModelRegistry()
+    service, provider = _service(registries)
+    image = _attachment(name="scan.png", mime_type="image/png", content=b"\x89PNG fixture")
+
+    with pytest.raises(ModelNotAvailableError, match="no model satisfies"):
+        await service.execute(_request(), attachments=[image])
+    assert provider.requests == []  # nothing was dispatched
+
+
+async def test_execute_routes_image_attachments_to_vision_capable_model() -> None:
+    """A model declaring both ``documents`` and ``vision`` carries image
+    attachments; the adapter receives the validated, still-immutable object."""
+    registries = InMemoryRegistries.default()
+    registries.models = _DocumentModelRegistry(
+        capabilities=[
+            Capability.STRUCTURED_OUTPUT,
+            Capability.DOCUMENTS,
+            Capability.VISION,
+        ]
+    )
+    service, provider = _service(registries)
+    image = _attachment(name="scan.png", mime_type="image/png", content=b"\x89PNG fixture")
+
+    result = await service.execute(_request(), attachments=[image])
+
+    assert result.routing.model == "fake-model-document.classify"
+    assert result.output.attachments == [image.sha256_digest]
+    assert len(provider.requests) == 1
+    assert provider.requests[0].attachments == [image]

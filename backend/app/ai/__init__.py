@@ -8,6 +8,7 @@ adapter under test. Google Gemini is reached through Vertex AI only
 (ADR-0018).
 """
 
+from app.ai.attachments import Attachment
 from app.ai.errors import AIError
 from app.ai.providers import FakeLLMProvider, LLMProvider
 from app.ai.schemas import AIRequest, AIResult, ChatMessage, TokenUsage
@@ -18,6 +19,7 @@ __all__ = [
     "AIRequest",
     "AIResult",
     "AIService",
+    "Attachment",
     "ChatMessage",
     "FakeLLMProvider",
     "LLMProvider",

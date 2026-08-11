@@ -16,6 +16,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.ai.attachments import MAX_ATTACHMENT_COUNT, Attachment
 from app.ai.schemas import TokenUsage
 
 
@@ -27,7 +28,11 @@ class ProviderRequest(BaseModel):
     uses to request native structured output where supported; the adapter must
     never receive source content beyond the rendered prompt or approved
     metadata. ``max_tokens`` / ``temperature`` are optional parameter
-    overrides bounded by the task's parameter defaults.
+    overrides bounded by the task's parameter defaults. ``attachments`` carries
+    the validated bounded inline attachments (v0.7 Scope §6.2 amendment) when
+    the task routes to a model with the ``documents`` capability; adapters that
+    declare ``supports_documents`` map them to their native inline request form
+    (Scope §6.3). Attachment bytes exist only for this request.
     """
 
     task: str = Field(min_length=1, max_length=128)
@@ -37,6 +42,11 @@ class ProviderRequest(BaseModel):
     max_tokens: int | None = Field(default=None, ge=1, le=128_000)
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
     metadata: dict[str, str] = Field(default_factory=dict)
+    # The lambda default avoids a Pyright strict-mode "partially unknown" false
+    # positive that a bare ``list`` factory produces for model-element types.
+    attachments: list[Attachment] = Field(
+        default_factory=lambda: [], max_length=MAX_ATTACHMENT_COUNT
+    )
 
 
 class ProviderResponse(BaseModel):
@@ -76,6 +86,13 @@ class LLMProvider(ABC):
     #: mode) for the task's declared output schema (Scope §6.3). The service
     #: still validates every result against the Pydantic contract (Scope §6.4).
     supports_structured_output: bool = False
+    #: Whether the adapter can carry bounded inline document attachments in
+    #: their native request form (v0.7 Scope §6.2/§6.3 amendment). The service
+    #: refuses to dispatch attachments to an adapter that does not declare
+    #: support — DeepSeek and local remain ``False`` until a reviewed
+    #: capability exists (ADR-0017) — so unsupported documents always fail
+    #: before dispatch rather than being silently dropped.
+    supports_documents: bool = False
 
     @abstractmethod
     async def complete(self, request: ProviderRequest) -> ProviderResponse:

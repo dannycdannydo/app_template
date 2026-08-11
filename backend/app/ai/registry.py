@@ -11,7 +11,7 @@ import importlib
 import re
 import string
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import date
 from decimal import Decimal
 from enum import StrEnum
@@ -20,6 +20,12 @@ from typing import cast
 
 import yaml
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+
+from app.ai.attachments import (
+    MAX_ATTACHMENT_BYTES,
+    MAX_TOTAL_ATTACHMENT_BYTES,
+    Attachment,
+)
 
 MAX_REGISTRY_FILE_BYTES = 256 * 1024
 MAX_PROMPT_INSTRUCTIONS_LENGTH = 16 * 1024
@@ -43,6 +49,10 @@ class Capability(StrEnum):
     VISION = "vision"
     TOOLS = "tools"
     REASONING = "reasoning"
+    #: Bounded inline document/attachment input (v0.7 Scope §6.2 amendment).
+    #: Models declaring it must also declare per-model inline attachment
+    #: ceilings; models without it can never carry attachments.
+    DOCUMENTS = "documents"
 
 
 class QualityTier(StrEnum):
@@ -192,6 +202,19 @@ class ModelDefinition(BaseModel):
     priority: int = Field(default=100, ge=0, le=10_000)
     pricing: PricingBasis
     available: bool = True
+    # Per-model inline attachment ceilings (v0.7 Scope §6.2 amendment). Models
+    # declaring the ``documents`` capability must declare both; models without
+    # it must declare neither. Ceilings are reviewed configuration bounded by
+    # the template limits (5 MB per file / 10 MB combined, ADR-0017).
+    max_attachment_bytes: int | None = Field(
+        default=None, ge=1, le=MAX_ATTACHMENT_BYTES, description="Per-file inline ceiling"
+    )
+    max_total_attachment_bytes: int | None = Field(
+        default=None,
+        ge=1,
+        le=MAX_TOTAL_ATTACHMENT_BYTES,
+        description="Combined inline ceiling for one request",
+    )
 
     @field_validator("supported_parameters")
     @classmethod
@@ -200,6 +223,26 @@ class ModelDefinition(BaseModel):
         if unknown:
             raise ValueError(f"unknown supported parameters: {sorted(unknown)}")
         return values
+
+    @model_validator(mode="after")
+    def _validate_attachment_contract(self) -> ModelDefinition:
+        supports_documents = Capability.DOCUMENTS in self.capabilities
+        has_per_file_ceiling = self.max_attachment_bytes is not None
+        has_total_ceiling = self.max_total_attachment_bytes is not None
+        if supports_documents and not (has_per_file_ceiling and has_total_ceiling):
+            raise ValueError(
+                "models declaring the documents capability must declare both "
+                "inline attachment ceilings (per-file and combined)"
+            )
+        if not supports_documents and (has_per_file_ceiling or has_total_ceiling):
+            raise ValueError("inline attachment ceilings require the documents capability")
+        if (
+            self.max_total_attachment_bytes is not None
+            and self.max_attachment_bytes is not None
+            and self.max_total_attachment_bytes < self.max_attachment_bytes
+        ):
+            raise ValueError("max_total_attachment_bytes must not be below max_attachment_bytes")
+        return self
 
 
 class RoutingDecision(BaseModel):
@@ -248,6 +291,7 @@ class ModelRegistry(ABC):
         estimated_input_tokens: int = 0,
         maximum_estimated_cost: Decimal | None = None,
         excluded_model_ids: Iterable[str] = (),
+        attachments: Iterable[Attachment] = (),
     ) -> RoutingDecision:
         """Compatibility route for custom registries implementing ``resolve``.
 
@@ -260,6 +304,9 @@ class ModelRegistry(ABC):
         if estimated_input_tokens > task.max_input_tokens:
             raise ValueError(f"input exceeds token budget for task {task.name}")
         model = self.resolve(task, allowed_providers=allowed_providers)
+        attachment_list = list(attachments)
+        if attachment_list and not _model_can_carry_attachments(model, attachment_list):
+            raise ValueError(f"model cannot carry the supplied attachments for task {task.name}")
         if allowed_model_ids is not None and model.id not in allowed_model_ids:
             raise ValueError(f"model is not allowed for task {task.name}")
         if model_override is not None and model.id != model_override:
@@ -428,6 +475,7 @@ class CapabilityCostModelRegistry(ModelRegistry):
         estimated_input_tokens: int = 0,
         maximum_estimated_cost: Decimal | None = None,
         excluded_model_ids: Iterable[str] = (),
+        attachments: Iterable[Attachment] = (),
     ) -> RoutingDecision:
         excluded = set(excluded_model_ids)
         if excluded and not task.fallback_policy.allowed:
@@ -436,8 +484,13 @@ class CapabilityCostModelRegistry(ModelRegistry):
             raise RegistryValidationError(f"input exceeds token budget for task {task.name}")
         if maximum_estimated_cost is not None and maximum_estimated_cost < 0:
             raise RegistryValidationError("maximum estimated cost must not be negative")
+        attachments = list(attachments)
 
         candidates = [model for model in self.all() if self._eligible(task, model)]
+        if attachments:
+            candidates = [
+                model for model in candidates if _model_can_carry_attachments(model, attachments)
+            ]
         if allowed_providers is not None:
             candidates = [model for model in candidates if model.provider in allowed_providers]
         if allowed_model_ids is not None:
@@ -485,6 +538,10 @@ class CapabilityCostModelRegistry(ModelRegistry):
                 fallback_used=fallback_used,
                 estimated_input_tokens=estimated_input_tokens,
                 estimated_max_cost=cost,
+            )
+        if attachments:
+            raise RegistryValidationError(
+                f"no model can carry the supplied attachments for task {task.name}"
             )
         raise RegistryValidationError(f"no model satisfies task {task.name}")
 
@@ -553,6 +610,27 @@ def validate_registry_bundle(bundle: RegistryBundle) -> None:
                 estimated_input_tokens=task.max_input_tokens,
             )
         bundle.models.route(task, estimated_input_tokens=task.max_input_tokens)
+
+
+def _model_can_carry_attachments(model: ModelDefinition, attachments: Sequence[Attachment]) -> bool:
+    """Whether one model can carry an attachment set under its reviewed
+    ceilings: it must declare the ``documents`` capability and both inline
+    ceilings, each file must fit the per-file ceiling and the combined size
+    must fit the combined ceiling. Image attachments additionally require the
+    ``vision`` capability, so an image can never route to a documents-only
+    model before dispatch (v0.7 Scope §6.2 amendment)."""
+    if Capability.DOCUMENTS not in model.capabilities:
+        return False
+    if model.max_attachment_bytes is None or model.max_total_attachment_bytes is None:
+        return False
+    if any(attachment.size > model.max_attachment_bytes for attachment in attachments):
+        return False
+    if sum(attachment.size for attachment in attachments) > model.max_total_attachment_bytes:
+        return False
+    return not any(
+        attachment.is_image and Capability.VISION not in model.capabilities
+        for attachment in attachments
+    )
 
 
 def estimate_tokens(text: str) -> int:

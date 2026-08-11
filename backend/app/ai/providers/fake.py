@@ -33,10 +33,17 @@ def _token_count(text: str) -> int:
 
 
 class FakeLLMProvider(LLMProvider):
-    """Deterministic, test-only :class:`LLMProvider` implementation."""
+    """Deterministic, test-only :class:`LLMProvider` implementation.
+
+    Declares document support so attachment routing/dispatch (v0.7 Scope §6.2
+    amendment) can be exercised end-to-end without a real provider; the fake
+    records attachment digests in its structured output so tests can assert
+    the adapter received exactly the resolved attachment set.
+    """
 
     provider_id = "fake"
     supports_structured_output = True
+    supports_documents = True
 
     def __init__(self) -> None:
         self.requests: list[ProviderRequest] = []
@@ -90,6 +97,7 @@ class FakeLLMProvider(LLMProvider):
                     "task": request.task,
                     "prompt_hash": _deterministic_hash(request.prompt)[:16],
                     "variables": dict(sorted(request.metadata.items())),
+                    "attachments": [attachment.sha256_digest for attachment in request.attachments],
                 }
             content = json.dumps(structured, sort_keys=True)
         else:

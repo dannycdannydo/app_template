@@ -433,3 +433,63 @@ def test_settings_have_no_gemini_api_key_field() -> None:
 
     assert "gemini_api_key" not in Settings.model_fields
     assert "ai_gemini_api_key" not in Settings.model_fields
+
+
+# --- v0.7 attachment amendment: truthful document-support declarations ---
+
+
+def test_provider_document_support_declarations_are_truthful(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Adapters declare the modalities they actually support (ADR-0017).
+
+    DeepSeek rejects attachments and the local adapter has no reviewed
+    document capability yet, so both must declare ``supports_documents=False``.
+    OpenAI/Azure, Anthropic and Vertex gain inline mapping in Scope §6.3; until
+    that mapping exists they must not claim document support either, or the
+    service would dispatch attachments an adapter silently drops.
+    """
+    monkeypatch.setattr("app.ai.providers.vertex.google_auth_default", _fake_google_auth)
+    assert DeepSeekAdapter(api_key="ds-test").supports_documents is False
+    assert (
+        LocalOpenAICompatibleAdapter(base_url="http://127.0.0.1:11434/v1").supports_documents
+        is False
+    )
+    assert OpenAIAdapter(api_key="sk-test").supports_documents is False
+    assert (
+        AzureOpenAIAdapter(
+            endpoint="https://my-resource.openai.azure.com",
+            api_key="az-test",
+            api_version="2024-08-01-preview",
+        ).supports_documents
+        is False
+    )
+    assert AnthropicAdapter(api_key="ant-test").supports_documents is False
+    assert (
+        VertexAIAdapter(
+            project="demo-project",
+            location="us-central1",
+            client=_client(_empty_response_handler),
+        ).supports_documents
+        is False
+    )
+
+
+def test_provider_request_carries_bounded_attachments() -> None:
+    from app.ai.attachments import Attachment
+    from app.ai.providers.base import ProviderRequest
+
+    request = _request()
+    assert request.attachments == []
+
+    attachment = Attachment(
+        display_name="lease.pdf", mime_type="application/pdf", content=b"%PDF-1.7 fixture"
+    )
+    with_attachments = ProviderRequest(
+        task=request.task,
+        model=request.model,
+        prompt=request.prompt,
+        attachments=[attachment],
+    )
+    assert with_attachments.attachments == [attachment]
+    assert with_attachments.attachments[0].sha256_digest
