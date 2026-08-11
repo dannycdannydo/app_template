@@ -90,5 +90,26 @@ class ObjectStorage(ABC):
         """Permanently remove one object from the provider; idempotent."""
 
     @abstractmethod
+    async def list_objects(
+        self,
+        prefix: str,
+        *,
+        limit: int = 1000,
+        start_after: str | None = None,
+    ) -> list[ObjectInfo]:
+        """Return up to ``limit`` objects whose key starts with ``prefix``.
+
+        The AI retention job uses this to sweep orphaned analyse-only objects
+        from the organisation-scoped AI scratch namespace (v0.7 Scope §6.5):
+        listed metadata carries the provider's ``last_modified`` so the sweep
+        can age them out without storing a registry of scratch keys. The
+        result is bounded by ``limit`` and pages with ``start_after`` — the
+        exclusive lexicographic marker of the last key the caller already
+        processed — so the caller can sweep a namespace of any size one page
+        at a time without re-reading fresh objects forever. Keys stay opaque
+        strings.
+        """
+
+    @abstractmethod
     async def ensure_bucket(self) -> None:
         """Create the configured bucket when missing (lazy, idempotent)."""

@@ -12,6 +12,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai.persistence.service import create_default_settings
 from app.core.exceptions import APIError
 from app.modules.audit.service import ACTION_ORGANISATION_CREATED, record_event
 from app.modules.organisations.models import (
@@ -55,6 +56,11 @@ async def create_organisation(
     await session.flush()
 
     session.add(MembershipRole(membership_id=membership.id, role_id=owner_role.id))
+    # AI is default-off for every new organisation (v0.7 Scope §6.5, BP §27): the
+    # policy row is created inside this same transaction so the
+    # one-row-per-organisation invariant holds from the moment the
+    # organisation exists.
+    await create_default_settings(session, organisation_id=organisation.id)
     await record_event(
         session,
         organisation_id=organisation.id,

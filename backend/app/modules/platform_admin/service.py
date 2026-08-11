@@ -36,6 +36,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai.persistence.service import create_default_settings
 from app.core.config import get_settings
 from app.core.exceptions import BadRequestError, NotFoundError, ServiceUnavailableError
 from app.core.security import UserProfileClient
@@ -108,6 +109,11 @@ async def create_platform_organisation(
         external_id=str(organisation.id),
     )
     organisation.workos_organisation_id = workos_organisation.id
+
+    # AI is default-off for every new organisation (v0.7 Scope §6.5, BP §27): the
+    # policy row is created in the same transaction as the organisation and
+    # its WorkOS mapping.
+    await create_default_settings(session, organisation_id=organisation.id)
 
     await record_event(
         session,
@@ -376,6 +382,11 @@ async def _ensure_bootstrap_organisation(session: AsyncSession, user: User) -> N
             resource_id=str(organisation.id),
             metadata={"name": org_name, "source": "platform_bootstrap"},
         )
+        # AI is default-off for every new organisation (v0.7 Scope §6.5, BP
+        # §27): the policy row is created inside this same transaction so the
+        # one-row-per-organisation invariant holds on every production
+        # organisation-creation path, including the bootstrap.
+        await create_default_settings(session, organisation_id=organisation.id)
 
     membership = OrganisationMembership(
         user_id=user.id,

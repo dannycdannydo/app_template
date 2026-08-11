@@ -189,11 +189,13 @@ class S3Storage(ObjectStorage):
         # application code, which only compares it for equality (Scope §6.3).
         etag = response.get("ETag")
         checksum = etag.strip('"') if isinstance(etag, str) else None
+        last_modified = response.get("LastModified")
         return ObjectInfo(
             object_key=object_key,
             size_bytes=int(response.get("ContentLength") or 0),
             content_type=response.get("ContentType"),
             checksum=checksum,
+            last_modified=last_modified,
         )
 
     async def read_object(self, object_key: str, *, max_bytes: int | None = None) -> bytes:
@@ -251,6 +253,59 @@ class S3Storage(ObjectStorage):
             # report it as an error instead of returning the usual 204.
             if _error_code(exc) not in _MISSING_OBJECT_CODES:
                 raise
+
+    async def list_objects(
+        self,
+        prefix: str,
+        *,
+        limit: int = 1000,
+        start_after: str | None = None,
+    ) -> list[ObjectInfo]:
+        """Return up to ``limit`` objects under a prefix (v0.7 Scope §6.5).
+
+        Used by the AI retention job to sweep orphaned analyse-only scratch
+        objects: each result carries the provider's ``LastModified`` so the
+        sweep can age them out. The listing is bounded by ``MaxKeys`` and
+        pages with ``StartAfter`` (the exclusive last-key marker), so the
+        sweep can cover a namespace of any size without re-reading fresh
+        objects (the fake adapter sorts lexicographically, mirroring S3's
+        listing order).
+        """
+        parameters: dict[str, Any] = {
+            "Bucket": self._bucket,
+            "Prefix": prefix,
+            "MaxKeys": limit,
+        }
+        # Botocore rejects ``None`` for StartAfter. Omit the optional parameter
+        # entirely on the first page and add it only for continuation pages.
+        if start_after is not None:
+            parameters["StartAfter"] = start_after
+        response = await asyncio.to_thread(self._client.list_objects_v2, **parameters)
+        # list_objects_v2 payloads are provider typed (botocore dict); every
+        # field is read defensively like head_object, and the Contents list is
+        # explicitly boxed so a missing key is an empty listing.
+        raw_contents = response.get("Contents")
+        contents = (
+            cast(list[dict[str, Any]], raw_contents) if isinstance(raw_contents, list) else []
+        )
+        result: list[ObjectInfo] = []
+        for item in contents:
+            key = item.get("Key")
+            if not isinstance(key, str):
+                continue
+            etag = item.get("ETag")
+            checksum = etag.strip('"') if isinstance(etag, str) else None
+            size_raw = item.get("Size")
+            result.append(
+                ObjectInfo(
+                    object_key=key,
+                    size_bytes=int(size_raw or 0),
+                    content_type=None,  # the listing does not carry content types
+                    checksum=checksum,
+                    last_modified=item.get("LastModified"),
+                )
+            )
+        return result
 
     async def ensure_bucket(self) -> None:
         if self._bucket_ensured:

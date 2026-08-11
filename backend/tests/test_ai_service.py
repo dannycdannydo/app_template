@@ -91,6 +91,7 @@ def _service(
         model_registry=registries.models,
         provider=provider,
         schema_resolver=_resolver,
+        allow_unmanaged_execution=True,
     )
     return service, provider
 
@@ -481,6 +482,7 @@ async def test_execute_rejects_attachments_when_provider_lacks_document_support(
         model_registry=registries.models,
         provider=_NoDocumentsProvider(),
         schema_resolver=_resolver,
+        allow_unmanaged_execution=True,
     )
 
     with pytest.raises(ModelNotAvailableError, match="does not support document"):

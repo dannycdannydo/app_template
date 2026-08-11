@@ -132,6 +132,7 @@ async def test_checked_in_demo_task_runs_through_service() -> None:
         prompt_registry=bundle.prompts,
         model_registry=bundle.models,
         provider=FakeLLMProvider(),
+        allow_unmanaged_execution=True,
     )
     fixture_path = (
         Path(__file__).parents[1]

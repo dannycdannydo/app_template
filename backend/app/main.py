@@ -25,6 +25,7 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.responses import Response
 
+from app.ai.persistence.router import router as ai_settings_router
 from app.ai.registry import load_registry_bundle
 from app.api.health import router as health_router
 from app.broker import build_broker
@@ -291,6 +292,7 @@ def create_app() -> FastAPI:
     app.include_router(notifications_router)
     app.include_router(invitations_router)
     app.include_router(feature_flags_router)
+    app.include_router(ai_settings_router)
     app.include_router(webhooks_router)
     return app
 

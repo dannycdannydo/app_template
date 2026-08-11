@@ -247,6 +247,22 @@ async def test_delete_object_reports_other_errors() -> None:
         await storage.delete_object(_KEY)
 
 
+async def test_list_objects_omits_empty_start_after() -> None:
+    """Botocore receives StartAfter only on continuation pages."""
+
+    client = Mock()
+    client.list_objects_v2.return_value = {}
+    storage = _storage_with_mocked_clients(client=client)
+
+    await storage.list_objects("prefix/")
+    await storage.list_objects("prefix/", start_after="prefix/last")
+
+    first_parameters = client.list_objects_v2.call_args_list[0].kwargs
+    second_parameters = client.list_objects_v2.call_args_list[1].kwargs
+    assert "StartAfter" not in first_parameters
+    assert second_parameters["StartAfter"] == "prefix/last"
+
+
 async def test_ensure_bucket_creates_and_is_idempotent() -> None:
     client = Mock()
     storage = _make_storage()

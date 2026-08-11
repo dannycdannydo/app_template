@@ -10,6 +10,10 @@ parameter_defaults:
   temperature: 0
 output_schema: app.ai.tasks.schemas.DocumentClassificationResult
 declares_text_result: false
+# v0.7 Scope §2 retention choice: the demo task does not opt into retaining
+# output content — its ai_outputs record stores references/digests only unless
+# a derived application deliberately enables this knob.
+retains_output_content: false
 retry_policy:
   max_attempts: 3
   repair_attempts: 1

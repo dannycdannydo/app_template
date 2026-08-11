@@ -23,6 +23,7 @@ class Base(DeclarativeBase):
 # Model modules are imported here, after Base is defined, so their tables are
 # registered on Base.metadata for Alembic autogenerate. They cannot be imported
 # at the top of this file: every model subclasses Base.
+import app.ai.persistence.models  # pyright: ignore[reportUnusedImport]
 import app.modules.audit.models  # pyright: ignore[reportUnusedImport]
 import app.modules.feature_flags.models  # pyright: ignore[reportUnusedImport]
 import app.modules.files.models  # pyright: ignore[reportUnusedImport]
