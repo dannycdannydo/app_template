@@ -11,11 +11,13 @@ live here: the required ``max_tokens`` field, block-based content responses,
 
 from __future__ import annotations
 
+import base64
 from typing import Any, cast
 
 import httpx
 
-from app.ai.errors import ProviderResponseError
+from app.ai.attachments import ANTHROPIC_INLINE_ATTACHMENT_MIME_TYPES, Attachment
+from app.ai.errors import AIInputValidationError, ProviderResponseError
 from app.ai.providers.base import LLMProvider, ProviderRequest, ProviderResponse
 from app.ai.providers.http_transport import (
     FINISH_CONTENT_FILTER,
@@ -35,6 +37,49 @@ _API_VERSION = "2023-06-01"
 # Anthropic reports "overloaded" as HTTP 529, a transient retryable state.
 _UNAVAILABLE_STATUSES = frozenset({500, 502, 503, 504, 529})
 _JSON_INSTRUCTION = "\n\nRespond with a single JSON object."
+# Anthropic inference geography is a top-level ``inference_geo`` field on
+# ``POST /v1/messages`` (never a header); only ``global`` and ``us`` exist and
+# only Claude 4.6+ models accept the field, so the registry pins a compatible
+# model (v0.7 Scope §6.3 regional amendment; official contract:
+# https://platform.claude.com/docs/en/manage-claude/data-residency).
+
+
+# Native inline attachment blocks (v0.7 Scope §6.3 attachment amendment,
+# ADR-0017): images map to base64 ``image`` blocks and documents to base64
+# ``document`` blocks. Anthropic's base64 ``document`` source carries PDF
+# only; plain-text formats need a different representation and are rejected
+# before dispatch by the adapter's MIME guard (official contract:
+# https://platform.claude.com/docs/en/build-with-claude/pdf-support). Bytes
+# stay in-memory and never reference storage credentials, signed URLs or
+# object paths.
+def _anthropic_attachment_blocks(attachments: list[Attachment]) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = []
+    for attachment in attachments:
+        encoded = base64.b64encode(attachment.content).decode("ascii")
+        if attachment.is_image:
+            blocks.append(
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": attachment.mime_type,
+                        "data": encoded,
+                    },
+                }
+            )
+        else:
+            blocks.append(
+                {
+                    "type": "document",
+                    "title": attachment.display_name,
+                    "source": {
+                        "type": "base64",
+                        "media_type": attachment.mime_type,
+                        "data": encoded,
+                    },
+                }
+            )
+    return blocks
 
 
 class AnthropicAdapter(LLMProvider):
@@ -42,6 +87,8 @@ class AnthropicAdapter(LLMProvider):
 
     provider_id = "anthropic"
     supports_structured_output = True
+    supports_documents = True
+    supported_attachment_mime_types = ANTHROPIC_INLINE_ATTACHMENT_MIME_TYPES
     default_base_url = "https://api.anthropic.com"
 
     def __init__(
@@ -51,10 +98,14 @@ class AnthropicAdapter(LLMProvider):
         base_url: str = "",
         timeout_seconds: float = 60.0,
         client: httpx.AsyncClient | None = None,
+        inference_geography: str = "",
     ) -> None:
         self._base_url = (base_url or self.default_base_url).rstrip("/")
         self._api_key = api_key
         self._client = client or httpx.AsyncClient(timeout=timeout_seconds)
+        # Validated inference geography (v0.7 Scope §6.3 regional amendment);
+        # empty means the provider default (global) and sends no field.
+        self.region = inference_geography
 
     def _auth_headers(self) -> dict[str, str]:
         return {
@@ -63,18 +114,46 @@ class AnthropicAdapter(LLMProvider):
         }
 
     def _build_payload(self, request: ProviderRequest) -> dict[str, Any]:
-        content = request.prompt + _JSON_INSTRUCTION if request.output_schema else request.prompt
+        if request.attachments:
+            # Pre-dispatch MIME guard (v0.7 Scope §6.3 attachment amendment):
+            # Anthropic's base64 document source carries PDF only, so a text
+            # attachment that the template allowlist permits globally must
+            # fail here before any HTTP dispatch.
+            unsupported = sorted(
+                {
+                    attachment.mime_type
+                    for attachment in request.attachments
+                    if attachment.mime_type not in self.supported_attachment_mime_types
+                }
+            )
+            if unsupported:
+                raise AIInputValidationError(
+                    f"provider {self.provider_id!r} does not support attachment MIME "
+                    f"type(s): {', '.join(unsupported)}"
+                )
+        text = request.prompt + _JSON_INSTRUCTION if request.output_schema else request.prompt
+        if request.attachments:
+            content: Any = [
+                {"type": "text", "text": text},
+                *_anthropic_attachment_blocks(list(request.attachments)),
+            ]
+        else:
+            content = text
         payload: dict[str, Any] = {
             "model": request.model,
             "max_tokens": request.max_tokens or _DEFAULT_MAX_TOKENS,
             "messages": [{"role": "user", "content": content}],
         }
+        if self.region:
+            # Top-level field, not a header (official contract): requests
+            # must use a Claude 4.6+ model, which the registry pins.
+            payload["inference_geo"] = self.region
         if request.temperature is not None:
             payload["temperature"] = request.temperature
         return payload
 
     def _response_model(self, data: dict[str, Any], request: ProviderRequest) -> str:
-        # Anthropic echoes the concrete model id (e.g. "claude-3-5-haiku-20241022")
+        # Anthropic echoes the concrete model id (e.g. "claude-sonnet-4-6-2026…")
         # even when the request used an alias; the alias from the registry is
         # the reviewed routing fact and is reported as such.
         return request.model
@@ -101,8 +180,13 @@ class AnthropicAdapter(LLMProvider):
                 input_tokens=int(usage_data.get("input_tokens") or 0),
                 output_tokens=int(usage_data.get("output_tokens") or 0),
             )
+            # The response reports where inference actually ran; prefer that
+            # observed fact over the configured geography for routing metadata
+            # (v0.7 Scope §6.3 regional amendment).
+            reported_region = str(usage_data.get("inference_geo") or "")
         else:
             usage = TokenUsage(input_tokens=0, output_tokens=0)
+            reported_region = ""
         stop_reason = str(data.get("stop_reason") or "").lower()
         if stop_reason in ("end_turn", "stop_sequence"):
             finish_reason = FINISH_STOP
@@ -119,6 +203,7 @@ class AnthropicAdapter(LLMProvider):
             usage=usage,
             latency_ms=latency_ms,
             finish_reason=finish_reason,
+            region=reported_region or self.region,
         )
 
     async def complete(self, request: ProviderRequest) -> ProviderResponse:

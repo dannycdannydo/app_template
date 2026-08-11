@@ -720,7 +720,9 @@ def test_ai_settings_defaults() -> None:
     assert settings.ai_http_timeout_seconds == 60.0
     assert settings.ai_openai_api_key == ""
     assert settings.ai_openai_base_url == ""
+    assert settings.ai_openai_region == ""
     assert settings.ai_anthropic_api_key == ""
+    assert settings.ai_anthropic_inference_geography == ""
     assert settings.ai_deepseek_base_url == "https://api.deepseek.com"
     assert settings.ai_azure_openai_api_version == "2024-08-01-preview"
     assert settings.ai_vertex_project == ""
@@ -757,6 +759,91 @@ def test_ai_http_timeout_is_bounded() -> None:
             database_url="postgresql+asyncpg://x",
             ai_http_timeout_seconds=601,
         )
+
+
+def test_ai_openai_region_is_validated() -> None:
+    """OpenAI regions are explicit, validated deployment configuration; a typo
+    can never silently route data to an unintended processing location (v0.7
+    Scope §6.3 regional amendment, ADR-0017)."""
+    for invalid in ("mars", "US-WEST", "eu-west-1", " "):
+        with pytest.raises(ValidationError, match="ai_openai_region"):
+            Settings(
+                app_env="test",
+                database_url="postgresql+asyncpg://x",
+                ai_openai_region=invalid,
+            )
+    settings = Settings(
+        app_env="test",
+        database_url="postgresql+asyncpg://x",
+        ai_openai_region="eu",
+    )
+    assert settings.ai_openai_region == "eu"
+    assert (
+        Settings(
+            app_env="test",
+            database_url="postgresql+asyncpg://x",
+        ).ai_openai_region
+        == ""
+    )
+
+
+def test_ai_openai_region_conflicts_with_base_url() -> None:
+    """A regional label with a non-regional endpoint is a configuration
+    conflict: requests must be routed through the matching regional domain,
+    never labelled regional while going to the global endpoint (v0.7 Scope
+    §6.3 regional amendment)."""
+    for region, wrong_host in (("eu", "api.openai.com"), ("us", "eu.api.openai.com")):
+        with pytest.raises(ValidationError, match="conflicts with ai_openai_region"):
+            Settings(
+                app_env="test",
+                database_url="postgresql+asyncpg://x",
+                ai_openai_region=region,
+                ai_openai_base_url=f"https://{wrong_host}/v1",
+            )
+    settings = Settings(
+        app_env="test",
+        database_url="postgresql+asyncpg://x",
+        ai_openai_region="eu",
+        ai_openai_base_url="https://eu.api.openai.com/v1",
+    )
+    assert settings.ai_openai_base_url == "https://eu.api.openai.com/v1"
+
+
+def test_ai_anthropic_inference_geography_is_validated() -> None:
+    """Anthropic inference geographies are explicit, validated configuration;
+    only ``global`` and ``us`` exist and an unsupported value fails fast so
+    residency is never misconfigured (v0.7 Scope §6.3 regional amendment,
+    ADR-0017)."""
+    for invalid in ("apac", "europe", "eu", "US-EAST", " "):
+        with pytest.raises(ValidationError, match="ai_anthropic_inference_geography"):
+            Settings(
+                app_env="test",
+                database_url="postgresql+asyncpg://x",
+                ai_anthropic_inference_geography=invalid,
+            )
+    assert (
+        Settings(
+            app_env="test",
+            database_url="postgresql+asyncpg://x",
+            ai_anthropic_inference_geography="us",
+        ).ai_anthropic_inference_geography
+        == "us"
+    )
+    assert (
+        Settings(
+            app_env="test",
+            database_url="postgresql+asyncpg://x",
+            ai_anthropic_inference_geography="global",
+        ).ai_anthropic_inference_geography
+        == "global"
+    )
+    assert (
+        Settings(
+            app_env="test",
+            database_url="postgresql+asyncpg://x",
+        ).ai_anthropic_inference_geography
+        == ""
+    )
 
 
 def test_enabled_ai_provider_requires_configuration() -> None:

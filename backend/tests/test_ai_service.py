@@ -18,7 +18,12 @@ import pytest
 from pydantic import BaseModel, Field
 from tests.ai_test_helpers import InMemoryPromptRegistry, InMemoryRegistries
 
-from app.ai.attachments import MAX_ATTACHMENT_BYTES, MAX_TOTAL_ATTACHMENT_BYTES, Attachment
+from app.ai.attachments import (
+    ALLOWED_ATTACHMENT_MIME_TYPES,
+    MAX_ATTACHMENT_BYTES,
+    MAX_TOTAL_ATTACHMENT_BYTES,
+    Attachment,
+)
 from app.ai.errors import (
     AIInputValidationError,
     ModelNotAvailableError,
@@ -123,6 +128,17 @@ async def test_execute_is_deterministic_for_the_same_input() -> None:
     assert first.usage == second.usage
     assert first.cost == second.cost
     assert first.routing == second.routing
+
+
+async def test_routing_metadata_records_the_configured_region() -> None:
+    """The adapter's configured region is recorded in routing metadata
+    (v0.7 Scope §6.3 regional amendment) without leaking content."""
+    provider = FakeLLMProvider()
+    provider.region = "eu"
+    service, _ = _service(provider=provider)
+    result = await service.execute(_request())
+    assert result.routing.region == "eu"
+    assert result.routing.provider == "fake"
 
 
 async def test_unknown_task_raises_task_not_found() -> None:
@@ -376,6 +392,7 @@ class _DocumentModelRegistry(ModelRegistry):
             supported_parameters=[],
             max_attachment_bytes=MAX_ATTACHMENT_BYTES,
             max_total_attachment_bytes=MAX_TOTAL_ATTACHMENT_BYTES,
+            attachment_mime_types=sorted(ALLOWED_ATTACHMENT_MIME_TYPES),
             pricing=PricingBasis(
                 currency="USD",
                 input_price_per_million_tokens=Decimal("1.00"),

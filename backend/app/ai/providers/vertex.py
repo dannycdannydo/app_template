@@ -18,6 +18,7 @@ scope (Scope §3).
 
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 from typing import Any, cast
 
@@ -32,6 +33,7 @@ from google.auth import default as google_auth_default  # pyright: ignore[report
 from google.auth.transport import urllib3 as google_auth_urllib3
 from google.oauth2 import service_account  # pyright: ignore[reportUnknownVariableType]
 
+from app.ai.attachments import VERTEX_INLINE_ATTACHMENT_MIME_TYPES, Attachment
 from app.ai.errors import AIInputValidationError, ProviderResponseError
 from app.ai.providers.base import LLMProvider, ProviderRequest, ProviderResponse
 from app.ai.providers.http_transport import (
@@ -65,11 +67,33 @@ def _finish_reason(reason: str) -> str:
     return FINISH_UNKNOWN
 
 
+# Native inline attachment parts (v0.7 Scope §6.3 attachment amendment,
+# ADR-0017): Vertex ``generateContent`` accepts base64 ``inlineData`` parts
+# (REST JSON naming: ``inlineData.mimeType`` / ``inlineData.data`` — never the
+# proto ``inline_data``/``mime_type`` keys) for images, PDF and plain text.
+# Bytes stay in memory and no storage credential, signed URL or object path
+# ever reaches the adapter.
+def _vertex_inline_parts(attachments: list[Attachment]) -> list[dict[str, Any]]:
+    parts: list[dict[str, Any]] = []
+    for attachment in attachments:
+        parts.append(
+            {
+                "inlineData": {
+                    "mimeType": attachment.mime_type,
+                    "data": base64.b64encode(attachment.content).decode("ascii"),
+                }
+            }
+        )
+    return parts
+
+
 class VertexAIAdapter(LLMProvider):
     """Vertex AI Gemini ``generateContent`` adapter."""
 
     provider_id = "vertex"
     supports_structured_output = True
+    supports_documents = True
+    supported_attachment_mime_types = VERTEX_INLINE_ATTACHMENT_MIME_TYPES
 
     def __init__(
         self,
@@ -86,6 +110,9 @@ class VertexAIAdapter(LLMProvider):
             raise AIInputValidationError("vertex location is required")
         self._project = project
         self._location = location
+        # The location is the declared data-residency region (ADR-0018) and is
+        # reported in ``ProviderResponse.region`` for routing metadata.
+        self.region = location
         self._credentials: Any = self._load_credentials(credentials_path)
         self._client = client or httpx.AsyncClient(timeout=timeout_seconds)
 
@@ -129,6 +156,22 @@ class VertexAIAdapter(LLMProvider):
         )
 
     def _build_payload(self, request: ProviderRequest) -> dict[str, Any]:
+        if request.attachments:
+            # Pre-dispatch MIME guard (v0.7 Scope §6.3 attachment amendment):
+            # Vertex ``inlineData`` carries images, PDF and plain text; a MIME
+            # type outside that set fails here before any HTTP dispatch.
+            unsupported = sorted(
+                {
+                    attachment.mime_type
+                    for attachment in request.attachments
+                    if attachment.mime_type not in self.supported_attachment_mime_types
+                }
+            )
+            if unsupported:
+                raise AIInputValidationError(
+                    f"provider {self.provider_id!r} does not support attachment MIME "
+                    f"type(s): {', '.join(unsupported)}"
+                )
         generation_config: dict[str, Any] = {}
         if request.max_tokens is not None:
             generation_config["maxOutputTokens"] = request.max_tokens
@@ -136,9 +179,10 @@ class VertexAIAdapter(LLMProvider):
             generation_config["temperature"] = request.temperature
         if request.output_schema:
             generation_config["responseMimeType"] = "application/json"
-        payload: dict[str, Any] = {
-            "contents": [{"role": "user", "parts": [{"text": request.prompt}]}]
-        }
+        parts: list[dict[str, Any]] = [{"text": request.prompt}]
+        if request.attachments:
+            parts.extend(_vertex_inline_parts(list(request.attachments)))
+        payload: dict[str, Any] = {"contents": [{"role": "user", "parts": parts}]}
         if generation_config:
             payload["generationConfig"] = generation_config
         return payload
@@ -186,6 +230,7 @@ class VertexAIAdapter(LLMProvider):
             usage=usage,
             latency_ms=latency_ms,
             finish_reason=_finish_reason(str(candidate.get("finishReason") or "")),
+            region=self.region,
         )
 
     async def complete(self, request: ProviderRequest) -> ProviderResponse:

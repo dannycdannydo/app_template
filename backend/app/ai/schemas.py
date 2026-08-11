@@ -124,6 +124,10 @@ class RoutingMetadata(BaseModel):
     ``reason`` is the deterministic router's decision summary (Scope §6.2:
     capability match, organisation override, configured fallback); it is
     stored and audited but must never contain prompt or document content.
+    ``region`` is the adapter's configured deployment region (Scope §6.3
+    regional amendment) — empty where the provider has no template-controlled
+    pinning — so deployments can verify a request never silently changed
+    region.
     """
 
     task: str
@@ -133,6 +137,7 @@ class RoutingMetadata(BaseModel):
     prompt_version: int
     reason: str = ""
     fallback_used: bool = False
+    region: str = ""
 
 
 class AIResult(BaseModel):

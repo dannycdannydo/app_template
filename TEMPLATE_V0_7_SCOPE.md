@@ -150,8 +150,8 @@ Check items off only after review. Work is ordered so contracts and safety contr
 - [x] `VertexAIProvider` for Gemini through the Vertex AI API only; settings for Google Cloud project/location and approved server credentials; no `GEMINI_API_KEY`, Google AI Studio or developer-API endpoint implementation
 - [x] `LocalOpenAICompatibleProvider` for privately reachable Ollama/vLLM/SGLang-compatible servers, with explicit TLS/network/allowlist safeguards; fake remains the test default
 - [x] Typed `AI_*` settings, provider factories and production fail-fast validation; pin/document dependencies and add opt-in non-production adapter-contract CI jobs
-- [ ] v0.7 attachment amendment: add provider-neutral `Attachment` and inline mappings for supported OpenAI/Azure, Anthropic and Vertex requests; local/DeepSeek reject unsupported documents and no adapter receives a private storage credential or signed URL
-- [ ] v0.7 regional amendment: add validated OpenAI region and Anthropic inference-geography settings, retain endpoint-declared Azure and location-declared Vertex regions, document providers without pinning, and prohibit implicit cross-region fallback
+- [x] v0.7 attachment amendment: add provider-neutral `Attachment` and inline mappings for supported OpenAI/Azure, Anthropic and Vertex requests; local/DeepSeek reject unsupported documents and no adapter receives a private storage credential or signed URL
+- [x] v0.7 regional amendment: add validated OpenAI region and Anthropic inference-geography settings, retain endpoint-declared Azure and location-declared Vertex regions, document providers without pinning, and prohibit implicit cross-region fallback
 
 ## 6.4 Structured Outputs, Retry and Safety Controls
 

@@ -7,6 +7,12 @@ rules in :mod:`app.core.endpoint_safety` are enforced here again
 public HTTP endpoint; the typed settings validator applies the identical rule
 (BP §27). This adapter is backend-only by construction — no browser or
 frontend code ever sees its URL or key.
+
+Two boundaries are declared truthfully rather than faked (attachment and
+regional amendments, v0.7 Scope §6.3): local has no reviewed document
+capability, so ``supports_documents`` stays False and the shared payload
+builder fails an attachment-bearing request before dispatch; and it inherits
+its operator-controlled location, so it reports no template-controlled region.
 """
 
 from __future__ import annotations

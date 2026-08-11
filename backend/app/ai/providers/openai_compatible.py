@@ -19,12 +19,14 @@ against the declared Pydantic contract.
 
 from __future__ import annotations
 
+import base64
 import json
 from typing import Any, cast
 
 import httpx
 
-from app.ai.errors import ProviderResponseError
+from app.ai.attachments import Attachment
+from app.ai.errors import AIInputValidationError, ProviderResponseError
 from app.ai.providers.base import LLMProvider, ProviderRequest, ProviderResponse
 from app.ai.providers.http_transport import (
     FINISH_CONTENT_FILTER,
@@ -40,6 +42,39 @@ from app.ai.schemas import TokenUsage
 # rendered task prompt is a reviewed asset that must not depend on it, so the
 # adapter appends this explicit instruction when structured output is asked.
 _JSON_INSTRUCTION = "\n\nRespond with a single JSON object."
+
+
+# Native inline attachment forms (v0.7 Scope §6.3 attachment amendment,
+# ADR-0017). OpenAI/Azure chat-completions accept images as data-URI
+# ``image_url`` parts and documents as ``type=file`` parts carrying a
+# data-URI ``file_data`` string; both stay in-memory base64 and never
+# reference storage credentials, signed URLs or object paths. ``input_file``
+# is the Responses API form and is deliberately not used here (official
+# contract: https://developers.openai.com/api/docs/guides/file-inputs).
+def _openai_attachment_parts(
+    attachments: list[Attachment],
+) -> list[dict[str, Any]]:
+    parts: list[dict[str, Any]] = []
+    for attachment in attachments:
+        encoded = base64.b64encode(attachment.content).decode("ascii")
+        if attachment.is_image:
+            parts.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{attachment.mime_type};base64,{encoded}"},
+                }
+            )
+        else:
+            parts.append(
+                {
+                    "type": "file",
+                    "file": {
+                        "filename": attachment.display_name,
+                        "file_data": f"data:{attachment.mime_type};base64,{encoded}",
+                    },
+                }
+            )
+    return parts
 
 
 def _map_finish_reason(reason: Any) -> str:
@@ -90,10 +125,14 @@ class OpenAICompatibleAdapter(LLMProvider):
         api_key: str = "",
         timeout_seconds: float = 60.0,
         client: httpx.AsyncClient | None = None,
+        region: str = "",
     ) -> None:
         self._base_url = (base_url or self.default_base_url).rstrip("/")
         self._api_key = api_key
         self._client = client or httpx.AsyncClient(timeout=timeout_seconds)
+        # Configured deployment region (v0.7 Scope §6.3 regional amendment);
+        # reported in ``ProviderResponse.region`` for routing metadata.
+        self.region = region
 
     def _chat_url(self, request: ProviderRequest) -> str:
         return f"{self._base_url}/chat/completions"
@@ -104,7 +143,44 @@ class OpenAICompatibleAdapter(LLMProvider):
         return {"Authorization": f"Bearer {self._api_key}"}
 
     def _build_payload(self, request: ProviderRequest) -> dict[str, Any]:
-        content = request.prompt + _JSON_INSTRUCTION if request.output_schema else request.prompt
+        if request.attachments and not self.supports_documents:
+            # Defense in depth: the service/router already reject attachments
+            # for adapters without document support (Scope §6.3), but a directly
+            # constructed adapter must fail before dispatch rather than silently
+            # drop the input (ADR-0017 "no fake interchangeability").
+            raise AIInputValidationError(
+                f"provider {self.provider_id!r} does not support document attachments"
+            )
+        if request.attachments:
+            # Pre-dispatch MIME guard (v0.7 Scope §6.3 attachment amendment):
+            # even a directly constructed adapter fails closed on a MIME type
+            # its native wire format cannot carry, instead of sending an
+            # invalid part to the provider.
+            unsupported = sorted(
+                {
+                    attachment.mime_type
+                    for attachment in request.attachments
+                    if attachment.mime_type not in self.supported_attachment_mime_types
+                }
+            )
+            if unsupported:
+                raise AIInputValidationError(
+                    f"provider {self.provider_id!r} does not support attachment MIME "
+                    f"type(s): {', '.join(unsupported)}"
+                )
+        content: str | list[dict[str, Any]]
+        if request.attachments:
+            content = [
+                {
+                    "type": "text",
+                    "text": request.prompt + (_JSON_INSTRUCTION if request.output_schema else ""),
+                },
+                *_openai_attachment_parts(list(request.attachments)),
+            ]
+        else:
+            content = (
+                request.prompt + _JSON_INSTRUCTION if request.output_schema else request.prompt
+            )
         payload: dict[str, Any] = {
             "model": request.model,
             "messages": [{"role": "user", "content": content}],
@@ -157,6 +233,7 @@ class OpenAICompatibleAdapter(LLMProvider):
             usage=usage,
             latency_ms=latency_ms,
             finish_reason=_map_finish_reason(choice.get("finish_reason")),
+            region=self.region,
         )
 
     async def complete(self, request: ProviderRequest) -> ProviderResponse:

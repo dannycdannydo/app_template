@@ -15,6 +15,15 @@ models:
     priority: 0
     max_attachment_bytes: 5242880
     max_total_attachment_bytes: 10485760
+    attachment_mime_types:
+      - application/json
+      - application/pdf
+      - image/jpeg
+      - image/png
+      - image/webp
+      - text/csv
+      - text/markdown
+      - text/plain
     pricing:
       currency: USD
       input_price_per_million_tokens: "0"
@@ -62,6 +71,15 @@ models:
     priority: 1000
     max_attachment_bytes: 5242880
     max_total_attachment_bytes: 10485760
+    attachment_mime_types:
+      - application/json
+      - application/pdf
+      - image/jpeg
+      - image/png
+      - image/webp
+      - text/csv
+      - text/markdown
+      - text/plain
     pricing:
       currency: USD
       input_price_per_million_tokens: "0.15"
@@ -69,9 +87,15 @@ models:
       effective_date: 2026-08-10
       owner: Template maintainers
     available: true
-  - id: anthropic.claude-3-5-haiku
+  # Anthropic model pinned for the inference-geography contract (v0.7 Scope
+  # §6.3 regional amendment): only Claude 4.6+ models accept the top-level
+  # ``inference_geo`` field, so claude-3-5-haiku-latest would return 400 the
+  # moment the setting is used (official contract:
+  # https://platform.claude.com/docs/en/manage-claude/data-residency).
+  # claude-sonnet-4-6 is the economy-tier 4.6+ model in this template.
+  - id: anthropic.claude-sonnet-4-6
     provider: anthropic
-    model: claude-3-5-haiku-latest
+    model: claude-sonnet-4-6
     capabilities:
       - structured_output
       - documents
@@ -84,10 +108,15 @@ models:
     priority: 1000
     max_attachment_bytes: 5242880
     max_total_attachment_bytes: 10485760
+    attachment_mime_types:
+      - application/pdf
+      - image/jpeg
+      - image/png
+      - image/webp
     pricing:
       currency: USD
-      input_price_per_million_tokens: "0.80"
-      output_price_per_million_tokens: "4.00"
+      input_price_per_million_tokens: "3.00"
+      output_price_per_million_tokens: "15.00"
       effective_date: 2026-08-10
       owner: Template maintainers
     available: true
@@ -127,6 +156,15 @@ models:
     priority: 1000
     max_attachment_bytes: 5242880
     max_total_attachment_bytes: 10485760
+    attachment_mime_types:
+      - application/json
+      - application/pdf
+      - image/jpeg
+      - image/png
+      - image/webp
+      - text/csv
+      - text/markdown
+      - text/plain
     pricing:
       currency: USD
       input_price_per_million_tokens: "0.15"
@@ -151,6 +189,12 @@ models:
     priority: 1000
     max_attachment_bytes: 5242880
     max_total_attachment_bytes: 10485760
+    attachment_mime_types:
+      - application/pdf
+      - image/jpeg
+      - image/png
+      - image/webp
+      - text/plain
     pricing:
       currency: USD
       input_price_per_million_tokens: "0.10"

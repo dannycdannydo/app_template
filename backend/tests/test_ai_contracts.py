@@ -66,7 +66,7 @@ async def test_anthropic_live_contract() -> None:
         pytest.skip(
             "AI_CONTRACTS_ANTHROPIC_API_KEY not configured; skipping live Anthropic contract test"
         )
-    model = os.environ.get("AI_CONTRACTS_ANTHROPIC_MODEL", "claude-3-5-haiku-latest")
+    model = os.environ.get("AI_CONTRACTS_ANTHROPIC_MODEL", "claude-sonnet-4-6")
     await _probe(AnthropicAdapter(api_key=api_key), model)
 
 

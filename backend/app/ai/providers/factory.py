@@ -74,6 +74,7 @@ class ProviderFactory:
                 base_url=settings.ai_openai_base_url,
                 api_key=settings.ai_openai_api_key,
                 timeout_seconds=settings.ai_http_timeout_seconds,
+                region=settings.ai_openai_region,
             )
         if provider_id == "anthropic":
             self._require(settings.ai_anthropic_api_key, "anthropic", "AI_ANTHROPIC_API_KEY")
@@ -81,6 +82,7 @@ class ProviderFactory:
                 api_key=settings.ai_anthropic_api_key,
                 base_url=settings.ai_anthropic_base_url,
                 timeout_seconds=settings.ai_http_timeout_seconds,
+                inference_geography=settings.ai_anthropic_inference_geography,
             )
         if provider_id == "deepseek":
             self._require(settings.ai_deepseek_api_key, "deepseek", "AI_DEEPSEEK_API_KEY")
