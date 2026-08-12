@@ -49,6 +49,7 @@ from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
 from app.ai.schemas import CostEstimate, TokenUsage
+from app.ai.transfer import MAX_LARGE_ATTACHMENT_BYTES, TransferMode
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,14 @@ class OrganisationAIPolicy:
     ``None`` means no budget is configured; ``retention_policy_days`` ``None``
     means no retention deletion is scheduled (and, together with the task-level
     opt-in, no output content is retained).
+
+    v0.8 Scope §2.2 transfer policy: ``allowed_transfer_modes`` defaults to
+    ``inline`` only (default-deny for every organisation — a non-inline mode is
+    never eligible until a platform administrator explicitly enables it);
+    ``max_large_attachment_bytes`` ``None`` means the template ceiling
+    (50,000,000 bytes) applies unchanged, and a configured value tightens it.
+    ``AIService`` intersects these with the task/model declarations and the
+    provider contract before any external transfer (Scope §6.2).
     """
 
     enabled: bool
@@ -83,6 +92,16 @@ class OrganisationAIPolicy:
     model_override: str | None = None
     monthly_budget: Decimal | None = None
     retention_policy_days: int | None = None
+    allowed_transfer_modes: list[TransferMode] = field(
+        default_factory=lambda: [TransferMode.INLINE]
+    )
+    max_large_attachment_bytes: int | None = None
+
+    def effective_max_large_attachment_bytes(self) -> int:
+        """The organisation's large-attachment ceiling, defaulting to template."""
+        if self.max_large_attachment_bytes is None:
+            return MAX_LARGE_ATTACHMENT_BYTES
+        return self.max_large_attachment_bytes
 
 
 @runtime_checkable

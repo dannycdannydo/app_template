@@ -364,6 +364,70 @@ class Settings(BaseSettings):
         default="",
         description="Optional API key for the private local provider (vLLM deployments)",
     )
+    # v0.8 Scope §2.2/§6.2: deployment-level transfer-mode configuration.
+    # Non-inline modes are default-deny — an empty list means only the inline
+    # mode is deployed — and enabling one requires the supporting provider and
+    # configuration to be present (fail fast at startup, never at request
+    # time, BP §27). The aggregate inline threshold can never be configured
+    # above 5,000,000 bytes and the large-file ceiling can never exceed
+    # 50,000,000 bytes; the managed signed-URL TTL defaults to 900 seconds and
+    # is capped at 1,800; the Vertex staging bucket is user-provisioned and
+    # never created or configured by the application (Scope §2.2/§2.4).
+    ai_enabled_transfer_modes: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Non-inline AI transfer modes enabled at deployment level; empty "
+            "(the default) deploys inline only. Enabling a mode requires an "
+            "enabled provider whose reviewed contract supports it plus the "
+            "mode's configuration (v0.8 Scope §2.2)."
+        ),
+    )
+    ai_inline_aggregate_threshold_bytes: int = Field(
+        default=5_000_000,
+        ge=1,
+        le=5_000_000,
+        description=(
+            "Aggregate raw attachment byte threshold below which inline is the "
+            "only eligible mode; cannot be configured above 5,000,000 bytes "
+            "(v0.8 Scope §2.2)"
+        ),
+    )
+    ai_max_large_attachment_bytes: int = Field(
+        default=50_000_000,
+        ge=1,
+        le=50_000_000,
+        description=(
+            "Template ceiling for exactly one non-inline PDF attachment; cannot "
+            "be configured above 50,000,000 bytes (v0.8 Scope §2.2)"
+        ),
+    )
+    ai_upload_expiry_seconds: int = Field(
+        default=3_600,
+        ge=1,
+        le=2_592_000,
+        description=(
+            "Expiry for transient provider-hosted uploaded files (seconds); "
+            "bounded by the reviewed provider contracts (v0.8 Scope §2.2)"
+        ),
+    )
+    ai_managed_url_ttl_seconds: int = Field(
+        default=900,
+        ge=1,
+        le=1_800,
+        description=(
+            "Managed signed-URL TTL for retained private sources (seconds); "
+            "default 900, maximum 1,800 (v0.8 Scope §2.2)"
+        ),
+    )
+    ai_vertex_temp_gcs_bucket: str = Field(
+        default="",
+        description=(
+            "User-provisioned private same-region GCS staging bucket used for "
+            "the Vertex storage-reference mode; never created or configured by "
+            "the application, and required only when that mode is enabled "
+            "(v0.8 Scope §2.4)"
+        ),
+    )
 
     @field_validator("cors_allowed_origins")
     @classmethod
@@ -643,6 +707,27 @@ class Settings(BaseSettings):
                     f"{base_host!r} conflicts with ai_openai_region {self.ai_openai_region!r}; "
                     f"regional requests must use https://{expected_host}/v1"
                 )
+        # v0.8 Scope §2.2/§6.2: deployment-level transfer-mode configuration
+        # must be complete and compatible, failing fast at startup (BP §27),
+        # never at request time. The cross-field checks live in the AI layer
+        # (``app.ai.deployment``) because they name the reviewed transfer
+        # modes and consult the provider contract fixture; the import is
+        # deferred to keep the ``app.core.config`` boundary intact and the
+        # mode names out of this module (v0.8 Scope §6.1 import-boundary
+        # rule). Default-deny: an empty ``ai_enabled_transfer_modes`` is
+        # always valid and requires no cloud configuration.
+        if self.ai_enabled_transfer_modes:
+            from app.ai.deployment import validate_transfer_deployment
+
+            validate_transfer_deployment(
+                enabled_transfer_modes=self.ai_enabled_transfer_modes,
+                enabled_providers=self.ai_enabled_providers,
+                inline_aggregate_threshold_bytes=self.ai_inline_aggregate_threshold_bytes,
+                max_large_attachment_bytes=self.ai_max_large_attachment_bytes,
+                upload_expiry_seconds=self.ai_upload_expiry_seconds,
+                managed_url_ttl_seconds=self.ai_managed_url_ttl_seconds,
+                vertex_temp_gcs_bucket=self.ai_vertex_temp_gcs_bucket,
+            )
         return self
 
     def _redis_url_is_production_safe(self) -> bool:

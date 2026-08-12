@@ -7,6 +7,7 @@ from uuid import UUID
 
 import pytest
 from pydantic import ValidationError
+from tests.ai_test_helpers import metadata_attachment
 
 from app.ai.attachments import (
     ALLOWED_ATTACHMENT_MIME_TYPES,
@@ -14,7 +15,7 @@ from app.ai.attachments import (
     MAX_TOTAL_ATTACHMENT_BYTES,
     Attachment,
 )
-from app.ai.errors import ModelNotAvailableError
+from app.ai.errors import ModelNotAvailableError, TransferModeUnavailableError
 from app.ai.providers.fake import FakeLLMProvider
 from app.ai.registry import (
     Capability,
@@ -24,12 +25,14 @@ from app.ai.registry import (
     FileTaskRegistry,
     LatencyTier,
     ModelDefinition,
+    NonInlineModeLimit,
     PricingBasis,
     PromptDefinition,
     QualityTier,
     RegistryBundle,
     RegistryValidationError,
     TaskDefinition,
+    TransferRoutingContext,
     estimate_maximum_cost,
     estimate_tokens,
     load_registry_bundle,
@@ -38,6 +41,12 @@ from app.ai.registry import (
 from app.ai.schemas import AIRequest
 from app.ai.service import AIService
 from app.ai.storage_resolver import StorageAttachmentResolver
+from app.ai.transfer import (
+    MAX_LARGE_ATTACHMENT_BYTES,
+    SourceLifecycle,
+    TransferDeploymentPolicy,
+    TransferMode,
+)
 from app.storage import FakeObjectStorage
 
 
@@ -53,8 +62,10 @@ def _model(
     max_attachment_bytes: int | None = None,
     max_total_attachment_bytes: int | None = None,
     attachment_mime_types: list[str] | None = None,
+    allowed_transfer_modes: list[TransferMode] | None = None,
+    transfer_mode_limits: dict[TransferMode, NonInlineModeLimit] | None = None,
 ) -> ModelDefinition:
-    return ModelDefinition(
+    definition = ModelDefinition(
         id=model_id,
         provider=provider,
         model=f"provider-{model_id}",
@@ -75,6 +86,15 @@ def _model(
             owner="tests",
         ),
     )
+    # ``None`` means "use the reviewed defaults" (inline-only), so the v0.8
+    # declarations are only applied when explicitly supplied.
+    if allowed_transfer_modes is not None:
+        definition = definition.model_copy(
+            update={"allowed_transfer_modes": allowed_transfer_modes}
+        )
+    if transfer_mode_limits is not None:
+        definition = definition.model_copy(update={"transfer_mode_limits": transfer_mode_limits})
+    return definition
 
 
 def _task(**updates: object) -> TaskDefinition:
@@ -538,6 +558,8 @@ def _document_model(
     max_total_attachment_bytes: int | None = MAX_TOTAL_ATTACHMENT_BYTES,
     capabilities: list[Capability] | None = None,
     attachment_mime_types: list[str] | None = None,
+    allowed_transfer_modes: list[TransferMode] | None = None,
+    transfer_mode_limits: dict[TransferMode, NonInlineModeLimit] | None = None,
 ) -> ModelDefinition:
     return _model(
         model_id,
@@ -551,6 +573,8 @@ def _document_model(
             if attachment_mime_types is not None
             else sorted(ALLOWED_ATTACHMENT_MIME_TYPES)
         ),
+        allowed_transfer_modes=allowed_transfer_modes,
+        transfer_mode_limits=transfer_mode_limits,
     )
 
 
@@ -736,3 +760,228 @@ def test_router_requires_vision_for_image_attachments() -> None:
     # same documents-only model still carries a plain document.
     decision = documents_only.route(task, attachments=[_attachment()])
     assert decision.model.id == "doc-only"
+
+
+def test_router_keeps_non_inline_models_eligible_above_the_inline_ceilings() -> None:
+    """v0.8 Scope §2.2/§6.2: routing is transfer-mode-aware. A model whose
+    declared non-inline mode can carry a large single PDF must survive routing
+    even when the v0.7 inline ceilings cannot, so the transfer selector can
+    run before dispatch — routing must not reject an otherwise eligible
+    non-inline model (the execution seam itself is §6.3+). The large file is
+    described by metadata (size + MIME), never allocated as inline bytes."""
+    router = CapabilityCostModelRegistry(
+        [
+            _document_model(
+                "inline-only",
+                priority=0,
+                max_attachment_bytes=MAX_ATTACHMENT_BYTES,
+                max_total_attachment_bytes=MAX_TOTAL_ATTACHMENT_BYTES,
+            ),
+            _document_model(
+                "large-capable",
+                priority=100,
+                allowed_transfer_modes=[TransferMode.INLINE, TransferMode.PROVIDER_UPLOAD],
+                transfer_mode_limits={
+                    TransferMode.PROVIDER_UPLOAD: NonInlineModeLimit(
+                        mime_types=["application/pdf"], max_bytes=MAX_LARGE_ATTACHMENT_BYTES
+                    )
+                },
+            ),
+        ]
+    )
+    task = _task()
+    # A single PDF exactly at the 50,000,000-byte large-file boundary: above
+    # the template inline per-file ceiling, still within the declared
+    # provider-upload ceiling — the non-inline model is the routing candidate.
+    decision = router.route(
+        task, attachments=[metadata_attachment(size_bytes=MAX_LARGE_ATTACHMENT_BYTES)]
+    )
+    assert decision.model.id == "large-capable"
+
+    # The same set never routes to an inline-only model: the inline ceilings
+    # fail and there is no declared non-inline mode to fall back on.
+    inline_only = CapabilityCostModelRegistry(
+        [
+            _document_model(
+                "inline-only",
+                max_attachment_bytes=MAX_ATTACHMENT_BYTES,
+                max_total_attachment_bytes=MAX_TOTAL_ATTACHMENT_BYTES,
+            )
+        ]
+    )
+    with pytest.raises(RegistryValidationError, match="carry the supplied attachments"):
+        inline_only.route(
+            task, attachments=[metadata_attachment(size_bytes=MAX_LARGE_ATTACHMENT_BYTES)]
+        )
+
+    # Above the template large-file ceiling no mode can carry the set: fail
+    # closed, exactly like the inline path does above its own ceilings.
+    oversized = CapabilityCostModelRegistry(
+        [
+            _document_model(
+                "large-capable",
+                allowed_transfer_modes=[TransferMode.INLINE, TransferMode.PROVIDER_UPLOAD],
+                transfer_mode_limits={
+                    TransferMode.PROVIDER_UPLOAD: NonInlineModeLimit(
+                        mime_types=["application/pdf"], max_bytes=MAX_LARGE_ATTACHMENT_BYTES
+                    )
+                },
+            )
+        ]
+    )
+    with pytest.raises(RegistryValidationError, match="carry the supplied attachments"):
+        oversized.route(
+            task,
+            attachments=[metadata_attachment(size_bytes=MAX_LARGE_ATTACHMENT_BYTES + 1)],
+        )
+
+    # Multiple large PDFs are not the v0.8 large path (exactly one PDF, Scope
+    # §2.1 decision 3 / §5.3), so they never route to the non-inline model.
+    with pytest.raises(RegistryValidationError, match="carry the supplied attachments"):
+        oversized.route(
+            task,
+            attachments=[
+                metadata_attachment(name="part-a.pdf", size_bytes=6_000_000),
+                metadata_attachment(name="part-b.pdf", size_bytes=6_000_000),
+            ],
+        )
+
+
+def test_router_picks_a_model_with_an_eligible_mode_over_a_higher_priority_incompatible_one() -> (
+    None
+):
+    """v0.8 Scope §6.2: routing and mode selection are one coherent decision.
+    A 6,000,000-byte transient PDF with a task allowing provider_upload must
+    route to the lower-priority model that declares provider_upload, not to a
+    higher-priority model whose only fitting non-inline mode
+    (managed_signed_url) serves retained sources only — the selector would
+    then deny even though a valid model exists. Without the effective
+    transfer-mode context the router cannot see the lifecycle/org/deployment
+    gates and picks the incompatible higher-priority model."""
+    router = CapabilityCostModelRegistry(
+        [
+            _document_model(
+                "managed-url-only",
+                priority=0,
+                allowed_transfer_modes=[
+                    TransferMode.INLINE,
+                    TransferMode.MANAGED_SIGNED_URL,
+                ],
+                transfer_mode_limits={
+                    TransferMode.MANAGED_SIGNED_URL: NonInlineModeLimit(
+                        mime_types=["application/pdf"], max_bytes=MAX_LARGE_ATTACHMENT_BYTES
+                    )
+                },
+            ),
+            _document_model(
+                "provider-upload",
+                priority=100,
+                allowed_transfer_modes=[
+                    TransferMode.INLINE,
+                    TransferMode.PROVIDER_UPLOAD,
+                ],
+                transfer_mode_limits={
+                    TransferMode.PROVIDER_UPLOAD: NonInlineModeLimit(
+                        mime_types=["application/pdf"], max_bytes=MAX_LARGE_ATTACHMENT_BYTES
+                    )
+                },
+            ),
+        ]
+    )
+    task = _task(
+        allowed_transfer_modes=[
+            TransferMode.INLINE,
+            TransferMode.PROVIDER_UPLOAD,
+        ]
+    )
+    attachments = [metadata_attachment(size_bytes=6_000_000)]
+    # Without the effective context the router cannot see that the transient
+    # source makes managed_signed_url ineligible and commits to the wrong model.
+    assert router.route(task, attachments=attachments).model.id == "managed-url-only"
+    # With the context, the incompatible higher-priority candidate is dropped
+    # and the compatible lower-priority model wins (deterministic ordering).
+    context = TransferRoutingContext(
+        source_lifecycle=SourceLifecycle.TRANSIENT,
+        organisation_allowed_modes=[
+            TransferMode.INLINE,
+            TransferMode.PROVIDER_UPLOAD,
+        ],
+        deployment=TransferDeploymentPolicy(
+            enabled_transfer_modes=frozenset({TransferMode.PROVIDER_UPLOAD})
+        ),
+    )
+    decision = router.route(task, attachments=attachments, transfer_context=context)
+    assert decision.model.id == "provider-upload"
+
+
+def test_router_skips_a_model_whose_inline_mime_set_excludes_the_set() -> None:
+    """v0.8 Scope §6.2: below the inline threshold a model whose inline MIME
+    set excludes the attachment must not win merely because one of its
+    non-inline modes accepts it — the selector would then choose inline for
+    the request and bypass the model's inline MIME declaration. The
+    lower-priority model whose inline declarations actually cover the PDF is
+    selected instead."""
+    router = CapabilityCostModelRegistry(
+        [
+            _document_model(
+                "text-only-inline",
+                priority=0,
+                attachment_mime_types=["text/plain"],
+                allowed_transfer_modes=[
+                    TransferMode.INLINE,
+                    TransferMode.PROVIDER_UPLOAD,
+                ],
+                transfer_mode_limits={
+                    TransferMode.PROVIDER_UPLOAD: NonInlineModeLimit(
+                        mime_types=["application/pdf"], max_bytes=MAX_LARGE_ATTACHMENT_BYTES
+                    )
+                },
+            ),
+            _document_model(
+                "pdf-inline",
+                priority=100,
+            ),
+        ]
+    )
+    task = _task()
+    context = TransferRoutingContext(source_lifecycle=SourceLifecycle.TRANSIENT)
+    decision = router.route(
+        task,
+        attachments=[metadata_attachment(size_bytes=100_000)],
+        transfer_context=context,
+    )
+    assert decision.model.id == "pdf-inline"
+
+
+def test_router_fails_closed_when_only_a_mode_incompatible_model_exists() -> None:
+    """v0.8 Scope §6.2: with only a model whose inline MIME set excludes the
+    PDF, a small below-threshold request has no eligible mode (inline is
+    excluded by the model's own inline MIME declaration and non-inline modes
+    are only eligible above the threshold), so routing fails closed with the
+    transfer-mode error instead of dispatching inline in violation of the
+    model's MIME declaration."""
+    router = CapabilityCostModelRegistry(
+        [
+            _document_model(
+                "text-only-inline",
+                attachment_mime_types=["text/plain"],
+                allowed_transfer_modes=[
+                    TransferMode.INLINE,
+                    TransferMode.PROVIDER_UPLOAD,
+                ],
+                transfer_mode_limits={
+                    TransferMode.PROVIDER_UPLOAD: NonInlineModeLimit(
+                        mime_types=["application/pdf"], max_bytes=MAX_LARGE_ATTACHMENT_BYTES
+                    )
+                },
+            )
+        ]
+    )
+    task = _task()
+    context = TransferRoutingContext(source_lifecycle=SourceLifecycle.TRANSIENT)
+    with pytest.raises(TransferModeUnavailableError, match="no permitted"):
+        router.route(
+            task,
+            attachments=[metadata_attachment(size_bytes=100_000)],
+            transfer_context=context,
+        )

@@ -516,6 +516,7 @@ class _FallbackModelRegistry(ModelRegistry):
         excluded_model_ids: Any = (),
         attachments: Any = (),
         region_of_provider: Any = None,
+        transfer_context: Any = None,
     ) -> RoutingDecision:
         excluded = set(excluded_model_ids)
         if excluded:

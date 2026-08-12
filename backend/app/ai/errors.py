@@ -70,6 +70,41 @@ class ModelNotAvailableError(AIError):
     error_code = "model_not_available"
 
 
+class TransferModeUnavailableError(AIError):
+    """The resolved attachment set needs a non-inline transfer mode, but no
+    permitted/provider-supported mode is eligible (v0.8 Scope §2.2/§6.2).
+
+    Raised by :class:`~app.ai.service.AIService` before any external transfer
+    when the aggregate raw attachment bytes exceed the inline threshold and
+    the intersection of organisation policy, task declaration, routed
+    model/provider capability and deployment configuration leaves no eligible
+    mode. Default-deny: the caller never silently downgrades to a less
+    private mode. Permanent — policy/capability changes, not retries, fix it.
+    """
+
+    error_code = "transfer_mode_unavailable"
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, retryable=False)
+
+
+class TransferExecutionUnavailableError(AIError):
+    """A non-inline transfer mode is eligible but not executable here.
+
+    v0.8 Scope §6.2 → §6.3+: the deterministic mode selection and the
+    fail-before-transfer gate land in §6.2; the streaming/staging execution
+    seam for the selected non-inline mode is provisioned by §6.3-§6.7. Until
+    that seam is wired, a request whose selected mode is not ``inline`` fails
+    closed before dispatch rather than silently riding the inline path above
+    the aggregate threshold. Permanent for the same request.
+    """
+
+    error_code = "transfer_execution_unavailable"
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, retryable=False)
+
+
 class AIUnavailableError(AIError):
     """AI is disabled for the organisation (default-off, Scope §6.5)."""
 

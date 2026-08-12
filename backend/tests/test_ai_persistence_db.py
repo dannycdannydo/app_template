@@ -42,6 +42,7 @@ from app.ai.persistence.service import (
 )
 from app.ai.registry import load_registry_bundle
 from app.ai.schemas import CostEstimate, TokenUsage
+from app.ai.transfer import TransferMode
 from app.core.exceptions import ConflictError, ValidationError
 from app.modules.audit.service import (
     ACTION_AI_BUDGET_DENIED,
@@ -169,11 +170,17 @@ async def test_default_settings_row_is_off_and_policy_is_default_deny(
             assert settings_row.allowed_model_ids == []
             assert settings_row.monthly_budget is None
             assert settings_row.retention_policy_days is None
+            # v0.8 Scope §2.2 default-deny transfer policy: inline only, with
+            # the template large-attachment ceiling.
+            assert settings_row.allowed_transfer_modes == ["inline"]
+            assert settings_row.max_large_attachment_bytes == 50_000_000
 
             policy = await ai_persistence.get_organisation_policy(
                 session, organisation_id=organisation.id
             )
             assert policy.enabled is False
+            assert policy.allowed_transfer_modes == [TransferMode.INLINE]
+            assert policy.effective_max_large_attachment_bytes() == 50_000_000
     finally:
         await engine.dispose()
 
@@ -230,6 +237,135 @@ async def test_update_settings_persists_and_audits(migrated_database: str) -> No
                 )
             ).all()
             assert [action for (action,) in actions] == [ACTION_AI_SETTINGS_UPDATED]
+    finally:
+        await engine.dispose()
+
+
+async def test_update_settings_persists_transfer_policy(migrated_database: str) -> None:
+    """The v0.8 transfer policy persists, audits and flows into the policy."""
+    engine, session_factory = _session_factory(migrated_database)
+    try:
+        async with session_factory() as session:
+            actor = await _seed_actor(session)
+            organisation = await _seed_organisation(session)
+            await _seed_settings(session, organisation.id)
+
+            settings_row = await ai_persistence.update_ai_settings(
+                session,
+                actor=actor,
+                organisation_id=organisation.id,
+                enabled=True,
+                allowed_provider_ids=["fake"],
+                allowed_model_ids=[],
+                provider_override=None,
+                model_override=None,
+                monthly_budget=None,
+                retention_policy_days=None,
+                allowed_transfer_modes=["inline", "provider_upload"],
+                max_large_attachment_bytes=30_000_000,
+            )
+            assert settings_row.allowed_transfer_modes == ["inline", "provider_upload"]
+            assert settings_row.max_large_attachment_bytes == 30_000_000
+
+            policy = await ai_persistence.get_organisation_policy(
+                session, organisation_id=organisation.id
+            )
+            assert policy.allowed_transfer_modes == [
+                TransferMode.INLINE,
+                TransferMode.PROVIDER_UPLOAD,
+            ]
+            assert policy.max_large_attachment_bytes == 30_000_000
+            assert policy.effective_max_large_attachment_bytes() == 30_000_000
+
+            actions = (
+                await session.execute(
+                    text(
+                        "SELECT action FROM audit_events "
+                        "WHERE resource_type = 'organisation_ai_settings' "
+                        "AND resource_id = :oid"
+                    ).bindparams(oid=str(organisation.id))
+                )
+            ).all()
+            assert [action for (action,) in actions] == [ACTION_AI_SETTINGS_UPDATED]
+    finally:
+        await engine.dispose()
+
+
+async def test_update_settings_rejects_invalid_transfer_policy(migrated_database: str) -> None:
+    """Unknown/duplicate modes and an out-of-range ceiling never reach the row."""
+    engine, session_factory = _session_factory(migrated_database)
+    try:
+        async with session_factory() as session:
+            actor = await _seed_actor(session)
+            organisation = await _seed_organisation(session)
+            await _seed_settings(session, organisation.id)
+
+            with pytest.raises(ValidationError) as exc_info:
+                await ai_persistence.update_ai_settings(
+                    session,
+                    actor=actor,
+                    organisation_id=organisation.id,
+                    enabled=True,
+                    allowed_provider_ids=["fake"],
+                    allowed_model_ids=[],
+                    provider_override=None,
+                    model_override=None,
+                    monthly_budget=None,
+                    retention_policy_days=None,
+                    allowed_transfer_modes=["inline", "teleport"],
+                    max_large_attachment_bytes=50_000_000,
+                )
+            assert any(
+                "unknown transfer modes" in (detail.message or "")
+                for detail in (exc_info.value.details or [])
+            )
+            with pytest.raises(ValidationError) as exc_info:
+                await ai_persistence.update_ai_settings(
+                    session,
+                    actor=actor,
+                    organisation_id=organisation.id,
+                    enabled=True,
+                    allowed_provider_ids=["fake"],
+                    allowed_model_ids=[],
+                    provider_override=None,
+                    model_override=None,
+                    monthly_budget=None,
+                    retention_policy_days=None,
+                    allowed_transfer_modes=["provider_upload"],
+                    max_large_attachment_bytes=50_000_000,
+                )
+            assert any(
+                "mandatory" in (detail.message or "") for detail in (exc_info.value.details or [])
+            )
+            with pytest.raises(ValidationError) as exc_info:
+                await ai_persistence.update_ai_settings(
+                    session,
+                    actor=actor,
+                    organisation_id=organisation.id,
+                    enabled=True,
+                    allowed_provider_ids=["fake"],
+                    allowed_model_ids=[],
+                    provider_override=None,
+                    model_override=None,
+                    monthly_budget=None,
+                    retention_policy_days=None,
+                    allowed_transfer_modes=["inline", "provider_upload"],
+                    max_large_attachment_bytes=51_000_000,
+                )
+            assert any(
+                detail.field == "max_large_attachment_bytes"
+                or "max_large_attachment_bytes" in (detail.message or "")
+                for detail in (exc_info.value.details or [])
+            )
+            # Nothing was written: the row keeps the default-deny policy.
+            row = await session.scalar(
+                select(OrganisationAISettings).where(
+                    OrganisationAISettings.organisation_id == organisation.id
+                )
+            )
+            assert row is not None
+            assert row.allowed_transfer_modes == ["inline"]
+            assert row.max_large_attachment_bytes == 50_000_000
     finally:
         await engine.dispose()
 

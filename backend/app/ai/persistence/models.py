@@ -60,6 +60,10 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
+from app.ai.transfer import (
+    MAX_LARGE_ATTACHMENT_BYTES,
+    TransferMode,
+)
 from app.db.base import Base
 from app.db.conventions import TimestampMixin, UuidV7, uuid7
 
@@ -103,6 +107,10 @@ class OrganisationAISettings(Base, TimestampMixin):
             name="positive_retention_policy_days",
         ),
         CheckConstraint("version > 0", name="positive_version"),
+        CheckConstraint(
+            "max_large_attachment_bytes > 0 AND max_large_attachment_bytes <= 50000000",
+            name="max_large_attachment_bytes_range",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UuidV7, primary_key=True, default=uuid7)
@@ -145,6 +153,25 @@ class OrganisationAISettings(Base, TimestampMixin):
     # How long ai_outputs records (and the scratch objects they reference)
     # are kept. ``NULL`` means no retention deletion is scheduled.
     retention_policy_days: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    # v0.8 Scope §2.2 transfer policy: the organisation's allowed transfer
+    # modes default to ``inline`` only (default-deny — a non-inline mode is
+    # never eligible until a platform administrator explicitly enables it) and
+    # ``max_large_attachment_bytes`` tightens the 50,000,000-byte template
+    # ceiling. Mode ids are plain validated configuration checked against the
+    # transfer contract at write time, never enum columns (the registry and
+    # provider contract are the single source of truth, like the allowlists).
+    allowed_transfer_modes: Mapped[list[str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=lambda: [TransferMode.INLINE.value],
+        server_default=text("'[\"inline\"]'::jsonb"),
+    )
+    max_large_attachment_bytes: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=MAX_LARGE_ATTACHMENT_BYTES,
+        server_default=text("50000000"),
+    )
     updated_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         # Settings outlive the administrator who last changed them; a user row
         # is never hard-deleted, but if it ever is the reference is nulled.

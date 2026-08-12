@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
+from app.ai.attachments import Attachment
 from app.ai.registry import (
     Capability,
     ModelDefinition,
@@ -26,6 +27,33 @@ from app.ai.registry import (
 _FAKE_MODEL = "fake-model-document.classify"
 _FAKE_PROMPT = "classify"
 _FAKE_TASK = "document.classify"
+
+
+class MetadataAttachment(Attachment):
+    """An :class:`Attachment` whose size is declared metadata, not carried bytes.
+
+    The v0.8 bounded metadata/stream carrier for files above the inline
+    ceilings is §6.3+ work; until then, routing tests describe a large file by
+    size + MIME without allocating or validating inline bytes. ``size``
+    reflects the declared size while ``content`` stays a tiny validated
+    placeholder, so the service's bounded-memory contract still holds.
+    """
+
+    declared_size: int
+
+    @property
+    def size(self) -> int:  # type: ignore[override]
+        return self.declared_size
+
+
+def metadata_attachment(*, size_bytes: int, name: str = "lease.pdf") -> MetadataAttachment:
+    """A single large-PDF attachment carrier described by metadata only."""
+    return MetadataAttachment(
+        display_name=name,
+        mime_type="application/pdf",
+        content=b"%PDF-1.7 fixture",
+        declared_size=size_bytes,
+    )
 
 
 class InMemoryTaskRegistry(TaskRegistry):

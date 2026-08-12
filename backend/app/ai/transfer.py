@@ -21,16 +21,21 @@ signed URL or ``gs://`` URI is never a caller-supplied input (Scope §2.2).
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date
 from enum import StrEnum
 from pathlib import Path
 from typing import cast
+from uuid import UUID
 
 import yaml
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
-from app.ai.attachments import ALLOWED_ATTACHMENT_MIME_TYPES
+from app.ai.attachments import (
+    ALLOWED_ATTACHMENT_MIME_TYPES,
+    IMAGE_ATTACHMENT_MIME_TYPES,
+)
 from app.ai.errors import RegistryValidationError
 from app.core.config import AI_KNOWN_PROVIDER_IDS
 
@@ -60,6 +65,13 @@ MANAGED_URL_MAX_TTL_SECONDS = 1_800
 #: document shorter ceilings; the fixture records each provider's own bounds
 #: and the loader rejects anything above this template ceiling.
 MAX_PROVIDER_UPLOAD_EXPIRY_SECONDS = 2_592_000  # 30 days (OpenAI expires_after max)
+
+#: The organisation-scoped AI scratch namespace (v0.7 Scope §6.5 item 4): the
+#: v0.7 retention job owns objects under this prefix and the source lifecycle
+#: classifier treats them as ``transient`` (short-lived, v0.8 Scope §2.2). The
+#: persistence service keeps a same-named alias so retention and the transfer
+#: selector can never drift about which namespace is transient.
+SCRATCH_KEY_TEMPLATE = "organisations/{organisation_id}/ai/scratch/"
 
 
 class SourceLifecycle(StrEnum):
@@ -91,6 +103,85 @@ class TransferMode(StrEnum):
     PROVIDER_UPLOAD = "provider_upload"
     MANAGED_SIGNED_URL = "managed_signed_url"
     STORAGE_REFERENCE = "storage_reference"
+
+
+@dataclass(frozen=True)
+class TransferDeploymentPolicy:
+    """Deployment-level transfer configuration closed over by the executor.
+
+    Built from the typed settings at wiring time (``app/ai/runtime.py``) so the
+    service's deterministic selector can never drift from the deployment the
+    process actually boots with (v0.8 Scope §2.2, §6.2): the aggregate inline
+    threshold, the large-file template ceiling and the enabled non-inline
+    modes. Non-inline modes are default-deny — an empty ``enabled_transfer_modes``
+    deploys inline only — and ``inline`` always remains in the eligible set, so
+    a deployment can never accidentally disable the reviewed default.
+    """
+
+    inline_aggregate_threshold_bytes: int = INLINE_AGGREGATE_THRESHOLD_BYTES
+    max_large_attachment_bytes: int = MAX_LARGE_ATTACHMENT_BYTES
+    enabled_transfer_modes: frozenset[TransferMode] = frozenset({TransferMode.INLINE})
+
+    @property
+    def allowed_transfer_modes(self) -> frozenset[TransferMode]:
+        """The deployable mode set: inline plus the enabled non-inline modes."""
+        return self.enabled_transfer_modes | frozenset({TransferMode.INLINE})
+
+
+@dataclass(frozen=True)
+class ModelModeCeiling:
+    """One model's per-mode non-inline limits in provider-neutral form.
+
+    A structural twin of the registry's ``NonInlineModeLimit`` (kept here so
+    the selector never depends on the registry module, which imports this one):
+    the MIME set and byte ceiling one model can carry for one non-inline mode.
+    """
+
+    mime_types: frozenset[str]
+    max_bytes: int
+
+
+@dataclass(frozen=True)
+class ModelInlineCeiling:
+    """One model's inline-mode declarations in provider-neutral form.
+
+    A structural twin of the registry's inline attachment fields (kept here so
+    the selector never depends on the registry module, which imports this one):
+    the MIME set, the per-file and aggregate byte ceilings the model can carry
+    inline, and the capability facts (``documents`` required for any inline
+    attachment, ``vision`` required for image attachments). The selector
+    requires a model to fit these before ``inline`` can be selected, so a model
+    whose inline MIME set excludes an attachment can never ride a non-inline
+    declaration to an inline dispatch, and inline dispatch never violates a
+    model's inline MIME or byte limits (v0.8 Scope §6.2).
+    """
+
+    mime_types: frozenset[str] = frozenset()
+    max_attachment_bytes: int | None = None
+    max_total_attachment_bytes: int | None = None
+    has_documents_capability: bool = False
+    has_vision_capability: bool = False
+
+    def can_carry(self, *, sizes: Sequence[int], mime_types: Sequence[str]) -> bool:
+        """Whether one attachment set fits the model's inline declarations.
+
+        Mirrors the registry's inline check: the documents capability, the
+        per-file and combined byte ceilings, the MIME coverage and the vision
+        requirement for image attachments must all hold, or ``inline`` is not
+        an eligible mode for this model and set.
+        """
+        if not self.has_documents_capability:
+            return False
+        if self.max_attachment_bytes is None or self.max_total_attachment_bytes is None:
+            return False
+        if any(size > self.max_attachment_bytes for size in sizes):
+            return False
+        if sum(sizes) > self.max_total_attachment_bytes:
+            return False
+        if any(mime_type not in self.mime_types for mime_type in mime_types):
+            return False
+        has_images = any(mime_type in IMAGE_ATTACHMENT_MIME_TYPES for mime_type in mime_types)
+        return not has_images or self.has_vision_capability
 
 
 class ProviderUploadLifecycle(StrEnum):
@@ -456,19 +547,27 @@ def select_transfer_mode(
     source_lifecycle: SourceLifecycle,
     allowed_modes: Iterable[TransferMode],
     contract: ProviderTransferContract,
+    inline_threshold_bytes: int = INLINE_AGGREGATE_THRESHOLD_BYTES,
 ) -> TransferMode | None:
     """Deterministically select the eligible transfer mode, or ``None``.
 
     Default-deny selection (Scope §2.2, §5.2): ``inline`` wins whenever the
-    aggregate raw attachment bytes are at or below the 5,000,000-byte
-    threshold and inline is both allowed and supported. Above the threshold a
-    transient source prefers ``provider_upload`` and a retained source prefers
-    ``managed_signed_url``; ``storage_reference`` (Vertex GCS staging) serves
-    either lifecycle when the provider declares it. A mode is eligible only
-    when the caller's allowed set, the provider's reviewed contract, the
-    source lifecycle and the byte ceiling all allow it; returning ``None``
-    means the caller must fail before any external transfer — never silently
-    downgrade to a less private mode.
+    aggregate raw attachment bytes are at or below the inline threshold (the
+    deployment's ``ai_inline_aggregate_threshold_bytes``, which defaults to
+    the 5,000,000-byte template constant) and inline is both allowed and
+    supported. Above the threshold a transient source prefers
+    ``provider_upload`` and a retained source prefers ``managed_signed_url``;
+    ``storage_reference`` (Vertex GCS staging) serves either lifecycle when the
+    provider declares it. A mode is eligible only when the caller's allowed
+    set, the provider's reviewed contract, the source lifecycle and the byte
+    ceiling all allow it; returning ``None`` means the caller must fail before
+    any external transfer — never silently downgrade to a less private mode.
+
+    ``inline_threshold_bytes`` is the *authoritative* inline boundary: inline
+    is eligible only at or below it, so a lowered deployment threshold makes
+    inline ineligible above it even when the provider's fixed inline contract
+    ceiling would still fit — the configured threshold decides, never the
+    provider contract (v0.8 Scope §5.2, §6.2).
     """
     allowed = list(allowed_modes)
     contracts_by_mode = contract.transfer_modes
@@ -482,7 +581,7 @@ def select_transfer_mode(
         )
 
     if (
-        aggregate_bytes <= INLINE_AGGREGATE_THRESHOLD_BYTES
+        aggregate_bytes <= inline_threshold_bytes
         and TransferMode.INLINE in allowed
         and _eligible(TransferMode.INLINE)
     ):
@@ -494,7 +593,158 @@ def select_transfer_mode(
     for mode in priority:
         if mode in allowed and _eligible(mode):
             return mode
+    # Above the deployment threshold inline is ineligible by definition: the
+    # configured boundary, not the provider's inline contract ceiling, decides
+    # where the default mode stops being selectable (Scope §2.2).
     return None
+
+
+def select_transfer_mode_for_policy(
+    *,
+    aggregate_bytes: int,
+    attachment_mime_types: Sequence[str],
+    attachment_sizes: Sequence[int] | None = None,
+    source_lifecycle: SourceLifecycle,
+    organisation_allowed_modes: Iterable[TransferMode],
+    organisation_max_large_attachment_bytes: int | None,
+    task_allowed_modes: Iterable[TransferMode],
+    model_allowed_modes: Iterable[TransferMode],
+    model_mode_limits: Mapping[TransferMode, ModelModeCeiling] | None = None,
+    model_inline: ModelInlineCeiling | None = None,
+    deployment: TransferDeploymentPolicy | None = None,
+    contract: ProviderTransferContract,
+) -> TransferMode | None:
+    """Deterministic mode selection intersected with every policy gate.
+
+    v0.8 Scope §2.2/§6.2: a non-inline mode is eligible only when the source
+    lifecycle, the task declaration, the organisation policy, the routed
+    model/provider capability and the deployment configuration all allow it.
+    This function intersects the four mode allowlists (organisation, task,
+    model, deployment) and applies the lowest of the organisation ceiling, the
+    deployment ceiling, the routed model's per-mode ceiling and the provider
+    contract's own per-mode ceiling, then delegates the deterministic priority
+    to :func:`select_transfer_mode`. An organisation with the default
+    ``inline``-only policy can never reach a non-inline mode, a deployment
+    that enables no non-inline mode can never either, and a request above the
+    inline threshold whose intersection leaves no eligible mode returns
+    ``None`` — the caller must fail before any external transfer (never
+    silently downgrade to a less private mode).
+
+    ``organisation_max_large_attachment_bytes`` ``None`` means the template
+    ceiling applies unchanged (no organisation-level tightening); a configured
+    value caps every non-inline mode, so a request above the organisation's
+    ceiling can never silently ride a provider mode the organisation did not
+    authorise. ``deployment`` carries the typed deployment configuration; when
+    ``None`` the template defaults apply (inline only at the 5,000,000-byte
+    threshold).
+
+    ``attachment_mime_types`` and ``model_mode_limits`` gate the v0.8 large
+    path (Scope §2.1 decision 3, §5.3): above the inline threshold, once a
+    non-inline mode is a candidate, the request must be exactly one
+    ``application/pdf`` and must fit the routed model's per-mode MIME set and
+    byte ceiling, or no mode is eligible. Every request — including one at or
+    below the threshold — passes through the full intersection: inline is
+    selectable only when every allowlist and the provider contract allow it,
+    and the configured threshold decides where inline stops being eligible,
+    never the provider's inline contract ceiling (§5.2, §6.2).
+
+    ``model_inline`` (with ``attachment_sizes``) additionally gates the inline
+    path on the routed model's own inline declarations — MIME set, per-file
+    and combined byte ceilings, documents/vision capabilities — so a model
+    that cannot carry the set inline can never receive an inline dispatch,
+    even when one of its non-inline modes happens to fit the set (Scope §6.2).
+    Both must be supplied together; when either is absent the model-inline
+    gate is skipped (backward-compatible callers).
+    """
+    allowed = set(organisation_allowed_modes) & set(task_allowed_modes) & set(model_allowed_modes)
+    inline_threshold = (
+        deployment.inline_aggregate_threshold_bytes
+        if deployment is not None
+        else INLINE_AGGREGATE_THRESHOLD_BYTES
+    )
+    if deployment is not None:
+        allowed &= deployment.allowed_transfer_modes
+    if (
+        model_inline is not None
+        and attachment_sizes is not None
+        and not model_inline.can_carry(sizes=attachment_sizes, mime_types=attachment_mime_types)
+    ):
+        # The model cannot carry this set inline: exclude inline from the
+        # eligible set so the early inline-required check below fails closed
+        # for a small set and ``select_transfer_mode`` can never return inline
+        # for a model whose inline MIME/byte limits the set violates.
+        allowed = {mode for mode in allowed if mode is not TransferMode.INLINE}
+    if TransferMode.INLINE not in allowed and aggregate_bytes <= inline_threshold:
+        # Inline is the reviewed default and must remain eligible through the
+        # aggregate threshold; an intersection without it is misconfigured and
+        # must fail closed rather than skip to a non-inline mode for a small
+        # file (Scope §2.2 "inline remains the default").
+        return None
+    if (
+        organisation_max_large_attachment_bytes is not None
+        and organisation_max_large_attachment_bytes > MAX_LARGE_ATTACHMENT_BYTES
+    ):
+        raise ValueError(
+            f"organisation_max_large_attachment_bytes must not exceed {MAX_LARGE_ATTACHMENT_BYTES}"
+        )
+    if organisation_max_large_attachment_bytes is not None:
+        allowed = {
+            mode
+            for mode in allowed
+            if mode is TransferMode.INLINE
+            or aggregate_bytes <= organisation_max_large_attachment_bytes
+        }
+    if deployment is not None:
+        allowed = {
+            mode
+            for mode in allowed
+            if mode is TransferMode.INLINE
+            or aggregate_bytes <= deployment.max_large_attachment_bytes
+        }
+    if (
+        any(mode is not TransferMode.INLINE for mode in allowed)
+        and aggregate_bytes > inline_threshold
+    ):
+        # v0.8 large path (Scope §2.1 decision 3, §5.3): exactly one PDF. Any
+        # other count or MIME type above the inline threshold has no eligible
+        # non-inline mode, so the caller fails before any external transfer.
+        # Below the threshold the shape gate is irrelevant: inline is the only
+        # mode ``select_transfer_mode`` can return there (when allowed), so a
+        # small multi-file or non-PDF set must not be rejected.
+        if len(attachment_mime_types) != 1 or attachment_mime_types[0] not in NON_INLINE_MIME_TYPES:
+            return None
+        if model_mode_limits is not None:
+            allowed = {
+                mode
+                for mode in allowed
+                if mode is TransferMode.INLINE
+                or (
+                    (ceiling := model_mode_limits.get(mode)) is not None
+                    and set(attachment_mime_types) <= ceiling.mime_types
+                    and aggregate_bytes <= ceiling.max_bytes
+                )
+            }
+    return select_transfer_mode(
+        aggregate_bytes=aggregate_bytes,
+        source_lifecycle=source_lifecycle,
+        allowed_modes=allowed,
+        contract=contract,
+        inline_threshold_bytes=inline_threshold,
+    )
+
+
+def source_lifecycle_for_reference(reference: str, organisation_id: UUID) -> SourceLifecycle:
+    """Classify one private storage reference by its source lifecycle.
+
+    v0.8 Scope §2.2: transient sources live in the organisation-scoped AI
+    scratch namespace (v0.7 Scope §6.5 item 4); every other feature-owned
+    reference in private storage is retained. The classification is a property
+    of the object's namespace, never of the caller's request.
+    """
+    prefix = SCRATCH_KEY_TEMPLATE.format(organisation_id=organisation_id)
+    if reference.startswith(prefix):
+        return SourceLifecycle.TRANSIENT
+    return SourceLifecycle.RETAINED
 
 
 def _error_message(exc: ValidationError) -> str:
@@ -515,16 +765,22 @@ __all__ = [
     "MAX_PROVIDER_UPLOAD_EXPIRY_SECONDS",
     "NON_INLINE_MIME_TYPES",
     "REQUIRED_STORAGE_CONTRACTS",
+    "SCRATCH_KEY_TEMPLATE",
     "ManagedUrlTtlContract",
+    "ModelInlineCeiling",
+    "ModelModeCeiling",
     "ProviderTransferContract",
     "ProviderUploadLifecycle",
     "SourceLifecycle",
     "StorageTransferContract",
     "TransferContracts",
+    "TransferDeploymentPolicy",
     "TransferMode",
     "TransferModeContract",
     "UploadExpiryContract",
     "load_transfer_contracts",
     "select_transfer_mode",
+    "select_transfer_mode_for_policy",
+    "source_lifecycle_for_reference",
     "validate_transfer_contracts",
 ]

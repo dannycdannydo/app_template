@@ -332,13 +332,45 @@ or public-API changes are introduced by this work unit.
 
 Dependencies: Scope §6.1.
 
-- [ ] Add task/model transfer-mode capabilities and deterministic mode selection: inline at or below 5,000,000 aggregate raw bytes; above it prefer provider upload for transient sources, managed signed URL for retained private S3 sources, and GCS staging for Vertex; fail before external transfer when no permitted/provider-supported mode is eligible
-- [ ] Add `allowed_transfer_modes` (default `inline`) and `max_large_attachment_bytes` (maximum 50,000,000) to `organisation_ai_settings` with an additive Alembic migration, constraints, model/query/service updates and optimistic-concurrency tests
-- [ ] Extend explicit schemas for `GET`/`PUT /api/v1/platform/organisations/{organisation_id}/ai-settings`, regenerate the frontend client, and prove platform/cross-plane security and stale-update behavior remain intact
-- [ ] Add typed deployment settings and production fail-fast validation for enabled modes, upload expiry, managed signed-URL TTL and Vertex staging project/user-provisioned bucket/location; test default-deny and every invalid combination without creating or configuring cloud infrastructure
+- [x] Add task/model transfer-mode capabilities and deterministic mode selection: inline at or below 5,000,000 aggregate raw bytes; above it prefer provider upload for transient sources, managed signed URL for retained private S3 sources, and GCS staging for Vertex; fail before external transfer when no permitted/provider-supported mode is eligible
+- [x] Add `allowed_transfer_modes` (default `inline`) and `max_large_attachment_bytes` (maximum 50,000,000) to `organisation_ai_settings` with an additive Alembic migration, constraints, model/query/service updates and optimistic-concurrency tests
+- [x] Extend explicit schemas for `GET`/`PUT /api/v1/platform/organisations/{organisation_id}/ai-settings`, regenerate the frontend client, and prove platform/cross-plane security and stale-update behavior remain intact
+- [x] Add typed deployment settings and production fail-fast validation for enabled modes, upload expiry, managed signed-URL TTL and Vertex staging project/user-provisioned bucket/location; test default-deny and every invalid combination without creating or configuring cloud infrastructure
 
 Human review required before application: tenant-isolation, database migration,
 platform configuration, secret handling and the additive public API change.
+
+> **Recorded human review and application authorisation (AGENTS.md — §6.2
+> tenant-isolation, database-migration, platform-configuration,
+> secret-handling and additive-public-API categories).**
+> On 2026-08-12, after the v0.8 Scope §6.2 review requested changes (multi-model
+> routing was not closed over effective transfer-mode eligibility: a candidate
+> survived on any fitting non-inline mode instead of a mode actually eligible
+> under the task, lifecycle, organisation, deployment and inline threshold),
+> the repository owner explicitly authorised the implementer to apply those
+> corrections and complete the validation/PR/merge workflow. The corrected
+> checkpoint is approved for application:
+>
+> 1. **Deterministic policy-aware mode selection** (`select_transfer_mode_for_policy`
+>    in `app/ai/transfer.py`, `AIService._select_transfer_mode` in
+>    `app/ai/service.py`): routing and mode selection are one coherent decision —
+>    each candidate survives only when at least one mode is eligible under the
+>    current size/MIME/count, task, lifecycle, organisation policy, deployment
+>    configuration, the model's reviewed inline/per-mode limits and its
+>    provider's contract, with deterministic ordering preserved among eligible
+>    candidates and multi-model regression tests for both reproduced cases.
+> 2. **Organisation settings columns** (`allowed_transfer_modes`,
+>    `max_large_attachment_bytes`) with the additive Alembic migration,
+>    constraints, model/query/service mapping and concurrency evidence.
+> 3. **Explicit GET/PUT schemas** for
+>    `/api/v1/platform/organisations/{organisation_id}/ai-settings`, the
+>    regenerated frontend client, and the platform/cross-plane security matrix
+>    plus stale-update behavior.
+> 4. **Typed deployment settings and production fail-fast validation**
+>    (`app/ai/deployment.py`) for enabled modes, upload expiry, managed
+>    signed-URL TTL and the Vertex staging bucket, with default-deny and every
+>    invalid combination tested without creating or configuring cloud
+>    infrastructure.
 
 ## 6.3 Streaming Transfer and Durable Reference Lifecycle
 

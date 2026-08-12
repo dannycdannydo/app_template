@@ -47,16 +47,21 @@ from app.ai.transfer import (
     NON_INLINE_MIME_TYPES,
     REQUIRED_STORAGE_CONTRACTS,
     ManagedUrlTtlContract,
+    ModelInlineCeiling,
+    ModelModeCeiling,
     ProviderTransferContract,
     ProviderUploadLifecycle,
     SourceLifecycle,
     StorageTransferContract,
     TransferContracts,
+    TransferDeploymentPolicy,
     TransferMode,
     TransferModeContract,
     UploadExpiryContract,
     load_transfer_contracts,
     select_transfer_mode,
+    select_transfer_mode_for_policy,
+    source_lifecycle_for_reference,
     validate_transfer_contracts,
 )
 
@@ -346,6 +351,580 @@ def test_selection_fails_closed_when_no_mode_is_eligible() -> None:
             contract=contract,
         )
         is None
+    )
+
+
+# --- policy-aware selection (v0.8 Scope §6.2) -------------------------------
+
+
+def test_policy_selection_intersects_organisation_task_and_model() -> None:
+    """The org policy is an additional default-deny gate, never a bypass."""
+    contract = _provider_contract()
+    above = INLINE_AGGREGATE_THRESHOLD_BYTES + 1
+
+    # Org and task both allow provider_upload for a transient source → selected.
+    assert (
+        select_transfer_mode_for_policy(
+            aggregate_bytes=above,
+            attachment_mime_types=["application/pdf"],
+            source_lifecycle=SourceLifecycle.TRANSIENT,
+            organisation_allowed_modes=[
+                TransferMode.INLINE,
+                TransferMode.PROVIDER_UPLOAD,
+            ],
+            organisation_max_large_attachment_bytes=None,
+            task_allowed_modes=[TransferMode.INLINE, TransferMode.PROVIDER_UPLOAD],
+            model_allowed_modes=[TransferMode.INLINE, TransferMode.PROVIDER_UPLOAD],
+            contract=contract,
+        )
+        is TransferMode.PROVIDER_UPLOAD
+    )
+    # The org restricts to inline only → nothing is eligible above the threshold.
+    assert (
+        select_transfer_mode_for_policy(
+            aggregate_bytes=above,
+            attachment_mime_types=["application/pdf"],
+            source_lifecycle=SourceLifecycle.TRANSIENT,
+            organisation_allowed_modes=[TransferMode.INLINE],
+            organisation_max_large_attachment_bytes=None,
+            task_allowed_modes=[TransferMode.INLINE, TransferMode.PROVIDER_UPLOAD],
+            model_allowed_modes=[TransferMode.INLINE, TransferMode.PROVIDER_UPLOAD],
+            contract=contract,
+        )
+        is None
+    )
+    # The task restricts to inline only → the org's broader allowlist cannot
+    # silently widen the task's reviewed declaration.
+    assert (
+        select_transfer_mode_for_policy(
+            aggregate_bytes=above,
+            attachment_mime_types=["application/pdf"],
+            source_lifecycle=SourceLifecycle.TRANSIENT,
+            organisation_allowed_modes=[
+                TransferMode.INLINE,
+                TransferMode.PROVIDER_UPLOAD,
+            ],
+            organisation_max_large_attachment_bytes=None,
+            task_allowed_modes=[TransferMode.INLINE],
+            model_allowed_modes=[TransferMode.INLINE, TransferMode.PROVIDER_UPLOAD],
+            contract=contract,
+        )
+        is None
+    )
+
+
+def test_policy_selection_applies_organisation_max_large_ceiling() -> None:
+    contract = _provider_contract()
+    above = INLINE_AGGREGATE_THRESHOLD_BYTES + 1
+
+    # The org tightens the ceiling below the request: no non-inline mode fits.
+    assert (
+        select_transfer_mode_for_policy(
+            aggregate_bytes=above,
+            attachment_mime_types=["application/pdf"],
+            source_lifecycle=SourceLifecycle.TRANSIENT,
+            organisation_allowed_modes=[
+                TransferMode.INLINE,
+                TransferMode.PROVIDER_UPLOAD,
+            ],
+            organisation_max_large_attachment_bytes=above - 1,
+            task_allowed_modes=[TransferMode.INLINE, TransferMode.PROVIDER_UPLOAD],
+            model_allowed_modes=[TransferMode.INLINE, TransferMode.PROVIDER_UPLOAD],
+            contract=contract,
+        )
+        is None
+    )
+    # A ceiling at or above the request keeps provider_upload eligible.
+    assert (
+        select_transfer_mode_for_policy(
+            aggregate_bytes=above,
+            attachment_mime_types=["application/pdf"],
+            source_lifecycle=SourceLifecycle.TRANSIENT,
+            organisation_allowed_modes=[
+                TransferMode.INLINE,
+                TransferMode.PROVIDER_UPLOAD,
+            ],
+            organisation_max_large_attachment_bytes=above,
+            task_allowed_modes=[TransferMode.INLINE, TransferMode.PROVIDER_UPLOAD],
+            model_allowed_modes=[TransferMode.INLINE, TransferMode.PROVIDER_UPLOAD],
+            contract=contract,
+        )
+        is TransferMode.PROVIDER_UPLOAD
+    )
+
+
+def test_policy_selection_retained_source_prefers_managed_url() -> None:
+    contract = _provider_contract()
+    above = INLINE_AGGREGATE_THRESHOLD_BYTES + 1
+    assert (
+        select_transfer_mode_for_policy(
+            aggregate_bytes=above,
+            attachment_mime_types=["application/pdf"],
+            source_lifecycle=SourceLifecycle.RETAINED,
+            organisation_allowed_modes=[
+                TransferMode.INLINE,
+                TransferMode.MANAGED_SIGNED_URL,
+            ],
+            organisation_max_large_attachment_bytes=None,
+            task_allowed_modes=[
+                TransferMode.INLINE,
+                TransferMode.MANAGED_SIGNED_URL,
+            ],
+            model_allowed_modes=[TransferMode.INLINE, TransferMode.MANAGED_SIGNED_URL],
+            contract=contract,
+        )
+        is TransferMode.MANAGED_SIGNED_URL
+    )
+
+
+def test_policy_selection_vertex_storage_reference_for_either_lifecycle() -> None:
+    contract = _provider_contract(
+        modes={
+            TransferMode.INLINE: TransferModeContract(
+                mime_types=_INLINE_MIME,
+                max_bytes=INLINE_AGGREGATE_THRESHOLD_BYTES,
+                source_lifecycles=[SourceLifecycle.TRANSIENT, SourceLifecycle.RETAINED],
+            ),
+            TransferMode.STORAGE_REFERENCE: TransferModeContract(
+                mime_types=sorted(NON_INLINE_MIME_TYPES),
+                max_bytes=MAX_LARGE_ATTACHMENT_BYTES,
+                source_lifecycles=[SourceLifecycle.TRANSIENT, SourceLifecycle.RETAINED],
+                same_region_required=True,
+            ),
+        }
+    )
+    above = INLINE_AGGREGATE_THRESHOLD_BYTES + 1
+    for lifecycle in (SourceLifecycle.TRANSIENT, SourceLifecycle.RETAINED):
+        assert (
+            select_transfer_mode_for_policy(
+                aggregate_bytes=above,
+                attachment_mime_types=["application/pdf"],
+                source_lifecycle=lifecycle,
+                organisation_allowed_modes=[TransferMode.INLINE, TransferMode.STORAGE_REFERENCE],
+                organisation_max_large_attachment_bytes=None,
+                task_allowed_modes=[TransferMode.INLINE, TransferMode.STORAGE_REFERENCE],
+                model_allowed_modes=[TransferMode.INLINE, TransferMode.STORAGE_REFERENCE],
+                contract=contract,
+            )
+            is TransferMode.STORAGE_REFERENCE
+        )
+
+
+def test_policy_selection_requires_inline_through_the_threshold() -> None:
+    """An intersection without inline can never skip to non-inline for a small
+    file — inline remains the reviewed default (Scope §2.2)."""
+    contract = _provider_contract()
+    assert (
+        select_transfer_mode_for_policy(
+            aggregate_bytes=1,
+            attachment_mime_types=["application/pdf"],
+            source_lifecycle=SourceLifecycle.TRANSIENT,
+            organisation_allowed_modes=[TransferMode.PROVIDER_UPLOAD],
+            organisation_max_large_attachment_bytes=None,
+            task_allowed_modes=[TransferMode.PROVIDER_UPLOAD],
+            model_allowed_modes=[TransferMode.PROVIDER_UPLOAD],
+            contract=contract,
+        )
+        is None
+    )
+
+
+def test_policy_selection_rejects_ceiling_above_template() -> None:
+    with pytest.raises(ValueError, match="must not exceed"):
+        select_transfer_mode_for_policy(
+            aggregate_bytes=INLINE_AGGREGATE_THRESHOLD_BYTES + 1,
+            attachment_mime_types=["application/pdf"],
+            source_lifecycle=SourceLifecycle.TRANSIENT,
+            organisation_allowed_modes=[TransferMode.INLINE, TransferMode.PROVIDER_UPLOAD],
+            organisation_max_large_attachment_bytes=MAX_LARGE_ATTACHMENT_BYTES + 1,
+            task_allowed_modes=[TransferMode.INLINE, TransferMode.PROVIDER_UPLOAD],
+            model_allowed_modes=[TransferMode.INLINE, TransferMode.PROVIDER_UPLOAD],
+            contract=_provider_contract(),
+        )
+
+
+def test_policy_selection_intersects_the_deployment_configuration() -> None:
+    """Deployment configuration is an eligibility gate (v0.8 Scope §2.2/§6.2):
+    a mode the deployment does not enable can never be selected, and the
+    deployment ceiling caps every non-inline mode."""
+    contract = _provider_contract()
+    above = INLINE_AGGREGATE_THRESHOLD_BYTES + 1
+    permissive_policy = [
+        TransferMode.INLINE,
+        TransferMode.PROVIDER_UPLOAD,
+        TransferMode.STORAGE_REFERENCE,
+    ]
+
+    # Default-deny deployment (no non-inline mode enabled): nothing eligible.
+    assert (
+        select_transfer_mode_for_policy(
+            aggregate_bytes=above,
+            attachment_mime_types=["application/pdf"],
+            source_lifecycle=SourceLifecycle.TRANSIENT,
+            organisation_allowed_modes=permissive_policy,
+            organisation_max_large_attachment_bytes=None,
+            task_allowed_modes=permissive_policy,
+            model_allowed_modes=permissive_policy,
+            deployment=TransferDeploymentPolicy(),
+            contract=contract,
+        )
+        is None
+    )
+    # Enabling the mode in the deployment makes it eligible again.
+    assert (
+        select_transfer_mode_for_policy(
+            aggregate_bytes=above,
+            attachment_mime_types=["application/pdf"],
+            source_lifecycle=SourceLifecycle.TRANSIENT,
+            organisation_allowed_modes=permissive_policy,
+            organisation_max_large_attachment_bytes=None,
+            task_allowed_modes=permissive_policy,
+            model_allowed_modes=permissive_policy,
+            deployment=TransferDeploymentPolicy(
+                enabled_transfer_modes=frozenset({TransferMode.PROVIDER_UPLOAD})
+            ),
+            contract=contract,
+        )
+        is TransferMode.PROVIDER_UPLOAD
+    )
+    # A deployment that enables a mode but tightens the ceiling below the
+    # request excludes that mode: the lowest ceiling wins.
+    assert (
+        select_transfer_mode_for_policy(
+            aggregate_bytes=above,
+            attachment_mime_types=["application/pdf"],
+            source_lifecycle=SourceLifecycle.TRANSIENT,
+            organisation_allowed_modes=permissive_policy,
+            organisation_max_large_attachment_bytes=None,
+            task_allowed_modes=permissive_policy,
+            model_allowed_modes=permissive_policy,
+            deployment=TransferDeploymentPolicy(
+                enabled_transfer_modes=frozenset({TransferMode.PROVIDER_UPLOAD}),
+                max_large_attachment_bytes=above - 1,
+            ),
+            contract=contract,
+        )
+        is None
+    )
+
+
+def test_policy_selection_uses_the_deployment_inline_threshold() -> None:
+    """A lowered deployment inline threshold moves the inline-only boundary:
+    the fail-closed intersection check and the service gate use the configured
+    threshold, never the template constant (v0.8 Scope §2.2)."""
+    contract = _provider_contract()
+    lowered = TransferDeploymentPolicy(
+        inline_aggregate_threshold_bytes=1_000_000,
+        enabled_transfer_modes=frozenset({TransferMode.PROVIDER_UPLOAD}),
+    )
+    # 2 MB is above the deployment threshold, so the policy intersection
+    # applies; the mode is eligible and selected.
+    assert (
+        select_transfer_mode_for_policy(
+            aggregate_bytes=2_000_000,
+            attachment_mime_types=["application/pdf"],
+            source_lifecycle=SourceLifecycle.TRANSIENT,
+            organisation_allowed_modes=[TransferMode.INLINE, TransferMode.PROVIDER_UPLOAD],
+            organisation_max_large_attachment_bytes=None,
+            task_allowed_modes=[TransferMode.INLINE, TransferMode.PROVIDER_UPLOAD],
+            model_allowed_modes=[TransferMode.INLINE, TransferMode.PROVIDER_UPLOAD],
+            deployment=lowered,
+            contract=contract,
+        )
+        is TransferMode.PROVIDER_UPLOAD
+    )
+    # A tiny request with an inline-less intersection still fails closed at the
+    # lowered boundary (below it inline is the only eligible mode).
+    assert (
+        select_transfer_mode_for_policy(
+            aggregate_bytes=500_000,
+            attachment_mime_types=["application/pdf"],
+            source_lifecycle=SourceLifecycle.TRANSIENT,
+            organisation_allowed_modes=[TransferMode.PROVIDER_UPLOAD],
+            organisation_max_large_attachment_bytes=None,
+            task_allowed_modes=[TransferMode.PROVIDER_UPLOAD],
+            model_allowed_modes=[TransferMode.PROVIDER_UPLOAD],
+            deployment=lowered,
+            contract=contract,
+        )
+        is None
+    )
+
+
+def test_policy_selection_inline_is_not_eligible_above_a_lowered_threshold() -> None:
+    """The configured deployment threshold is the authoritative inline
+    boundary (v0.8 Scope §2.2/§5.2): above a lowered threshold an inline-only
+    intersection fails closed rather than falling back to inline whenever the
+    provider's fixed inline contract ceiling would still fit."""
+    contract = _provider_contract()
+    lowered = TransferDeploymentPolicy(inline_aggregate_threshold_bytes=1_000_000)
+    # 2,000,000 bytes: above the lowered 1,000,000-byte deployment threshold,
+    # still within the provider's 5,000,000-byte inline contract ceiling —
+    # inline must not be selected.
+    assert (
+        select_transfer_mode_for_policy(
+            aggregate_bytes=2_000_000,
+            attachment_mime_types=["application/pdf"],
+            source_lifecycle=SourceLifecycle.TRANSIENT,
+            organisation_allowed_modes=[TransferMode.INLINE],
+            organisation_max_large_attachment_bytes=None,
+            task_allowed_modes=[TransferMode.INLINE],
+            model_allowed_modes=[TransferMode.INLINE],
+            deployment=lowered,
+            contract=contract,
+        )
+        is None
+    )
+    # At or below the lowered threshold inline is still the reviewed default.
+    assert (
+        select_transfer_mode_for_policy(
+            aggregate_bytes=1_000_000,
+            attachment_mime_types=["application/pdf"],
+            source_lifecycle=SourceLifecycle.TRANSIENT,
+            organisation_allowed_modes=[TransferMode.INLINE],
+            organisation_max_large_attachment_bytes=None,
+            task_allowed_modes=[TransferMode.INLINE],
+            model_allowed_modes=[TransferMode.INLINE],
+            deployment=lowered,
+            contract=contract,
+        )
+        is TransferMode.INLINE
+    )
+
+
+def test_policy_selection_requires_exactly_one_pdf_for_non_inline() -> None:
+    """v0.8 Scope §2.1 decision 3 / §5.3: the non-inline path carries exactly
+    one application/pdf; any other count or MIME type above the threshold has
+    no eligible mode."""
+    contract = _provider_contract()
+    above = INLINE_AGGREGATE_THRESHOLD_BYTES + 1
+    permissive = [TransferMode.INLINE, TransferMode.PROVIDER_UPLOAD]
+
+    for bad_mimes in (
+        ["application/pdf", "application/pdf"],
+        ["text/plain"],
+        ["application/json"],
+    ):
+        assert (
+            select_transfer_mode_for_policy(
+                aggregate_bytes=above,
+                attachment_mime_types=bad_mimes,
+                source_lifecycle=SourceLifecycle.TRANSIENT,
+                organisation_allowed_modes=permissive,
+                organisation_max_large_attachment_bytes=None,
+                task_allowed_modes=permissive,
+                model_allowed_modes=permissive,
+                contract=contract,
+            )
+            is None
+        )
+    # Exactly one PDF keeps the mode eligible.
+    assert (
+        select_transfer_mode_for_policy(
+            aggregate_bytes=above,
+            attachment_mime_types=["application/pdf"],
+            source_lifecycle=SourceLifecycle.TRANSIENT,
+            organisation_allowed_modes=permissive,
+            organisation_max_large_attachment_bytes=None,
+            task_allowed_modes=permissive,
+            model_allowed_modes=permissive,
+            contract=contract,
+        )
+        is TransferMode.PROVIDER_UPLOAD
+    )
+
+
+def test_policy_selection_applies_the_model_per_mode_ceiling() -> None:
+    """The routed model's per-mode MIME set and byte ceiling gate selection:
+    a request above a model-specific mode ceiling (or outside its MIME set)
+    has no eligible mode (v0.8 Scope §2.2)."""
+    contract = _provider_contract()
+    above = INLINE_AGGREGATE_THRESHOLD_BYTES + 1
+    permissive = [TransferMode.INLINE, TransferMode.PROVIDER_UPLOAD]
+    tight_limits = {
+        TransferMode.PROVIDER_UPLOAD: ModelModeCeiling(
+            mime_types=frozenset(NON_INLINE_MIME_TYPES), max_bytes=above - 1
+        )
+    }
+
+    # The model's ceiling is below the request: the mode is excluded.
+    assert (
+        select_transfer_mode_for_policy(
+            aggregate_bytes=above,
+            attachment_mime_types=["application/pdf"],
+            source_lifecycle=SourceLifecycle.TRANSIENT,
+            organisation_allowed_modes=permissive,
+            organisation_max_large_attachment_bytes=None,
+            task_allowed_modes=permissive,
+            model_allowed_modes=permissive,
+            model_mode_limits=tight_limits,
+            contract=contract,
+        )
+        is None
+    )
+    # The model's MIME set excludes PDF: the mode is excluded.
+    no_pdf_limits = {
+        TransferMode.PROVIDER_UPLOAD: ModelModeCeiling(
+            mime_types=frozenset({"text/plain"}), max_bytes=MAX_LARGE_ATTACHMENT_BYTES
+        )
+    }
+    assert (
+        select_transfer_mode_for_policy(
+            aggregate_bytes=above,
+            attachment_mime_types=["application/pdf"],
+            source_lifecycle=SourceLifecycle.TRANSIENT,
+            organisation_allowed_modes=permissive,
+            organisation_max_large_attachment_bytes=None,
+            task_allowed_modes=permissive,
+            model_allowed_modes=permissive,
+            model_mode_limits=no_pdf_limits,
+            contract=contract,
+        )
+        is None
+    )
+    # A ceiling at or above the request keeps the mode eligible.
+    roomy_limits = {
+        TransferMode.PROVIDER_UPLOAD: ModelModeCeiling(
+            mime_types=frozenset(NON_INLINE_MIME_TYPES), max_bytes=MAX_LARGE_ATTACHMENT_BYTES
+        )
+    }
+    assert (
+        select_transfer_mode_for_policy(
+            aggregate_bytes=above,
+            attachment_mime_types=["application/pdf"],
+            source_lifecycle=SourceLifecycle.TRANSIENT,
+            organisation_allowed_modes=permissive,
+            organisation_max_large_attachment_bytes=None,
+            task_allowed_modes=permissive,
+            model_allowed_modes=permissive,
+            model_mode_limits=roomy_limits,
+            contract=contract,
+        )
+        is TransferMode.PROVIDER_UPLOAD
+    )
+
+
+def test_policy_selection_gates_inline_on_the_model_inline_declaration() -> None:
+    """v0.8 Scope §6.2: the routed model's inline declarations gate the inline
+    path. A model whose inline MIME set excludes the attachment, whose
+    per-file or combined byte ceilings do not fit, or that lacks the vision
+    capability for an image can never receive an inline dispatch — even when
+    one of its non-inline modes happens to accept the set — so a
+    below-threshold request fails closed instead of bypassing the declaration.
+    """
+    contract = _provider_contract()
+    permissive = [TransferMode.INLINE, TransferMode.PROVIDER_UPLOAD]
+
+    def _select(
+        *,
+        sizes: list[int],
+        mimes: list[str],
+        inline: ModelInlineCeiling,
+    ) -> TransferMode | None:
+        return select_transfer_mode_for_policy(
+            aggregate_bytes=sum(sizes),
+            attachment_sizes=sizes,
+            attachment_mime_types=mimes,
+            source_lifecycle=SourceLifecycle.TRANSIENT,
+            organisation_allowed_modes=permissive,
+            organisation_max_large_attachment_bytes=None,
+            task_allowed_modes=permissive,
+            model_allowed_modes=permissive,
+            model_mode_limits={
+                TransferMode.PROVIDER_UPLOAD: ModelModeCeiling(
+                    mime_types=frozenset(NON_INLINE_MIME_TYPES),
+                    max_bytes=MAX_LARGE_ATTACHMENT_BYTES,
+                )
+            },
+            model_inline=inline,
+            contract=contract,
+        )
+
+    pdf_mime = ["application/pdf"]
+    # The model's inline MIME set excludes the PDF: inline is excluded and a
+    # below-threshold request has no eligible mode — the non-inline declaration
+    # that accepts PDF cannot turn into an inline dispatch.
+    text_only = ModelInlineCeiling(
+        mime_types=frozenset({"text/plain"}),
+        max_attachment_bytes=5 * 1024 * 1024,
+        max_total_attachment_bytes=10 * 1024 * 1024,
+        has_documents_capability=True,
+    )
+    assert _select(sizes=[100_000], mimes=pdf_mime, inline=text_only) is None
+
+    # A fitting inline declaration keeps inline selectable below the threshold.
+    pdf_inline = ModelInlineCeiling(
+        mime_types=frozenset({"application/pdf"}),
+        max_attachment_bytes=5 * 1024 * 1024,
+        max_total_attachment_bytes=10 * 1024 * 1024,
+        has_documents_capability=True,
+    )
+    assert _select(sizes=[100_000], mimes=pdf_mime, inline=pdf_inline) is TransferMode.INLINE
+
+    # A per-file ceiling below the file size excludes inline for the same set.
+    tight_per_file = ModelInlineCeiling(
+        mime_types=frozenset({"application/pdf"}),
+        max_attachment_bytes=50_000,
+        max_total_attachment_bytes=10 * 1024 * 1024,
+        has_documents_capability=True,
+    )
+    assert _select(sizes=[100_000], mimes=pdf_mime, inline=tight_per_file) is None
+
+    # A combined ceiling below the set excludes inline as well.
+    tight_total = ModelInlineCeiling(
+        mime_types=frozenset({"application/pdf"}),
+        max_attachment_bytes=10 * 1024 * 1024,
+        max_total_attachment_bytes=60_000,
+        has_documents_capability=True,
+    )
+    assert _select(sizes=[100_000], mimes=pdf_mime, inline=tight_total) is None
+
+    # A model without the documents capability can never carry the set inline.
+    no_documents = ModelInlineCeiling(
+        mime_types=frozenset({"application/pdf"}),
+        max_attachment_bytes=5 * 1024 * 1024,
+        max_total_attachment_bytes=10 * 1024 * 1024,
+        has_documents_capability=False,
+    )
+    assert _select(sizes=[100_000], mimes=pdf_mime, inline=no_documents) is None
+
+    # An image additionally needs the vision capability on the model's inline
+    # declaration; with it, inline stays selectable below the threshold.
+    image = ["image/png"]
+    image_no_vision = ModelInlineCeiling(
+        mime_types=frozenset({"image/png"}),
+        max_attachment_bytes=5 * 1024 * 1024,
+        max_total_attachment_bytes=10 * 1024 * 1024,
+        has_documents_capability=True,
+        has_vision_capability=False,
+    )
+    assert _select(sizes=[100_000], mimes=image, inline=image_no_vision) is None
+    image_with_vision = ModelInlineCeiling(
+        mime_types=frozenset({"image/png"}),
+        max_attachment_bytes=5 * 1024 * 1024,
+        max_total_attachment_bytes=10 * 1024 * 1024,
+        has_documents_capability=True,
+        has_vision_capability=True,
+    )
+    assert _select(sizes=[100_000], mimes=image, inline=image_with_vision) is TransferMode.INLINE
+
+
+def test_source_lifecycle_for_reference_classifies_scratch_as_transient() -> None:
+    assert (
+        source_lifecycle_for_reference(
+            f"organisations/{_ORG_ID}/ai/scratch/analyse-input.pdf", _ORG_ID
+        )
+        is SourceLifecycle.TRANSIENT
+    )
+    assert (
+        source_lifecycle_for_reference(f"organisations/{_ORG_ID}/documents/kept.pdf", _ORG_ID)
+        is SourceLifecycle.RETAINED
+    )
+    # Another organisation's scratch namespace is retained from this org's view.
+    other = UUID("01989f1c-e5cb-7000-8000-000000000002")
+    assert (
+        source_lifecycle_for_reference(f"organisations/{_ORG_ID}/ai/scratch/x.pdf", other)
+        is SourceLifecycle.RETAINED
     )
 
 

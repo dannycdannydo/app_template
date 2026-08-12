@@ -304,10 +304,11 @@ PROTECTED_ROUTES: list[RouteSpec] = [
         request_body={"organisation_id": _FEATURE_FLAG_ORG_ID, "enabled": True},
         path_values={"feature_key": "records.deletion"},
     ),
-    # AI organisation settings (Scope §6.5): platform-gated, never org-scoped;
-    # the organisation id comes from the path and the policy from the PUT body.
-    # The PUT body carries only management fields (enabled, allowlists,
-    # overrides, budget, retention) — no provider credentials or raw provider
+    # AI organisation settings (Scope §6.5, v0.8 Scope §6.2): platform-gated,
+    # never org-scoped; the organisation id comes from the path and the policy
+    # from the PUT body. The PUT body carries only management fields (enabled,
+    # allowlists, overrides, budget, retention, transfer policy) — no provider
+    # credentials, transfer-mode provider identifiers or raw provider
     # configuration ever crosses the API (ADR-0017, BP §27).
     _route(
         "GET",
@@ -328,6 +329,8 @@ PROTECTED_ROUTES: list[RouteSpec] = [
             "model_override": None,
             "monthly_budget": None,
             "retention_policy_days": None,
+            "allowed_transfer_modes": ["inline"],
+            "max_large_attachment_bytes": 50000000,
         },
         path_values={"organisation_id": _AI_SETTINGS_ORG_ID},
     ),
