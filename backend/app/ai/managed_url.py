@@ -133,9 +133,7 @@ async def mint_managed_download_url(
         raise TransferSourceError("the referenced storage object does not exist")
     stored_mime = _normalise_mime(info.content_type)
     if info.size_bytes != reference.size_bytes or stored_mime != reference.mime_type:
-        raise TransferSourceError(
-            "the referenced storage object changed since it was verified"
-        )
+        raise TransferSourceError("the referenced storage object changed since it was verified")
     # Exact immutable identity: size and MIME cannot prove the object is the
     # one the transfer verified — content replaced with different bytes of the
     # same length and content type would pass the head check. Re-stream the
@@ -146,17 +144,11 @@ async def mint_managed_download_url(
         sink = _DigestSink(max_bytes=reference.size_bytes, digest=digest)
         await storage.stream_object(source, destination=sink)
     except (KeyError, ValueError):
-        raise TransferSourceError(
-            "the referenced storage object could not be verified"
-        ) from None
+        raise TransferSourceError("the referenced storage object could not be verified") from None
     if sink.written != info.size_bytes:
-        raise TransferSourceError(
-            "the referenced storage object changed since it was verified"
-        )
+        raise TransferSourceError("the referenced storage object changed since it was verified")
     if digest.hexdigest() != reference.source_digest:
-        raise TransferSourceError(
-            "the referenced storage object changed since it was verified"
-        )
+        raise TransferSourceError("the referenced storage object changed since it was verified")
     signed = await storage.create_download_url(
         object_key=source,
         expires_in=timedelta(seconds=ttl),

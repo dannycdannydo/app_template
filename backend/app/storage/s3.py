@@ -291,7 +291,9 @@ class S3Storage(ObjectStorage):
                 # byte ever read beyond ``max_bytes``, and nothing of the
                 # remainder is buffered).
                 read_size = (
-                    _STREAM_CHUNK_BYTES if remaining is None else min(_STREAM_CHUNK_BYTES, remaining)
+                    _STREAM_CHUNK_BYTES
+                    if remaining is None
+                    else min(_STREAM_CHUNK_BYTES, remaining)
                 )
                 chunk = await asyncio.to_thread(body.read, read_size)
                 if not chunk:

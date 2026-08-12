@@ -188,7 +188,9 @@ async def test_reference_table_has_no_managed_url_columns(migrated_database: str
                             "WHERE table_name = 'ai_attachment_references'"
                         )
                     )
-                ).scalars().all()
+                )
+                .scalars()
+                .all()
             )
             assert "url" not in columns
             assert "query_string" not in columns
@@ -457,9 +459,12 @@ async def test_mark_expired_mark_deleted_and_expire_all(migrated_database: str) 
                 source_digest="bb22" * 16,
             )
             await store.create_or_adopt(two)
-            assert await store.expire_all_for_request(
-                organisation_id=org.id, logical_request_id="req-1"
-            ) == 1
+            assert (
+                await store.expire_all_for_request(
+                    organisation_id=org.id, logical_request_id="req-1"
+                )
+                == 1
+            )
             live = await _live_rows(session, org.id, "req-1")
             assert live == []
     finally:
@@ -489,16 +494,22 @@ async def test_list_for_request_is_org_scoped(migrated_database: str) -> None:
             )
         async with session_factory() as session:
             store = SQLTransferReferenceStore(session)
-            assert len(
-                await store.list_for_request(
-                    organisation_id=org_a.id, logical_request_id="req-1"
+            assert (
+                len(
+                    await store.list_for_request(
+                        organisation_id=org_a.id, logical_request_id="req-1"
+                    )
                 )
-            ) == 1
-            assert len(
-                await store.list_for_request(
-                    organisation_id=org_b.id, logical_request_id="req-1"
+                == 1
+            )
+            assert (
+                len(
+                    await store.list_for_request(
+                        organisation_id=org_b.id, logical_request_id="req-1"
+                    )
                 )
-            ) == 1
+                == 1
+            )
     finally:
         await engine.dispose()
 
@@ -698,17 +709,23 @@ async def test_orchestrator_request_scoped_expire_and_delete(migrated_database: 
                     region="eu-west-1",
                     expires_at=datetime.now(UTC) + timedelta(hours=1),
                 )
-            assert await orchestrator.expire_references_for_request(
-                organisation_id=org.id, logical_request_id="req-sweep"
-            ) == 2
+            assert (
+                await orchestrator.expire_references_for_request(
+                    organisation_id=org.id, logical_request_id="req-sweep"
+                )
+                == 2
+            )
             assert await _live_rows(session, org.id, "req-sweep") == []
             # Terminal cleanup composes safely after expiry: the sweep resolves
             # the authoritative (now expired) rows and still deletes the
             # provider copies, so an expire-then-delete sequence cannot strand
             # copies for the §6.7 reconciliation job.
-            assert await orchestrator.delete_references_for_request(
-                organisation_id=org.id, logical_request_id="req-sweep"
-            ) == 2
+            assert (
+                await orchestrator.delete_references_for_request(
+                    organisation_id=org.id, logical_request_id="req-sweep"
+                )
+                == 2
+            )
             assert len(store.deleted) == 2
             assert await storage.head_object(key) is not None  # source untouched
             rows = await _all_rows(session, org.id, "req-sweep")
@@ -1010,9 +1027,7 @@ async def test_adopt_touches_the_live_row_after_expired_replacement(
             rows = await _all_rows(session, org.id, "req-1")
             assert len(rows) == 2
             assert {row.status for row in rows} == {"live", "expired"}
-            assert await store.adopt(
-                organisation_id=org.id, idempotency_key=future.idempotency_key
-            )
+            assert await store.adopt(organisation_id=org.id, idempotency_key=future.idempotency_key)
             rows = await _all_rows(session, org.id, "req-1")
             live = next(row for row in rows if row.status == "live")
             expired = next(row for row in rows if row.status == "expired")

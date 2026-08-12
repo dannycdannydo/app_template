@@ -312,9 +312,7 @@ class SQLTransferReferenceStore:
         """
         rows = (
             await self._session.scalars(
-                ai_attachment_references_for_request_statement(
-                    organisation_id, logical_request_id
-                )
+                ai_attachment_references_for_request_statement(organisation_id, logical_request_id)
             )
         ).all()
         changed = 0
@@ -337,9 +335,7 @@ class SQLTransferReferenceStore:
         """
         rows = (
             await self._session.scalars(
-                ai_attachment_references_for_request_statement(
-                    organisation_id, logical_request_id
-                )
+                ai_attachment_references_for_request_statement(organisation_id, logical_request_id)
             )
         ).all()
         return [_row_to_reference(row) for row in rows]

@@ -54,9 +54,7 @@ def upgrade() -> None:
         sa.Column("mime_type", sa.String(length=128), nullable=False),
         sa.Column("source_lifecycle", sa.String(length=16), nullable=False),
         sa.Column("region", sa.String(length=128), server_default=sa.text("''"), nullable=False),
-        sa.Column(
-            "status", sa.String(length=16), server_default=sa.text("'live'"), nullable=False
-        ),
+        sa.Column("status", sa.String(length=16), server_default=sa.text("'live'"), nullable=False),
         sa.Column("idempotency_key", sa.String(length=64), nullable=False),
         sa.Column("error_code", sa.String(length=80), nullable=True),
         sa.Column("metadata", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
@@ -83,8 +81,7 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_ai_attachment_references")),
         sa.CheckConstraint(
-            "transfer_mode IN ('provider_upload', 'managed_signed_url', "
-            "'storage_reference')",
+            "transfer_mode IN ('provider_upload', 'managed_signed_url', 'storage_reference')",
             name="ck_ai_attachment_references_transfer_mode",
         ),
         sa.CheckConstraint(
@@ -144,7 +141,5 @@ def downgrade() -> None:
         table_name="ai_attachment_references",
     )
     op.drop_index("ix_ai_attachment_references_org_request", table_name="ai_attachment_references")
-    op.drop_index(
-        "uq_ai_attachment_references_org_key_live", table_name="ai_attachment_references"
-    )
+    op.drop_index("uq_ai_attachment_references_org_key_live", table_name="ai_attachment_references")
     op.drop_table("ai_attachment_references")

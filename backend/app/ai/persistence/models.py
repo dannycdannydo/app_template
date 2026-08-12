@@ -496,9 +496,7 @@ class AIAttachmentReference(Base, TimestampMixin):
     # mapped attribute is ``event_metadata`` because ``metadata`` is reserved
     # in the SQLAlchemy declarative API (it would shadow ``Base.metadata``);
     # the database column keeps the §2.3 name ``metadata``.
-    event_metadata: Mapped[dict[str, Any] | None] = mapped_column(
-        "metadata", JSONB, nullable=True
-    )
+    event_metadata: Mapped[dict[str, Any] | None] = mapped_column("metadata", JSONB, nullable=True)
     # Lifecycle timestamps: the provider-side expiry (None where the provider
     # has no automatic expiry), the last reuse time and the terminal deletion
     # time. Timezone-aware UTC (BP §10).

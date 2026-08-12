@@ -99,9 +99,7 @@ class TransferOrchestrator:
         — it produces no durable reference.
         """
         if mode not in _PROVIDER_COPY_MODES | {TransferMode.MANAGED_SIGNED_URL}:
-            raise TransferExecutionUnavailableError(
-                "inline transfers produce no durable reference"
-            )
+            raise TransferExecutionUnavailableError("inline transfers produce no durable reference")
         if mode in _PROVIDER_COPY_MODES:
             # The store is the adapter for exactly one provider; a wiring error
             # that selects a different provider than the store stages through

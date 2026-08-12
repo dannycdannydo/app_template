@@ -54,7 +54,9 @@ async def _seed_source(
 ) -> str:
     """Declare and store one private source object; returns its key."""
     key = _source_key()
-    await storage.create_upload_url(file_id=uuid4(), object_key=key, content_type=content_type, size_bytes=len(content))
+    await storage.create_upload_url(
+        file_id=uuid4(), object_key=key, content_type=content_type, size_bytes=len(content)
+    )
     await storage.put(key, content, content_type=content_type)
     return key
 
