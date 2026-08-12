@@ -49,7 +49,9 @@ def validate_plan(path: Path, text: str) -> list[str]:
         expected = f"P{index + 1}"
         name = checkpoint.group(1)
         if name != expected:
-            errors.append(f"{path}: checkpoints must be consecutive; expected {expected}, found {name}")
+            errors.append(
+                f"{path}: checkpoints must be consecutive; expected {expected}, found {name}"
+            )
         end = checkpoints[index + 1].start() if index + 1 < len(checkpoints) else len(text)
         body = text[checkpoint.end() : end]
         if "Dependencies:" not in body:

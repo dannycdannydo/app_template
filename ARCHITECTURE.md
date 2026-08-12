@@ -85,10 +85,24 @@ AIService.execute(task=...)          app/ai/service.py
   is its configured endpoint, Vertex is pinned by location, DeepSeek documents
   no pinning, and local/fake inherit their operator location; unsupported
   regions fail config validation and fallback never changes region implicitly.
-- **Large-file and provider-reference transfer modes** (v0.7 Scope
-  §6.1/§6.8-boundary): provider uploads, file identifiers, `gs://` references,
-  URL inputs and larger ceilings are deferred to v0.8
-  (`plans/AI_LARGE_ATTACHMENTS_V0_8_PLAN.md`); inline is the only v0.7 mode.
+- **Large-file transfer modes** (v0.8 Scope §2.2, ADR-0017 amendment): the
+  feature boundary is unchanged — a caller supplies only a task name and a
+  private `storage_reference`, never a transfer mode or provider reference.
+  `app/ai/transfer.py` owns the provider-neutral contracts (`inline`,
+  `provider_upload`, `managed_signed_url`, `storage_reference`; inline is
+  eligible only through a 5,000,000-byte aggregate threshold, non-inline is
+  exactly one PDF up to 50,000,000 bytes) and `app/ai/staging.py` owns the
+  provider-neutral `TransferStore` seam with a deterministic fake for the test
+  suite. Transient sources prefer provider upload, retained private S3
+  sources prefer a just-in-time managed signed URL (900 s default / 1,800 s
+  max, never returned, persisted, audited or logged), and Vertex stages to a
+  user-provisioned private same-region GCS bucket (`gs://`) with a
+  deployer-owned `age = 1` lifecycle backstop. Provider contracts are
+  re-verified against official docs and recorded in
+  `app/ai/contracts/providers.yaml`; inconsistent registry/contract
+  declarations fail fast at startup/CI (Scope §6.1). Provider copies and GCS
+  staging objects are AI-owned derivatives and deletion never touches the
+  feature-owned source; caller-supplied HTTP(S) URLs remain prohibited.
 - Small bounded tasks run synchronously; document-scale work enqueues an
   `ai.execute` job on the `ai` queue with the durable record-then-enqueue
   lifecycle. Organisation AI settings are default-off, use versioned full

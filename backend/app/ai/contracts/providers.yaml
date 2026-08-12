@@ -1,0 +1,259 @@
+# Provider transfer contract fixture (v0.8 Scope §2.1, §6.1 checkbox 1).
+#
+# Re-verified against the official provider and cloud-storage documentation on
+# 2026-08-11 (see `verified_at` per record and `sources` for the exact pages).
+# The loader (`app.ai.transfer.load_transfer_contracts`) validates this file at
+# startup and in CI: any inconsistent mode, source-lifecycle, MIME, threshold/
+# ceiling, provider, expiry/TTL or regional declaration fails fast (Scope §6.1
+# checkbox 4). Provider ceilings are lower than the template ceiling and always
+# win (Scope §2.1); the template large-file ceiling is 50,000,000 bytes and the
+# aggregate inline threshold is 5,000,000 bytes.
+providers:
+  - provider: fake
+    verified_at: 2026-08-11
+    api_version: deterministic in-memory test adapter (no wire format)
+    sources:
+      template_contract: https://github.com/dannycdannydo/app_template/blob/main/plans/AI_LARGE_ATTACHMENTS_V0_8_PLAN.md
+    retention_notes: >-
+      The fake stores no bytes; it records deterministic opaque references and
+      simulates upload, reuse, expiry and deletion so the default test suite
+      exercises every transfer mode without a provider.
+    regional_notes: >-
+      The fake inherits its operator-controlled location and declares no
+      template-controlled region pinning.
+    transfer_modes:
+      inline:
+        mime_types: [application/json, application/pdf, image/jpeg, image/png, image/webp, text/csv, text/markdown, text/plain]
+        max_bytes: 5000000
+        source_lifecycles: [transient, retained]
+      provider_upload:
+        mime_types: [application/pdf]
+        max_bytes: 50000000
+        source_lifecycles: [transient]
+        upload_lifecycle: expires_after
+        upload_expiry:
+          min_seconds: 3600
+          default_seconds: 3600
+          max_seconds: 2592000
+      managed_signed_url:
+        mime_types: [application/pdf]
+        max_bytes: 50000000
+        source_lifecycles: [retained]
+        managed_url_ttl:
+          default_seconds: 900
+          max_seconds: 1800
+      storage_reference:
+        mime_types: [application/pdf]
+        max_bytes: 50000000
+        source_lifecycles: [transient, retained]
+        same_region_required: true
+
+  - provider: openai
+    verified_at: 2026-08-11
+    api_version: >-
+      Files API v1 (REST); PDF file inputs via Responses API `input_file`
+      with `file_id` (vision-capable models such as gpt-4o and later).
+    sources:
+      files_api: https://developers.openai.com/api/docs/api-reference/files
+      pdf_input: https://platform.openai.com/docs/guides/pdf-files
+      regional_processing: https://developers.openai.com/api/docs/guides/your-data
+    retention_notes: >-
+      Files uploaded with purpose=user_data persist until deleted unless an
+      expires_after policy is set (anchor created_at, seconds between 3600 and
+      2592000, i.e. 1 hour to 30 days); DELETE /v1/files/{file_id} deletes a
+      file and removes it from vector stores. Default: batch files expire after
+      30 days, all other files persist until manually deleted. Per-file limit
+      512 MB, 2.5 TB per project, 1000 uploads/minute. PDF inputs: each file
+      under 50 MB, combined 50 MB.
+    regional_notes: >-
+      Data-processing region is explicit per-project configuration using the
+      us.api.openai.com / eu.api.openai.com regional domains (official data
+      residency guide cited in `sources`); no implicit cross-region routing.
+    transfer_modes:
+      inline:
+        mime_types: [application/json, application/pdf, image/jpeg, image/png, image/webp, text/csv, text/markdown, text/plain]
+        max_bytes: 5000000
+        source_lifecycles: [transient, retained]
+      provider_upload:
+        mime_types: [application/pdf]
+        max_bytes: 50000000
+        source_lifecycles: [transient]
+        upload_lifecycle: expires_after
+        upload_expiry:
+          min_seconds: 3600
+          default_seconds: 3600
+          max_seconds: 2592000
+      managed_signed_url:
+        mime_types: [application/pdf]
+        max_bytes: 50000000
+        source_lifecycles: [retained]
+        managed_url_ttl:
+          default_seconds: 900
+          max_seconds: 1800
+
+  - provider: anthropic
+    verified_at: 2026-08-11
+    api_version: >-
+      Messages API; Files API is beta and requires the `betas` header
+      `["files-api-2025-04-14"]` (upload/list/delete via client.beta.files.*).
+    sources:
+      files_api: https://platform.claude.com/docs/en/build-with-claude/files
+      pdf_support: https://platform.claude.com/docs/en/build-with-claude/pdf-support
+      data_residency: https://platform.claude.com/docs/en/manage-claude/data-residency
+    retention_notes: >-
+      Uploaded files persist until deleted with DELETE /v1/files/{file_id};
+      there is no automatic expiry. Beta limits: ~100 requests/minute, 500 MB
+      per file, 500 GB per organisation. PDF inference: maximum request payload
+      32 MB (the whole request, not just the PDF) and 600 pages per request
+      (100 pages when the context window is under 1M tokens); all active models
+      support PDF processing. Files are scoped to the workspace of the API key
+      that uploaded them; file ids from untrusted sources must never be
+      accepted.
+    regional_notes: >-
+      Inference geography is explicit per-request configuration (the
+      inference_geo field on Messages: global or us) per the official data
+      residency guide cited in `sources`; the Files API is beta on Claude API,
+      AWS (beta) and Microsoft Foundry (Hosted on Anthropic only).
+    transfer_modes:
+      inline:
+        mime_types: [application/pdf, image/jpeg, image/png, image/webp]
+        max_bytes: 5000000
+        source_lifecycles: [transient, retained]
+      provider_upload:
+        mime_types: [application/pdf]
+        # The provider's own 32 MB request-payload ceiling always wins over the
+        # template's 50 MB ceiling (Scope §2.1).
+        max_bytes: 32000000
+        source_lifecycles: [transient]
+        # Anthropic has no automatic expiry: uploaded files persist until
+        # DELETE /v1/files/{file_id}, so the reviewed contract records the
+        # delete-only retention kind and no expiry bounds (Scope §6.1
+        # checkbox 1); terminal deletion/reconciliation is the only removal.
+        upload_lifecycle: until_deleted
+      managed_signed_url:
+        mime_types: [application/pdf]
+        # 32 MB request-payload ceiling applies to URL document sources too.
+        max_bytes: 32000000
+        source_lifecycles: [retained]
+        managed_url_ttl:
+          default_seconds: 900
+          max_seconds: 1800
+
+  - provider: vertex
+    verified_at: 2026-08-11
+    api_version: >-
+      Vertex AI Gemini generateContent with fileData `gs://` URIs (multimodal
+      document understanding); project and location from typed configuration,
+      never a Gemini API key (ADR-0018).
+    sources:
+      document_understanding: https://cloud.google.com/vertex-ai/generative-ai/docs/multimodal/document-understanding
+    retention_notes: >-
+      Maximum file size 50 MB per file (API and Cloud Storage imports); GCS
+      objects referenced by gs:// must be in the same Google Cloud project (or
+      publicly readable — never for this template). The deployer configures a
+      private same-region staging bucket and a console-owned Object Lifecycle
+      Management rule (age = 1 day, Delete action) as the asynchronous cleanup
+      backstop; the application creates/configures no bucket, sets no lifecycle
+      and runs no GCS cleanup scheduler. GCS lifecycle deletion is best-effort:
+      soft delete (default 7 days), versioning and holds/retention policies
+      delay it.
+    regional_notes: >-
+      The regional API endpoint determines where requests are processed; the
+      staging bucket must be single-region in the configured Vertex location
+      (same-region transfer, Scope §2.4/§5.7). Any conflicting location in a
+      resource path is ignored by the provider, so the application validates
+      the configured region before dispatch.
+    transfer_modes:
+      inline:
+        mime_types: [application/pdf, image/jpeg, image/png, image/webp, text/plain]
+        max_bytes: 5000000
+        source_lifecycles: [transient, retained]
+      storage_reference:
+        mime_types: [application/pdf]
+        max_bytes: 50000000
+        source_lifecycles: [transient, retained]
+        same_region_required: true
+
+  - provider: azure_openai
+    verified_at: 2026-08-11
+    api_version: >-
+      Azure OpenAI Responses API (v1 REST plane still preview). PDF input_file
+      with file_id is documented, but the `user_data` upload purpose is not
+      supported (files must use purpose=assistants as a workaround).
+    sources:
+      responses_api: https://learn.microsoft.com/en-us/azure/ai-services/openai/quickstart
+    retention_notes: >-
+      Fail-closed in v0.8: the user_data purpose and expiry/deletion semantics
+      required by the reviewed transfer contract are not available, so Azure
+      rejects non-inline files before any upload, staging or inference call
+      (Scope §2.4). Deferred until user_data, expiry, URL-fetch and regional
+      behavior reach the same reviewed contract.
+    regional_notes: >-
+      Azure's region is inherent in its configured resource endpoint; the
+      Responses API is documented in 29 regions with per-region model
+      availability.
+    transfer_modes:
+      inline:
+        mime_types: [application/json, application/pdf, image/jpeg, image/png, image/webp, text/csv, text/markdown, text/plain]
+        max_bytes: 5000000
+        source_lifecycles: [transient, retained]
+
+  - provider: deepseek
+    verified_at: 2026-08-11
+    api_version: OpenAI-compatible chat completions (no document input support).
+    sources:
+      docs: https://api-docs.deepseek.com/
+    retention_notes: >-
+      DeepSeek declares no document capability at all (ADR-0017) and no
+      non-inline transfer mode in v0.8; large attachments are rejected before
+      dispatch (Scope §2.4).
+    regional_notes: >-
+      DeepSeek documents no template-controlled regional pinning.
+    transfer_modes: {}
+
+  - provider: local
+    verified_at: 2026-08-11
+    api_version: OpenAI-compatible chat completions (private endpoint).
+    sources:
+      docs: https://docs.ollama.com/
+    retention_notes: >-
+      The local adapter declares only the modalities it actually supports and
+      no non-inline transfer mode in v0.8; a large attachment fails before
+      dispatch (Scope §2.4). The endpoint is never exposed to browsers.
+    regional_notes: >-
+      The local provider inherits its operator-controlled location.
+    transfer_modes: {}
+
+storage:
+  s3_presigned_url:
+    key: s3_presigned_url
+    verified_at: 2026-08-11
+    sources:
+      presigned_urls: https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-presigned-url.html
+      sigv4_query_string_auth: https://docs.aws.amazon.com/AmazonS3/latest/developerguide/sigv4-query-string-auth.html
+    notes: >-
+      Presigned URLs are HTTPS by default, authorize a single exact object
+      (bucket + key), and are GET-only when presigned for download. Maximum
+      expiration is 604800 seconds (7 days) via SigV4 query-string
+      authentication; the URL expires at its configured expiration or when the
+      signing credentials expire/are revoked, whichever comes first. They are
+      bearer capabilities — anyone holding the URL can read the object — so the
+      template mints exact-object, read-only, short-lived (default 900 s, max
+      1800 s) URLs just before dispatch and never returns, persists, audits or
+      logs them or their query strings (Scope §2.3).
+  gcs_lifecycle:
+    key: gcs_lifecycle
+    verified_at: 2026-08-11
+    sources:
+      lifecycle: https://cloud.google.com/storage/docs/lifecycle
+    notes: >-
+      A lifecycle rule with age = 1 day and a Delete action deletes the live
+      object from 24 hours after creation. Execution is asynchronous and
+      best-effort — applications must not rely on lifecycle actions occurring
+      within a certain time — and configuration changes can take up to 24 hours
+      to propagate. By default deletion soft-deletes the object for 7 days;
+      object versioning keeps noncurrent versions (needing their own rules);
+      object holds and retention policies delay deletion until fulfilled. The
+      template therefore treats the deployer-owned rule as the cleanup backstop
+      for the Vertex staging bucket, not an exact 24-hour deletion guarantee
+      (Scope §2.4/§2.5).

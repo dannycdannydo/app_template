@@ -11,6 +11,16 @@ provider failures retry, permanent validation/policy failures never do.
 from __future__ import annotations
 
 
+class RegistryValidationError(ValueError):
+    """A safe, actionable checked-in registry or transfer-contract
+    configuration error.
+
+    Raised by the registry bundle validator and the transfer contract loader
+    (v0.8 Scope §6.1 checkbox 4) when reviewed configuration is inconsistent;
+    the message names the offending declaration without echoing content.
+    """
+
+
 class AIError(Exception):
     """Base class for every error raised by the AI layer.
 

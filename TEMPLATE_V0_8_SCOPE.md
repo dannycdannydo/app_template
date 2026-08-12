@@ -290,13 +290,43 @@ commit or merge that checkpoint.
 
 Dependencies: completed v0.7 release.
 
-- [ ] Re-verify the official provider sources in §2.1 plus official S3 signed-URL and GCS lifecycle documentation; record verification date, supported API/version, retention/deletion behavior, MIME/size limits and regional caveats in ADR-0017 and provider contract fixtures
-- [ ] Amend ADR-0017, BP §3/§17/§18/§23/§27–§33 and `ARCHITECTURE.md` with the four transfer modes, 5,000,000-byte aggregate inline threshold, 50,000,000-byte PDF ceiling, source-lifecycle selection, retry-only provider-reference reuse, managed-URL threat model and caller-URL prohibition
-- [ ] Add provider-neutral transfer/reference contracts and fake implementations under `app/ai/`; keep `AIRequest` unchanged and strengthen import-boundary tests so feature modules cannot name transfer modes or provider references
-- [ ] Registry/config contract tests fail on inconsistent mode, source lifecycle, MIME, threshold/ceiling, provider, expiry/TTL or regional declarations
+- [x] Re-verify the official provider sources in §2.1 plus official S3 signed-URL and GCS lifecycle documentation; record verification date, supported API/version, retention/deletion behavior, MIME/size limits and regional caveats in ADR-0017 and provider contract fixtures
+- [x] Amend ADR-0017, BP §3/§17/§18/§23/§27–§33 and `ARCHITECTURE.md` with the four transfer modes, 5,000,000-byte aggregate inline threshold, 50,000,000-byte PDF ceiling, source-lifecycle selection, retry-only provider-reference reuse, managed-URL threat model and caller-URL prohibition
+- [x] Add provider-neutral transfer/reference contracts and fake implementations under `app/ai/`; keep `AIRequest` unchanged and strengthen import-boundary tests so feature modules cannot name transfer modes or provider references
+- [x] Registry/config contract tests fail on inconsistent mode, source lifecycle, MIME, threshold/ceiling, provider, expiry/TTL or regional declarations
 
 Human review required before application: secret/IAM handling and provider data
 handling decisions.
+
+> **Recorded human review and application authorisation (AGENTS.md — secret/IAM
+> handling and provider data handling decisions).**
+> On 2026-08-12, after the v0.8 Scope §6.1 review requested changes (inline
+> allowed-mode intersection, Anthropic delete-only lifecycle, per-mode model
+> limits, complete inconsistency gates, BP §29–§32 amendments and a green
+> `make e2e`), the repository owner explicitly authorised the implementer to
+> apply those corrections and complete the validation/PR/merge workflow. The
+> corrected checkpoint is approved for application:
+>
+> 1. **Provider-neutral transfer contracts** (`app/ai/transfer.py`,
+>    `app/ai/staging.py`) and the re-verified provider fixture
+>    (`app/ai/contracts/providers.yaml`, verified 2026-08-11) with per-mode
+>    MIME/byte limits, the reviewed source-lifecycle matrix, two distinct
+>    provider retention kinds (automatic expiry with bounds vs delete-only
+>    with terminal deletion/reconciliation) and cited regional sources; no
+>    provider SDK, secret, migration, public API or frontend consumer is
+>    introduced by this checkpoint.
+> 2. **Registry/config consistency gates** (per-mode `transfer_mode_limits`,
+>    required regional declarations, lifecycle pinning) that fail fast on
+>    inconsistent mode, lifecycle, MIME, threshold/ceiling, provider,
+>    expiry/TTL or regional declarations; `AIRequest` remains unchanged and
+>    import-boundary tests keep transfer/provider concepts inside `app/ai/`.
+> 3. **ADR-0017, BP §3/§17/§18/§23/§27–§33 and `ARCHITECTURE.md` amendments**
+>    covering the four modes, thresholds, selection, retry-only reuse,
+>    managed-URL threat model and caller-URL prohibition, bounded to the
+>    contract's threat model and tests.
+
+No authentication, permission-model, tenant-isolation, destructive-migration
+or public-API changes are introduced by this work unit.
 
 ## 6.2 Organisation Policy, Registry Routing and Settings API
 
@@ -388,7 +418,7 @@ existing governing rules below.
 
 | Scope subsection | Blueprint sections | What to extract |
 | --- | --- | --- |
-| **Scope §6.1** Contracts/architecture | **BP §2–§5** (lines 40–263), **BP §17** (898–1044), **BP §23** (1359–1449), **BP §33–§34** (1906–1994) | Modular boundaries, v0.7 attachment/storage boundary, provider adapters, human review and ADR format |
+| **Scope §6.1** Contracts/architecture | **BP §2–§5** (lines 40–263), **BP §17** (898–1044), **BP §23** (1359–1449), **BP §27–§33** (1534–1994) | Modular boundaries, v0.7 attachment/storage boundary, provider adapters, configuration/never-log, audit/security/testing/tooling, human review and ADR format |
 | **Scope §6.2** Policy/registry/API | **BP §7** (317–371), **BP §9–§13** (432–765), **BP §27** (1534–1603), **BP §31** (1777–1850) | Schema separation, tenant/database/API conventions, typed/default-off AI policy, security matrix |
 | **Scope §6.3** Streaming/persistence | **BP §10–§11** (543–643), **BP §17** (898–1044), **BP §23** (1359–1449), **BP §29–§31** (1652–1850) | Constraints/transactions, private object ownership, adapter boundary, audit/security/testing |
 | **Scope §6.4** OpenAI upload | **BP §23** (1359–1449), **BP §27–§28** (1534–1651), **BP §30–§33** (1700–1967) | Adapter isolation, typed secrets/regions, never-log rules, file security, tests and dependency/review rules |

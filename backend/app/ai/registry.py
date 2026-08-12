@@ -28,6 +28,15 @@ from app.ai.attachments import (
     PROVIDER_INLINE_ATTACHMENT_MIME_TYPES,
     Attachment,
 )
+from app.ai.errors import RegistryValidationError
+from app.ai.transfer import (
+    INLINE_AGGREGATE_THRESHOLD_BYTES,
+    MAX_LARGE_ATTACHMENT_BYTES,
+    NON_INLINE_MIME_TYPES,
+    TransferContracts,
+    TransferMode,
+    load_transfer_contracts,
+)
 
 MAX_REGISTRY_FILE_BYTES = 256 * 1024
 MAX_PROMPT_INSTRUCTIONS_LENGTH = 16 * 1024
@@ -40,10 +49,6 @@ _VARIABLE_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 _SECRET_NAME = re.compile(
     r"(?:secret|password|passwd|token|api[_-]?key|authorization|credential)", re.IGNORECASE
 )
-
-
-class RegistryValidationError(ValueError):
-    """A safe, actionable checked-in registry configuration error."""
 
 
 class Capability(StrEnum):
@@ -110,6 +115,16 @@ class TaskDefinition(BaseModel):
     # in, the organisation must configure a retention policy for content to be
     # stored (both controls are required).
     retains_output_content: bool = False
+    # v0.8 Scope §2.2: the provider-neutral transfer modes this task permits.
+    # ``inline`` is the only default and remains eligible through the
+    # 5,000,000-byte aggregate raw threshold; a non-inline mode is eligible
+    # only when the source lifecycle, this task declaration, the organisation
+    # policy, the routed model/provider capability and the deployment
+    # configuration all allow it. A feature never selects a mode — this
+    # declaration is one of the gates the deterministic selector intersects.
+    allowed_transfer_modes: list[TransferMode] = Field(
+        default_factory=lambda: [TransferMode.INLINE]
+    )
     retry_policy: RetryPolicy = Field(default_factory=RetryPolicy)
     fallback_policy: FallbackPolicy = Field(default_factory=FallbackPolicy)
     model_preferences: list[str] = Field(default_factory=list)
@@ -129,6 +144,15 @@ class TaskDefinition(BaseModel):
     def _validate_model_preferences(cls, values: list[str]) -> list[str]:
         if len(values) != len(set(values)):
             raise ValueError("model_preferences must not contain duplicates")
+        return values
+
+    @field_validator("allowed_transfer_modes")
+    @classmethod
+    def _validate_allowed_transfer_modes(cls, values: list[TransferMode]) -> list[TransferMode]:
+        if not values:
+            raise ValueError("allowed_transfer_modes must not be empty")
+        if len(values) != len(set(values)):
+            raise ValueError("allowed_transfer_modes must not contain duplicates")
         return values
 
     @field_validator("parameter_defaults")
@@ -198,6 +222,35 @@ class PromptDefinition(BaseModel):
         return prompt
 
 
+class NonInlineModeLimit(BaseModel):
+    """Per-mode non-inline limits one model can carry (v0.8 Scope §2.2).
+
+    ``mime_types`` and ``max_bytes`` are the per-mode MIME set and byte
+    ceiling for exactly one non-inline transfer mode, so a model can express
+    (and the bundle validator can check) differing
+    ``provider_upload``/``managed_signed_url``/``storage_reference`` limits
+    against the provider's reviewed per-mode contract. The v0.8 non-inline
+    path is exactly one PDF (Scope §2.1, §5.3) and the provider contract's
+    lower ceiling always wins.
+    """
+
+    mime_types: list[str] = Field(min_length=1)
+    max_bytes: int = Field(ge=1, le=MAX_LARGE_ATTACHMENT_BYTES)
+
+    @field_validator("mime_types")
+    @classmethod
+    def _mime_types_are_reviewed(cls, values: list[str]) -> list[str]:
+        if len(set(values)) != len(values):
+            raise ValueError("mime_types must not contain duplicates")
+        unknown = set(values) - NON_INLINE_MIME_TYPES
+        if unknown:
+            raise ValueError(
+                "v0.8 non-inline transfer modes carry exactly one PDF; "
+                f"unsupported: {sorted(unknown)}"
+            )
+        return values
+
+
 class ModelDefinition(BaseModel):
     id: str = Field(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9._-]*$")
     provider: str = Field(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9._-]*$")
@@ -233,6 +286,22 @@ class ModelDefinition(BaseModel):
         default=None,
         description="MIME types this model can carry as native inline attachments",
     )
+    # v0.8 Scope §2.2: the provider-neutral transfer modes this model's provider
+    # can carry, with per-mode MIME types and byte ceilings. ``inline`` is the
+    # only default; a model declaring a non-inline mode must declare per-mode
+    # limits for every non-inline mode it allows, and the provider contract's
+    # lower ceiling always wins (Scope §2.1). The checked-in bundle validator
+    # rejects any declaration the provider's reviewed contract cannot support.
+    allowed_transfer_modes: list[TransferMode] = Field(
+        default_factory=lambda: [TransferMode.INLINE]
+    )
+    # v0.8 Scope §2.2: per-mode MIME types and byte ceilings for the non-inline
+    # transfer modes this model declares (one entry per non-inline mode in
+    # ``allowed_transfer_modes``). The v0.8 large path is exactly one PDF
+    # (Scope §2.1, §5.3).
+    transfer_mode_limits: dict[TransferMode, NonInlineModeLimit] = Field(
+        default_factory=lambda: dict[TransferMode, NonInlineModeLimit]()
+    )
 
     @field_validator("supported_parameters")
     @classmethod
@@ -254,6 +323,29 @@ class ModelDefinition(BaseModel):
             raise ValueError(f"unknown attachment MIME types: {sorted(unknown)}")
         if len(set(values)) != len(values):
             raise ValueError("attachment_mime_types must not contain duplicates")
+        return values
+
+    @field_validator("allowed_transfer_modes")
+    @classmethod
+    def _validate_allowed_transfer_modes(cls, values: list[TransferMode]) -> list[TransferMode]:
+        if not values:
+            raise ValueError("allowed_transfer_modes must not be empty")
+        if len(values) != len(set(values)):
+            raise ValueError("allowed_transfer_modes must not contain duplicates")
+        return values
+
+    @field_validator("transfer_mode_limits")
+    @classmethod
+    def _validate_transfer_mode_limits(
+        cls, values: dict[TransferMode, NonInlineModeLimit]
+    ) -> dict[TransferMode, NonInlineModeLimit]:
+        if not values:
+            return values
+        if TransferMode.INLINE in values:
+            raise ValueError(
+                "transfer_mode_limits covers non-inline modes only; inline limits "
+                "come from the v0.7 attachment ceilings"
+            )
         return values
 
     @model_validator(mode="after")
@@ -280,6 +372,45 @@ class ModelDefinition(BaseModel):
             )
         if not supports_documents and self.attachment_mime_types:
             raise ValueError("attachment_mime_types require the documents capability")
+        # v0.8 Scope §2.2: non-inline transfer declarations must be complete and
+        # consistent. A model that declares a non-inline mode must declare
+        # per-mode limits for every non-inline mode (the fields are a contract,
+        # not an optional hint); a model that declares neither may not carry
+        # either, and a limit entry must name a mode the model actually allows.
+        # The v0.8 large path is exactly one PDF above the 5,000,000-byte
+        # aggregate inline threshold (Scope §2.1, §5.3), and non-inline input is
+        # still document input, so the ``documents`` capability is required.
+        declares_non_inline = any(
+            mode is not TransferMode.INLINE for mode in self.allowed_transfer_modes
+        )
+        if declares_non_inline and not supports_documents:
+            raise ValueError("non-inline transfer modes require the documents capability")
+        declared_modes = set(self.transfer_mode_limits)
+        if not declares_non_inline:
+            if declared_modes:
+                raise ValueError("transfer_mode_limits require a non-inline transfer mode")
+        else:
+            allowed_non_inline = {
+                mode for mode in self.allowed_transfer_modes if mode is not TransferMode.INLINE
+            }
+            missing = allowed_non_inline - declared_modes
+            if missing:
+                raise ValueError(
+                    "models declaring a non-inline transfer mode must declare per-mode "
+                    f"limits for: {sorted(missing.value for missing in missing)}"
+                )
+            stray = declared_modes - allowed_non_inline
+            if stray:
+                raise ValueError(
+                    "transfer_mode_limits name modes not in allowed_transfer_modes: "
+                    f"{sorted(mode.value for mode in stray)}"
+                )
+            for mode, limits in self.transfer_mode_limits.items():
+                if limits.max_bytes <= INLINE_AGGREGATE_THRESHOLD_BYTES:
+                    raise ValueError(
+                        f"mode {mode.value!r} max_bytes must be above the "
+                        f"{INLINE_AGGREGATE_THRESHOLD_BYTES} byte aggregate inline threshold"
+                    )
         return self
 
 
@@ -708,6 +839,94 @@ def validate_registry_bundle(bundle: RegistryBundle) -> None:
                 f"model {model.id} declares attachment MIME types its provider cannot "
                 f"carry inline: {sorted(declared - adapter_types)}"
             )
+
+    # v0.8 Scope §2.2/§6.1: registry declarations must stay consistent with the
+    # re-verified provider transfer contracts. A model declaring a non-inline
+    # mode must name a mode, MIME set and ceiling its provider's reviewed
+    # contract actually supports; a task may only declare a non-inline mode
+    # that at least one registered model can realise, so an unreachable mode
+    # declaration fails fast at startup/CI instead of failing at dispatch.
+    contracts = load_transfer_contracts()
+    for model in bundle.models.all():
+        non_inline_modes = [
+            mode for mode in model.allowed_transfer_modes if mode is not TransferMode.INLINE
+        ]
+        if not non_inline_modes:
+            continue
+        provider_contract = contracts.providers.get(model.provider)
+        if provider_contract is None:
+            raise RegistryValidationError(
+                f"model {model.id} provider {model.provider!r} declares non-inline transfer "
+                "modes but has no provider transfer contract"
+            )
+        for mode in non_inline_modes:
+            mode_contract = provider_contract.transfer_modes.get(mode)
+            if mode_contract is None:
+                raise RegistryValidationError(
+                    f"model {model.id} declares transfer mode {mode.value!r} that provider "
+                    f"{model.provider!r} does not support"
+                )
+            limits = model.transfer_mode_limits[mode]
+            declared_mime = set(limits.mime_types)
+            if not declared_mime <= set(mode_contract.mime_types):
+                raise RegistryValidationError(
+                    f"model {model.id} declares non-inline MIME types its provider cannot "
+                    f"carry in mode {mode.value!r}: {sorted(declared_mime - set(mode_contract.mime_types))}"
+                )
+            if limits.max_bytes > mode_contract.max_bytes:
+                raise RegistryValidationError(
+                    f"model {model.id} declares max_bytes {limits.max_bytes} above the "
+                    f"provider ceiling {mode_contract.max_bytes} for mode {mode.value!r}"
+                )
+            if mode is TransferMode.STORAGE_REFERENCE and not mode_contract.same_region_required:
+                raise RegistryValidationError(
+                    f"model {model.id} declares storage_reference but provider "
+                    f"{model.provider!r} has no same-region staging contract"
+                )
+    for task in bundle.tasks.all():
+        for mode in task.allowed_transfer_modes:
+            if mode is TransferMode.INLINE:
+                continue
+            supported_by = [
+                model
+                for model in bundle.models.all()
+                if mode in model.allowed_transfer_modes
+                and _model_supports_transfer_mode(model, mode, contracts)
+            ]
+            if not supported_by:
+                raise RegistryValidationError(
+                    f"task {task.name} declares transfer mode {mode.value!r} but no "
+                    "registered model supports it"
+                )
+
+
+def _model_supports_transfer_mode(
+    model: ModelDefinition, mode: TransferMode, contracts: TransferContracts
+) -> bool:
+    """Whether one model can carry a non-inline transfer mode under its own
+    declarations and its provider's reviewed contract (v0.8 Scope §2.2).
+
+    Re-runs the same checks as the bundle validator so the task-level
+    "realisable by at least one model" test and the model-level contract test
+    can never disagree."""
+    if Capability.DOCUMENTS not in model.capabilities:
+        return False
+    limits = model.transfer_mode_limits.get(mode)
+    if limits is None:
+        return False
+    provider_contract = contracts.providers.get(model.provider)
+    if provider_contract is None:
+        return False
+    mode_contract = provider_contract.transfer_modes.get(mode)
+    if mode_contract is None:
+        return False
+    if not set(limits.mime_types) <= set(mode_contract.mime_types):
+        return False
+    if limits.max_bytes > mode_contract.max_bytes:
+        return False
+    if mode is TransferMode.STORAGE_REFERENCE:
+        return mode_contract.same_region_required
+    return True
 
 
 def _model_can_carry_attachments(model: ModelDefinition, attachments: Sequence[Attachment]) -> bool:
