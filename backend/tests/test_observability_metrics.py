@@ -15,15 +15,17 @@ import uuid
 from typing import Any, cast
 
 import dramatiq
+import pytest
 from dramatiq.brokers.stub import StubBroker
 from httpx import ASGITransport, AsyncClient, Response
+from prometheus_client import generate_latest
 from sqlalchemy.ext.asyncio import AsyncSession
 from tests.context_helpers import ContextState, FakeSession, make_job
 
 from app.main import create_app
 from app.modules.jobs import service as jobs_service
 from app.modules.jobs.models import JobStatus
-from app.observability.metrics import normalise_path
+from app.observability.metrics import normalise_path, update_queue_depths
 
 _ALL_METRICS = (
     "http_requests_total",
@@ -184,3 +186,64 @@ async def test_job_counters_increment_through_the_durable_job_service() -> None:
         _metric_value(after, "jobs_failed_total", labels)
         == _metric_value(before, "jobs_failed_total", labels) + 1
     )
+
+
+# --- Dramatiq queue depth (v0.7 Scope §6.7) ----------------------------------
+#
+# ``update_queue_depths`` reads the broker's queue-length counts (LLEN on the
+# ``dramatiq:<queue>`` Redis lists) into gauges, so the backlog alert promised
+# by the AI dashboard contract is queryable from ``GET /metrics``. The tests
+# stub ``app.observability.metrics.dramatiq`` so they need no Redis or broker.
+
+
+def _fake_dramatiq_with_counts(counts: dict[str, int]) -> Any:
+    class _FakeBroker:
+        def get_queue_message_counts(self, *queues: str) -> dict[str, int]:
+            return counts
+
+    class _FakeDramatiq:
+        def get_broker(self) -> Any:
+            return _FakeBroker()
+
+    return _FakeDramatiq()
+
+
+def test_queue_depth_gauge_exposes_broker_counts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.observability.metrics.dramatiq",
+        _fake_dramatiq_with_counts({"ai": 3, "documents": 1, "emails": 0, "default": 0}),
+    )
+    update_queue_depths()
+    body = generate_latest().decode()
+    assert 'dramatiq_queue_depth{queue="ai"} 3.0' in body
+    assert 'dramatiq_queue_depth{queue="documents"} 1.0' in body
+    assert 'dramatiq_queue_depth{queue="default"} 0.0' in body
+    assert 'dramatiq_queue_depth{queue="emails"} 0.0' in body
+
+
+def test_queue_depth_refresh_failure_never_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Redis outage leaves the gauges stale instead of failing the scrape."""
+    monkeypatch.setattr(
+        "app.observability.metrics.dramatiq",
+        _fake_dramatiq_with_counts({"ai": 3}),
+    )
+    update_queue_depths()
+
+    class _FakeBroker:
+        def get_queue_message_counts(self, *queues: str) -> dict[str, int]:
+            raise RuntimeError("redis unavailable")
+
+    class _FakeDramatiq:
+        def get_broker(self) -> Any:
+            return _FakeBroker()
+
+    monkeypatch.setattr("app.observability.metrics.dramatiq", _FakeDramatiq())
+    update_queue_depths()  # must not raise
+
+    # The previous sample survives: the gauge is stale, not zeroed.
+    body = generate_latest().decode()
+    assert 'dramatiq_queue_depth{queue="ai"} 3.0' in body

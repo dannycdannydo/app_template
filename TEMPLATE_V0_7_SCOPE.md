@@ -231,9 +231,9 @@ Check items off only after review. Work is ordered so contracts and safety contr
 
 ## 6.7 Operations, Documentation and Release Governance
 
-- [ ] Metrics/logging/Sentry instrumentation with safe low-cardinality labels and `ai_request_id`; dashboards/alerts and a runbook for provider outage, budget response, prompt rollback, model rollback and retention deletion
-- [ ] `.env.example`, `.env.production.example`, README and deployment docs describe secret injection, provider enablement, provider regions/inference geography, Vertex project/location/identity, attachment limits and lifecycle, local-provider network controls and non-production contract-test credentials
-- [ ] `SECURITY.md` covers prompt injection as untrusted input, external-data disclosure/redaction, provider data handling, output validation, audit/retention, no client credentials and approval boundaries
+- [x] Metrics/logging/Sentry instrumentation with safe low-cardinality labels and `ai_request_id`; dashboards/alerts and a runbook for provider outage, budget response, prompt rollback, model rollback and retention deletion
+- [x] `.env.example`, `.env.production.example`, README and deployment docs describe secret injection, provider enablement, provider regions/inference geography, Vertex project/location/identity, attachment limits and lifecycle, local-provider network controls and non-production contract-test credentials
+- [x] `SECURITY.md` covers prompt injection as untrusted input, external-data disclosure/redaction, provider data handling, output validation, audit/retention, no client credentials and approval boundaries
 - [ ] Dependencies, migrations, provider credentials/secrets, platform configuration/tenant isolation and any public endpoints receive recorded human review; CI/quality gate green and architecture audit clean
 
 ---

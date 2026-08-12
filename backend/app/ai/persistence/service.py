@@ -53,6 +53,7 @@ from decimal import Decimal
 from functools import lru_cache
 from typing import Any
 
+import structlog
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -90,7 +91,13 @@ from app.modules.audit.service import (
 )
 from app.modules.organisations.models import Organisation
 from app.modules.users.models import User
+from app.observability.metrics import observe_ai_budget_denial
 from app.storage.base import ObjectStorage
+
+#: Module logger. AI persistence log lines bind ``ai_request_id``, task and the
+#: existing organisation context — never prompts, provider responses,
+#: attachment bytes or retained input/output content (BP §28, ADR-0017).
+logger = structlog.get_logger()
 
 #: The organisation-scoped AI scratch namespace (v0.7 Scope §6.5 item 4): temporary
 #: analyse-only objects live here so the retention sweep can target them and
@@ -453,6 +460,16 @@ class AIPersistencePortImpl:
                     },
                 )
                 await session.commit()
+                observe_ai_budget_denial(task=task)
+                logger.warning(
+                    "ai.budget_denied",
+                    ai_request_id=request_id,
+                    task=task,
+                    organisation_id=str(organisation_id),
+                    estimated_cost=str(execution_maximum_estimated_cost),
+                    spent=str(spent),
+                    monthly_budget=str(settings_row.monthly_budget),
+                )
                 raise BudgetExceededError("the organisation's monthly AI budget is exhausted")
 
         if existing is not None and existing.status == AIRequestStatus.QUEUED:

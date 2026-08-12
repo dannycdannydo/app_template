@@ -104,7 +104,11 @@ async def execute_ai_task(job_id: str) -> None:
     failure the job is marked ``failed`` permanently.
     """
     job_uuid = uuid.UUID(job_id)
-    bind_worker_context(job_id=str(job_uuid))
+    # The deterministic request id is derived before the first log line so
+    # every AI-job log entry binds ``ai_request_id`` (v0.7 Scope §6.7, BP §28)
+    # — including ``ai.execute.started`` itself.
+    request_id = request_id_for_job(job_uuid)
+    bind_worker_context(job_id=str(job_uuid), ai_request_id=request_id)
     logger.info("ai.execute.started")
     async with async_session_factory() as session:
         job = await jobs_service.get_job_for_task(session, job_id=job_uuid)
@@ -127,8 +131,6 @@ async def execute_ai_task(job_id: str) -> None:
             raise jobs_service.JobPermanentError("the AI job context is invalid")
 
         await jobs_service.mark_running(session, job_id=job_uuid)
-        request_id = request_id_for_job(job_uuid)
-        bind_worker_context(job_id=str(job_uuid), ai_request_id=request_id)
         if job.created_by_user_id is None:
             # A durable AI job always records the initiating user (the demo
             # service passes the authenticated caller). A row without one is a

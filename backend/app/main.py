@@ -7,9 +7,10 @@ the OpenAPI export used by the generated client pipeline.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from collections.abc import AsyncGenerator, Sequence
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from time import perf_counter
 from typing import Any, cast
 from uuid import uuid4
@@ -46,7 +47,7 @@ from app.modules.platform_admin.router import router as platform_admin_router
 from app.modules.records.router import router as records_router
 from app.modules.users.router import router as users_router
 from app.modules.webhooks.router import router as webhooks_router
-from app.observability.metrics import metrics_middleware
+from app.observability.metrics import metrics_middleware, update_queue_depths
 from app.observability.metrics import router as metrics_router
 from app.observability.sentry import capture_exception, initialise_sentry
 
@@ -192,6 +193,22 @@ async def _rate_limit_middleware(request: Request, call_next: RequestResponseEnd
     return await call_next(request)
 
 
+async def _queue_depth_refresh_loop() -> None:
+    """Periodically refresh the Dramatiq queue-depth gauges (v0.7 Scope §6.7).
+
+    The gauges are the concrete backlog signal the AI dashboard contract and
+    runbooks alert on. The broker's queue-length read is synchronous redis-py,
+    so it runs in a thread; a Redis outage leaves the gauges stale (logged once)
+    instead of failing the scrape. No-op in the test profile, mirroring the
+    NoOpRateLimiter, so the suite stays independent of Redis.
+    """
+    if get_settings().app_env == "test":
+        return
+    while True:
+        await asyncio.to_thread(update_queue_depths)
+        await asyncio.sleep(30)
+
+
 def _register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(APIError, _handle_api_error)
     app.add_exception_handler(RequestValidationError, _handle_request_validation_error)
@@ -269,8 +286,14 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         logger.info("application_started", app=settings.app_name, env=settings.app_env)
-        yield
-        logger.info("application_stopped", app=settings.app_name)
+        queue_depth_task = asyncio.create_task(_queue_depth_refresh_loop())
+        try:
+            yield
+        finally:
+            queue_depth_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await queue_depth_task
+        logger.info("application_stopped", app=settings.app_name, env=settings.app_env)
 
     is_production = settings.app_env == "production"
     app = FastAPI(
