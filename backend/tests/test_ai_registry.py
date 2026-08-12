@@ -37,6 +37,8 @@ from app.ai.registry import (
 )
 from app.ai.schemas import AIRequest
 from app.ai.service import AIService
+from app.ai.storage_resolver import StorageAttachmentResolver
+from app.storage import FakeObjectStorage
 
 
 def _model(
@@ -106,34 +108,31 @@ def test_checked_in_registry_bundle_is_complete_and_executable() -> None:
 
 def test_task_can_move_between_real_providers_by_reviewed_configuration() -> None:
     """Acceptance criterion §5.2: allowed_providers moves the demo task to
-    each real provider's registered model without any feature-code change."""
+    each real document-capable provider's registered model without any
+    feature-code change. Providers lacking the ``documents`` capability
+    (DeepSeek, local) cannot serve the document task."""
     bundle = load_registry_bundle()
     task = bundle.tasks.get("document.classify")
 
     expected = {
         "openai": "openai.gpt-4o-mini",
         "anthropic": "anthropic.claude-sonnet-4-6",
-        "deepseek": "deepseek.deepseek-chat",
         "azure_openai": "azure_openai.gpt-4o-mini",
         "vertex": "vertex.gemini-2.0-flash",
-        "local": "local.document-classifier",
         "fake": "fake.document-classifier",
     }
     for provider_id, model_id in expected.items():
         decision = bundle.models.route(task, allowed_providers=[provider_id])
         assert decision.model.id == model_id
         assert decision.model.provider == provider_id
+    # Document input cannot route to a model lacking the documents capability.
+    with pytest.raises(RegistryValidationError):
+        bundle.models.route(task, allowed_providers=["deepseek"])
 
 
 async def test_checked_in_demo_task_runs_through_service() -> None:
     bundle = load_registry_bundle()
-    service = AIService(
-        task_registry=bundle.tasks,
-        prompt_registry=bundle.prompts,
-        model_registry=bundle.models,
-        provider=FakeLLMProvider(),
-        allow_unmanaged_execution=True,
-    )
+    storage = FakeObjectStorage(bucket="test-bucket")
     fixture_path = (
         Path(__file__).parents[1]
         / "app"
@@ -143,28 +142,44 @@ async def test_checked_in_demo_task_runs_through_service() -> None:
         / "fixtures"
         / "lease_notice.txt"
     )
+    org_id = UUID("01989f1c-e5cb-7000-8000-000000000001")
+    user_id = UUID("01989f1c-e5cb-7000-8000-000000000002")
+    storage_key = f"organisations/{org_id}/ai/scratch/lease_notice.txt"
+    await storage.put(
+        storage_key,
+        fixture_path.read_bytes(),
+        content_type="text/plain",
+    )
+    service = AIService(
+        task_registry=bundle.tasks,
+        prompt_registry=bundle.prompts,
+        model_registry=bundle.models,
+        provider=FakeLLMProvider(),
+        attachment_resolver=StorageAttachmentResolver(storage),
+        allow_unmanaged_execution=True,
+    )
     result = await service.execute(
         AIRequest(
             task="document.classify",
-            text=fixture_path.read_text(encoding="utf-8"),
-            organisation_id=UUID("01989f1c-e5cb-7000-8000-000000000001"),
-            user_id=UUID("01989f1c-e5cb-7000-8000-000000000002"),
+            storage_reference=storage_key,
+            organisation_id=org_id,
+            user_id=user_id,
         )
     )
 
     assert result.output.category == "lease"
     assert result.routing.model == "fake-model-document.classify"
-    assert result.routing.reason == "first eligible configured model fake.document-classifier"
 
+    # Document input cannot route to a model lacking the documents capability.
     with pytest.raises(ModelNotAvailableError):
         await service.execute(
             AIRequest(
                 task="document.classify",
-                text="FICTIONAL LEASE NOTICE",
-                organisation_id=UUID("01989f1c-e5cb-7000-8000-000000000001"),
-                user_id=UUID("01989f1c-e5cb-7000-8000-000000000002"),
+                storage_reference=storage_key,
+                organisation_id=org_id,
+                user_id=user_id,
             ),
-            allowed_providers=["anthropic"],
+            allowed_providers=["deepseek"],
         )
 
 

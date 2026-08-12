@@ -34,6 +34,7 @@ from app.core.config import get_settings
 from app.core.exceptions import APIError, ErrorDetail, ErrorResponse
 from app.core.logging import bind_identity_context, configure_logging, current_request_id
 from app.core.rate_limit import RateLimiter, get_rate_limiter
+from app.modules.ai_demo.router import router as ai_demo_router
 from app.modules.audit.router import router as audit_router
 from app.modules.feature_flags.router import router as feature_flags_router
 from app.modules.files.router import router as files_router
@@ -299,6 +300,7 @@ def create_app() -> FastAPI:
     app.include_router(invitations_router)
     app.include_router(feature_flags_router)
     app.include_router(ai_settings_router)
+    app.include_router(ai_demo_router)
     app.include_router(webhooks_router)
     return app
 

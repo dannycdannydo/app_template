@@ -67,6 +67,45 @@ def ai_request_by_request_id_statement(
     )
 
 
+def ai_winning_attempt_statement(
+    organisation_id: uuid.UUID,
+    request_id: str,
+) -> Select[tuple[AIRequestRecord]]:
+    """Return the succeeded (winning) attempt for one execution, if any.
+
+    A multi-attempt execution settles every non-winning attempt ``failed`` and
+    exactly one ``succeeded`` (v0.7 Scope §6.4/§6.5). Querying the winning
+    attempt — rather than hard-coding ``attempt_number == 1`` — means a
+    transient first failure followed by a later success is reported correctly
+    after the job completes (v0.7 Scope §6.6).
+    """
+    return select(AIRequestRecord).where(
+        AIRequestRecord.organisation_id == organisation_id,
+        AIRequestRecord.request_id == request_id,
+        AIRequestRecord.status == "succeeded",
+    )
+
+
+def ai_latest_attempt_statement(
+    organisation_id: uuid.UUID,
+    request_id: str,
+) -> Select[tuple[AIRequestRecord]]:
+    """Return the highest-numbered attempt row for one execution.
+
+    Used as a fallback when no attempt has succeeded: the latest row's status
+    is the execution-level outcome (``running``, ``queued`` or ``failed``).
+    Ordered by ``attempt_number`` descending so the most recent dispatch wins.
+    """
+    return (
+        select(AIRequestRecord)
+        .where(
+            AIRequestRecord.organisation_id == organisation_id,
+            AIRequestRecord.request_id == request_id,
+        )
+        .order_by(AIRequestRecord.attempt_number.desc())
+    )
+
+
 def ai_request_record_statement(
     ai_request_id: uuid.UUID,
     organisation_id: uuid.UUID,

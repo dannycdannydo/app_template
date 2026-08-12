@@ -406,7 +406,11 @@ class AIPersistencePortImpl:
         existing = await session.scalar(
             ai_request_by_request_id_statement(organisation_id, request_id, 1)
         )
-        if existing is not None:
+        # A pre-enqueued ``queued`` row is adopted (promoted to ``running`` with
+        # the budget reservation) after the settings-row lock below. Any other
+        # existing row is a replay: the caller re-used the execution id (v0.7
+        # Scope §6.5/§6.6).
+        if existing is not None and existing.status != AIRequestStatus.QUEUED:
             row_id = existing.id
             await session.commit()
             return AIRequestReservation(row_id=row_id, created=False)
@@ -423,7 +427,7 @@ class AIPersistencePortImpl:
         existing = await session.scalar(
             ai_request_by_request_id_statement(organisation_id, request_id, 1)
         )
-        if existing is not None:
+        if existing is not None and existing.status != AIRequestStatus.QUEUED:
             row_id = existing.id
             await session.commit()  # releases the settings-row lock
             return AIRequestReservation(row_id=row_id, created=False)
@@ -450,6 +454,27 @@ class AIPersistencePortImpl:
                 )
                 await session.commit()
                 raise BudgetExceededError("the organisation's monthly AI budget is exhausted")
+
+        if existing is not None and existing.status == AIRequestStatus.QUEUED:
+            # Adopt the pre-enqueued row (v0.7 Scope §5.8): promote it from
+            # ``queued`` to ``running``, fill the routing columns that were
+            # unknown at enqueue time, and apply the execution-level budget
+            # reservation. This is the first actual dispatch, not a replay.
+            existing.status = AIRequestStatus.RUNNING
+            existing.provider = provider
+            existing.model = model
+            existing.prompt_name = prompt_name
+            existing.prompt_version = prompt_version
+            existing.routing_reason = routing_reason
+            existing.fallback_used = fallback_used
+            existing.region = region
+            existing.estimated_cost = estimated_cost
+            existing.cost = execution_maximum_estimated_cost
+            existing.input_reference = input_reference
+            existing.input_digest = input_digest
+            await session.commit()
+            await session.refresh(existing)
+            return AIRequestReservation(row_id=existing.id, created=True)
 
         record = AIRequestRecord(
             organisation_id=organisation_id,

@@ -67,13 +67,18 @@ from app.db.conventions import TimestampMixin, UuidV7, uuid7
 class AIRequestStatus(enum.StrEnum):
     """Lifecycle of one attempted provider execution (v0.7 Scope §6.5).
 
-    ``running`` is written before dispatch and doubles as the budget
-    reservation; settlement moves the row to ``succeeded`` or ``failed``.
-    Terminal rows are never re-run, and a row stuck in ``running`` (a crashed
-    worker) is reconciled by the retention job, which marks it ``failed`` and
-    keeps its reserved cost — conservative, never a silent budget release.
+    ``queued`` is a pre-enqueue placeholder created before the broker message
+    is published (v0.7 Scope §5.8) so the result endpoint is coherent
+    immediately after ``202``; the row carries no routing or budget
+    information. ``reserve()`` promotes it to ``running`` (the budget
+    reservation) when the worker dispatches. Settlement moves the row to
+    ``succeeded`` or ``failed``. Terminal rows are never re-run, and a row
+    stuck in ``running`` (a crashed worker) is reconciled by the retention
+    job, which marks it ``failed`` and keeps its reserved cost — conservative,
+    never a silent budget release.
     """
 
+    QUEUED = "queued"
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
@@ -178,7 +183,7 @@ class AIRequestRecord(Base, TimestampMixin):
         CheckConstraint("cost >= 0", name="non_negative_cost"),
         CheckConstraint("latency_ms >= 0", name="non_negative_latency_ms"),
         CheckConstraint(
-            "status IN ('running', 'succeeded', 'failed')",
+            "status IN ('queued', 'running', 'succeeded', 'failed')",
             name="ai_request_status",
         ),
     )
@@ -203,10 +208,13 @@ class AIRequestRecord(Base, TimestampMixin):
     # all persisted and priced with their own model (v0.7 Scope §2).
     attempt_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     task: Mapped[str] = mapped_column(String(128), nullable=False)
-    provider: Mapped[str] = mapped_column(String(128), nullable=False)
-    model: Mapped[str] = mapped_column(String(256), nullable=False)
-    prompt_name: Mapped[str] = mapped_column(String(128), nullable=False)
-    prompt_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Routing columns are NULL while a request is ``queued`` (created before
+    # enqueue but not yet dispatched); the provider/model/prompt are filled by
+    # ``reserve()`` when it promotes the row to ``running`` (v0.7 Scope §5.8).
+    provider: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    prompt_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    prompt_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     routing_reason: Mapped[str] = mapped_column(String(512), nullable=False, default="")
     fallback_used: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false")

@@ -31,6 +31,8 @@ composables → components).
 | `useNotificationsQuery(params)`                                                   | org-scoped notifications list (envelope carries `unread_count`) | `src/queries/notifications.ts` |
 | `useUnreadNotificationsCountQuery()`                                              | header-bell unread badge (polled)                               | `src/queries/notifications.ts` |
 | `useMarkNotificationReadMutation` / `useSendTestNotificationMutation`             | mark-read + gated test-send, invalidate lists and unread count  | `src/queries/notifications.ts` |
+| `useClassifyMutation()`                                                           | `document.classify` submission (sync text or queued reference)  | `src/queries/ai.ts`            |
+| `useClassifyResultQuery(requestId)`                                               | polled durable classification result                            | `src/queries/ai.ts`            |
 
 ## Platform-plane keys
 

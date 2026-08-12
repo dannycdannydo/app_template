@@ -260,10 +260,14 @@ async def test_complete_enqueues_job_and_worker_drives_file_to_ready(
         organisation = await _create_org(session, "File Jobs Ltd")
 
         file, job_id = await _upload_round_trip(session, organisation.id, process_task=process_task)
-        # The durable row was written queued before the worker picked it up.
+        # The durable row was written before the worker picked it up. The
+        # worker may have already transitioned it to ``running`` (a race between
+        # the in-process StubBroker worker and this assertion), so either
+        # non-terminal state is valid here — the terminal assertion below is
+        # what proves the job ran to completion.
         queued = await session.get(Job, job_id)
         assert queued is not None
-        assert queued.status == JobStatus.QUEUED
+        assert queued.status in (JobStatus.QUEUED, JobStatus.RUNNING)
         assert queued.job_type == files_tasks.JOB_TYPE_FILE_PROCESSING
         assert queued.input_reference == str(file.id)
         assert queued.organisation_id == organisation.id

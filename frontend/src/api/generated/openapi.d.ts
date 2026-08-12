@@ -742,6 +742,52 @@ export interface paths {
     patch?: never
     trace?: never
   }
+  '/api/v1/ai/classify': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    /**
+     * Classify Document
+     * @description Classify a document: synchronously (``sync=true``) or as a durable job.
+     *
+     *     Both paths pass the private storage reference through ``AIService.execute``
+     *     so the service resolves it to a bounded provider-neutral attachment rather
+     *     than rendering the reference as content (v0.7 Scope §2). The synchronous
+     *     response (200) returns the validated result inline; the accepted response
+     *     (202) returns the job and request ids the caller polls.
+     */
+    post: operations['classify_document_api_v1_ai_classify_post']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/api/v1/ai/classify/requests/{request_id}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /**
+     * Get Classify Result
+     * @description Return the durable classification record; a foreign id is a 404.
+     */
+    get: operations['get_classify_result_api_v1_ai_classify_requests__request_id__get']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
   '/api/v1/webhooks/workos': {
     parameters: {
       query?: never
@@ -815,6 +861,140 @@ export interface components {
       page_size: number
       /** Total */
       total: number
+    }
+    /**
+     * ClassifyCost
+     * @description Calculated cost for one execution (BP §10 NUMERIC precision in storage).
+     */
+    ClassifyCost: {
+      /** Amount */
+      amount: string
+      /** Currency */
+      currency: string
+    }
+    /**
+     * ClassifyRouting
+     * @description Safe routing metadata: which provider/model/prompt served the request.
+     */
+    ClassifyRouting: {
+      /** Provider */
+      provider: string
+      /** Model */
+      model: string
+      /** Prompt Name */
+      prompt_name: string
+      /** Prompt Version */
+      prompt_version: number
+      /** Fallback Used */
+      fallback_used: boolean
+      /**
+       * Region
+       * @default
+       */
+      region: string
+    }
+    /**
+     * ClassifyUsage
+     * @description Provider-normalised token usage for one execution.
+     */
+    ClassifyUsage: {
+      /** Input Tokens */
+      input_tokens: number
+      /** Output Tokens */
+      output_tokens: number
+    }
+    /**
+     * DocumentClassificationResult
+     * @description Small non-product fixture result for ``document.classify``.
+     */
+    DocumentClassificationResult: {
+      /**
+       * Category
+       * @enum {string}
+       */
+      category: 'lease' | 'invoice' | 'correspondence' | 'other'
+      /** Confidence */
+      confidence: number
+      /** Summary */
+      summary: string
+    }
+    /**
+     * DocumentClassifyAcceptedResponse
+     * @description The durable-job acknowledgement (202) for document-scale input.
+     */
+    DocumentClassifyAcceptedResponse: {
+      /** Job Id */
+      job_id: string
+      /** Request Id */
+      request_id: string
+      /**
+       * Status
+       * @default queued
+       * @enum {string}
+       */
+      status: 'queued' | 'running' | 'succeeded' | 'failed'
+    }
+    /**
+     * DocumentClassifyRequest
+     * @description One classification submission: a private storage reference.
+     *
+     *     ``sync=True`` resolves the reference to a bounded attachment and runs
+     *     synchronously within the documented input/time limits; ``sync=False``
+     *     (default) enqueues the durable ``ai.execute`` job. The worker re-reads the
+     *     object on every attempt — the reference is never trusted as content
+     *     (ADR-0017).
+     */
+    DocumentClassifyRequest: {
+      /** Storage Reference */
+      storage_reference: string
+      /**
+       * Sync
+       * @default false
+       */
+      sync: boolean
+    }
+    /**
+     * DocumentClassifyResultResponse
+     * @description The durable record of one classification (synchronous or queued).
+     *
+     *     ``output`` is present only when the organisation's retention policy and the
+     *     task-level opt-in both permitted content retention (v0.7 Scope §2); by
+     *     default the record carries status and safe routing/usage only, never
+     *     sensitive source content (BP §28, ADR-0017).
+     */
+    DocumentClassifyResultResponse: {
+      /** Request Id */
+      request_id: string
+      /**
+       * Status
+       * @enum {string}
+       */
+      status: 'queued' | 'running' | 'succeeded' | 'failed'
+      /** Error Code */
+      error_code?: string | null
+      output?: components['schemas']['DocumentClassificationResult'] | null
+      routing?: components['schemas']['ClassifyRouting'] | null
+      usage?: components['schemas']['ClassifyUsage'] | null
+      cost?: components['schemas']['ClassifyCost'] | null
+      /** Completed At */
+      completed_at?: string | null
+    }
+    /**
+     * DocumentClassifySyncResponse
+     * @description The synchronous classification result (200).
+     */
+    DocumentClassifySyncResponse: {
+      /** Request Id */
+      request_id: string
+      output: components['schemas']['DocumentClassificationResult']
+      routing: components['schemas']['ClassifyRouting']
+      usage: components['schemas']['ClassifyUsage']
+      cost: components['schemas']['ClassifyCost']
+      /**
+       * Completed At
+       * Format: date-time
+       */
+      completed_at: string
     }
     /**
      * ErrorDetail
@@ -3309,6 +3489,85 @@ export interface operations {
         }
         content: {
           'application/json': components['schemas']['PlatformOrganisationAISettingsResponse']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  classify_document_api_v1_ai_classify_post: {
+    parameters: {
+      query?: never
+      header?: {
+        'x-org-id'?: string | null
+        authorization?: string | null
+      }
+      path?: never
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['DocumentClassifyRequest']
+      }
+    }
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['DocumentClassifySyncResponse']
+        }
+      }
+      /** @description Accepted */
+      202: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['DocumentClassifyAcceptedResponse']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  get_classify_result_api_v1_ai_classify_requests__request_id__get: {
+    parameters: {
+      query?: never
+      header?: {
+        'x-org-id'?: string | null
+        authorization?: string | null
+      }
+      path: {
+        request_id: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['DocumentClassifyResultResponse']
         }
       }
       /** @description Validation Error */
