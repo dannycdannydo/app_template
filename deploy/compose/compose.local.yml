@@ -34,6 +34,13 @@ services:
     image: redis:7-alpine
     ports:
       - "${REDIS_PORT:-6379}:6379"
+    # Redis declares /data as an image VOLUME. Bind it explicitly so Docker
+    # does not create an opaque anonymous volume that can preserve Dramatiq
+    # messages across container recreation. PostgreSQL, Redis and MinIO are
+    # deliberately reset together by `make dev-reset` so broker job ids never
+    # outlive the database rows they reference.
+    volumes:
+      - redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -201,4 +208,5 @@ services:
 
 volumes:
   postgres_data:
+  redis_data:
   minio_data:

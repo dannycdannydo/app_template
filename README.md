@@ -70,6 +70,20 @@ make dev-docker
 
 `make dev` and `make dev-docker` apply pending Alembic migrations before the API serves traffic. `make migrate` remains available for a deliberate migration-only step. The container command starts the same Postgres, Redis and MinIO plus the API, worker and frontend containers (built from `backend/Dockerfile` and `frontend/Dockerfile`). Both commands share `deploy/compose/compose.local.yml`: the default service set is infrastructure only, and the `fullstack` Compose profile adds the application containers.
 
+Local PostgreSQL, Redis and MinIO state persists across ordinary container
+restarts. Use `make dev-down` to remove the containers while preserving that
+state. When the local state is disposable, run
+`CONFIRM_RESET=1 make dev-reset` to erase all three stores together, recreate
+the infrastructure and migrate the empty database. Resetting PostgreSQL and
+Redis separately is unsupported because queued Dramatiq messages carry job ids
+whose durable records live in PostgreSQL. WorkOS users are external and are
+never deleted by `make dev-reset`.
+
+Before migrations and native processes start, `make dev` also pings Redis
+through `REDIS_URL` from the host. This catches missing port publication and
+broken Docker network attachment that a container-internal health check cannot
+see.
+
 Verification: after `cp .env.example .env`, both `make dev` and `make dev-docker` must start the services and `make check` must pass with zero lint errors, zero type errors, and green tests.
 
 ## Trying the demo (login flow)
@@ -100,6 +114,8 @@ To tear the test admin down again (e.g. to provision a different one and re-test
 | --- | --- |
 | `make dev` | Start Postgres, Redis, MinIO, Mailhog, API, Dramatiq worker, and frontend |
 | `make dev-docker` | Entire stack in containers (CI parity, onboarding) |
+| `make dev-down` | Remove local containers and network while preserving application data |
+| `CONFIRM_RESET=1 make dev-reset` | Erase PostgreSQL, Redis and MinIO together, recreate infrastructure, and migrate |
 | `make worker` | Run the Dramatiq worker natively (`uv run dramatiq app.workers`) |
 | `make migrate` | Run Alembic migrations |
 | `make provision-admin` | Pre-create the bootstrap platform admin in WorkOS (email + password; idempotent) |
