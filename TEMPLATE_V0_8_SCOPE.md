@@ -15,7 +15,8 @@ Allow `AIService` to process a deliberately bounded class of files that are too
 large for v0.7's inline path without exposing provider concepts to feature
 modules. The service selects a policy-approved transfer mode, streams or stages
 the private object with bounded memory, records only safe durable reference
-metadata, and reliably deletes provider-side or staging copies.
+metadata, and applies the mode-specific expiry, deletion or deployer-owned
+lifecycle contract without deleting the feature-owned source.
 
 ---
 
@@ -26,24 +27,32 @@ metadata, and reliably deletes provider-side or staging copies.
 The open decisions in the source plan are resolved for this release:
 
 1. **Vertex default:** a private, same-region Google Cloud Storage staging
-   object referenced as `gs://...` is the only Vertex large-file path. There is
-   no Vertex managed-file upload abstraction.
+   object referenced as `gs://...` is the only Vertex large-file path. The
+   deployer provisions the bucket, IAM and lifecycle policy; the application
+   does not create/configure the bucket or use the Gemini Developer Files API.
 2. **Reuse boundary:** a provider-side reference may be reused only by retries
    of one logical AI execution. Reuse across distinct AI requests is prohibited.
-3. **Template ceiling:** the non-inline path accepts exactly one
-   `application/pdf` file, larger than the applicable inline ceiling and no
-   larger than **50 MB** and no larger than **50,000,000 bytes**. Provider
-   ceilings may be lower and always win.
-4. **URL inputs:** all HTTP(S) URL inputs, including private signed URLs, are
-   excluded. v0.8 never turns a private object into a bearer URL for a model.
+3. **Inline threshold and template ceiling:** inline is eligible only when the
+   aggregate raw attachment bytes do not exceed **5,000,000 bytes**. The
+   non-inline path accepts exactly one `application/pdf` above that threshold
+   and no larger than **50,000,000 bytes**. Provider/model ceilings may be lower
+   and always win. Base64 and JSON expansion is not counted as raw attachment
+   bytes and must be allowed for separately by HTTP/gateway body limits.
+4. **Managed URL boundary:** a retained feature-owned object in private
+   S3-compatible storage may use a service-minted, exact-object, read-only,
+   short-lived signed URL when the provider supports URL ingestion. The URL is
+   created just before dispatch and never returned to the caller, persisted,
+   audited or logged. Caller-supplied HTTP(S) URLs remain excluded.
 5. **Organisation policy:** add explicit typed columns to
    `organisation_ai_settings`; do not add an opaque policy blob. Bounded arrays
    may use JSONB consistently with the existing provider/model allowlists.
-6. **Provider matrix:** OpenAI and Anthropic implement `provider_upload`;
-   Vertex implements `storage_reference`; Azure OpenAI, DeepSeek and local
-   adapters fail closed for non-inline files in v0.8. Azure file input remains
-   deferred until its `user_data`, expiry and regional behavior reaches the
-   same reviewed contract as OpenAI.
+6. **Provider matrix:** OpenAI and Anthropic implement `provider_upload` for
+   transient sources and `managed_signed_url` for retained S3-compatible
+   sources where the deployed provider/model supports URL ingestion. Vertex
+   implements `storage_reference` through its configured GCS staging bucket.
+   Azure OpenAI, DeepSeek and local adapters fail closed for non-inline files
+   in v0.8. Azure file input remains deferred until its `user_data`, expiry,
+   URL-fetch and regional behavior reaches the same reviewed contract.
 
 These defaults deliberately choose the common 50 MB PDF envelope documented
 for Vertex rather than inheriting the much higher upload quotas exposed by
@@ -51,16 +60,22 @@ OpenAI or Anthropic. Provider capabilities and limits must be re-verified from
 official documentation during each adapter work unit:
 
 - [OpenAI Files API](https://platform.openai.com/docs/api-reference/files)
+- [OpenAI file inputs](https://platform.openai.com/docs/guides/pdf-files)
 - [Anthropic Files API](https://platform.claude.com/docs/en/build-with-claude/files)
+- [Anthropic PDF support](https://platform.claude.com/docs/en/build-with-claude/pdf-support)
 - [Vertex AI document understanding](https://cloud.google.com/vertex-ai/generative-ai/docs/multimodal/document-understanding)
 - [Azure OpenAI Responses file input](https://learn.microsoft.com/en-us/azure/ai-services/openai/quickstart?pivots=rest-api&tabs=command-line%2Ckeyless%2Ctypescript-keyless%2Centra)
+- [Amazon S3 presigned URLs](https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-presigned-url.html)
+- [Google Cloud Object Lifecycle Management](https://cloud.google.com/storage/docs/lifecycle)
 
 ## 2.2 Transfer contract and policy
 
-- Introduce provider-neutral transfer modes: `inline`, `provider_upload` and
-  `storage_reference`. `inline` remains the default and retains all v0.7 limits.
-- A non-inline mode is eligible only when the task definition, organisation
-  policy, model/provider capability and deployment configuration all allow it.
+- Introduce provider-neutral transfer modes: `inline`, `provider_upload`,
+  `managed_signed_url` and `storage_reference`. `inline` remains the default
+  but is eligible only through the 5,000,000-byte aggregate raw threshold.
+- A non-inline mode is eligible only when the source lifecycle, task
+  definition, organisation policy, model/provider capability and deployment
+  configuration all allow it.
 - Extend task/model registries with explicit supported transfer modes,
   per-mode MIME types and byte ceilings. Startup/CI validation rejects
   inconsistent declarations and any provider-specific field in a task.
@@ -69,13 +84,15 @@ official documentation during each adapter work unit:
   `allowed_transfer_modes` and `max_large_attachment_bytes`. Existing optimistic
   concurrency, platform-only authorisation, explicit schemas and generated
   client rules continue to apply. Defaults permit `inline` only.
-- Add typed deployment settings for enabled non-inline modes, the template
-  ceiling, provider upload expiry, and the Vertex staging project, regional
-  bucket and location. Production fails fast on incomplete or incompatible
-  configuration.
+- Add typed deployment settings for enabled non-inline modes, template ceiling,
+  provider upload expiry, managed signed-URL TTL (default 900 seconds, maximum
+  1,800), and the Vertex staging project, user-provisioned bucket and location.
+  The aggregate inline threshold cannot be configured above 5,000,000 bytes.
+  Production fails fast on incomplete or incompatible configuration.
 - The feature-facing `AIRequest` remains unchanged: the caller supplies only a
   task name and private `storage_reference`, never a transfer mode, provider
-  file id, `gs://` URI, URL, provider name or credential.
+  file id, `gs://` URI, URL, provider name or credential. It cannot request or
+  override a transfer mode.
 
 ## 2.3 Streaming, staging and durable state
 
@@ -89,28 +106,47 @@ official documentation during each adapter work unit:
 - Add an organisation-scoped `ai_attachment_references` record with UUIDv7 and
   UTC timestamps. It stores the logical request id, provider, transfer mode,
   opaque external id or `gs://` URI, source storage reference, SHA-256 digest,
-  size, MIME type, region, status, idempotency key, expiry/last-used/deleted
+  size, MIME type, source lifecycle, region, status, idempotency key, expiry/last-used/deleted
   timestamps and a safe error code/bounded metadata. It never stores bytes,
-  credentials, request headers, signed URL query strings or raw responses.
+  credentials, request headers, a managed signed URL or its query string, or
+  raw responses. A managed URL is minted anew for a dispatch/retry and is not a
+  reusable durable reference.
 - Enforce an idempotency constraint covering organisation, logical request,
   provider, mode and digest. A retry reuses only a live matching record from the
   same logical request and revalidates source digest, provider and region.
 - Implement a private GCS staging adapter capable of bounded upload, metadata
-  verification and deletion. The staging bucket must be non-public, regional,
-  in the configured Vertex location and accessed with workload identity/ADC or
-  approved service-account credentials. No browser upload path is added.
+  verification and best-effort terminal deletion. The staging bucket must be
+  non-public, regional, in the configured Vertex location and accessed with
+  workload identity/ADC or approved service-account credentials. Its globally
+  unique name is supplied through typed configuration; no browser upload path
+  or application bucket creation/configuration is added.
+- Extend the private S3-compatible storage seam to mint a managed download URL
+  only after organisation ownership, immutable object identity, size, MIME and
+  digest validation. URLs are HTTPS, read-only, exact-object and short-lived;
+  query strings are redacted from every log/error/telemetry boundary.
 
 ## 2.4 Provider behavior
 
-- **OpenAI:** upload with purpose `user_data`, set the shortest supported
-  `expires_after`, pass the returned file id through the Responses input-file
-  form, and delete after terminal success/failure where possible.
-- **Anthropic:** use the beta Files API and file-id document source, then delete
-  after terminal success/failure. Because uploaded files otherwise persist
-  until deleted, reconciliation is mandatory before this mode can be enabled.
+- **OpenAI:** for a transient source, upload with purpose `user_data`, set the
+  shortest supported `expires_after`, pass the file id through Responses and
+  delete after terminal success/failure where possible. For a retained private
+  S3 source, prefer a just-in-time managed signed URL when the deployed
+  provider/model contract supports file URL input.
+- **Anthropic:** for a transient source, use the beta Files API and file-id
+  document source, then delete after terminal success/failure. Because uploaded
+  files otherwise persist until deleted, provider-file reconciliation is
+  mandatory. For a retained private S3 source, prefer a just-in-time managed
+  signed URL when its URL document-source contract is supported.
 - **Vertex:** stage privately to the configured regional GCS bucket and pass the
   resulting `gs://` reference as Vertex `fileData`. Validate project, bucket,
-  object prefix, MIME type and exact region before dispatch.
+  object prefix, MIME type and exact region before dispatch. The deployer must
+  configure GCS Object Lifecycle Management to delete live objects with
+  `age = 1`; lifecycle execution is asynchronous and is a cleanup backstop,
+  not an exact 24-hour deletion guarantee.
+  Configuration uses the existing Vertex project/location and ADC boundary,
+  plus a typed `VERTEX_TEMP_GCS_BUCKET` name. File-based deployments may point
+  `GOOGLE_APPLICATION_CREDENTIALS` at approved service-account credentials;
+  workload identity remains preferred where available.
 - **Azure OpenAI, DeepSeek and local:** declare no non-inline mode and reject a
   large attachment before any upload, staging or inference call.
 - The fake provider/stager implements deterministic upload, reference, reuse,
@@ -122,9 +158,15 @@ official documentation during each adapter work unit:
   deletion never deletes the feature-owned source object or changes its file
   lifecycle.
 - Terminal success, permanent failure and exhausted retry attempt cleanup run
-  immediately. A scheduled Dramatiq reconciliation task finds expired,
-  orphaned and deletion-failed records, retries with bounded backoff and exposes
-  a low-cardinality backlog metric.
+  immediately for provider uploads and may attempt best-effort Vertex staging
+  deletion. A scheduled Dramatiq reconciliation task covers provider-hosted
+  file references, but never GCS staging objects or managed signed URLs.
+- Managed signed URLs expire through their short TTL and never own/delete the
+  retained feature source. Vertex GCS lifecycle configuration is entirely
+  deployer-owned: the application runs no GCS cleanup cron/reconciliation job.
+  Deployers seeking Files-API-like ephemeral storage must disable soft delete,
+  versioning and conflicting retention/holds, or explicitly accept their
+  longer retention semantics.
 - Broker messages remain reference-only. Retries re-head and re-digest the
   private source before reuse or upload; worker memory and concurrency remain
   bounded independently of provider quotas.
@@ -139,7 +181,8 @@ official documentation during each adapter work unit:
 
 | Capability | Deferred to |
 | --- | --- |
-| HTTP(S) URL input, including private signed URLs | A later security-reviewed release with a concrete non-sensitive product use case |
+| Caller-supplied HTTP(S) URLs and redirects to unvalidated fetch targets | A later security-reviewed external-URL ingestion capability |
+| Public or caller-visible signed URLs | Prohibited; v0.8 only mints backend-to-provider URLs for authorised retained objects |
 | Reuse of provider file ids across logical AI requests | First product needing a durable provider-side document library and explicit ownership/deletion UX |
 | Azure OpenAI non-inline file input | After `user_data`, expiry/deletion and regional parity are verified against the deployed API version |
 | Large-file support for DeepSeek or local/OpenAI-compatible providers | A future adapter with an authenticated, private and tested transfer capability |
@@ -182,10 +225,13 @@ fake-provider transfer tests are mandatory in the normal CI gate.
 1. **Unchanged feature boundary:** a feature supplies only `task` and a private
    `storage_reference`; transfer mode selection and every provider/cloud
    identifier remain internal to `AIService` and its adapters.
-2. **Default-deny policy:** inline remains the default. A non-inline dispatch
-   occurs only when task, organisation, model/provider and deployment policies
-   all allow the same mode; every denial occurs before external transfer.
-3. **Bounded input:** exactly one PDF above the inline ceiling and at most
+2. **Deterministic default-deny policy:** aggregate raw attachment bytes at or
+   below 5,000,000 use inline. Above that threshold, a transient source prefers
+   a provider upload, a retained private S3 source prefers a managed signed URL
+   where supported, and Vertex uses configured GCS staging. Dispatch occurs
+   only when source lifecycle, task, organisation, model/provider and deployment
+   policies allow the selected mode.
+3. **Bounded input:** exactly one PDF above 5,000,000 and at most
    50,000,000 bytes can use a non-inline mode. Other MIME types, counts and sizes fail
    safely before upload/staging; the large path does not accumulate the whole
    object in worker memory.
@@ -193,18 +239,23 @@ fake-provider transfer tests are mandatory in the normal CI gate.
    matching external reference; changed digest/provider/region creates a new
    idempotent transfer, and separate requests never share a reference.
 5. **Lifecycle:** success, permanent failure, timeout, worker crash and provider
-   deletion failure are covered. Reconciliation exposes and eventually clears
-   orphaned references without deleting feature-owned source objects.
-6. **Provider closure:** OpenAI upload/use/delete-or-expiry, Anthropic
-   upload/use/delete and Vertex stage/reference/delete satisfy one normalized
-   fake-backed contract. Azure, DeepSeek and local fail before transfer.
+   deletion failure are covered. Reconciliation exposes provider-file orphans;
+   managed URLs expire; Vertex relies on the documented deployer-owned one-day
+   lifecycle backstop and has no application cleanup scheduler. No AI cleanup
+   path deletes feature-owned source objects.
+6. **Provider closure:** OpenAI and Anthropic upload/use/delete-or-expiry and
+   managed-URL ingestion, plus Vertex stage/reference and lifecycle-contract
+   documentation,
+   satisfy normalized fake-backed contracts. Azure, DeepSeek and local fail
+   before transfer.
 7. **Region and IAM:** Vertex accepts only the configured private same-region
    staging bucket and approved workload identity/ADC credentials; no provider
    path silently changes region, project, endpoint or privacy mode.
 8. **Tenant and secret safety:** cross-organisation source/reference access is
    denied. Database rows, broker messages, logs, Sentry and audit metadata
-   contain no bytes, credentials, provider headers, raw responses or signed
-   URLs. Existing protected settings routes remain in the security matrix.
+   contain no bytes, credentials, provider headers, raw responses or managed
+   signed URLs/query strings. Caller-supplied URLs are rejected. Existing
+   protected settings routes remain in the security matrix.
 9. **API/configuration:** the platform AI-settings `GET`/`PUT` schemas expose the
    typed transfer policy with optimistic concurrency; production validation
    rejects unsafe/incomplete mode configuration and generated types are clean.
@@ -220,10 +271,10 @@ fake-provider transfer tests are mandatory in the normal CI gate.
 | Provider-neutral transfer selection | §5.1–§5.3 | Scope §6.1–§6.2 | Internal `AIService`; no new feature endpoint or frontend consumer | Registry, routing, policy-intersection, pre-dispatch denial and import-boundary tests |
 | Organisation transfer policy | §5.2, §5.9 | Scope §6.2 | Existing platform `GET`/`PUT /api/v1/platform/organisations/{organisation_id}/ai-settings`; extended explicit request/response schemas; generated types only, no new view | API integration, optimistic concurrency, default-off, platform/cross-plane and generated-client drift tests |
 | Durable reference/idempotency boundary | §5.3–§5.5, §5.8 | Scope §6.3 | Internal persistence/service surface; no public endpoint | Migration, PostgreSQL tenant isolation, concurrency, retry reuse, digest mismatch, expiry and source-ownership tests |
-| OpenAI provider upload | §5.4–§5.6 | Scope §6.4 | Internal provider adapter only | Fake upload/use/delete/failure tests plus opt-in non-production contract |
-| Anthropic provider upload | §5.4–§5.6 | Scope §6.5 | Internal provider adapter only | Fake upload/use/delete/failure tests plus opt-in non-production contract |
-| Vertex private GCS reference | §5.4–§5.7 | Scope §6.6 | Internal storage/provider adapters only | Fake staging/use/delete, IAM/region fail-closed tests plus opt-in non-production contract |
-| Cleanup and crash recovery | §5.4–§5.5, §5.8 | Scope §6.7 | Internal Dramatiq job; existing AI result polling remains unchanged | Terminal-path, redelivery, worker-crash, provider-outage, reconciliation and leakage tests |
+| OpenAI provider upload / managed URL | §5.4–§5.6, §5.8 | Scope §6.4 | Internal provider/storage adapters only | Fake upload/use/delete and retained-source URL tests plus opt-in non-production contract |
+| Anthropic provider upload / managed URL | §5.4–§5.6, §5.8 | Scope §6.5 | Internal provider/storage adapters only | Fake upload/use/delete and retained-source URL tests plus opt-in non-production contract |
+| Vertex private GCS reference | §5.4–§5.7 | Scope §6.6 | Internal storage/provider adapters only | Fake staging/use/delete, IAM/region fail-closed and documented-lifecycle tests plus opt-in non-production contract |
+| Cleanup and crash recovery | §5.4–§5.5, §5.8 | Scope §6.7 | Provider-file Dramatiq reconciliation only; existing AI result polling remains unchanged | Terminal-path, redelivery, worker-crash, provider-file reconciliation, URL expiry and leakage tests |
 | Operations and release closure | §5.7–§5.10 | Scope §6.8 | Configuration/docs/metrics; no new route or UI | Production-config, observability/redaction, full gate, provider contracts, e2e and architecture audit |
 
 ---
@@ -239,10 +290,10 @@ commit or merge that checkpoint.
 
 Dependencies: completed v0.7 release.
 
-- [ ] Re-verify the four official provider sources in §2.1; record verification date, supported API/version, retention/deletion behavior, MIME/size limits and regional caveats in ADR-0017 and provider contract fixtures
-- [ ] Amend ADR-0017, BP §3/§17/§18/§23/§27–§33 and `ARCHITECTURE.md` with the three transfer modes, fixed provider matrix, 50,000,000-byte PDF boundary, retry-only reuse, ownership/threat model and URL prohibition
+- [ ] Re-verify the official provider sources in §2.1 plus official S3 signed-URL and GCS lifecycle documentation; record verification date, supported API/version, retention/deletion behavior, MIME/size limits and regional caveats in ADR-0017 and provider contract fixtures
+- [ ] Amend ADR-0017, BP §3/§17/§18/§23/§27–§33 and `ARCHITECTURE.md` with the four transfer modes, 5,000,000-byte aggregate inline threshold, 50,000,000-byte PDF ceiling, source-lifecycle selection, retry-only provider-reference reuse, managed-URL threat model and caller-URL prohibition
 - [ ] Add provider-neutral transfer/reference contracts and fake implementations under `app/ai/`; keep `AIRequest` unchanged and strengthen import-boundary tests so feature modules cannot name transfer modes or provider references
-- [ ] Registry/config contract tests fail on inconsistent mode, MIME, ceiling, provider, expiry or regional declarations
+- [ ] Registry/config contract tests fail on inconsistent mode, source lifecycle, MIME, threshold/ceiling, provider, expiry/TTL or regional declarations
 
 Human review required before application: secret/IAM handling and provider data
 handling decisions.
@@ -251,10 +302,10 @@ handling decisions.
 
 Dependencies: Scope §6.1.
 
-- [ ] Add task/model transfer-mode capabilities and deterministic mode selection: inline first when eligible, otherwise the single policy intersection; fail before external transfer when none is eligible
+- [ ] Add task/model transfer-mode capabilities and deterministic mode selection: inline at or below 5,000,000 aggregate raw bytes; above it prefer provider upload for transient sources, managed signed URL for retained private S3 sources, and GCS staging for Vertex; fail before external transfer when no permitted/provider-supported mode is eligible
 - [ ] Add `allowed_transfer_modes` (default `inline`) and `max_large_attachment_bytes` (maximum 50,000,000) to `organisation_ai_settings` with an additive Alembic migration, constraints, model/query/service updates and optimistic-concurrency tests
 - [ ] Extend explicit schemas for `GET`/`PUT /api/v1/platform/organisations/{organisation_id}/ai-settings`, regenerate the frontend client, and prove platform/cross-plane security and stale-update behavior remain intact
-- [ ] Add typed deployment settings and production fail-fast validation for enabled modes, upload expiry and Vertex staging project/bucket/location; test default-deny and every invalid combination
+- [ ] Add typed deployment settings and production fail-fast validation for enabled modes, upload expiry, managed signed-URL TTL and Vertex staging project/user-provisioned bucket/location; test default-deny and every invalid combination without creating or configuring cloud infrastructure
 
 Human review required before application: tenant-isolation, database migration,
 platform configuration, secret handling and the additive public API change.
@@ -264,6 +315,7 @@ platform configuration, secret handling and the additive public API change.
 Dependencies: Scope §6.2.
 
 - [ ] Add bounded object streaming/secure temporary-file support behind `ObjectStorage`; verify source ownership, size, MIME and SHA-256 without accumulating 50 MB in memory and preserve existing adapters/callers
+- [ ] Add just-in-time managed download-URL minting for retained private S3 objects behind `ObjectStorage`; require exact immutable object identity, HTTPS/read-only/short TTL and query-string redaction, and never return or persist the URL
 - [ ] Add the organisation-scoped `ai_attachment_references` table, migration, ORM model and complex/reused queries with the §2.3 fields, safe constraints/indexes and idempotency uniqueness
 - [ ] Implement transfer orchestration services for create/adopt/reuse/expire/delete with transaction boundaries, safe errors and explicit proof that AI cleanup never deletes the feature source
 - [ ] Integration tests cover cross-org denial, concurrent duplicate creation, digest change, expired reference replacement, forbidden persisted fields and rollback/error paths
@@ -271,24 +323,24 @@ Dependencies: Scope §6.2.
 Human review required before application: tenant-isolation, migration and
 provider-reference data handling.
 
-## 6.4 OpenAI Provider Upload
+## 6.4 OpenAI Provider Upload and Managed URL
 
 Dependencies: Scope §6.3.
 
-- [ ] Implement streamed OpenAI `user_data` upload, shortest configured `expires_after`, Responses file-id input and delete behind the adapter; no generic AI service code imports provider HTTP shapes
+- [ ] Implement streamed OpenAI `user_data` upload, shortest configured `expires_after`, Responses file-id input and delete for transient sources; implement managed file-URL input for retained private S3 sources behind the adapter; no generic AI service code imports provider HTTP shapes
 - [ ] Enforce the PDF/50,000,000-byte/model/context/region policy before upload and normalize upload, expiry, use and deletion failures into safe retryable/permanent AI errors
-- [ ] Fake-backed tests cover upload/use/delete, retry reuse, terminal cleanup, timeout and deletion failure; opt-in non-production OpenAI contract tests verify current behavior and skip cleanly without credentials
+- [ ] Fake-backed tests cover source-lifecycle selection, upload/use/delete, managed-URL fetch, URL non-persistence/redaction/expiry, retry reuse, terminal cleanup, timeout and deletion failure; opt-in non-production OpenAI contract tests verify current behavior and skip cleanly without credentials
 
 Human review required before enabling the mode: provider data retention,
 regional configuration and secret handling.
 
-## 6.5 Anthropic Provider Upload
+## 6.5 Anthropic Provider Upload and Managed URL
 
 Dependencies: Scope §6.3.
 
-- [ ] Implement streamed Anthropic beta Files API upload, file-id document source and delete behind the adapter; pin the reviewed beta header/version in one place
+- [ ] Implement streamed Anthropic beta Files API upload, file-id document source and delete for transient sources; implement managed URL document source for retained private S3 sources behind the adapter; pin the reviewed beta header/version in one place
 - [ ] Enforce the PDF/50,000,000-byte/model/context/inference-geography policy before upload and normalize file-not-found, size, context and deletion failures safely
-- [ ] Fake-backed tests cover upload/use/delete, retry reuse and persistent-file cleanup; opt-in non-production Anthropic contract tests verify current behavior and skip cleanly without credentials
+- [ ] Fake-backed tests cover source-lifecycle selection, upload/use/delete, managed-URL fetch, URL non-persistence/redaction/expiry, retry reuse and persistent-file cleanup; opt-in non-production Anthropic contract tests verify current behavior and skip cleanly without credentials
 
 Human review required before enabling the mode: beta-provider contract, provider
 data retention, inference geography and secret handling.
@@ -297,10 +349,10 @@ data retention, inference geography and secret handling.
 
 Dependencies: Scope §6.3.
 
-- [ ] Add the private GCS staging adapter/configuration with bounded upload, metadata/head and delete; keep Google auth/storage behavior behind adapters and add no browser-facing or public URL path
+- [ ] Add the private GCS staging adapter/configuration with bounded upload, metadata/head and best-effort terminal delete; keep Google auth/storage behavior behind adapters and add no browser-facing or public URL path, bucket creation or lifecycle mutation
 - [ ] Validate actual bucket project, regional location, private access, approved prefix, object size/MIME/digest and Vertex location before creating a `gs://` `fileData` reference
-- [ ] Implement idempotent stage/reference/use/delete behavior and fail closed for multi-region, cross-region, foreign-project, public or mismatched objects
-- [ ] Fake-backed tests cover staging and cleanup; opt-in Vertex contract tests use a dedicated non-production project/bucket and ADC/workload identity, never a Gemini API key
+- [ ] Implement idempotent stage/reference/use and best-effort terminal delete behavior; fail closed for multi-region, cross-region, foreign-project, public or mismatched objects; document that deployers configure live-object deletion with `age = 1` and that lifecycle execution is asynchronous
+- [ ] Fake-backed tests cover staging and best-effort deletion without an application GCS reconciliation job; opt-in Vertex contract tests use a user-provisioned dedicated non-production project/bucket and ADC/workload identity, never a Gemini API key
 
 Human review required before application/enabling: infrastructure, IAM/secret
 handling, tenant isolation and regional data movement.
@@ -310,9 +362,9 @@ handling, tenant isolation and regional data movement.
 Dependencies: Scope §6.4–§6.6.
 
 - [ ] Integrate transfer records into synchronous/queued AI execution so broker payloads remain reference-only, retries re-head/re-digest sources and terminal outcomes trigger cleanup without duplicate output/cost records
-- [ ] Add a bounded Dramatiq reconciliation job for expired, orphaned and deletion-failed references with idempotent claims, bounded backoff and crash recovery
+- [ ] Add a bounded Dramatiq reconciliation job only for expired, orphaned and deletion-failed provider-file references with idempotent claims, bounded backoff and crash recovery; prove it never processes managed URLs, GCS staging objects or feature sources
 - [ ] Add safe audit events and low-cardinality metrics for mode selection, transfer outcome/reuse, expiry, deletion and cleanup backlog; redaction tests cover logs, Sentry, audit, rows and broker messages
-- [ ] End-to-end integration tests cover success, permanent failure, timeout, worker crash and cleanup-provider outage across all three modes
+- [ ] End-to-end integration tests cover success, permanent failure, timeout, worker crash and cleanup-provider outage across all four modes and both transient/retained source lifecycles
 
 Human review required before application: background cleanup behavior and
 provider-data deletion guarantees.
@@ -321,8 +373,8 @@ provider-data deletion guarantees.
 
 Dependencies: Scope §6.1–§6.7.
 
-- [ ] Update `.env.example`, `.env.production.example`, README, `SECURITY.md` and the AI runbook with mode enablement, retention/deletion, IAM, regional guarantees, cleanup incidents and emergency disable procedures
-- [ ] Confirm Azure/DeepSeek/local non-inline rejection, URL prohibition, provider import boundaries, migration validity, generated-client drift and all fake/provider contract suites
+- [ ] Update `.env.example`, `.env.production.example`, README, `SECURITY.md` and the AI runbook with mode enablement, 5 MB threshold, signed-URL TTL/redaction, provider retention/deletion, Vertex project/bucket/location/IAM, the required console-configured `age = 1` lifecycle, asynchronous deletion and soft-delete/versioning/retention caveats
+- [ ] Confirm Azure/DeepSeek/local non-inline rejection, caller-supplied URL prohibition, managed-URL controls, absence of application GCS bucket/lifecycle/cleanup automation, provider import boundaries, migration validity, generated-client drift and all fake/provider contract suites
 - [ ] Record every required human review, document any dependency justification, run `make check`, relevant opt-in contracts and `make e2e`, and resolve all failures
 - [ ] Run `prompts/04-architecture-audit.md`; resolve every CRITICAL/MAJOR finding before marking v0.8 complete or tagging `v0.8.0`
 

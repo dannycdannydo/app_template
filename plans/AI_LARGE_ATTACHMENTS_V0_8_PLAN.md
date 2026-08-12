@@ -17,7 +17,9 @@ to `AIService` and never call provider file APIs directly.
 v0.7 remains the required foundation. It owns:
 
 - provider-neutral attachments and the `documents` capability;
-- 5 MB per-file and 10 MB combined inline limits;
+- bounded inline attachments (5 MB per file and 10 MB combined in v0.7); v0.8
+  tightens transfer selection to a 5,000,000-byte aggregate raw-attachment
+  threshold so larger inputs use a non-inline mode;
 - server-side storage-reference resolution and SHA-256 digests;
 - references rather than bytes in Dramatiq messages and persistence;
 - keep versus temporary scratch-file lifecycle;
@@ -25,15 +27,19 @@ v0.7 remains the required foundation. It owns:
 
 ## 2. In scope
 
-- Provider-neutral transfer policy: `inline`, `provider_upload` or
-  `storage_reference`, with `inline` remaining the safe default.
+- Provider-neutral transfer policy: `inline`, `provider_upload`,
+  `managed_signed_url` or `storage_reference`, with `inline` remaining the
+  default for attachments whose aggregate raw bytes do not exceed 5,000,000.
 - Provider-hosted temporary uploads where an adapter offers an authenticated
   file API, including provider file identifier, expiry and cleanup semantics.
-- Direct cloud-object references where the provider can use workload identity
-  or narrowly scoped IAM, principally Vertex `gs://` references.
-- Provider-supported URL input only for explicitly non-sensitive flows under
-  organisation policy; private signed URLs remain disabled by default.
-- Files above the v0.7 inline ceiling, bounded by reviewed template and
+- Service-minted, read-only, short-lived signed URLs for feature-owned files
+  already retained in the application's private S3-compatible storage, when
+  the selected provider supports URL ingestion.
+- A user-provisioned private Google Cloud Storage staging bucket for Vertex
+  `gs://` references. The deployer configures bucket lifecycle deletion in the
+  Google Cloud console; the application does not create the bucket or run a
+  scheduled GCS cleanup job.
+- Files above the v0.8 5,000,000-byte inline threshold, bounded by reviewed template and
   provider-specific limits.
 - Durable upload/reference state needed for retries, idempotency, expiry and
   cleanup without storing file bytes in the database or job broker.
@@ -47,9 +53,10 @@ v0.7 remains the required foundation. It owns:
 | Capability | Boundary |
 | --- | --- |
 | Core inline attachment support | ships in v0.7 |
-| Automatic transfer-mode selection based only on provider convenience | policy must explicitly permit every non-inline mode |
+| Caller-selected transfer modes | source lifecycle, policy, provider capability and deployment configuration determine the mode |
 | Public buckets or making private source objects public | prohibited |
-| Private signed URLs as a template default | prohibited; bearer-token disclosure and expiry make them an explicit exception |
+| Caller-supplied HTTP(S) URLs | prohibited; v0.8 accepts no arbitrary external fetch target |
+| Application-created Vertex buckets or lifecycle policies | deployer provisions the bucket, IAM and lifecycle rule outside the application |
 | Cross-region upload or inference fallback | prohibited |
 | OCR, parsing, chunking, embeddings or RAG | separate domain/retrieval capabilities |
 | Permanent provider-side document library | first product requiring reusable provider files must define ownership and deletion obligations |
@@ -76,14 +83,16 @@ construct provider URLs.
 
 | Mode | Intended use | Security/lifecycle rule |
 | --- | --- | --- |
-| `inline` | v0.7-sized one-shot inputs | default; bytes live only for the provider call |
-| `provider_upload` | large one-shot inputs accepted by a provider file API | adapter uploads with server credentials; record opaque id, digest and expiry; delete when supported or rely on a documented hard provider expiry |
-| `storage_reference` | cloud objects the provider can read using IAM, such as same-project `gs://` objects | no public ACL; least-privilege identity; region and project/bucket policy validated before dispatch |
-| URL input | explicitly non-sensitive objects accepted by a provider | opt-in exception only; never mint a private signed URL by default |
+| `inline` | transient or retained inputs with aggregate raw attachment bytes at or below 5,000,000 | bytes live only for the provider call; base64/JSON expansion is accounted for separately in request-body and gateway configuration |
+| `provider_upload` | input above 5,000,000 bytes whose source is transient and whose provider has a reviewed file API | adapter uploads with server credentials; record opaque id, digest and expiry; delete when supported or rely on a documented hard provider expiry |
+| `managed_signed_url` | input above 5,000,000 bytes already retained in private application S3-compatible storage, when the provider supports URL ingestion | `AIService` mints an exact-object, read-only, short-lived URL only after tenant/source validation; the full URL is never returned, persisted, audited or logged |
+| `storage_reference` | Vertex input above 5,000,000 bytes staged in the configured private GCS bucket and passed as `gs://...` | no public ACL; least-privilege identity; project/bucket/location policy validated before dispatch; deployer-owned lifecycle deletion is the cleanup backstop |
 
 The service fails before dispatch when no permitted mode can carry the input.
 It does not silently downgrade privacy controls, upload to another region, or
-fall back from an authenticated reference to a public URL.
+accept a URL supplied by a caller. A managed signed URL is a temporary bearer
+capability generated by the service for one already-authorised immutable
+object; it is not an application-facing input.
 
 ### 4.3 Durable state and idempotency
 
@@ -97,8 +106,9 @@ must be organisation-scoped and contain only:
 - created, expiry, deleted and last-used timestamps;
 - safe provider error code and bounded non-sensitive metadata.
 
-It must never contain source bytes, credentials, signed URL query strings,
-provider headers or raw responses. Retried jobs reuse a live reference only
+It must never contain source bytes, credentials, a managed signed URL or its
+query string, provider headers or raw responses. Retried jobs reuse a live
+reference only
 when provider, digest, organisation and regional policy still match; otherwise
 they create a new idempotent upload.
 
@@ -114,7 +124,17 @@ human review before application.
 - Provider uploads use the shortest supported retention and are deleted after
   terminal success/failure when the provider supports deletion.
 - A reconciliation job detects expired, orphaned or deletion-failed provider
-  references and retries cleanup with bounded backoff.
+  file references and retries cleanup with bounded backoff.
+- Managed signed URLs expire without a cleanup record. The source object keeps
+  its feature-owned lifecycle and is never deleted by AI cleanup.
+- Vertex staging objects use a deployer-configured GCS lifecycle rule with an
+  age of one day as the authoritative cleanup backstop. Lifecycle execution is
+  asynchronous, so this is eligibility after one day rather than an exact
+  24-hour deletion guarantee. The application may attempt terminal deletion
+  but runs no scheduled GCS cleanup or reconciliation job.
+- Deployers wanting Files-API-like ephemeral Vertex staging disable GCS soft
+  delete, object versioning and conflicting holds/retention policies, or accept
+  the longer recovery/retention behavior those controls introduce.
 - Audit records identify the provider, transfer mode, reference record and
   outcome without recording content or bearer credentials.
 
@@ -125,9 +145,10 @@ non-production contract behavior immediately before implementation.
 
 | Provider | Candidate v0.8 path | Required decision |
 | --- | --- | --- |
-| OpenAI / Azure OpenAI | provider file id or approved URL input on Responses-capable deployments | retention/deletion API, regional availability and Azure parity |
-| Vertex AI | managed file upload, registered GCS object or direct same-project `gs://` reference | select one default large-file path; validate location, IAM, expiry and retry semantics |
-| Anthropic | provider-supported URL/file mechanisms available to the configured account | determine whether the security and regional contract is sufficient |
+| OpenAI | provider file id for transient sources; managed S3 signed URL for retained sources when the deployed model supports URL file input | retention/deletion API, URL-fetch behavior, regional availability and redaction |
+| Azure OpenAI | no v0.8 non-inline path unless parity is separately reviewed | continue fail-fast rejection for this release |
+| Vertex AI | upload to a user-provisioned private GCS staging bucket and pass a `gs://` reference | validate bucket location, IAM, lifecycle prerequisite and retry semantics; never use the Gemini Developer Files API |
+| Anthropic | provider file id for transient sources; managed S3 signed URL for retained sources | validate beta Files API cleanup, URL-fetch behavior, inference geography and redaction |
 | Local | implementation-specific private object/file bridge | remain disabled unless a reviewed adapter capability exists |
 | DeepSeek | none unless official document input support exists | continue fail-fast rejection |
 
@@ -138,7 +159,7 @@ non-production contract behavior immediately before implementation.
 - Amend the v0.8 release scope and ADR-0017 with transfer modes, ownership,
   lifecycle and threat model.
 - Decide organisation policy fields, maximum supported sizes and whether
-  provider-hosted reuse is allowed at all.
+  provider-hosted reuse is allowed within retries of one logical execution.
 - Define provider/reference capability metadata without leaking provider
   concepts into feature modules.
 
@@ -153,7 +174,9 @@ non-production contract behavior immediately before implementation.
 
 ### 5.3 Adapter implementations
 
-- Implement each approved provider mode behind its adapter.
+- Implement each approved provider mode behind its adapter, including
+  just-in-time signed-URL minting through the storage boundary rather than in
+  feature code.
 - Validate size, MIME, region/location, project/account and expiry before use.
 - Normalise upload, reference-expiry and deletion failures into safe AI errors.
 
@@ -169,16 +192,20 @@ non-production contract behavior immediately before implementation.
 
 1. A feature still supplies only a private storage reference and task name;
    provider file APIs and identifiers remain internal to the AI layer.
-2. Inline remains the default. Every other transfer mode requires explicit
-   task, organisation and deployment permission.
+2. Inline is selected only when aggregate raw attachment bytes are at or below
+   5,000,000. Larger transient inputs prefer a reviewed provider Files API;
+   larger retained S3 inputs prefer a managed signed URL where supported;
+   Vertex uses its configured private GCS staging bucket.
 3. Oversized or unsupported inputs fail before inference without generating a
-   public object or signed URL.
+   public object or accepting a caller-supplied URL.
 4. Broker messages, database rows, logs, Sentry and audit metadata contain no
    attachment bytes, credentials or bearer URL query strings.
 5. Retried work is idempotent and cannot create unbounded duplicate uploads or
    duplicate cost/output records.
-6. Cleanup handles success, permanent failure, timeout, worker crash and
-   provider deletion failure; reconciliation exposes orphaned references.
+6. Provider-upload cleanup handles success, permanent failure, timeout, worker
+   crash and deletion failure; managed URLs expire; Vertex documents and
+   requires the deployer-owned one-day lifecycle prerequisite without an
+   application GCS cleanup scheduler.
 7. Cross-organisation reference use is denied and covered by integration
    tests. Any protected routes join the mandatory security matrix.
 8. Provider contract tests cover upload/use/delete or expiry behavior against
@@ -188,18 +215,25 @@ non-production contract behavior immediately before implementation.
 10. `make check`, migration validation and the relevant provider contract
     suite are green, followed by architecture and required human review.
 
-## 7. Decisions required before implementation
+## 7. Resolved implementation decisions
 
-1. Which single large-file path should be the template default for Vertex:
-   managed upload or same-project GCS reference?
-2. Should provider-hosted identifiers ever be reusable across AI requests, or
-   only within retries of one logical request?
-3. Which MIME types and maximum sizes does the template support independently
-   of higher provider ceilings?
-4. Are URL inputs useful enough to retain as an explicit exception, or should
-   v0.8 exclude them entirely?
-5. Does organisation policy need dedicated columns or a bounded, typed policy
-   object, and what migration/compatibility consequences follow?
+1. The inline threshold is 5,000,000 aggregate raw attachment bytes. It is not
+   the large-file ceiling; v0.8 retains its reviewed PDF ceiling and applies
+   lower provider/model limits.
+2. Transient sources above the threshold prefer a provider Files API. Retained
+   S3-compatible source objects prefer a service-minted signed URL where the
+   provider supports URL ingestion. Callers never supply URLs.
+3. Vertex remains Vertex AI only. Its large-file path is a private `gs://`
+   object in a deployer-provisioned, configured GCS staging bucket; Gemini
+   Developer API and its Files API remain excluded.
+4. The deployer configures a GCS delete lifecycle with `age = 1` in Google
+   Cloud. The application neither creates/configures the bucket nor runs a GCS
+   cleanup scheduler. Lifecycle deletion is asynchronous and soft-delete,
+   versioning, holds and retention settings remain the deployer's explicit
+   responsibility.
+5. Provider-hosted identifiers are reusable only within retries of one logical
+   execution. Organisation policy remains explicit and typed rather than an
+   opaque policy blob.
 
 Do not start v0.8 implementation until v0.7 §6.5 retention/persistence and
 §6.6 reference-only job execution are implemented, reviewed and green.
