@@ -91,9 +91,10 @@ AIService.execute(task=...)          app/ai/service.py
   (`plans/AI_LARGE_ATTACHMENTS_V0_8_PLAN.md`); inline is the only v0.7 mode.
 - Small bounded tasks run synchronously; document-scale work enqueues an
   `ai.execute` job on the `ai` queue with the durable record-then-enqueue
-  lifecycle. Organisation AI settings are default-off, budget-enforced in
-  `AIService`, and content never reaches logs, Sentry or audit metadata
-  (retained output is a per-organisation policy with a documented deletion
+  lifecycle. Organisation AI settings are default-off, use versioned full
+  replacements so stale platform-admin writes return 409, and are
+  budget-enforced in `AIService`; content never reaches logs, Sentry or audit
+  metadata (retained output is a per-organisation policy with a documented deletion
   path).
 
 Each domain module normally uses: `models.py`, `schemas.py`, `router.py`, `service.py`, `queries.py` (optional), `permissions.py`, `tests/`. A mandatory repository class is not part of the architecture. The platform plane lives in `modules/platform_admin` (organisation/membership administration), `modules/invitations`, `modules/feature_flags`, `modules/audit` and `modules/webhooks`, all gated by `require_platform_permission` in `api/dependencies.py`.

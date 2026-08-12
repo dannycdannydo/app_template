@@ -1,10 +1,10 @@
 """The ``ai.execute`` durable job (v0.7 Scope §6.6, blueprint §18, ADR-0017).
 
 Document-scale AI work runs as a durable job, not in an HTTP handler (BP §18):
-the demonstration feature persists a ``queued`` job row whose
-``input_reference`` is the private storage reference, then enqueues this actor
-on the ``ai`` queue. The broker message carries only the job id — never file
-bytes (v0.7 Scope §2) — and the worker passes the storage reference through
+the platform execution boundary persists a ``queued`` job and AI request row
+whose ``input_reference`` is the private storage reference, then enqueues this
+actor on the ``ai`` queue. The broker message carries only the job id — never
+file bytes (v0.7 Scope §2) — and the worker passes the storage reference through
 ``AIService.execute`` on every idempotent attempt so the service resolves it
 to a bounded provider-neutral attachment (v0.7 Scope §2/§6.6).
 
@@ -38,6 +38,10 @@ example queues) so AI workloads never compete with the ``default`` or
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
+from datetime import datetime
+from decimal import Decimal
+from typing import Any, Literal
 
 import dramatiq
 import structlog
@@ -45,19 +49,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai import runtime
 from app.ai.errors import AIError, AIRequestReplayError
+from app.ai.persistence.models import AIRequestRecord, AIRequestStatus
 from app.ai.persistence.queries import (
     ai_latest_attempt_statement,
+    ai_output_for_request_statement,
     ai_winning_attempt_statement,
 )
 from app.ai.persistence.service import AIPersistencePortImpl
-from app.ai.schemas import AIRequest
+from app.ai.schemas import AIRequest, AIResult
+from app.core.exceptions import NotFoundError
 from app.core.logging import bind_worker_context
+from app.db.conventions import uuid7
 from app.db.session import async_session_factory
 from app.modules.jobs import service as jobs_service
 
 #: The durable ``job_type`` this task owns (v0.7 Scope §2/§6.6). The
-#: demonstration service names it when it writes the row, so the constant
-#: lives with the task that owns the identity.
+#: execution boundary names it when it writes the row, so the constant lives
+#: with the task that owns the identity.
 JOB_TYPE_AI_EXECUTE = "ai.execute"
 
 #: The queue AI workloads run on (blueprint §18 example queues: default,
@@ -82,6 +90,36 @@ ERROR_CODE_REQUEST_IN_PROGRESS = "ai_request_in_progress"
 
 logger = structlog.get_logger()
 
+AIExecutionStatus = Literal["queued", "running", "succeeded", "failed"]
+
+
+@dataclass(frozen=True)
+class QueuedAIExecution:
+    """Public acknowledgement for a durably queued AI execution."""
+
+    job_id: uuid.UUID
+    request_id: str
+
+
+@dataclass(frozen=True)
+class AIExecutionSnapshot:
+    """Persistence-neutral status returned to an AI-consuming feature."""
+
+    request_id: str
+    status: AIExecutionStatus
+    error_code: str | None
+    output: dict[str, Any] | None
+    provider: str | None
+    model: str | None
+    prompt_name: str | None
+    prompt_version: int | None
+    fallback_used: bool
+    region: str
+    input_tokens: int
+    output_tokens: int
+    cost: Decimal
+    completed_at: datetime | None
+
 
 def request_id_for_job(job_id: uuid.UUID) -> str:
     """The deterministic AI request id for one durable job.
@@ -91,6 +129,96 @@ def request_id_for_job(job_id: uuid.UUID) -> str:
     idempotency key is structural, not metadata (v0.7 Scope §6.6).
     """
     return job_id.hex
+
+
+async def execute_managed_ai(
+    session: AsyncSession,
+    request: AIRequest,
+    *,
+    request_id: str | None = None,
+) -> AIResult:
+    """Execute through ``AIService`` with the platform persistence boundary."""
+    return await runtime.get_ai_service().execute(
+        request,
+        recorder=AIPersistencePortImpl(session),
+        request_id=request_id,
+    )
+
+
+async def enqueue_document_classification(
+    session: AsyncSession,
+    *,
+    organisation_id: uuid.UUID,
+    user_id: uuid.UUID,
+    storage_reference: str,
+) -> QueuedAIExecution:
+    """Persist a queued AI request and durable job before broker publication."""
+    job_id = uuid7()
+    request_id = request_id_for_job(job_id)
+    session.add(
+        AIRequestRecord(
+            organisation_id=organisation_id,
+            user_id=user_id,
+            request_id=request_id,
+            attempt_number=1,
+            task=DEMO_TASK,
+            status=AIRequestStatus.QUEUED,
+            input_reference=storage_reference,
+        )
+    )
+    job = await jobs_service.create_and_enqueue(
+        session,
+        organisation_id=organisation_id,
+        job_type=JOB_TYPE_AI_EXECUTE,
+        input_reference=storage_reference,
+        actor_user_id=user_id,
+        task=execute_ai_task_actor,
+        job_id=job_id,
+    )
+    return QueuedAIExecution(job_id=job.id, request_id=request_id_for_job(job.id))
+
+
+async def get_ai_execution_snapshot(
+    session: AsyncSession,
+    *,
+    organisation_id: uuid.UUID,
+    request_id: str,
+) -> AIExecutionSnapshot:
+    """Return an organisation-scoped execution result without leaking ORM types."""
+    record = await session.scalar(ai_winning_attempt_statement(organisation_id, request_id))
+    if record is None:
+        record = await session.scalar(ai_latest_attempt_statement(organisation_id, request_id))
+    if record is None:
+        raise NotFoundError(
+            code="ai_request_not_found",
+            message="The classification result could not be found.",
+        )
+
+    output: dict[str, Any] | None = None
+    if record.status == AIRequestStatus.SUCCEEDED:
+        output_record = await session.scalar(
+            ai_output_for_request_statement(organisation_id, record.id)
+        )
+        if output_record is not None:
+            output = output_record.output_json
+
+    is_terminal = record.status in (AIRequestStatus.SUCCEEDED, AIRequestStatus.FAILED)
+    return AIExecutionSnapshot(
+        request_id=record.request_id,
+        status=record.status.value,
+        error_code=record.error_code,
+        output=output,
+        provider=record.provider,
+        model=record.model,
+        prompt_name=record.prompt_name,
+        prompt_version=record.prompt_version,
+        fallback_used=record.fallback_used,
+        region=record.region,
+        input_tokens=record.input_tokens,
+        output_tokens=record.output_tokens,
+        cost=record.cost,
+        completed_at=record.updated_at if is_terminal else None,
+    )
 
 
 async def execute_ai_task(job_id: str) -> None:
@@ -150,7 +278,8 @@ async def execute_ai_task(job_id: str) -> None:
             raise jobs_service.JobPermanentError(failure.message)
 
         try:
-            result = await runtime.get_ai_service().execute(
+            result = await execute_managed_ai(
+                session,
                 AIRequest(
                     task=DEMO_TASK,
                     storage_reference=job.input_reference,
@@ -158,7 +287,6 @@ async def execute_ai_task(job_id: str) -> None:
                     user_id=job.created_by_user_id,
                     metadata={"source": "ai_demo", "job_id": str(job_uuid)},
                 ),
-                recorder=AIPersistencePortImpl(session),
                 request_id=request_id,
             )
         except AIRequestReplayError:

@@ -85,7 +85,7 @@ def _membership(user_id: uuid.UUID, role_id: uuid.UUID) -> PlatformMembership:
 
 
 def test_bootstrap_state_table_registered_on_base_metadata() -> None:
-    assert "bootstrap_state" in Base.metadata.tables
+    assert "bootstrap_states" in Base.metadata.tables
 
 
 def test_bootstrap_state_is_a_single_row_table_by_construction() -> None:
@@ -93,7 +93,7 @@ def test_bootstrap_state_is_a_single_row_table_by_construction() -> None:
     table = cast(Table, BootstrapState.__table__)
     assert table.c.id.primary_key
     check_names = {constraint.name for constraint in table.constraints}
-    assert "ck_bootstrap_state_single_row" in check_names
+    assert "ck_bootstrap_states_single_row" in check_names
     assert "updated_at" not in table.c  # consumed once, never modified
 
 

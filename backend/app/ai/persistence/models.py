@@ -102,6 +102,7 @@ class OrganisationAISettings(Base, TimestampMixin):
             "retention_policy_days IS NULL OR retention_policy_days > 0",
             name="positive_retention_policy_days",
         ),
+        CheckConstraint("version > 0", name="positive_version"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UuidV7, primary_key=True, default=uuid7)
@@ -149,6 +150,15 @@ class OrganisationAISettings(Base, TimestampMixin):
         # is never hard-deleted, but if it ever is the reference is nulled.
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
+    )
+    # Full policy replacements are collaboratively managed by platform
+    # administrators. Clients must submit the version they read; the service
+    # locks the row and rejects stale replacements with 409 Conflict (BP §10).
+    version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+        server_default=text("1"),
     )
 
 

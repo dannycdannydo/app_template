@@ -245,7 +245,7 @@ async def maybe_grant_bootstrap_platform_admin(
     following hold:
 
     - ``BOOTSTRAP_PLATFORM_ADMIN_EMAIL`` is configured;
-    - the ``bootstrap_state`` row does not exist yet (unconsumed);
+    - the ``bootstrap_states`` row does not exist yet (unconsumed);
     - the WorkOS profile behind the session reports the configured email and
       ``email_verified`` (the profile is fetched server-side, so the email and
       its verification state never come from client input — BP §8).

@@ -234,7 +234,20 @@ Check items off only after review. Work is ordered so contracts and safety contr
 - [x] Metrics/logging/Sentry instrumentation with safe low-cardinality labels and `ai_request_id`; dashboards/alerts and a runbook for provider outage, budget response, prompt rollback, model rollback and retention deletion
 - [x] `.env.example`, `.env.production.example`, README and deployment docs describe secret injection, provider enablement, provider regions/inference geography, Vertex project/location/identity, attachment limits and lifecycle, local-provider network controls and non-production contract-test credentials
 - [x] `SECURITY.md` covers prompt injection as untrusted input, external-data disclosure/redaction, provider data handling, output validation, audit/retention, no client credentials and approval boundaries
-- [ ] Dependencies, migrations, provider credentials/secrets, platform configuration/tenant isolation and any public endpoints receive recorded human review; CI/quality gate green and architecture audit clean
+- [x] Dependencies, migrations, provider credentials/secrets, platform configuration/tenant isolation and any public endpoints receive recorded human review; CI/quality gate green and architecture audit clean
+
+> **Recorded human review and application authorisation (v0.7 architecture-audit corrections).**
+> On 2026-08-12, after the release-gate architecture audit reported two MAJOR
+> findings and one MINOR naming drift, the repository owner explicitly
+> authorised the implementer to apply, commit, publish and merge the complete
+> correction diff without a separate `.handoff/review.md`. That authorisation
+> covers the additive `organisation_ai_settings.version` migration and required
+> PUT field, stale-write `409` contract, the internal AI execution/persistence
+> boundary, and the non-destructive `bootstrap_state` → `bootstrap_states`
+> rename. The corrected migration is reversible; tenant filters and platform
+> authorisation are unchanged; generated client types and regression tests ship
+> with the contract. The full local quality gate is green, and the corrected
+> boundary/name/concurrency scans have no remaining CRITICAL or MAJOR finding.
 
 ---
 

@@ -29,7 +29,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.db.base import Base
 from app.db.conventions import TimestampMixin, UuidV7, uuid7
 
-# The bootstrap_state table holds exactly one row; the id is a fixed sentinel
+# The bootstrap_states table holds exactly one row; the id is a fixed sentinel
 # enforced by a check constraint, so the primary key itself prevents a second
 # grant (Scope §6.4).
 BOOTSTRAP_SINGLETON_ID = 1
@@ -110,8 +110,8 @@ class BootstrapState(Base):
     is never modified.
     """
 
-    __tablename__ = "bootstrap_state"
-    # The naming convention renders this as ``ck_bootstrap_state_single_row``
+    __tablename__ = "bootstrap_states"
+    # The naming convention renders this as ``ck_bootstrap_states_single_row``
     # (ck_<table>_<constraint_name>), matching the migration's op.f() name.
     __table_args__ = (CheckConstraint("id = 1", name="single_row"),)
 

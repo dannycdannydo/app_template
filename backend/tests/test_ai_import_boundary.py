@@ -21,6 +21,7 @@ APP_ROOT = BACKEND_ROOT / "app"
 # first dotted component is what we match.
 AI_PROVIDER_SDKS = ("openai", "anthropic", "deepseek", "vertexai", "google", "azure")
 ALLOWED_DIR = "app/ai/providers"
+AI_DEMO_ROOT = APP_ROOT / "modules" / "ai_demo"
 
 
 def _sdk_import_lines() -> list[tuple[Path, int, str]]:
@@ -56,4 +57,19 @@ def test_no_provider_sdk_imported_outside_app_ai_providers() -> None:
     assert violations == [], (
         "provider SDKs must only be imported inside app/ai/providers/ "
         f"(ADR-0017); found: {violations}"
+    )
+
+
+def test_ai_demo_does_not_import_ai_persistence_internals() -> None:
+    """The example feature consumes the platform execution boundary only."""
+    violations: list[tuple[str, int, str]] = []
+    for path in sorted(AI_DEMO_ROOT.rglob("*.py")):
+        for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            stripped = line.strip()
+            if stripped.startswith(("from app.ai.persistence", "import app.ai.persistence")):
+                violations.append(
+                    (path.relative_to(BACKEND_ROOT).as_posix(), line_number, stripped)
+                )
+    assert violations == [], (
+        f"feature modules must not import app.ai.persistence internals; found: {violations}"
     )

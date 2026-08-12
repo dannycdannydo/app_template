@@ -29,6 +29,7 @@ class PlatformOrganisationAISettingsUpdate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    version: int = Field(ge=1)
     enabled: bool
     allowed_provider_ids: list[str] = Field(default_factory=list, max_length=64)
     allowed_model_ids: list[str] = Field(default_factory=list, max_length=256)
@@ -46,6 +47,7 @@ class PlatformOrganisationAISettingsResponse(BaseModel):
     """
 
     organisation_id: uuid.UUID
+    version: int
     enabled: bool
     allowed_provider_ids: list[str]
     allowed_model_ids: list[str]
