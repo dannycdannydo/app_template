@@ -30,7 +30,28 @@ from app.ai.providers.factory import get_provider_factory
 from app.ai.registry import load_registry_bundle
 from app.ai.service import AIService
 from app.ai.storage_resolver import StorageAttachmentResolver
+from app.ai.transfer import TransferDeploymentPolicy, TransferMode
+from app.core.config import get_settings
 from app.storage import get_storage
+
+
+def _transfer_deployment_policy() -> TransferDeploymentPolicy:
+    """Close the typed deployment transfer settings over the executor.
+
+    v0.8 Scope §2.2/§6.2: the process-wide service must select transfer modes
+    from the exact deployment it boots with — the enabled non-inline modes, the
+    aggregate inline threshold and the large-file ceiling — so routing can
+    never drift from configuration. The mode ids come from the typed settings;
+    the validation lives in ``app/ai/deployment.py`` at construction time.
+    """
+    settings = get_settings()
+    return TransferDeploymentPolicy(
+        inline_aggregate_threshold_bytes=settings.ai_inline_aggregate_threshold_bytes,
+        max_large_attachment_bytes=settings.ai_max_large_attachment_bytes,
+        enabled_transfer_modes=frozenset(
+            TransferMode(mode_id) for mode_id in settings.ai_enabled_transfer_modes
+        ),
+    )
 
 
 @lru_cache
@@ -38,8 +59,9 @@ def get_ai_service() -> AIService:
     """Return the process-wide, fully wired :class:`AIService`.
 
     Builds the enabled-provider map from the typed-settings factory, loads the
-    checked-in registry bundle (validated at import), and wires the
-    storage-backed attachment resolver. Exactly one provider must be enabled —
+    checked-in registry bundle (validated at import), wires the
+    storage-backed attachment resolver and closes the deployment-level
+    transfer policy over the executor. Exactly one provider must be enabled —
     the deterministic fake adapter under test, one or more real adapters in a
     configured deployment — or :class:`AIService` itself rejects construction.
     """
@@ -54,4 +76,5 @@ def get_ai_service() -> AIService:
         model_registry=bundle.models,
         providers=providers,
         attachment_resolver=StorageAttachmentResolver(get_storage()),
+        transfer_deployment=_transfer_deployment_policy(),
     )

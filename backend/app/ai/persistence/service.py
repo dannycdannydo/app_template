@@ -79,6 +79,12 @@ from app.ai.persistence.queries import (
 )
 from app.ai.registry import CapabilityCostModelRegistry, load_registry_bundle
 from app.ai.schemas import CostEstimate, TokenUsage
+from app.ai.transfer import (
+    INLINE_AGGREGATE_THRESHOLD_BYTES,
+    MAX_LARGE_ATTACHMENT_BYTES,
+    SCRATCH_KEY_TEMPLATE,
+    TransferMode,
+)
 from app.core.config import AI_KNOWN_PROVIDER_IDS
 from app.core.exceptions import ConflictError, ErrorDetail, NotFoundError, ValidationError
 from app.modules.audit.service import (
@@ -102,8 +108,10 @@ logger = structlog.get_logger()
 #: The organisation-scoped AI scratch namespace (v0.7 Scope §6.5 item 4): temporary
 #: analyse-only objects live here so the retention sweep can target them and
 #: keep-flow objects under ``organisations/{org}/documents/…`` (feature-owned,
-#: v0.7 Scope §6.3) are never touched by the AI layer.
-SCRATCH_KEY_PREFIX = "organisations/{organisation_id}/ai/scratch/"
+#: v0.7 Scope §6.3) are never touched by the AI layer. The template string
+#: lives in ``app.ai.transfer`` so the transfer selector's transient-source
+#: classification and the retention sweep share one source of truth.
+SCRATCH_KEY_PREFIX = SCRATCH_KEY_TEMPLATE
 
 #: A reservation older than this while still ``running`` is a crashed worker
 #: execution; the retention job reconciles it to ``failed`` keeping its cost.
@@ -209,6 +217,61 @@ def _validate_policy_identifiers(
             )
 
 
+def _validate_transfer_policy(
+    *,
+    allowed_transfer_modes: list[str],
+    max_large_attachment_bytes: int,
+) -> None:
+    """Validate the organisation transfer policy before any row is written.
+
+    v0.8 Scope §2.2/§6.2: ``allowed_transfer_modes`` is a bounded array of
+    known transfer-mode ids (default ``inline`` only, so a non-inline mode is
+    never enabled by accident), and ``max_large_attachment_bytes`` tightens the
+    50,000,000-byte template ceiling — it can never raise it. Unknown or
+    duplicate modes and out-of-range ceilings fail fast with an actionable
+    error before any write, exactly like the provider/model allowlists.
+    """
+    if not allowed_transfer_modes:
+        raise _registry_error(
+            "allowed_transfer_modes", "at least one transfer mode is required (inline)"
+        )
+    if len(set(allowed_transfer_modes)) != len(allowed_transfer_modes):
+        raise _registry_error(
+            "allowed_transfer_modes", "transfer modes must not contain duplicates"
+        )
+    known = {mode.value for mode in TransferMode}
+    unknown = set(allowed_transfer_modes) - known
+    if unknown:
+        raise _registry_error(
+            "allowed_transfer_modes",
+            f"unknown transfer modes: {sorted(unknown)}",
+        )
+    if TransferMode.INLINE.value not in allowed_transfer_modes:
+        # Inline is the reviewed default and must remain eligible through the
+        # aggregate threshold (Scope §2.2); an allowlist without it is a
+        # misconfiguration that would silently block small files.
+        raise _registry_error(
+            "allowed_transfer_modes",
+            f"the {TransferMode.INLINE.value!r} mode is mandatory",
+        )
+    if not 1 <= max_large_attachment_bytes <= MAX_LARGE_ATTACHMENT_BYTES:
+        raise _registry_error(
+            "max_large_attachment_bytes",
+            f"must be between 1 and {MAX_LARGE_ATTACHMENT_BYTES} bytes",
+        )
+    non_inline = [mode for mode in allowed_transfer_modes if mode != TransferMode.INLINE.value]
+    if non_inline and max_large_attachment_bytes <= INLINE_AGGREGATE_THRESHOLD_BYTES:
+        # Non-inline modes carry exactly one PDF above the inline aggregate
+        # threshold (Scope §2.1/§5.3); a ceiling at or below 5,000,000 would
+        # make every non-inline mode unreachable, so the policy fails fast
+        # instead of silently routing nothing.
+        raise _registry_error(
+            "max_large_attachment_bytes",
+            "a non-inline transfer mode requires a ceiling above the "
+            f"{INLINE_AGGREGATE_THRESHOLD_BYTES}-byte inline aggregate threshold",
+        )
+
+
 async def _get_organisation_or_404(session: AsyncSession, organisation_id: uuid.UUID) -> None:
     """Raise the standard 404 when the organisation does not exist."""
     organisation = await session.scalar(
@@ -277,6 +340,8 @@ async def update_ai_settings(
     model_override: str | None,
     monthly_budget: Decimal | None,
     retention_policy_days: int | None,
+    allowed_transfer_modes: list[str] | None = None,
+    max_large_attachment_bytes: int | None = None,
 ) -> OrganisationAISettings:
     """Replace one organisation's AI policy and audit the change.
 
@@ -287,6 +352,13 @@ async def update_ai_settings(
     commits in the same transaction. The row is created when missing (the
     platform can enable AI for an organisation whose row predates this
     release), and that defensive default begins at version 1.
+
+    v0.8 Scope §2.2/§6.2: ``allowed_transfer_modes`` and
+    ``max_large_attachment_bytes`` carry the organisation's transfer policy.
+    ``None`` keeps the current row values (so existing callers and the
+    default-off row keep working unchanged); explicit lists/values replace the
+    policy. ``allowed_transfer_modes`` must always contain ``inline`` and
+    ``max_large_attachment_bytes`` can only tighten the template ceiling.
     """
     await _get_organisation_or_404(session, organisation_id)
     _validate_policy_identifiers(
@@ -310,6 +382,20 @@ async def update_ai_settings(
             code="ai_settings_version_conflict",
             message="The AI settings were changed by another administrator.",
         )
+    effective_transfer_modes = (
+        allowed_transfer_modes
+        if allowed_transfer_modes is not None
+        else list(settings_row.allowed_transfer_modes)
+    )
+    effective_max_large_bytes = (
+        max_large_attachment_bytes
+        if max_large_attachment_bytes is not None
+        else settings_row.max_large_attachment_bytes
+    )
+    _validate_transfer_policy(
+        allowed_transfer_modes=effective_transfer_modes,
+        max_large_attachment_bytes=effective_max_large_bytes,
+    )
     settings_row.enabled = enabled
     settings_row.allowed_provider_ids = allowed_provider_ids
     settings_row.allowed_model_ids = allowed_model_ids
@@ -317,6 +403,8 @@ async def update_ai_settings(
     settings_row.model_override = model_override
     settings_row.monthly_budget = monthly_budget
     settings_row.retention_policy_days = retention_policy_days
+    settings_row.allowed_transfer_modes = effective_transfer_modes
+    settings_row.max_large_attachment_bytes = effective_max_large_bytes
     settings_row.updated_by_user_id = actor.id
     settings_row.version += 1
     await record_event(
@@ -334,6 +422,8 @@ async def update_ai_settings(
             "model_override": model_override,
             "monthly_budget": str(monthly_budget) if monthly_budget is not None else None,
             "retention_policy_days": retention_policy_days,
+            "allowed_transfer_modes": effective_transfer_modes,
+            "max_large_attachment_bytes": effective_max_large_bytes,
             "version": settings_row.version,
         },
     )
@@ -364,6 +454,8 @@ async def get_organisation_policy(
         model_override=settings_row.model_override,
         monthly_budget=settings_row.monthly_budget,
         retention_policy_days=settings_row.retention_policy_days,
+        allowed_transfer_modes=[TransferMode(mode) for mode in settings_row.allowed_transfer_modes],
+        max_large_attachment_bytes=settings_row.max_large_attachment_bytes,
     )
 
 

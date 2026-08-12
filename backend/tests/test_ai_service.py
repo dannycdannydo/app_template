@@ -12,11 +12,11 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from pydantic import BaseModel, Field
-from tests.ai_test_helpers import InMemoryPromptRegistry, InMemoryRegistries
+from tests.ai_test_helpers import InMemoryPromptRegistry, InMemoryRegistries, metadata_attachment
 
 from app.ai.attachments import (
     ALLOWED_ATTACHMENT_MIME_TYPES,
@@ -32,19 +32,26 @@ from app.ai.errors import (
     PromptNotFoundError,
     ProviderResponseError,
     TaskNotFoundError,
+    TransferExecutionUnavailableError,
+    TransferModeUnavailableError,
 )
+from app.ai.persistence.port import AIRequestReservation, OrganisationAIPolicy
 from app.ai.providers.base import LLMProvider, ProviderRequest, ProviderResponse
 from app.ai.providers.fake import FakeLLMProvider
 from app.ai.registry import (
     Capability,
+    CapabilityCostModelRegistry,
     ModelDefinition,
     ModelRegistry,
+    NonInlineModeLimit,
     PricingBasis,
     PromptDefinition,
+    RetryPolicy,
     TaskDefinition,
 )
 from app.ai.schemas import AIRequest, TokenUsage
 from app.ai.service import AIService
+from app.ai.transfer import NON_INLINE_MIME_TYPES, TransferDeploymentPolicy, TransferMode
 
 
 class ClassificationResult(BaseModel):
@@ -82,6 +89,7 @@ def _service(
     registries: InMemoryRegistries | None = None,
     *,
     provider: FakeLLMProvider | None = None,
+    transfer_deployment: TransferDeploymentPolicy | None = None,
 ) -> tuple[AIService, FakeLLMProvider]:
     registries = registries or InMemoryRegistries.default()
     provider = provider or FakeLLMProvider()
@@ -91,6 +99,7 @@ def _service(
         model_registry=registries.models,
         provider=provider,
         schema_resolver=_resolver,
+        transfer_deployment=transfer_deployment,
         allow_unmanaged_execution=True,
     )
     return service, provider
@@ -531,6 +540,525 @@ async def test_execute_rejects_image_attachments_when_model_lacks_vision() -> No
 
     with pytest.raises(ModelNotAvailableError, match="no model satisfies"):
         await service.execute(_request(), attachments=[image])
+    assert provider.requests == []  # nothing was dispatched
+
+
+# --- v0.8 §6.2 transfer gate: pre-dispatch denial above the inline threshold ---
+
+
+class _NonInlineDocumentModelRegistry(_DocumentModelRegistry):
+    """A document model that additionally declares the provider-upload mode."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._model = ModelDefinition(
+            id="fake.document-classifier",
+            provider="fake",
+            model="fake-model-document.classify",
+            capabilities=[Capability.STRUCTURED_OUTPUT, Capability.DOCUMENTS],
+            context_window=128_000,
+            supported_parameters=[],
+            max_attachment_bytes=MAX_ATTACHMENT_BYTES,
+            max_total_attachment_bytes=MAX_TOTAL_ATTACHMENT_BYTES,
+            attachment_mime_types=sorted(ALLOWED_ATTACHMENT_MIME_TYPES),
+            allowed_transfer_modes=[TransferMode.INLINE, TransferMode.PROVIDER_UPLOAD],
+            transfer_mode_limits={
+                TransferMode.PROVIDER_UPLOAD: NonInlineModeLimit(
+                    mime_types=sorted(NON_INLINE_MIME_TYPES), max_bytes=50_000_000
+                )
+            },
+            pricing=PricingBasis(
+                currency="USD",
+                input_price_per_million_tokens=Decimal("1.00"),
+                output_price_per_million_tokens=Decimal("2.00"),
+                effective_date=date(2026, 1, 1),
+                owner="tests",
+            ),
+        )
+
+
+class _PermissiveRecorder:
+    """Minimal :class:`AIPersistencePort` whose policy permits a non-inline mode."""
+
+    def __init__(self) -> None:
+        self.policy = OrganisationAIPolicy(
+            enabled=True,
+            allowed_transfer_modes=[TransferMode.INLINE, TransferMode.PROVIDER_UPLOAD],
+        )
+
+    async def load_policy(self, *, organisation_id: object) -> OrganisationAIPolicy:
+        return self.policy
+
+    async def reserve(self, **kwargs: object) -> AIRequestReservation:
+        return AIRequestReservation(row_id=uuid4(), created=True)
+
+    async def record_attempt(self, **kwargs: object) -> UUID:
+        return uuid4()
+
+    async def settle(self, **kwargs: object) -> None:
+        return None
+
+
+def _doc_model(
+    model_id: str,
+    *,
+    priority: int = 100,
+    attachment_mime_types: list[str] | None = None,
+    allowed_transfer_modes: list[TransferMode] | None = None,
+    transfer_mode_limits: dict[TransferMode, NonInlineModeLimit] | None = None,
+) -> ModelDefinition:
+    """A fake document model with the reviewed inline ceilings and optional
+    v0.8 non-inline declarations, for multi-model routing tests."""
+    return ModelDefinition(
+        id=model_id,
+        provider="fake",
+        model=f"fake-model-{model_id}.classify",
+        capabilities=[Capability.STRUCTURED_OUTPUT, Capability.DOCUMENTS],
+        context_window=128_000,
+        supported_parameters=["max_tokens", "temperature"],
+        priority=priority,
+        max_attachment_bytes=MAX_ATTACHMENT_BYTES,
+        max_total_attachment_bytes=MAX_TOTAL_ATTACHMENT_BYTES,
+        attachment_mime_types=(
+            attachment_mime_types
+            if attachment_mime_types is not None
+            else sorted(ALLOWED_ATTACHMENT_MIME_TYPES)
+        ),
+        allowed_transfer_modes=allowed_transfer_modes or [TransferMode.INLINE],
+        transfer_mode_limits=transfer_mode_limits or {},
+        pricing=PricingBasis(
+            currency="USD",
+            input_price_per_million_tokens=Decimal("1.00"),
+            output_price_per_million_tokens=Decimal("2.00"),
+            effective_date=date(2026, 1, 1),
+            owner="tests",
+        ),
+    )
+
+
+async def test_execute_denies_attachments_above_inline_threshold_with_default_policy() -> None:
+    """Default-deny: with an inline-only organisation policy (and an inline-only
+    model declaration), a set above the 5,000,000-byte aggregate threshold fails
+    before any external transfer (Scope §5.2, §6.2)."""
+    registries = InMemoryRegistries.default()
+    registries.models = _DocumentModelRegistry()
+    service, provider = _service(registries)
+    # One PDF just above the aggregate threshold (still under the per-file
+    # ceiling) cannot ride a non-inline mode the policy never allows.
+    large_pdf = _attachment(name="lease.pdf", content=b"x" * 5_100_000)
+
+    with pytest.raises(TransferModeUnavailableError, match="no permitted"):
+        await service.execute(_request(), attachments=[large_pdf])
+    assert provider.requests == []  # nothing was dispatched
+
+
+async def test_execute_denies_non_inline_selection_until_execution_seam_lands() -> None:
+    """A policy/task/model/deployment intersection that selects a non-inline
+    mode fails closed with the execution-unavailable error until §6.3 wires the
+    transfer seam — never by silently riding the inline path above the
+    threshold."""
+    registries = InMemoryRegistries.default()
+    registries.models = _NonInlineDocumentModelRegistry()
+    registries.tasks.register(
+        TaskDefinition(
+            name="document.classify",
+            prompt_name="classify",
+            prompt_version=1,
+            input_variables=["document_id"],
+            required_capabilities=[Capability.STRUCTURED_OUTPUT, Capability.DOCUMENTS],
+            output_schema="demo.ClassificationResult",
+            allowed_transfer_modes=[TransferMode.INLINE, TransferMode.PROVIDER_UPLOAD],
+            retry_policy=RetryPolicy(max_attempts=3, repair_attempts=1),
+        )
+    )
+    service, provider = _service(
+        registries,
+        transfer_deployment=TransferDeploymentPolicy(
+            enabled_transfer_modes=frozenset({TransferMode.PROVIDER_UPLOAD})
+        ),
+    )
+
+    large_pdf = _attachment(name="lease.pdf", content=b"x" * 5_100_000)
+    with pytest.raises(TransferExecutionUnavailableError, match="not executable"):
+        await service.execute(_request(), attachments=[large_pdf], recorder=_PermissiveRecorder())
+    assert provider.requests == []
+
+
+async def test_execute_denies_multiple_pdfs_above_the_threshold() -> None:
+    """v0.8 Scope §2.1 decision 3/§5.3: the non-inline path carries exactly one
+    PDF, so multiple large files fail before any external transfer."""
+    registries = InMemoryRegistries.default()
+    registries.models = _NonInlineDocumentModelRegistry()
+    registries.tasks.register(
+        TaskDefinition(
+            name="document.classify",
+            prompt_name="classify",
+            prompt_version=1,
+            input_variables=["document_id"],
+            required_capabilities=[Capability.STRUCTURED_OUTPUT, Capability.DOCUMENTS],
+            output_schema="demo.ClassificationResult",
+            allowed_transfer_modes=[TransferMode.INLINE, TransferMode.PROVIDER_UPLOAD],
+            retry_policy=RetryPolicy(max_attempts=3, repair_attempts=1),
+        )
+    )
+    service, provider = _service(
+        registries,
+        transfer_deployment=TransferDeploymentPolicy(
+            enabled_transfer_modes=frozenset({TransferMode.PROVIDER_UPLOAD})
+        ),
+    )
+    parts = [_attachment(name=f"part-{i}.pdf", content=b"x" * 3_000_000) for i in range(2)]
+
+    with pytest.raises(TransferModeUnavailableError, match="exactly one application/pdf"):
+        await service.execute(_request(), attachments=parts, recorder=_PermissiveRecorder())
+    assert provider.requests == []  # nothing was dispatched
+
+
+async def test_execute_denies_non_pdf_input_above_the_threshold() -> None:
+    """A large non-PDF attachment above the threshold has no eligible non-inline
+    mode and fails before dispatch (Scope §2.1/§5.3)."""
+    registries = InMemoryRegistries.default()
+    registries.models = _NonInlineDocumentModelRegistry()
+    registries.tasks.register(
+        TaskDefinition(
+            name="document.classify",
+            prompt_name="classify",
+            prompt_version=1,
+            input_variables=["document_id"],
+            required_capabilities=[Capability.STRUCTURED_OUTPUT, Capability.DOCUMENTS],
+            output_schema="demo.ClassificationResult",
+            allowed_transfer_modes=[TransferMode.INLINE, TransferMode.PROVIDER_UPLOAD],
+            retry_policy=RetryPolicy(max_attempts=3, repair_attempts=1),
+        )
+    )
+    service, provider = _service(
+        registries,
+        transfer_deployment=TransferDeploymentPolicy(
+            enabled_transfer_modes=frozenset({TransferMode.PROVIDER_UPLOAD})
+        ),
+    )
+    large_csv = _attachment(name="ledger.csv", mime_type="text/csv", content=b"x" * 5_100_000)
+
+    with pytest.raises(TransferModeUnavailableError, match="exactly one application/pdf"):
+        await service.execute(_request(), attachments=[large_csv], recorder=_PermissiveRecorder())
+    assert provider.requests == []  # nothing was dispatched
+
+
+class _TightCeilingDocumentModelRegistry(_NonInlineDocumentModelRegistry):
+    """A document model whose provider-upload mode ceiling sits just above the
+    inline threshold, so a slightly larger single PDF has no eligible mode."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._model = ModelDefinition(
+            id="fake.document-classifier",
+            provider="fake",
+            model="fake-model-document.classify",
+            capabilities=[Capability.STRUCTURED_OUTPUT, Capability.DOCUMENTS],
+            context_window=128_000,
+            supported_parameters=[],
+            max_attachment_bytes=MAX_ATTACHMENT_BYTES,
+            max_total_attachment_bytes=MAX_TOTAL_ATTACHMENT_BYTES,
+            attachment_mime_types=sorted(ALLOWED_ATTACHMENT_MIME_TYPES),
+            allowed_transfer_modes=[TransferMode.INLINE, TransferMode.PROVIDER_UPLOAD],
+            transfer_mode_limits={
+                TransferMode.PROVIDER_UPLOAD: NonInlineModeLimit(
+                    mime_types=sorted(NON_INLINE_MIME_TYPES), max_bytes=5_100_000
+                )
+            },
+            pricing=PricingBasis(
+                currency="USD",
+                input_price_per_million_tokens=Decimal("1.00"),
+                output_price_per_million_tokens=Decimal("2.00"),
+                effective_date=date(2026, 1, 1),
+                owner="tests",
+            ),
+        )
+
+
+async def test_execute_denies_request_above_a_model_specific_mode_ceiling() -> None:
+    """The routed model's per-mode byte ceiling gates selection: a single PDF
+    above it fails before any external transfer (Scope §2.2, lowest ceiling
+    wins)."""
+    registries = InMemoryRegistries.default()
+    registries.models = _TightCeilingDocumentModelRegistry()
+    registries.tasks.register(
+        TaskDefinition(
+            name="document.classify",
+            prompt_name="classify",
+            prompt_version=1,
+            input_variables=["document_id"],
+            required_capabilities=[Capability.STRUCTURED_OUTPUT, Capability.DOCUMENTS],
+            output_schema="demo.ClassificationResult",
+            allowed_transfer_modes=[TransferMode.INLINE, TransferMode.PROVIDER_UPLOAD],
+            retry_policy=RetryPolicy(max_attempts=3, repair_attempts=1),
+        )
+    )
+    service, provider = _service(
+        registries,
+        transfer_deployment=TransferDeploymentPolicy(
+            enabled_transfer_modes=frozenset({TransferMode.PROVIDER_UPLOAD})
+        ),
+    )
+    # 5.2 MB single PDF: above the model's 5,100,000-byte provider-upload
+    # ceiling, still under the 5 MiB per-file template ceiling (5,242,880
+    # bytes), so this set reaches the selector through the legacy router.
+    large_pdf = _attachment(name="lease.pdf", content=b"x" * 5_200_000)
+
+    with pytest.raises(TransferModeUnavailableError, match="no permitted"):
+        await service.execute(_request(), attachments=[large_pdf], recorder=_PermissiveRecorder())
+    assert provider.requests == []  # nothing was dispatched
+
+
+class _NonInlineOnlyModelRegistry(_DocumentModelRegistry):
+    """A document model that declares ``provider_upload`` but not inline."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._model = ModelDefinition(
+            id="fake.document-classifier",
+            provider="fake",
+            model="fake-model-document.classify",
+            capabilities=[Capability.STRUCTURED_OUTPUT, Capability.DOCUMENTS],
+            context_window=128_000,
+            supported_parameters=[],
+            max_attachment_bytes=MAX_ATTACHMENT_BYTES,
+            max_total_attachment_bytes=MAX_TOTAL_ATTACHMENT_BYTES,
+            attachment_mime_types=sorted(ALLOWED_ATTACHMENT_MIME_TYPES),
+            allowed_transfer_modes=[TransferMode.PROVIDER_UPLOAD],
+            transfer_mode_limits={
+                TransferMode.PROVIDER_UPLOAD: NonInlineModeLimit(
+                    mime_types=sorted(NON_INLINE_MIME_TYPES), max_bytes=50_000_000
+                )
+            },
+            pricing=PricingBasis(
+                currency="USD",
+                input_price_per_million_tokens=Decimal("1.00"),
+                output_price_per_million_tokens=Decimal("2.00"),
+                effective_date=date(2026, 1, 1),
+                owner="tests",
+            ),
+        )
+
+
+async def test_execute_never_dispatches_inline_when_the_intersection_excludes_it() -> None:
+    """Scope §5.2/§6.2: the service runs the full policy intersection for
+    *every* attachment set — there is no inline shortcut below the aggregate
+    threshold, so a task/model whose declarations exclude inline can never
+    dispatch inline, even for a tiny file."""
+    registries = InMemoryRegistries.default()
+    registries.models = _NonInlineOnlyModelRegistry()
+    registries.tasks.register(
+        TaskDefinition(
+            name="document.classify",
+            prompt_name="classify",
+            prompt_version=1,
+            input_variables=["document_id"],
+            required_capabilities=[Capability.STRUCTURED_OUTPUT, Capability.DOCUMENTS],
+            output_schema="demo.ClassificationResult",
+            allowed_transfer_modes=[TransferMode.PROVIDER_UPLOAD],
+            retry_policy=RetryPolicy(max_attempts=3, repair_attempts=1),
+        )
+    )
+    service, provider = _service(
+        registries,
+        transfer_deployment=TransferDeploymentPolicy(
+            enabled_transfer_modes=frozenset({TransferMode.PROVIDER_UPLOAD})
+        ),
+    )
+    small_pdf = _attachment(name="lease.pdf", content=b"%PDF-1.7 tiny")
+
+    with pytest.raises(TransferModeUnavailableError, match="no permitted"):
+        await service.execute(_request(), attachments=[small_pdf], recorder=_PermissiveRecorder())
+    assert provider.requests == []  # nothing was dispatched
+
+
+async def test_execute_fails_inline_only_intersection_above_a_lowered_threshold() -> None:
+    """The configured deployment threshold is authoritative (Scope §2.2/§5.2):
+    above a lowered threshold an inline-only intersection fails closed instead
+    of falling back to inline whenever the provider's fixed inline contract
+    ceiling would still fit."""
+    registries = InMemoryRegistries.default()
+    registries.models = _DocumentModelRegistry()  # task and model declare inline only
+    service, provider = _service(
+        registries,
+        transfer_deployment=TransferDeploymentPolicy(inline_aggregate_threshold_bytes=1_000_000),
+    )
+    # 2,000,000 bytes: above the lowered 1,000,000-byte deployment threshold,
+    # still within the provider's 5,000,000-byte inline contract ceiling.
+    above_lowered = _attachment(name="lease.pdf", content=b"x" * 2_000_000)
+
+    with pytest.raises(TransferModeUnavailableError, match="no permitted"):
+        await service.execute(
+            _request(), attachments=[above_lowered], recorder=_PermissiveRecorder()
+        )
+    assert provider.requests == []  # nothing was dispatched
+
+
+async def test_execute_routes_large_pdf_to_non_inline_model_before_execution_seam() -> None:
+    """v0.8 Scope §6.2: routing is transfer-mode-aware — a PDF above the
+    template inline per-file ceiling (5 MiB) still routes to a model whose
+    declared provider-upload ceiling fits, so the request reaches the transfer
+    gate, which then fails closed until the §6.3 execution seam lands. The
+    carrier is metadata (size + MIME); no inline bytes are allocated."""
+    registries = InMemoryRegistries.default()
+    registries.models = _NonInlineDocumentModelRegistry()
+    registries.tasks.register(
+        TaskDefinition(
+            name="document.classify",
+            prompt_name="classify",
+            prompt_version=1,
+            input_variables=["document_id"],
+            required_capabilities=[Capability.STRUCTURED_OUTPUT, Capability.DOCUMENTS],
+            output_schema="demo.ClassificationResult",
+            allowed_transfer_modes=[TransferMode.INLINE, TransferMode.PROVIDER_UPLOAD],
+            retry_policy=RetryPolicy(max_attempts=3, repair_attempts=1),
+        )
+    )
+    service, provider = _service(
+        registries,
+        transfer_deployment=TransferDeploymentPolicy(
+            enabled_transfer_modes=frozenset({TransferMode.PROVIDER_UPLOAD})
+        ),
+    )
+    # 6,000,000 bytes: above MAX_ATTACHMENT_BYTES (5,242,880), below the 10 MiB
+    # combined ceiling — a metadata carrier, never allocated inline bytes.
+    large_pdf = metadata_attachment(size_bytes=6_000_000)
+
+    with pytest.raises(TransferExecutionUnavailableError, match="not executable"):
+        await service.execute(_request(), attachments=[large_pdf], recorder=_PermissiveRecorder())
+    assert provider.requests == []  # routed, then denied before any dispatch
+
+
+async def test_execute_picks_a_model_with_an_eligible_mode_over_a_higher_priority_incompatible_one() -> (
+    None
+):
+    """v0.8 Scope §6.2: routing and mode selection are one coherent decision.
+    A 6,000,000-byte transient PDF routes past the higher-priority model whose
+    only non-inline mode (managed_signed_url) serves retained sources to the
+    lower-priority provider_upload model, so the request reaches the transfer
+    gate with a compatible model and fails closed at the §6.3 execution seam —
+    never a no-eligible-mode denial while a valid model exists."""
+    registries = InMemoryRegistries.default()
+    registries.models = CapabilityCostModelRegistry(
+        [
+            _doc_model(
+                "managed-url-only",
+                priority=0,
+                allowed_transfer_modes=[
+                    TransferMode.INLINE,
+                    TransferMode.MANAGED_SIGNED_URL,
+                ],
+                transfer_mode_limits={
+                    TransferMode.MANAGED_SIGNED_URL: NonInlineModeLimit(
+                        mime_types=sorted(NON_INLINE_MIME_TYPES), max_bytes=50_000_000
+                    )
+                },
+            ),
+            _doc_model(
+                "provider-upload",
+                priority=100,
+                allowed_transfer_modes=[
+                    TransferMode.INLINE,
+                    TransferMode.PROVIDER_UPLOAD,
+                ],
+                transfer_mode_limits={
+                    TransferMode.PROVIDER_UPLOAD: NonInlineModeLimit(
+                        mime_types=sorted(NON_INLINE_MIME_TYPES), max_bytes=50_000_000
+                    )
+                },
+            ),
+        ]
+    )
+    registries.tasks.register(
+        TaskDefinition(
+            name="document.classify",
+            prompt_name="classify",
+            prompt_version=1,
+            input_variables=["document_id"],
+            required_capabilities=[Capability.STRUCTURED_OUTPUT, Capability.DOCUMENTS],
+            output_schema="demo.ClassificationResult",
+            allowed_transfer_modes=[TransferMode.INLINE, TransferMode.PROVIDER_UPLOAD],
+            retry_policy=RetryPolicy(max_attempts=3, repair_attempts=1),
+        )
+    )
+    service, provider = _service(
+        registries,
+        transfer_deployment=TransferDeploymentPolicy(
+            enabled_transfer_modes=frozenset({TransferMode.PROVIDER_UPLOAD})
+        ),
+    )
+    large_pdf = metadata_attachment(size_bytes=6_000_000)
+
+    with pytest.raises(TransferExecutionUnavailableError, match="not executable"):
+        await service.execute(_request(), attachments=[large_pdf], recorder=_PermissiveRecorder())
+    assert provider.requests == []  # the compatible model was routed and denied at the seam
+
+
+async def test_execute_inline_dispatch_never_violates_a_models_inline_mime_declaration() -> None:
+    """v0.8 Scope §6.2: a small PDF below the threshold routes past the
+    higher-priority model whose inline MIME set excludes PDF (it only accepts
+    PDF via provider_upload) to the lower-priority model whose inline
+    declarations cover it, and the inline dispatch goes to that model — never
+    a dispatch that violates a model's inline MIME declaration."""
+    registries = InMemoryRegistries.default()
+    registries.models = CapabilityCostModelRegistry(
+        [
+            _doc_model(
+                "text-only-inline",
+                priority=0,
+                attachment_mime_types=["text/plain"],
+                allowed_transfer_modes=[
+                    TransferMode.INLINE,
+                    TransferMode.PROVIDER_UPLOAD,
+                ],
+                transfer_mode_limits={
+                    TransferMode.PROVIDER_UPLOAD: NonInlineModeLimit(
+                        mime_types=sorted(NON_INLINE_MIME_TYPES), max_bytes=50_000_000
+                    )
+                },
+            ),
+            _doc_model("pdf-inline", priority=100),
+        ]
+    )
+    service, provider = _service(registries)
+    small_pdf = _attachment(name="lease.pdf", content=b"%PDF-1.7 tiny")
+
+    result = await service.execute(
+        _request(), attachments=[small_pdf], recorder=_PermissiveRecorder()
+    )
+    assert result.routing.model == "fake-model-pdf-inline.classify"
+    assert provider.requests[0].attachments == [small_pdf]
+
+
+async def test_execute_denies_inline_when_the_only_model_cannot_carry_the_set_inline() -> None:
+    """v0.8 Scope §6.2: with only a model whose inline MIME set excludes the
+    PDF, a small below-threshold request fails closed before dispatch — the
+    non-inline declaration that accepts PDF must never turn into an inline
+    dispatch that violates the model's inline MIME declaration."""
+    registries = InMemoryRegistries.default()
+    registries.models = CapabilityCostModelRegistry(
+        [
+            _doc_model(
+                "text-only-inline",
+                attachment_mime_types=["text/plain"],
+                allowed_transfer_modes=[
+                    TransferMode.INLINE,
+                    TransferMode.PROVIDER_UPLOAD,
+                ],
+                transfer_mode_limits={
+                    TransferMode.PROVIDER_UPLOAD: NonInlineModeLimit(
+                        mime_types=sorted(NON_INLINE_MIME_TYPES), max_bytes=50_000_000
+                    )
+                },
+            )
+        ]
+    )
+    service, provider = _service(registries)
+    small_pdf = _attachment(name="lease.pdf", content=b"%PDF-1.7 tiny")
+
+    with pytest.raises(TransferModeUnavailableError, match="no permitted"):
+        await service.execute(_request(), attachments=[small_pdf], recorder=_PermissiveRecorder())
     assert provider.requests == []  # nothing was dispatched
 
 

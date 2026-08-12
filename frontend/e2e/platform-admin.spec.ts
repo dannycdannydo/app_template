@@ -61,8 +61,10 @@ test('platform admin invites a user who then appears in memberships', async ({ p
   await page.getByTestId('platform-invite-submit').click()
 
   // Success returns to the detail where the pending invitation is listed.
+  // Scoped to the table row: the bare text also matches the success toast, so
+  // an unscoped text locator races between the two elements.
   await expect(page).toHaveURL(/\/platform\/organisations\/.+/)
-  await expect(page.getByText(inviteeEmail)).toBeVisible()
+  await expect(page.getByRole('row').filter({ hasText: inviteeEmail })).toBeVisible()
 
   // The invitee accepted at login (login-time linking, Scope §6.5) and now
   // appears in the memberships with the intended role.

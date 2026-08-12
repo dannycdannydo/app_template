@@ -43,6 +43,8 @@ def _item(settings_row: OrganisationAISettings) -> PlatformOrganisationAISetting
         model_override=settings_row.model_override,
         monthly_budget=settings_row.monthly_budget,
         retention_policy_days=settings_row.retention_policy_days,
+        allowed_transfer_modes=list(settings_row.allowed_transfer_modes),
+        max_large_attachment_bytes=settings_row.max_large_attachment_bytes,
         updated_by_user_id=settings_row.updated_by_user_id,
         created_at=settings_row.created_at,
         updated_at=settings_row.updated_at,
@@ -86,5 +88,7 @@ async def update_ai_settings_endpoint(
         model_override=payload.model_override,
         monthly_budget=payload.monthly_budget,
         retention_policy_days=payload.retention_policy_days,
+        allowed_transfer_modes=payload.allowed_transfer_modes,
+        max_large_attachment_bytes=payload.max_large_attachment_bytes,
     )
     return _item(settings_row)

@@ -12,9 +12,11 @@ import re
 import string
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from enum import StrEnum
+from functools import lru_cache
 from pathlib import Path
 from typing import cast
 
@@ -28,14 +30,19 @@ from app.ai.attachments import (
     PROVIDER_INLINE_ATTACHMENT_MIME_TYPES,
     Attachment,
 )
-from app.ai.errors import RegistryValidationError
+from app.ai.errors import RegistryValidationError, TransferModeUnavailableError
 from app.ai.transfer import (
     INLINE_AGGREGATE_THRESHOLD_BYTES,
     MAX_LARGE_ATTACHMENT_BYTES,
     NON_INLINE_MIME_TYPES,
+    ModelInlineCeiling,
+    ModelModeCeiling,
+    SourceLifecycle,
     TransferContracts,
+    TransferDeploymentPolicy,
     TransferMode,
     load_transfer_contracts,
+    select_transfer_mode_for_policy,
 )
 
 MAX_REGISTRY_FILE_BYTES = 256 * 1024
@@ -422,6 +429,36 @@ class RoutingDecision(BaseModel):
     estimated_max_cost: Decimal = Field(ge=0)
 
 
+@dataclass(frozen=True)
+class TransferRoutingContext:
+    """Effective transfer-mode context the router closes over per candidate.
+
+    v0.8 Scope §6.2: routing and mode selection are one coherent decision. A
+    model survives routing only when at least one transfer mode is eligible
+    for the current attachment set under the task declaration, the source
+    lifecycle, the organisation policy (allowlist + large-file ceiling), the
+    deployment configuration (enabled modes, authoritative inline threshold,
+    large-file ceiling), the model's own reviewed inline and per-mode limits
+    and its provider's transfer contract. Without this context the router can
+    commit to a model whose only fitting mode is ineligible for the request —
+    for example a transient source that forces ``provider_upload`` while the
+    higher-priority model declares only ``managed_signed_url`` — and the
+    service-level selector then has no compatible candidate left to fall back
+    to.
+
+    ``organisation_allowed_modes`` ``None`` means the caller did not load an
+    organisation policy (unmanaged execution); the router defaults to the
+    reviewed ``inline``-only baseline, exactly like the service's selector.
+    ``deployment`` ``None`` means the template defaults apply (inline only at
+    the 5,000,000-byte threshold).
+    """
+
+    source_lifecycle: SourceLifecycle
+    organisation_allowed_modes: Sequence[TransferMode] | None = None
+    organisation_max_large_attachment_bytes: int | None = None
+    deployment: TransferDeploymentPolicy | None = None
+
+
 class TaskRegistry(ABC):
     @abstractmethod
     def get(self, name: str) -> TaskDefinition: ...
@@ -462,6 +499,7 @@ class ModelRegistry(ABC):
         excluded_model_ids: Iterable[str] = (),
         attachments: Iterable[Attachment] = (),
         region_of_provider: Mapping[str, str] | None = None,
+        transfer_context: TransferRoutingContext | None = None,
     ) -> RoutingDecision:
         """Compatibility route for custom registries implementing ``resolve``.
 
@@ -471,6 +509,9 @@ class ModelRegistry(ABC):
         ``region_of_provider`` (provider id → configured region, Scope §6.3
         regional amendment) is accepted for interface parity; this default
         rejects fallback outright, so it can never change region.
+        ``transfer_context`` (v0.8 Scope §6.2) carries the effective
+        transfer-mode context; when supplied with attachments, the resolved
+        model survives only when at least one mode is eligible under it.
         """
         if excluded_model_ids:
             raise ValueError(f"fallback is unsupported by registry for task {task.name}")
@@ -478,8 +519,20 @@ class ModelRegistry(ABC):
             raise ValueError(f"input exceeds token budget for task {task.name}")
         model = self.resolve(task, allowed_providers=allowed_providers)
         attachment_list = list(attachments)
-        if attachment_list and not _model_can_carry_attachments(model, attachment_list):
+        if attachment_list and not _model_can_carry_attachment_set(model, attachment_list):
             raise ValueError(f"model cannot carry the supplied attachments for task {task.name}")
+        if (
+            transfer_context is not None
+            and attachment_list
+            and not _model_has_eligible_transfer_mode(
+                model,
+                task,
+                attachment_list,
+                context=transfer_context,
+                contracts=_routing_transfer_contracts(),
+            )
+        ):
+            raise _transfer_mode_unavailable_error(task, attachment_list, transfer_context)
         if allowed_model_ids is not None and model.id not in allowed_model_ids:
             raise ValueError(f"model is not allowed for task {task.name}")
         if model_override is not None and model.id != model_override:
@@ -650,6 +703,7 @@ class CapabilityCostModelRegistry(ModelRegistry):
         excluded_model_ids: Iterable[str] = (),
         attachments: Iterable[Attachment] = (),
         region_of_provider: Mapping[str, str] | None = None,
+        transfer_context: TransferRoutingContext | None = None,
     ) -> RoutingDecision:
         excluded = set(excluded_model_ids)
         if excluded and not task.fallback_policy.allowed:
@@ -663,8 +717,33 @@ class CapabilityCostModelRegistry(ModelRegistry):
         candidates = [model for model in self.all() if self._eligible(task, model)]
         if attachments:
             candidates = [
-                model for model in candidates if _model_can_carry_attachments(model, attachments)
+                model for model in candidates if _model_can_carry_attachment_set(model, attachments)
             ]
+            # v0.8 Scope §6.2: routing and mode selection are one coherent
+            # decision. Each candidate survives only when at least one transfer
+            # mode is eligible for the set under the current size/MIME/count,
+            # task, lifecycle, organisation, deployment, model/provider contract
+            # and inline threshold — the router must never commit to a model the
+            # selector would then deny while a compatible candidate exists
+            # (deterministic ordering among the survivors is preserved by the
+            # sort below). When candidates existed but none has an eligible
+            # mode, fail with the same transfer-mode error the service's own
+            # gate would have raised.
+            if transfer_context is not None:
+                eligible = [
+                    model
+                    for model in candidates
+                    if _model_has_eligible_transfer_mode(
+                        model,
+                        task,
+                        attachments,
+                        context=transfer_context,
+                        contracts=_routing_transfer_contracts(),
+                    )
+                ]
+                if not eligible and candidates:
+                    raise _transfer_mode_unavailable_error(task, attachments, transfer_context)
+                candidates = eligible
         if allowed_providers is not None:
             candidates = [model for model in candidates if model.provider in allowed_providers]
         if allowed_model_ids is not None:
@@ -951,6 +1030,163 @@ def _model_can_carry_attachments(model: ModelDefinition, attachments: Sequence[A
     return not any(
         attachment.is_image and Capability.VISION not in model.capabilities
         for attachment in attachments
+    )
+
+
+def _model_can_carry_attachment_set(
+    model: ModelDefinition, attachments: Sequence[Attachment]
+) -> bool:
+    """Whether one model can carry an attachment set under any reviewed mode.
+
+    v0.8 Scope §2.2/§6.2: routing is transfer-mode-aware. The v0.7 inline path
+    (:func:`_model_can_carry_attachments`) is unchanged and always wins when it
+    fits. A set the inline ceilings cannot carry is *not* automatically
+    unroutable: a single PDF within the template large-file ceiling remains a
+    candidate when the model declares a non-inline mode whose reviewed per-mode
+    MIME set and byte ceiling fit, so routing never rejects an otherwise
+    eligible non-inline model before the transfer selector can be invoked
+    (the selector later fails closed when the effective policy or execution
+    seam does not allow the mode).
+    """
+    if _model_can_carry_attachments(model, attachments):
+        return True
+    # v0.8 large path (Scope §2.1 decision 3, §5.3): exactly one PDF, never
+    # above the template large-file ceiling.
+    if len(attachments) != 1:
+        return False
+    attachment = attachments[0]
+    if (
+        attachment.mime_type not in NON_INLINE_MIME_TYPES
+        or attachment.size > MAX_LARGE_ATTACHMENT_BYTES
+    ):
+        return False
+    return any(
+        attachment.size <= limits.max_bytes and attachment.mime_type in limits.mime_types
+        for limits in model.transfer_mode_limits.values()
+    )
+
+
+def model_transfer_mode_limits(
+    model: ModelDefinition,
+) -> dict[TransferMode, ModelModeCeiling]:
+    """One model's non-inline per-mode limits in deterministic-selector form.
+
+    The selector consumes the provider-neutral :class:`ModelModeCeiling`
+    structural twin, so the router and the service compute the exact same
+    per-mode ceilings for one model and can never disagree about mode
+    eligibility (v0.8 Scope §6.2).
+    """
+    return {
+        mode: ModelModeCeiling(
+            mime_types=frozenset(limits.mime_types),
+            max_bytes=limits.max_bytes,
+        )
+        for mode, limits in model.transfer_mode_limits.items()
+    }
+
+
+def model_inline_ceiling(model: ModelDefinition) -> ModelInlineCeiling:
+    """One model's inline declarations in deterministic-selector form.
+
+    The structural twin of the registry's inline attachment fields; the
+    selector requires a model to fit these before ``inline`` can be selected,
+    so a model whose inline MIME set excludes an attachment can never ride a
+    non-inline declaration to an inline dispatch (v0.8 Scope §6.2). The router
+    and the service build this identically for one model.
+    """
+    return ModelInlineCeiling(
+        mime_types=frozenset(model.attachment_mime_types or ()),
+        max_attachment_bytes=model.max_attachment_bytes,
+        max_total_attachment_bytes=model.max_total_attachment_bytes,
+        has_documents_capability=Capability.DOCUMENTS in model.capabilities,
+        has_vision_capability=Capability.VISION in model.capabilities,
+    )
+
+
+@lru_cache(maxsize=1)
+def _routing_transfer_contracts() -> TransferContracts:
+    """The checked-in provider transfer contract fixture, cached (immutable).
+
+    v0.8 Scope §6.2: routing intersects each candidate model's declarations
+    with its provider's reviewed per-mode contract before committing to a
+    model. The fixture is validated at load (Scope §6.1) so an inconsistent
+    declaration fails at startup and in CI, never at dispatch.
+    """
+    return load_transfer_contracts()
+
+
+def _model_has_eligible_transfer_mode(
+    model: ModelDefinition,
+    task: TaskDefinition,
+    attachments: Sequence[Attachment],
+    *,
+    context: TransferRoutingContext,
+    contracts: TransferContracts,
+) -> bool:
+    """Whether one candidate has at least one eligible mode for the set.
+
+    v0.8 Scope §6.2: runs the exact deterministic policy intersection the
+    service's selector runs (:func:`select_transfer_mode_for_policy`) with
+    the current size/MIME/count, source lifecycle, task declaration,
+    organisation policy, deployment configuration, the model's reviewed inline
+    and per-mode limits and its provider's contract. A model survives routing
+    only when the intersection returns a mode, so the router never commits to
+    a model the selector would then deny while a compatible candidate exists.
+    """
+    provider_contract = contracts.providers.get(model.provider)
+    if provider_contract is None:
+        return False
+    sizes = [attachment.size for attachment in attachments]
+    return (
+        select_transfer_mode_for_policy(
+            aggregate_bytes=sum(sizes),
+            attachment_sizes=sizes,
+            attachment_mime_types=[attachment.mime_type for attachment in attachments],
+            source_lifecycle=context.source_lifecycle,
+            organisation_allowed_modes=(
+                context.organisation_allowed_modes
+                if context.organisation_allowed_modes is not None
+                else [TransferMode.INLINE]
+            ),
+            organisation_max_large_attachment_bytes=context.organisation_max_large_attachment_bytes,
+            task_allowed_modes=task.allowed_transfer_modes,
+            model_allowed_modes=model.allowed_transfer_modes,
+            model_mode_limits=model_transfer_mode_limits(model) or None,
+            model_inline=model_inline_ceiling(model),
+            deployment=context.deployment,
+            contract=provider_contract,
+        )
+        is not None
+    )
+
+
+def _transfer_mode_unavailable_error(
+    task: TaskDefinition,
+    attachments: Sequence[Attachment],
+    context: TransferRoutingContext,
+) -> TransferModeUnavailableError:
+    """The routing failure when candidates exist but none has an eligible mode.
+
+    Mirrors the service's transfer-gate messages so an operator diagnosing a
+    denial gets the shape reason up front (the non-inline path carries exactly
+    one PDF above the inline threshold) rather than a generic
+    no-eligible-mode error (v0.8 Scope §5.3, §6.2).
+    """
+    threshold = (
+        context.deployment.inline_aggregate_threshold_bytes
+        if context.deployment is not None
+        else INLINE_AGGREGATE_THRESHOLD_BYTES
+    )
+    aggregate_bytes = sum(attachment.size for attachment in attachments)
+    if aggregate_bytes > threshold and (
+        len(attachments) != 1 or attachments[0].mime_type not in NON_INLINE_MIME_TYPES
+    ):
+        return TransferModeUnavailableError(
+            "the non-inline transfer path accepts exactly one application/pdf; "
+            "this attachment set cannot be transferred above the inline threshold"
+        )
+    return TransferModeUnavailableError(
+        "no permitted/provider-supported transfer mode is eligible for this attachment set"
     )
 
 

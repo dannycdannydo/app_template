@@ -1017,3 +1017,211 @@ def test_ai_provider_base_url_overrides_require_private_http_or_https() -> None:
         ai_openai_base_url="https://openai-proxy.example.com/v1",
     )
     assert settings.ai_openai_base_url == "https://openai-proxy.example.com/v1"
+
+
+# --- AI transfer-mode deployment settings (v0.8 Scope §2.2, §6.2) ---
+
+
+def test_ai_transfer_deployment_defaults_are_default_deny() -> None:
+    """Empty enabled modes deploys inline only, with reviewed template bounds."""
+    settings = Settings(
+        app_env="test",
+        database_url="postgresql+asyncpg://x",
+        ai_enabled_providers=["fake"],
+    )
+    assert settings.ai_enabled_transfer_modes == []
+    assert settings.ai_inline_aggregate_threshold_bytes == 5_000_000
+    assert settings.ai_max_large_attachment_bytes == 50_000_000
+    assert settings.ai_upload_expiry_seconds == 3_600
+    assert settings.ai_managed_url_ttl_seconds == 900
+    assert settings.ai_vertex_temp_gcs_bucket == ""
+
+
+def test_ai_transfer_deployment_rejects_unknown_and_duplicate_modes() -> None:
+    with pytest.raises(ValidationError, match="unknown non-inline transfer modes"):
+        Settings(
+            app_env="test",
+            database_url="postgresql+asyncpg://x",
+            ai_enabled_providers=["fake"],
+            ai_enabled_transfer_modes=["teleport"],
+        )
+    with pytest.raises(ValidationError, match="duplicates"):
+        Settings(
+            app_env="test",
+            database_url="postgresql+asyncpg://x",
+            ai_enabled_providers=["fake"],
+            ai_enabled_transfer_modes=["provider_upload", "provider_upload"],
+        )
+    # Inline is the always-eligible default, not a deployable non-inline mode.
+    with pytest.raises(ValidationError, match="unknown non-inline transfer modes"):
+        Settings(
+            app_env="test",
+            database_url="postgresql+asyncpg://x",
+            ai_enabled_providers=["fake"],
+            ai_enabled_transfer_modes=["inline"],
+        )
+
+
+def test_ai_transfer_deployment_rejects_out_of_bounds_ceilings_and_ttl() -> None:
+    with pytest.raises(ValidationError, match="ai_inline_aggregate_threshold_bytes"):
+        Settings(
+            app_env="test",
+            database_url="postgresql+asyncpg://x",
+            ai_enabled_providers=["fake"],
+            ai_inline_aggregate_threshold_bytes=5_000_001,
+        )
+    with pytest.raises(ValidationError, match="ai_max_large_attachment_bytes"):
+        Settings(
+            app_env="test",
+            database_url="postgresql+asyncpg://x",
+            ai_enabled_providers=["fake"],
+            ai_max_large_attachment_bytes=50_000_001,
+        )
+    with pytest.raises(ValidationError, match="ai_managed_url_ttl_seconds"):
+        Settings(
+            app_env="test",
+            database_url="postgresql+asyncpg://x",
+            ai_enabled_providers=["fake"],
+            ai_managed_url_ttl_seconds=1_801,
+        )
+    with pytest.raises(ValidationError, match="ai_upload_expiry_seconds"):
+        Settings(
+            app_env="test",
+            database_url="postgresql+asyncpg://x",
+            ai_enabled_providers=["fake"],
+            ai_upload_expiry_seconds=2_592_001,
+        )
+
+
+def test_ai_transfer_deployment_requires_ceiling_above_threshold_when_enabled() -> None:
+    with pytest.raises(ValidationError, match="must be above"):
+        Settings(
+            app_env="test",
+            database_url="postgresql+asyncpg://x",
+            ai_enabled_providers=["fake"],
+            ai_enabled_transfer_modes=["provider_upload"],
+            ai_max_large_attachment_bytes=5_000_000,
+        )
+
+
+def test_ai_transfer_deployment_requires_a_supporting_enabled_provider() -> None:
+    """An enabled mode with no capable enabled provider is a config error."""
+    with pytest.raises(ValidationError, match="no enabled provider"):
+        Settings(
+            app_env="test",
+            database_url="postgresql+asyncpg://x",
+            ai_enabled_providers=["deepseek"],
+            ai_deepseek_api_key="sk-test",
+            ai_enabled_transfer_modes=["provider_upload"],
+        )
+    # The fake declares every mode, so the mode is supportable by an enabled
+    # provider and the config validates without cloud infrastructure.
+    settings = Settings(
+        app_env="test",
+        database_url="postgresql+asyncpg://x",
+        ai_enabled_providers=["fake"],
+        ai_enabled_transfer_modes=["provider_upload"],
+    )
+    assert settings.ai_enabled_transfer_modes == ["provider_upload"]
+
+
+def test_ai_transfer_deployment_requires_vertex_bucket_for_storage_reference() -> None:
+    with pytest.raises(ValidationError, match="ai_vertex_temp_gcs_bucket"):
+        Settings(
+            app_env="test",
+            database_url="postgresql+asyncpg://x",
+            ai_enabled_providers=["fake"],
+            ai_enabled_transfer_modes=["storage_reference"],
+        )
+    # The fake contract supports storage_reference without real cloud config.
+    settings = Settings(
+        app_env="test",
+        database_url="postgresql+asyncpg://x",
+        ai_enabled_providers=["fake"],
+        ai_enabled_transfer_modes=["storage_reference"],
+        ai_vertex_temp_gcs_bucket="app-template-staging",
+    )
+    assert settings.ai_vertex_temp_gcs_bucket == "app-template-staging"
+
+
+def test_ai_transfer_deployment_rejects_expiry_below_provider_contract_minimum() -> None:
+    """A configured provider-upload expiry below an enabled provider's reviewed
+    minimum is a configuration error, not a silently unenforceable setting
+    (Scope §2.2, §6.1 checkbox 1 — the provider contract always wins)."""
+    for expiry in (1, 3_599):
+        with pytest.raises(ValidationError, match="ai_upload_expiry_seconds"):
+            Settings(
+                app_env="test",
+                database_url="postgresql+asyncpg://x",
+                ai_enabled_providers=["fake"],
+                ai_enabled_transfer_modes=["provider_upload"],
+                ai_upload_expiry_seconds=expiry,
+            )
+    # An expiry inside the reviewed bounds (fake/OpenAI: 3,600..2,592,000) is
+    # accepted.
+    settings = Settings(
+        app_env="test",
+        database_url="postgresql+asyncpg://x",
+        ai_enabled_providers=["fake"],
+        ai_enabled_transfer_modes=["provider_upload"],
+        ai_upload_expiry_seconds=3_600,
+    )
+    assert settings.ai_upload_expiry_seconds == 3_600
+
+
+def test_ai_transfer_deployment_rejects_expiry_below_openai_contract_minimum() -> None:
+    """The reviewer's exact case: an enabled OpenAI provider_upload deployment
+    with an expiry below OpenAI's documented 1-hour minimum must fail fast."""
+    with pytest.raises(ValidationError, match="ai_upload_expiry_seconds"):
+        Settings(
+            app_env="test",
+            database_url="postgresql+asyncpg://x",
+            ai_enabled_providers=["openai"],
+            ai_openai_api_key="sk-test",
+            ai_enabled_transfer_modes=["provider_upload"],
+            ai_upload_expiry_seconds=1,
+        )
+    settings = Settings(
+        app_env="test",
+        database_url="postgresql+asyncpg://x",
+        ai_enabled_providers=["openai"],
+        ai_openai_api_key="sk-test",
+        ai_enabled_transfer_modes=["provider_upload"],
+        ai_upload_expiry_seconds=86_400,
+    )
+    assert settings.ai_upload_expiry_seconds == 86_400
+
+
+def test_ai_transfer_deployment_ignores_expiry_for_delete_only_provider() -> None:
+    """A delete-only provider (Anthropic, no automatic expiry) imposes no
+    expiry bound, so the setting is irrelevant to it and validates."""
+    settings = Settings(
+        app_env="test",
+        database_url="postgresql+asyncpg://x",
+        ai_enabled_providers=["anthropic"],
+        ai_anthropic_api_key="sk-ant-test",
+        ai_enabled_transfer_modes=["provider_upload"],
+        ai_upload_expiry_seconds=1,
+    )
+    assert settings.ai_upload_expiry_seconds == 1
+
+
+def test_ai_transfer_deployment_rejects_ttl_outside_provider_contract_bounds() -> None:
+    """A managed signed-URL TTL outside a supporting provider's reviewed range
+    (default 900, maximum 1,800) fails fast."""
+    with pytest.raises(ValidationError, match="ai_managed_url_ttl_seconds"):
+        Settings(
+            app_env="test",
+            database_url="postgresql+asyncpg://x",
+            ai_enabled_providers=["fake"],
+            ai_enabled_transfer_modes=["managed_signed_url"],
+            ai_managed_url_ttl_seconds=899,
+        )
+    settings = Settings(
+        app_env="test",
+        database_url="postgresql+asyncpg://x",
+        ai_enabled_providers=["fake"],
+        ai_enabled_transfer_modes=["managed_signed_url"],
+        ai_managed_url_ttl_seconds=1_000,
+    )
+    assert settings.ai_managed_url_ttl_seconds == 1_000

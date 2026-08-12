@@ -1742,6 +1742,10 @@ export interface components {
       monthly_budget: string | null
       /** Retention Policy Days */
       retention_policy_days: number | null
+      /** Allowed Transfer Modes */
+      allowed_transfer_modes: string[]
+      /** Max Large Attachment Bytes */
+      max_large_attachment_bytes: number
       /** Updated By User Id */
       updated_by_user_id: string | null
       /**
@@ -1762,7 +1766,10 @@ export interface components {
      *     ``allowed_provider_ids`` / ``allowed_model_ids`` are the registry-validated
      *     allowlists; an empty list means "no restriction from this knob".
      *     ``monthly_budget`` ``None`` disables the budget; ``retention_policy_days``
-     *     ``None`` disables scheduled retention deletion.
+     *     ``None`` disables scheduled retention deletion. ``allowed_transfer_modes``
+     *     defaults to ``["inline"]`` (default-deny) and must always include
+     *     ``inline``; ``max_large_attachment_bytes`` defaults to the
+     *     50,000,000-byte template ceiling and can only tighten it.
      */
     PlatformOrganisationAISettingsUpdate: {
       /** Version */
@@ -1781,6 +1788,13 @@ export interface components {
       monthly_budget?: number | string | null
       /** Retention Policy Days */
       retention_policy_days?: number | null
+      /** Allowed Transfer Modes */
+      allowed_transfer_modes?: string[]
+      /**
+       * Max Large Attachment Bytes
+       * @default 50000000
+       */
+      max_large_attachment_bytes: number
     }
     /**
      * PlatformOrganisationCreate

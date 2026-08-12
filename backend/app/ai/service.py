@@ -33,6 +33,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
+from functools import lru_cache
 from time import perf_counter
 from typing import Any
 from uuid import UUID, uuid4
@@ -56,6 +57,8 @@ from app.ai.errors import (
     ProviderTimeoutError,
     ProviderUnavailableError,
     TaskNotFoundError,
+    TransferExecutionUnavailableError,
+    TransferModeUnavailableError,
 )
 from app.ai.persistence.port import AIPersistencePort, OrganisationAIPolicy
 from app.ai.providers.base import LLMProvider, ProviderRequest
@@ -68,12 +71,25 @@ from app.ai.registry import (
     RoutingDecision,
     TaskDefinition,
     TaskRegistry,
+    TransferRoutingContext,
     estimate_maximum_cost,
     estimate_tokens,
+    model_inline_ceiling,
+    model_transfer_mode_limits,
     resolve_output_schema,
 )
 from app.ai.schemas import AIRequest, AIResult, CostEstimate, RoutingMetadata, TokenUsage
 from app.ai.storage_resolver import AttachmentResolutionContext, AttachmentResolver
+from app.ai.transfer import (
+    NON_INLINE_MIME_TYPES,
+    SourceLifecycle,
+    TransferContracts,
+    TransferDeploymentPolicy,
+    TransferMode,
+    load_transfer_contracts,
+    select_transfer_mode_for_policy,
+    source_lifecycle_for_reference,
+)
 from app.observability.metrics import (
     observe_ai_attempt,
     observe_ai_fallback,
@@ -119,6 +135,18 @@ _REPAIR_INSTRUCTION = (
     "that contract. Do not include explanations, markdown fences or extra text.\n"
     "Previous response:\n{previous}"
 )
+
+
+@lru_cache(maxsize=1)
+def _transfer_contracts() -> TransferContracts:
+    """The checked-in provider transfer contract fixture, cached (immutable).
+
+    v0.8 Scope §6.2: the deterministic mode selector intersects the reviewed
+    per-mode provider contracts with the organisation/task/model policy before
+    any external transfer. The fixture is validated at load (Scope §6.1) so an
+    inconsistent declaration fails at startup and in CI, never at dispatch.
+    """
+    return load_transfer_contracts()
 
 
 def import_schema(path: str) -> type[BaseModel]:
@@ -243,6 +271,13 @@ class AIService:
     clear error. ``redactor`` is applied to text/message content before
     dispatch.
 
+    ``transfer_deployment`` (v0.8 Scope §2.2/§6.2) closes the deployment-level
+    transfer policy over the executor: the aggregate inline threshold, the
+    large-file template ceiling and the enabled non-inline modes from the
+    typed settings. ``None`` applies the template default (inline only, at the
+    5,000,000-byte threshold), which is also the deterministic default under
+    test.
+
     Enforcement is fail closed (v0.7 Scope §2/§6.5): the documented
     application-facing entry point ``execute`` requires the persistence/policy
     port, and execution without it raises unless the explicit test-only
@@ -262,6 +297,7 @@ class AIService:
         schema_resolver: SchemaResolver = import_schema,
         attachment_resolver: AttachmentResolver | None = None,
         redactor: Redactor | None = None,
+        transfer_deployment: TransferDeploymentPolicy | None = None,
         allow_unmanaged_execution: bool = False,
     ) -> None:
         if provider is not None:
@@ -280,6 +316,11 @@ class AIService:
         self._schema_resolver = schema_resolver
         self._attachment_resolver = attachment_resolver
         self._redactor = redactor
+        # v0.8 Scope §2.2/§6.2: the deployment-level transfer policy the
+        # selector closes over. Default-deny: ``None`` is the template
+        # default (inline only at the 5,000,000-byte threshold), so a service
+        # wired without the typed settings can never select a non-inline mode.
+        self._transfer_deployment = transfer_deployment or TransferDeploymentPolicy()
         # Test-only seam (v0.7 Scope §6.5): ``execute`` without a recorder
         # port is refused by default so the supported entry point can never
         # bypass organisation enforcement; deterministic service tests that
@@ -298,6 +339,107 @@ class AIService:
         is excluded, and an omitted region cannot be used to bypass the rule.
         """
         return {provider_id: provider.region for provider_id, provider in self._providers.items()}
+
+    def _select_transfer_mode(
+        self,
+        *,
+        policy: OrganisationAIPolicy | None,
+        task: TaskDefinition,
+        model: ModelDefinition,
+        resolved_attachments: Sequence[Attachment],
+        source_reference: str | None,
+        organisation_id: UUID,
+    ) -> TransferMode:
+        """Deterministically select the transfer mode for a resolved set.
+
+        v0.8 Scope §2.2/§6.2: *every* attachment set passes through the full
+        policy intersection (``select_transfer_mode_for_policy``) — there is no
+        inline shortcut below the deployment threshold, so a task/model whose
+        reviewed declarations exclude inline can never dispatch inline (Scope
+        §5.2). The deployment policy (``TransferDeploymentPolicy``), the
+        organisation policy (``allowed_transfer_modes`` /
+        ``max_large_attachment_bytes``), the task declaration, the routed
+        model's declarations and the provider's reviewed contract all gate the
+        selected mode, preferring a provider upload for transient sources, a
+        managed signed URL for retained private sources and Vertex GCS staging
+        when the provider declares it. Dispatch occurs only when every gate
+        allows the selected mode; otherwise the service fails before any
+        external transfer (:class:`TransferModeUnavailableError`), never
+        silently downgrading to a less private mode.
+
+        The v0.8 large path carries exactly one ``application/pdf`` (Scope
+        §2.1 decision 3, §5.3): a set above the deployment threshold with any
+        other count or MIME type fails before transfer, and the lowest of the
+        organisation, deployment, model and provider ceilings decides whether
+        a candidate mode can carry it.
+
+        The inline path remains the only *executable* path in §6.2 — the
+        streaming/staging execution seam for a selected non-inline mode is
+        provisioned by §6.3+ — so an eligible-but-not-yet-executable non-inline
+        selection fails closed with :class:`TransferExecutionUnavailableError`
+        until that seam lands. The selection itself is fully exercised by the
+        fake-backed contract suite.
+
+        The selector additionally gates the inline path on the model's own
+        inline declarations (:func:`model_inline_ceiling`), so inline dispatch
+        never violates a model's inline MIME or byte limits — the same
+        coherent decision routing already made, re-checked here before
+        dispatch.
+        """
+        deployment = self._transfer_deployment
+        aggregate_bytes = sum(attachment.size for attachment in resolved_attachments)
+        # v0.8 large-path shape gate (Scope §2.1 decision 3, §5.3): exactly one
+        # PDF, and nothing else above the deployment threshold — an operator
+        # diagnosing a denial gets the shape reason up front rather than a
+        # generic no-eligible-mode error. Below the threshold the shape is
+        # irrelevant because inline is the only selectable mode there.
+        if aggregate_bytes > deployment.inline_aggregate_threshold_bytes and (
+            len(resolved_attachments) != 1
+            or resolved_attachments[0].mime_type not in NON_INLINE_MIME_TYPES
+        ):
+            raise TransferModeUnavailableError(
+                "the non-inline transfer path accepts exactly one application/pdf; "
+                "this attachment set cannot be transferred above the inline threshold"
+            )
+        source_lifecycle = (
+            source_lifecycle_for_reference(source_reference, organisation_id)
+            if source_reference
+            else SourceLifecycle.TRANSIENT
+        )
+        contract = _transfer_contracts().providers.get(model.provider)
+        if contract is None:
+            raise TransferModeUnavailableError(
+                "the routed model's provider has no reviewed transfer contract"
+            )
+        organisation_modes = (
+            policy.allowed_transfer_modes if policy is not None else [TransferMode.INLINE]
+        )
+        organisation_max_bytes = (
+            policy.effective_max_large_attachment_bytes() if policy is not None else None
+        )
+        selected = select_transfer_mode_for_policy(
+            aggregate_bytes=aggregate_bytes,
+            attachment_sizes=[attachment.size for attachment in resolved_attachments],
+            attachment_mime_types=[attachment.mime_type for attachment in resolved_attachments],
+            source_lifecycle=source_lifecycle,
+            organisation_allowed_modes=organisation_modes,
+            organisation_max_large_attachment_bytes=organisation_max_bytes,
+            task_allowed_modes=task.allowed_transfer_modes,
+            model_allowed_modes=model.allowed_transfer_modes,
+            model_mode_limits=model_transfer_mode_limits(model) or None,
+            model_inline=model_inline_ceiling(model),
+            deployment=deployment,
+            contract=contract,
+        )
+        if selected is None:
+            raise TransferModeUnavailableError(
+                "no permitted/provider-supported transfer mode is eligible for this attachment set"
+            )
+        if selected is not TransferMode.INLINE:
+            raise TransferExecutionUnavailableError(
+                "the selected transfer mode is not executable by this release"
+            )
+        return selected
 
     async def execute(
         self,
@@ -400,6 +542,7 @@ class AIService:
         # the success path below always sees the in-try values.
         resolved_attachments: list[Attachment] = []
         retain_output_content = False
+        policy: OrganisationAIPolicy | None = None
         pending_attempts: list[_PendingAttempt] = []
         dispatch_count = 0
         failure: AIError | None = None
@@ -448,6 +591,33 @@ class AIService:
                     task.retains_output_content and policy.retention_policy_days is not None
                 )
 
+            # v0.8 Scope §6.2: routing and mode selection are one coherent
+            # decision. The router receives the same effective transfer-mode
+            # context the selector runs on — source lifecycle, organisation
+            # policy, deployment configuration — so a candidate survives only
+            # when at least one mode is eligible under the current size/MIME/
+            # count, task, lifecycle, organisation, deployment, model/provider
+            # contract and inline threshold. The router therefore never commits
+            # to a model the selector would then deny while a compatible
+            # candidate exists. The context is request-scoped and identical for
+            # every attempt.
+            transfer_context = TransferRoutingContext(
+                source_lifecycle=(
+                    source_lifecycle_for_reference(
+                        effective_input_reference, request.organisation_id
+                    )
+                    if effective_input_reference
+                    else SourceLifecycle.TRANSIENT
+                ),
+                organisation_allowed_modes=(
+                    policy.allowed_transfer_modes if policy is not None else [TransferMode.INLINE]
+                ),
+                organisation_max_large_attachment_bytes=(
+                    policy.effective_max_large_attachment_bytes() if policy is not None else None
+                ),
+                deployment=self._transfer_deployment,
+            )
+
             for attempt in range(1, max_attempts + 1):
                 try:
                     decision = self._model_registry.route(
@@ -463,16 +633,19 @@ class AIService:
                         # reviewed fallback can never implicitly change region
                         # (v0.7 Scope §6.3 regional amendment, ADR-0017).
                         region_of_provider=self._region_of_provider(),
+                        transfer_context=transfer_context,
                     )
-                except (KeyError, ValueError) as exc:
+                except (KeyError, ValueError, TransferModeUnavailableError) as exc:
                     # No eligible model at all, or — during an allowed fallback —
                     # no eligible alternative remains after excluding the failed
                     # model(s). The latter must surface the original transient
                     # failure (retryable by the caller/job) instead of converting
-                    # it into a permanent ModelNotAvailableError: the in-process
-                    # routing budget is exhausted, not the model itself.
+                    # it into a permanent error: the in-process routing budget is
+                    # exhausted, not the model or the transfer policy itself.
                     if excluded_model_ids and last_transient is not None:
                         raise last_transient from exc
+                    if isinstance(exc, TransferModeUnavailableError):
+                        raise
                     raise ModelNotAvailableError(f"no model satisfies task {task.name}") from exc
                 model = decision.model
                 try:
@@ -484,6 +657,21 @@ class AIService:
                 if resolved_attachments and not provider.supports_documents:
                     raise ModelNotAvailableError(
                         "resolved model provider does not support document attachments"
+                    )
+                # v0.8 Scope §2.2/§6.2 deterministic transfer gate: the mode is
+                # selected from the organisation/task/model/provider policy
+                # intersection before any external transfer, and an attachment
+                # set that needs a non-inline mode fails closed here — never by
+                # silently riding the inline path above the aggregate
+                # threshold (Scope §5.2, §6.2).
+                if resolved_attachments:
+                    self._select_transfer_mode(
+                        policy=policy,
+                        task=task,
+                        model=model,
+                        resolved_attachments=resolved_attachments,
+                        source_reference=effective_input_reference,
+                        organisation_id=request.organisation_id,
                     )
                 provider_request = ProviderRequest(
                     task=task.name,
