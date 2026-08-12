@@ -37,7 +37,19 @@ AI_DEMO_ROOT = APP_ROOT / "modules" / "ai_demo"
 # and the request/result schemas, but never the transfer-mode contract module,
 # the staging seam, or the provider contract fixtures — transfer modes and
 # provider references are selected and constructed inside the AI layer only.
-AI_INTERNAL_CONTRACT_MODULES = ("app.ai.transfer", "app.ai.staging", "app.ai.contracts")
+AI_INTERNAL_CONTRACT_MODULES = (
+    "app.ai.transfer",
+    "app.ai.staging",
+    "app.ai.contracts",
+    # §6.3 internal seams: the streaming/temp-file carrier, the managed-URL
+    # minter, the durable reference store and the orchestrator all construct
+    # or name transfer modes and provider references — they are internal to
+    # app/ai/ exactly like the contract modules.
+    "app.ai.streamed_source",
+    "app.ai.managed_url",
+    "app.ai.persistence.references",
+    "app.ai.transfer_orchestrator",
+)
 
 
 def _sdk_import_lines() -> list[tuple[Path, int, str]]:

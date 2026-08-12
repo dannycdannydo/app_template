@@ -19,7 +19,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from app.storage.base import DEFAULT_SIGNED_URL_TTL, ObjectStorage
+from app.storage.base import DEFAULT_SIGNED_URL_TTL, ObjectStorage, WritableByteStream
 from app.storage.types import ObjectInfo, SignedUrl
 
 _URL_PREFIX = "https://storage.example.invalid"
@@ -133,6 +133,28 @@ class FakeObjectStorage(ObjectStorage):
         if max_bytes is not None and len(stored.content) > max_bytes:
             raise ValueError(f"object exceeds the {max_bytes} byte read limit")
         return stored.content
+
+    async def stream_object(
+        self,
+        object_key: str,
+        *,
+        destination: WritableByteStream,
+        max_bytes: int | None = None,
+    ) -> None:
+        """Write one stored object into the destination stream, bounded.
+
+        Mirrors :meth:`read_object`'s bounded contract for the v0.8 streaming
+        seam (Scope §2.3/§6.3): a stored object larger than ``max_bytes``
+        raises :class:`ValueError` without buffering it, and a missing object
+        raises :class:`KeyError`. The fake keeps content in memory (test-only);
+        the S3 adapter streams the provider body chunk by chunk.
+        """
+        stored = self._objects.get(object_key)
+        if stored is None:
+            raise KeyError(f"object not found: {object_key}")
+        if max_bytes is not None and len(stored.content) > max_bytes:
+            raise ValueError(f"object exceeds the {max_bytes} byte read limit")
+        destination.write(stored.content)
 
     async def delete_object(self, object_key: str) -> None:
         self._objects.pop(object_key, None)

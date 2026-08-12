@@ -15,9 +15,14 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, case, func, select
 
-from app.ai.persistence.models import AIOutputRecord, AIRequestRecord, OrganisationAISettings
+from app.ai.persistence.models import (
+    AIAttachmentReference,
+    AIOutputRecord,
+    AIRequestRecord,
+    OrganisationAISettings,
+)
 
 #: Statuses that count towards committed monthly spend (v0.7 Scope §6.5
 #: documented reservation policy): a ``running`` row is an in-flight
@@ -189,4 +194,89 @@ def stale_running_requests_statement(
     return select(AIRequestRecord).where(
         AIRequestRecord.status == "running",
         AIRequestRecord.created_at < older_than,
+    )
+
+
+# --- v0.8 Scope §6.3: durable transfer references ----------------------------
+
+
+def ai_attachment_reference_by_key_statement(
+    organisation_id: uuid.UUID,
+    idempotency_key: str,
+) -> Select[tuple[AIAttachmentReference]]:
+    """Return one reference row by its derived idempotency key, org-scoped.
+
+    The org filter makes a cross-organisation reference lookup
+    indistinguishable from a missing row (BP §9 tenant boundary): a caller
+    that supplies another organisation's key finds nothing and can never adopt,
+    expire or delete a row it does not own. The row is uniquely identified
+    inside the organisation by the key when it is live (partial unique index,
+    Scope §2.3).
+    """
+    return select(AIAttachmentReference).where(
+        AIAttachmentReference.organisation_id == organisation_id,
+        AIAttachmentReference.idempotency_key == idempotency_key,
+    )
+
+
+def ai_live_attachment_reference_by_key_statement(
+    organisation_id: uuid.UUID,
+    idempotency_key: str,
+) -> Select[tuple[AIAttachmentReference]]:
+    """Return the one live reference row for an idempotency key, if any.
+
+    Reuse is allowed only while the record is ``live`` (Scope §2.1 retry-only
+    reuse); expired and deleted rows are terminal and must be replaced by a
+    new idempotent transfer. The caller additionally checks the provider
+    expiry timestamp, marking a time-expired row ``expired`` rather than
+    reusing it.
+    """
+    return ai_attachment_reference_by_key_statement(organisation_id, idempotency_key).where(
+        AIAttachmentReference.status == "live"
+    )
+
+
+def ai_attachment_reference_for_deletion_statement(
+    organisation_id: uuid.UUID,
+    idempotency_key: str,
+) -> Select[tuple[AIAttachmentReference]]:
+    """Resolve the authoritative row for terminal deletion of one key.
+
+    Deletion must act on the row that owns the current provider copy, not on a
+    caller-supplied possibly stale reference: the live row is preferred (it
+    names the copy the last create/adopt left in place), falling back to the
+    newest non-deleted (expired) row so a terminal sweep after
+    ``expire_all_for_request`` still removes the copies of expired references.
+    The partial unique index guarantees at most one live row per key and this
+    ordering makes the result unique; ``None`` means every row for the key is
+    already terminal. Strictly org-scoped (BP §9).
+    """
+    return (
+        select(AIAttachmentReference)
+        .where(
+            AIAttachmentReference.organisation_id == organisation_id,
+            AIAttachmentReference.idempotency_key == idempotency_key,
+            AIAttachmentReference.status != "deleted",
+        )
+        .order_by(
+            case((AIAttachmentReference.status == "live", 0), else_=1),
+            AIAttachmentReference.created_at.desc(),
+        )
+        .limit(1)
+    )
+
+
+def ai_attachment_references_for_request_statement(
+    organisation_id: uuid.UUID,
+    logical_request_id: str,
+) -> Select[tuple[AIAttachmentReference]]:
+    """Return every reference row belonging to one logical request.
+
+    Used by the terminal-lifecycle operations (expire/delete all references of
+    one logical request) and by the reconciliation surfaces; strictly
+    org-scoped so one request id can never reach another organisation's rows.
+    """
+    return select(AIAttachmentReference).where(
+        AIAttachmentReference.organisation_id == organisation_id,
+        AIAttachmentReference.logical_request_id == logical_request_id,
     )

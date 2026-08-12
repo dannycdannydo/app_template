@@ -105,6 +105,23 @@ class TransferExecutionUnavailableError(AIError):
         super().__init__(message, retryable=False)
 
 
+class TransferSourceError(AIError):
+    """A private source object could not be verified for a non-inline transfer.
+
+    v0.8 Scope §2.3/§6.3: raised by the managed-URL minting seam when the
+    retained source fails re-validation (missing, changed size or content type,
+    non-HTTPS/read-only breach or an out-of-bounds TTL) at dispatch time. The
+    message never echoes the source reference or a signed URL (BP §28).
+    Permanent for the same reference: the source identity must be re-verified,
+    not retried blindly.
+    """
+
+    error_code = "transfer_source_unavailable"
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, retryable=False)
+
+
 class AIUnavailableError(AIError):
     """AI is disabled for the organisation (default-off, Scope §6.5)."""
 

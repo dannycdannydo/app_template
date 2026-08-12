@@ -76,7 +76,7 @@ AttachmentResolver = Callable[[AttachmentResolutionContext], Awaitable[Sequence[
 
 #: Fallback content types for objects whose stored content type is absent;
 #: only allowlisted types are ever produced, anything else fails closed.
-_EXTENSION_MIME_TYPES = {
+EXTENSION_MIME_TYPES = {
     ".json": "application/json",
     ".pdf": "application/pdf",
     ".jpeg": "image/jpeg",
@@ -163,7 +163,7 @@ class StorageAttachmentResolver:
             raise AIInputValidationError(
                 "the referenced storage object has an unsupported content type"
             )
-        fallback = _EXTENSION_MIME_TYPES.get(Path(reference.rstrip("/")).suffix.lower())
+        fallback = EXTENSION_MIME_TYPES.get(Path(reference.rstrip("/")).suffix.lower())
         if fallback is None:
             raise AIInputValidationError(
                 "the referenced storage object declares no supported content type"

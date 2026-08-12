@@ -23,7 +23,6 @@ Scope §6.1 checkbox 3).
 
 from __future__ import annotations
 
-import hashlib
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -31,7 +30,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, computed_field
 
-from app.ai.transfer import SourceLifecycle, TransferMode
+from app.ai.transfer import SourceLifecycle, TransferMode, derive_idempotency_key
 
 
 class ExternalReferenceStatus(StrEnum):
@@ -144,30 +143,6 @@ class TransferStore(ABC):
         """
 
 
-def _idempotency_key(
-    *,
-    provider: str,
-    mode: TransferMode,
-    organisation_id: UUID,
-    logical_request_id: str,
-    source_digest: str,
-    region: str,
-) -> str:
-    """The structural idempotency key for one logical transfer.
-
-    Derived, never caller-supplied: retries of one logical request reconstruct
-    the same key, while a changed provider, mode, organisation, digest or
-    region creates a different key and therefore a new transfer (Scope §2.1).
-    The provider is part of the key because a store instance is
-    provider-specific; including it keeps the derived key collision-free even
-    if the durable uniqueness work later keys on it across stores.
-    """
-    raw = (
-        f"{provider}|{mode.value}|{organisation_id}|{logical_request_id}|{source_digest}|{region}"
-    ).encode()
-    return hashlib.sha256(raw).hexdigest()
-
-
 class FakeTransferStore(TransferStore):
     """Deterministic, in-memory :class:`TransferStore` for the default suite.
 
@@ -205,7 +180,7 @@ class FakeTransferStore(TransferStore):
         region: str,
         expires_at: datetime | None,
     ) -> ExternalFileReference:
-        key = _idempotency_key(
+        key = derive_idempotency_key(
             provider=self.provider_id,
             mode=mode,
             organisation_id=organisation_id,
@@ -248,7 +223,7 @@ class FakeTransferStore(TransferStore):
         source_digest: str,
         region: str,
     ) -> ExternalFileReference | None:
-        key = _idempotency_key(
+        key = derive_idempotency_key(
             provider=self.provider_id,
             mode=mode,
             organisation_id=organisation_id,
