@@ -27,8 +27,10 @@ Dramatiq (uv run dramatiq)     (MinIO, Mailpit in later releases)
 ```
 
 - `make dev` is the canonical development command. It starts the infrastructure services from `deploy/compose/compose.local.yml` and launches the API and frontend natively with live reload.
+- `make dev` verifies Redis through the host-facing `REDIS_URL` before it starts native application processes. Compose's container-internal health check is necessary but insufficient: it cannot detect a missing host port publication or broken network attachment.
 - A second command, `make dev-docker`, runs the **entire** stack (API, frontend, worker, Postgres, Redis) in containers. It exists for CI parity, fresh-clone onboarding verification, Dockerfile validation, and deployment debugging — not for daily use.
 - `compose.local.yml` carries the local services. Docker Compose profiles (or an equivalent mechanism within the single file) separate the infra-only set from the full-stack set, so both commands are served from the blueprint's existing three-file Compose layout (BP §36) without adding a fourth file.
+- PostgreSQL, Redis and MinIO use explicit named volumes. `make dev-down` preserves them; guarded `CONFIRM_RESET=1 make dev-reset` deletes and recreates all three together before applying migrations. Resetting only the database or broker is unsupported because Dramatiq messages reference durable PostgreSQL job rows. External WorkOS identities remain outside this local reset boundary.
 - `backend/Dockerfile` and `frontend/Dockerfile` remain required: they serve CI, both production profiles (BP §35), and the `make dev-docker` path.
 
 ## Consequences

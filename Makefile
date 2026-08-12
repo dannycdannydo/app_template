@@ -28,18 +28,44 @@ define load_env
 	set -a; [ -f .env ] && . ./.env; set +a;
 endef
 
-.PHONY: dev dev-docker worker migrate provision-admin provision-admin-delete lint typecheck test test-ai-contracts e2e format generate-client validate-ai-registries validate-execution-contracts check
+.PHONY: dev dev-docker dev-infra-check dev-down dev-reset worker migrate provision-admin provision-admin-delete lint typecheck test test-ai-contracts e2e format generate-client validate-ai-registries validate-execution-contracts check
 
 ## Start PostgreSQL + Redis + MinIO + Mailhog in Docker, then run the API, the
 ## Dramatiq worker and the frontend natively with live reload (ADR-0008).
 ## Infra stays up after Ctrl-C so `make migrate` and repeat `make dev` runs
 ## keep working; stop it with
-## `docker compose -f deploy/compose/compose.local.yml down`.
+## `make dev-down`.
 dev:
 	$(COMPOSE_CMD) up -d --wait postgres redis minio mailhog
+	$(MAKE) dev-infra-check
 	$(MAKE) migrate
 	@echo "API on http://localhost:8000 (live reload), worker native, frontend on http://localhost:5173, MinIO console on http://localhost:9001, Mailhog UI on http://localhost:8025. Ctrl-C stops the apps; Postgres/Redis/MinIO/Mailhog stay up."
 	@$(load_env) exec bash scripts/dev.sh
+
+## Verify infrastructure through the host-facing URL used by the native API
+## and worker. Container-internal health checks cannot detect a missing host
+## port publication or a broken Compose network attachment.
+dev-infra-check:
+	@$(load_env) cd backend && uv run python -m scripts.check_dev_infra
+
+## Remove local containers and the Compose network while preserving database,
+## broker and object-storage data for the next `make dev`.
+dev-down:
+	$(COMPOSE_CMD) down --remove-orphans
+
+## Destroy all local application data, recreate infrastructure and migrate the
+## empty database. The explicit guard prevents an accidental destructive run.
+## WorkOS identities are external and intentionally remain a separate command.
+dev-reset:
+	@if [ "$(CONFIRM_RESET)" != "1" ]; then \
+		echo "Refusing to erase local data. Re-run with CONFIRM_RESET=1 make dev-reset"; \
+		exit 2; \
+	fi
+	$(COMPOSE_CMD) down -v --remove-orphans
+	$(COMPOSE_CMD) up -d --wait postgres redis minio mailhog
+	$(MAKE) dev-infra-check
+	$(MAKE) migrate
+	@echo "Local PostgreSQL, Redis and MinIO state reset; clean infrastructure is ready. Run make dev to start the applications."
 
 ## Build and run the entire stack in containers (CI parity, onboarding,
 ## Dockerfile validation). Ctrl-C stops all services.
