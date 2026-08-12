@@ -52,7 +52,7 @@ wheels = [
 
 [[package]]
 name = "app-template-backend"
-version = "0.5.0"
+version = "0.7.0"
 source = { virtual = "." }
 dependencies = [
     { name = "alembic" },

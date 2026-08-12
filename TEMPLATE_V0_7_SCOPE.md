@@ -278,9 +278,12 @@ Never use an unprefixed section number in new AI code/docstrings. New citations 
 
 ```text
 Release:    v0.7.0 (AI / LLM application service layer)
-State:      planned
-Started:    —
-Completed:  —
+State:      complete
+Started:    2026-08-08
+Completed:  2026-08-12
 ```
 
-When every acceptance criterion in §5 is met and every §6 box is checked after review, update the version recording in `pyproject.toml` and `frontend/package.json`, tag `v0.7.0`, and record the completed blueprint amendment/versioned references.
+Every acceptance criterion in §5 is met and every §6 box is checked after
+review. The release version is recorded in `backend/pyproject.toml` and
+`frontend/package.json`; tag `v0.7.0` from the reviewed release-bookkeeping
+commit.
