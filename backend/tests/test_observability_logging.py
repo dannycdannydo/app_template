@@ -204,6 +204,55 @@ async def test_worker_tasks_emit_context_bound_log_lines(
     assert recorded == [jobs_service.ERROR_CODE_RETRIES_EXHAUSTED]
 
 
+async def test_ai_execute_started_log_binds_deterministic_request_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v0.7 Scope §6.7: every AI-job log line binds ``ai_request_id``.
+
+    The deterministic request id (``job_id.hex``) is derived and bound to the
+    worker context before ``ai.execute.started`` is emitted, so even the first
+    AI-job log line carries the id (BP §28).
+    """
+    from app.ai import execution as ai_execution
+    from app.modules.jobs import service as jobs_service
+    from app.modules.jobs.models import JobStatus
+
+    class _FakeSession:
+        async def __aenter__(self) -> _FakeSession:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    def _fake_factory() -> _FakeSession:
+        return _FakeSession()
+
+    class _TerminalJob:
+        status = JobStatus.SUCCEEDED
+
+    async def _get_terminal_job(session: object, *, job_id: object) -> _TerminalJob:
+        return _TerminalJob()
+
+    def _is_terminal(status: object) -> bool:
+        return True
+
+    monkeypatch.setattr(ai_execution, "async_session_factory", _fake_factory)
+    monkeypatch.setattr(jobs_service, "get_job_for_task", _get_terminal_job)
+    monkeypatch.setattr(jobs_service, "is_terminal", _is_terminal)
+
+    JOB_ID = "00000000-0000-7000-8000-000000000001"
+    expected_request_id = ai_execution.request_id_for_job(uuid.UUID(JOB_ID))
+    with _capture_logs() as logs:
+        await ai_execution.execute_ai_task(JOB_ID)
+
+    started = [entry for entry in logs if entry["event"] == "ai.execute.started"]
+    skipped = [entry for entry in logs if entry["event"] == "ai.execute.skipped"]
+    assert started and skipped
+    assert started[0]["ai_request_id"] == expected_request_id
+    assert skipped[0]["ai_request_id"] == expected_request_id
+    assert skipped[0]["job_id"] == JOB_ID
+
+
 async def test_untrusted_request_id_is_replaced_before_logging() -> None:
     """A client cannot inject arbitrary or oversized content into log context."""
     app, state, private_key = build_context_app_fixture()

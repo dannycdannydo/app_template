@@ -51,7 +51,23 @@ from app.modules.audit.service import (
 )
 from app.modules.organisations.models import Organisation
 from app.modules.users.models import User
+from app.observability.metrics import AI_BUDGET_DENIALS_TOTAL
 from app.storage.fake import FakeObjectStorage
+
+
+def _counter_value(counter: Any, labels: dict[str, str] | None = None) -> float:
+    """Current value of one Prometheus counter via the public collect() API.
+
+    ``labels`` selects one series explicitly so the assertion stays stable
+    when a labelled counter gains more series.
+    """
+    for metric in counter.collect():
+        for sample in metric.samples:
+            if labels is not None and sample.labels != labels:
+                continue
+            return float(sample.value)
+    return 0.0
+
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 
@@ -461,6 +477,7 @@ async def test_budget_denial_blocks_second_reservation(migrated_database: str) -
             )
             # The second reservation sees the first running row in the month's
             # spend: 0.006 + 0.006 > 0.01, so it is denied before dispatch.
+            denials_before = _counter_value(AI_BUDGET_DENIALS_TOTAL, {"task": "document.classify"})
             with pytest.raises(BudgetExceededError):
                 await _reserve(
                     port,
@@ -469,6 +486,11 @@ async def test_budget_denial_blocks_second_reservation(migrated_database: str) -
                     user_id=actor.id,
                     estimated_cost=Decimal("0.006000"),
                 )
+            # The budget-denial metric counts the denial (v0.7 Scope §6.7).
+            assert (
+                _counter_value(AI_BUDGET_DENIALS_TOTAL, {"task": "document.classify"})
+                == denials_before + 1
+            )
             rows = await _request_rows(session, organisation.id)
             assert len(rows) == 1  # the denied reservation wrote no row
 

@@ -16,7 +16,7 @@ This repository is a **template**, not an application. New projects start from a
 - CI that runs the same gate on every push to `main` and on pull requests
 - Governance docs and architecture decision records (ADRs)
 
-The authoritative design standard is `Internal_Custom_Application_Starter_Architecture_v2.md`. The scoped contract and progress log for the current release is `TEMPLATE_V0_5_SCOPE.md`. Agents read the architecture documentation before structural changes (see `AGENTS.md`).
+The authoritative design standard is `Internal_Custom_Application_Starter_Architecture_v2.md`. The scoped contract and progress log for the current release is `TEMPLATE_V0_7_SCOPE.md`. Agents read the architecture documentation before structural changes (see `AGENTS.md`).
 
 ## Repository layout
 
@@ -24,7 +24,7 @@ The authoritative design standard is `Internal_Custom_Application_Starter_Archit
 backend/                 FastAPI application (app/, alembic/, pyproject.toml)
 frontend/                Vue 3 + Vite application (src/, Dockerfile, nginx.conf)
 deploy/compose/          Compose files (compose.local.yml = local development)
-docs/decisions/          Architecture decision records (ADR 0001-0013)
+docs/decisions/          Architecture decision records (ADR 0001-0018)
 .github/workflows/       CI pipeline
 Makefile                 Command surface for development and quality gates
 .env.example             Documented environment variables
@@ -107,10 +107,12 @@ To tear the test admin down again (e.g. to provision a different one and re-test
 | `make lint` | Ruff (backend) + ESLint (frontend) |
 | `make typecheck` | Pyright (backend) + vue-tsc (frontend) |
 | `make test` | pytest (backend) + Vitest (frontend) |
+| `make test-ai-contracts` | Opt-in live AI provider contract tests (fake provider by default; each real-provider test skips until its dedicated non-production credentials are configured) |
 | `make e2e` | Playwright journeys against the local stack (stubbed WorkOS + API, no backend needed; authenticated journeys need `VITE_WORKOS_CLIENT_ID` set) |
 | `make format` | Ruff format + Prettier |
 | `make generate-client` | Export OpenAPI from FastAPI and generate the TypeScript client |
-| `make check` | Full local quality gate: lint + typecheck + test + generated-client drift |
+| `make validate-ai-registries` | Fail fast on invalid checked-in AI task/prompt/model registry definitions |
+| `make check` | Full local quality gate: lint + typecheck + test + registry validation + generated-client drift |
 
 ## Files and jobs (v0.5)
 
@@ -126,6 +128,22 @@ Files and jobs are org-scoped like every other resource and gated by the existin
 v0.6 closes the operations story (ADR-0015, ADR-0016). From the notification bell in the header (unread badge, recent notifications, mark-read) or the `/notifications` page (sidebar entry) an organisation member can see their in-app notifications; holders of `notifications.manage` (owner/administrator/manager) can send a test notification from the page. A test send creates an in-app notification and delivers an email through the Dramatiq worker — email is always sent from worker tasks, never from an HTTP handler. Locally, `make dev` starts **Mailhog** (web UI at `http://localhost:8025`), which catches every outbound message on port 1025; in production, the SMTP adapter (standard library, `EMAIL_PROVIDER=smtp`) targets any transactional provider's SMTP relay.
 
 Observability completes blueprint §28: every JSON log line carries `request_id` (plus `user_id`/`organisation_id` on authenticated requests and `job_id`/`resource_id` in the worker), Sentry captures unhandled request and worker errors when `SENTRY_DSN` is set, and `GET /metrics` serves Prometheus metrics (request + job counters). Deployment, scaling, monitoring and alerts: `docs/operations.md`.
+
+## AI layer (v0.7)
+
+v0.7 adds a **provider-independent AI application capability** (ADR-0017): a feature service calls `AIService.execute(task="document.classify", storage_reference=...)` and receives a validated, auditable result — it never imports an LLM SDK, selects a model, formats a provider request or calculates cost itself. The service resolves the task through checked-in task/prompt/model registries, routes to a compatible model (respecting organisation settings, budgets, regional constraints and attachment limits), dispatches through a provider adapter, validates structured output against a Pydantic schema (with bounded repair/retries), and records usage, cost and audit rows. The template ships one non-product demonstration task, `document.classify`, invoked from a protected, organisation-scoped endpoint (synchronous within limits, otherwise a durable `ai.execute` job on the `ai` queue).
+
+Providers are **opt-in configuration, never code**: OpenAI, Anthropic, DeepSeek, Azure OpenAI, Google Gemini **through Vertex AI only** (ADR-0018 — no Gemini Developer API key path), and a local OpenAI-compatible endpoint (Ollama/vLLM/SGLang). Provider SDKs stay behind `app/ai/providers/` adapters (an import-boundary test enforces this), and credentials are server-side secrets that never reach the API, frontend, logs, Sentry or audit metadata.
+
+To try it locally with the deterministic **fake provider** (the default), three prerequisites must be in place before the demo endpoint returns a result — the provider is enabled by default, but AI is default-**off** per organisation and the endpoint consumes an existing private storage object, never raw text:
+
+1. `cp .env.example .env` (if you have not already) — `AI_ENABLED_PROVIDERS='["fake"]'` is the default and needs no account. Run `make provision-admin` if you have not already: the one-time bootstrap platform admin.
+2. Start the stack: `make dev`, then sign in with any member account.
+3. **Enable AI for the organisation** (platform-admin managed, default off). A platform admin calls `PUT /api/v1/platform/organisations/{organisation_id}/ai-settings` with `{"enabled": true}`; the allowlists are optional (empty `allowed_provider_ids`/`allowed_model_ids` means unrestricted). Skipping this step makes the endpoint return `ai_unavailable` immediately.
+4. **Upload the document first** so a private storage object exists: the `/files` page (or `POST /api/v1/files`) stores it at `organisations/{org}/documents/{file_id}/original` — that object key is the `storage_reference`. The endpoint rejects references outside your organisation's namespace and fails with a missing-object error when the object does not exist.
+5. `POST /api/v1/ai/classify` with `{"storage_reference": "organisations/{org}/documents/{file_id}/original"}`; small inputs run synchronously, larger work is queued to the worker and pollable through the jobs API. The files page exercises the same seam via its file-processing job.
+
+Enabling a real provider is configuration-only: set `AI_ENABLED_PROVIDERS` and the provider's secret/endpoint settings in `.env` (all documented in `.env.example`), restart, and re-route the model registry through reviewed configuration if needed. Regional/inference-geography settings are validated and never changed implicitly by fallback; Vertex requires a Google Cloud project, an explicit `AI_VERTEX_LOCATION` and ADC or a service-account key via the deployment secret mechanism. Organisation AI settings (default **off**) are managed by platform admins; monthly budgets are enforced in the service before dispatch. AI observability (metrics families, alerts, and the provider-outage / budget / prompt-rollback / model-rollback / retention-deletion runbooks): `docs/operations.md` → AI observability. AI security model: `SECURITY.md` → AI security.
 
 ## Platform Admin Centre
 
@@ -147,6 +165,6 @@ Day-to-day operations, scaling, monitoring and alerts: `docs/operations.md`. Bac
 
 ## Releases
 
-The template is versioned and tagged. `make check` passing is the gate for a release. Current release: v0.6 (operations: observability, email, notifications, hybrid VPS deployment). See `TEMPLATE_V0_6_SCOPE.md` §6 for the progress log.
+The template is versioned and tagged. `make check` passing is the gate for a release. Current release: v0.7 (AI / LLM application service layer). See `TEMPLATE_V0_7_SCOPE.md` §6 for the progress log.
 
 Development follows the branch workflow in `CONTRIBUTING.md`: work units live on `feature/*` branches and reach `main` only through reviewed pull requests, so CI runs once per merged unit rather than on every push.

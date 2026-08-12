@@ -37,6 +37,7 @@ from time import perf_counter
 from typing import Any
 from uuid import UUID, uuid4
 
+import structlog
 from pydantic import BaseModel, ValidationError
 
 from app.ai.attachments import Attachment, validate_attachment_set
@@ -73,6 +74,19 @@ from app.ai.registry import (
 )
 from app.ai.schemas import AIRequest, AIResult, CostEstimate, RoutingMetadata, TokenUsage
 from app.ai.storage_resolver import AttachmentResolutionContext, AttachmentResolver
+from app.observability.metrics import (
+    observe_ai_attempt,
+    observe_ai_fallback,
+    observe_ai_retry,
+    observe_ai_validation_failure,
+)
+
+#: Module logger. AI log lines bind ``ai_request_id``, task, provider/model,
+#: prompt name/version and safe error codes only — never prompts, provider
+#: responses, attachment bytes or retained input/output content (BP §28,
+#: ADR-0017). The request middleware and worker entry points bind the
+#: surrounding request/job context.
+logger = structlog.get_logger()
 
 SchemaResolver = Callable[[str], type[BaseModel]]
 
@@ -367,57 +381,73 @@ class AIService:
         execution_request_id = request_id or uuid4().hex
         task = self._resolve_task(request.task)
         prompt = self._resolve_prompt(task.prompt_name, task.prompt_version)
-        # Input-form validation first (v0.7 Scope §6.4): a task whose prompt
-        # declares ``text`` must receive text input — a storage reference can
-        # never silently satisfy it — and vice versa.
-        self._validate_input_form(prompt, request)
-        resolved_attachments = await self._resolve_attachments(request, attachments)
-        rendered = self._render_prompt(prompt, request, resolved_attachments)
-        # The effective output schema is resolved exactly once: a request
-        # override wins, and an empty-string override is treated as "no
-        # override" so the provider request and output validation can never
-        # disagree (v0.7 Scope §6.1). Its JSON Schema (v0.7 Scope §6.4) is
-        # generated before dispatch so a bad schema fails fast and every
-        # adapter can request native structured output.
-        effective_output_schema = request.output_schema or task.output_schema
-        output_json_schema = self._output_json_schema(effective_output_schema)
-        configured_max_tokens = task.parameter_defaults.get("max_tokens")
-        configured_temperature = task.parameter_defaults.get("temperature")
-        estimated_input_tokens = estimate_tokens(rendered)
-        max_attempts = task.retry_policy.max_attempts
-        repair_budget = task.retry_policy.repair_attempts
-        excluded_model_ids: list[str] = []
-        last_transient: ProviderError | None = None
-
-        # Organisation controls (v0.7 Scope §6.5): the organisation's
-        # effective policy is enforced *here* — never in a router or UI
-        # (BP §27) — and its restrictions are merged with the caller's before
-        # routing. The task-level retention opt-in only takes effect together
-        # with a configured organisation retention policy (v0.7 Scope §2).
-        retain_output_content = False
-        if recorder is not None:
-            policy = await recorder.load_policy(organisation_id=request.organisation_id)
-            if not policy.enabled:
-                raise AIUnavailableError("AI is not enabled for this organisation")
-            allowed_providers, allowed_model_ids, model_override = _merge_organisation_policy(
-                policy, allowed_providers, allowed_model_ids, model_override
-            )
-            retain_output_content = (
-                task.retains_output_content and policy.retention_policy_days is not None
-            )
-
+        logger.info(
+            "ai.request.started",
+            ai_request_id=execution_request_id,
+            task=task.name,
+            prompt_name=prompt.name,
+            prompt_version=prompt.version,
+        )
         # Per-attempt accounting state (v0.7 Scope §2/§6.5): every attempted
         # provider execution gets its own running row (the first via reserve,
         # later attempts via record_attempt) carrying that attempt's routing
         # decision and estimate; settlement prices each row with its own
         # model's rates. ``pending_attempts`` tracks the rows so the terminal
         # tail can settle every one of them with actuals and safe error codes.
+        # ``resolved_attachments``/``retain_output_content`` are hoisted so
+        # the terminal tail type-checks even though a pre-dispatch failure
+        # raises before they are (re)assigned — the failure tail re-raises, so
+        # the success path below always sees the in-try values.
+        resolved_attachments: list[Attachment] = []
+        retain_output_content = False
         pending_attempts: list[_PendingAttempt] = []
         dispatch_count = 0
         failure: AIError | None = None
         result: AIResult | None = None
         winning_attempt: _PendingAttempt | None = None
         try:
+            # Input-form validation first (v0.7 Scope §6.4): a task whose
+            # prompt declares ``text`` must receive text input — a storage
+            # reference can never silently satisfy it — and vice versa.
+            self._validate_input_form(prompt, request)
+            resolved_attachments = await self._resolve_attachments(request, attachments)
+            rendered = self._render_prompt(prompt, request, resolved_attachments)
+            # The effective output schema is resolved exactly once: a request
+            # override wins, and an empty-string override is treated as "no
+            # override" so the provider request and output validation can never
+            # disagree (v0.7 Scope §6.1). Its JSON Schema (v0.7 Scope §6.4) is
+            # generated before dispatch so a bad schema fails fast and every
+            # adapter can request native structured output.
+            effective_output_schema = request.output_schema or task.output_schema
+            output_json_schema = self._output_json_schema(effective_output_schema)
+            configured_max_tokens = task.parameter_defaults.get("max_tokens")
+            configured_temperature = task.parameter_defaults.get("temperature")
+            estimated_input_tokens = estimate_tokens(rendered)
+            max_attempts = task.retry_policy.max_attempts
+            repair_budget = task.retry_policy.repair_attempts
+            excluded_model_ids: list[str] = []
+            last_transient: ProviderError | None = None
+
+            # Organisation controls (v0.7 Scope §6.5): the organisation's
+            # effective policy is enforced *here* — never in a router or UI
+            # (BP §27) — and its restrictions are merged with the caller's
+            # before routing. The task-level retention opt-in only takes
+            # effect together with a configured organisation retention policy
+            # (v0.7 Scope §2). A disabled organisation is a safe pre-dispatch
+            # failure: it raises here so the terminal tail below emits
+            # ``ai.request.failed`` for the started request (v0.7 Scope §6.7 —
+            # the synchronous path has no worker failure log to compensate).
+            if recorder is not None:
+                policy = await recorder.load_policy(organisation_id=request.organisation_id)
+                if not policy.enabled:
+                    raise AIUnavailableError("AI is not enabled for this organisation")
+                allowed_providers, allowed_model_ids, model_override = _merge_organisation_policy(
+                    policy, allowed_providers, allowed_model_ids, model_override
+                )
+                retain_output_content = (
+                    task.retains_output_content and policy.retention_policy_days is not None
+                )
+
             for attempt in range(1, max_attempts + 1):
                 try:
                     decision = self._model_registry.route(
@@ -588,6 +618,9 @@ class AIService:
                     # retry and a failure on the final attempt is terminal.
                     # Unvalidated data is never returned.
                     pending_attempt.error_code = exc.error_code
+                    observe_ai_validation_failure(
+                        task=task.name, provider=model.provider, model=model.model
+                    )
                     if repair_budget > 0:
                         repair_budget -= 1
                         repair_request = self._prepare_repair_request(
@@ -668,6 +701,9 @@ class AIService:
                             # invalid: consume one bounded malformed-output task
                             # retry; a failure on the final attempt is terminal.
                             repair_attempt.error_code = exc.error_code
+                            observe_ai_validation_failure(
+                                task=task.name, provider=model.provider, model=model.model
+                            )
                             if attempt >= max_attempts:
                                 raise
                             continue
@@ -753,6 +789,22 @@ class AIService:
                         fallback_used=pending_attempt.decision.fallback_used,
                         region=pending_attempt.region,
                     )
+            self._observe_metrics(
+                task=task.name,
+                attempts=pending_attempts,
+                winning_attempt=None,
+            )
+            logger.warning(
+                "ai.request.failed",
+                ai_request_id=execution_request_id,
+                task=task.name,
+                provider=(
+                    pending_attempts[-1].decision.model.provider if pending_attempts else None
+                ),
+                model=pending_attempts[-1].decision.model.model if pending_attempts else None,
+                error_code=failure.error_code,
+                attempts=len(pending_attempts),
+            )
             raise failure
 
         if result is None:
@@ -827,7 +879,74 @@ class AIService:
                         fallback_used=pending_attempt.decision.fallback_used,
                         region=pending_attempt.region,
                     )
+        self._observe_metrics(
+            task=task.name,
+            attempts=pending_attempts,
+            winning_attempt=winning_attempt,
+        )
+        logger.info(
+            "ai.request.succeeded",
+            ai_request_id=result.request_id,
+            task=result.routing.task,
+            provider=result.routing.provider,
+            model=result.routing.model,
+            prompt_name=result.routing.prompt_name,
+            prompt_version=result.routing.prompt_version,
+            fallback_used=result.routing.fallback_used,
+            region=result.routing.region,
+            latency_ms=winning_attempt.latency_ms if winning_attempt is not None else None,
+            cost=str(result.cost.amount),
+        )
         return result
+
+    def _observe_metrics(
+        self,
+        *,
+        task: str,
+        attempts: list[_PendingAttempt],
+        winning_attempt: _PendingAttempt | None,
+    ) -> None:
+        """Record the aggregate AI observability signal (v0.7 Scope §6.7).
+
+        One sample per settled attempt, mirroring the durable ``ai_requests``
+        rows attempt for attempt: the winning attempt is ``succeeded``, every
+        other attempt is ``failed`` with its own usage, latency and usage-priced
+        cost. Only low-cardinality registry ids become labels; organisation
+        ids, request ids and content never do (BP §28, ADR-0017). Validation
+        failures are observed at the point they occur with the failing model;
+        retries and reviewed fallbacks are attributed to the attempt that
+        caused them.
+        """
+        for index, attempt in enumerate(attempts):
+            observe_ai_attempt(
+                task=task,
+                provider=attempt.decision.model.provider,
+                model=attempt.decision.model.model,
+                status="succeeded" if attempt is winning_attempt else "failed",
+                latency_ms=attempt.latency_ms,
+                input_tokens=attempt.usage.input_tokens,
+                output_tokens=attempt.usage.output_tokens,
+                cost_usd=float(
+                    self._estimate_cost(
+                        attempt.model.pricing.input_price_per_million_tokens,
+                        attempt.model.pricing.output_price_per_million_tokens,
+                        attempt.usage,
+                        currency=attempt.model.pricing.currency,
+                    ).amount
+                ),
+            )
+            if index > 0:
+                observe_ai_retry(
+                    task=task,
+                    provider=attempt.decision.model.provider,
+                    model=attempt.decision.model.model,
+                )
+            if attempt.decision.fallback_used:
+                observe_ai_fallback(
+                    task=task,
+                    provider=attempt.decision.model.provider,
+                    model=attempt.decision.model.model,
+                )
 
     def _aggregate_cost(
         self,
