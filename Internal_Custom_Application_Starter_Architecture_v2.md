@@ -132,6 +132,26 @@ identifiers, `gs://` references and URL inputs are deferred to v0.8
 (`plans/AI_LARGE_ATTACHMENTS_V0_8_PLAN.md`); inline is the only v0.7 transfer
 mode and oversized inputs fail before dispatch.
 
+Large-file and provider-reference input (v0.8, ADR-0017 amendment) adds four
+**provider-neutral transfer modes** — `inline`, `provider_upload`,
+`managed_signed_url` and `storage_reference` — behind the same `AIService`
+entry point: a feature still supplies only a task name and a private storage
+reference, and the caller can never request or override a mode (Scope §2.2).
+Inline is eligible only through a 5,000,000-byte aggregate raw threshold;
+above it a non-inline mode is eligible only when the source lifecycle, task
+definition, organisation policy, model/provider capability and deployment
+configuration all allow it, and the service fails before external transfer
+when no permitted mode is eligible. Provider copies and GCS staging objects
+are AI-owned derivatives: deletion never deletes the feature-owned source.
+Provider-hosted file identifiers are reusable only within retries of one
+logical execution. Managed signed URLs are exact-object, read-only,
+short-lived (900 s default, 1,800 s maximum) bearer capabilities minted just
+before dispatch and never returned, persisted, audited or logged; caller-
+supplied HTTP(S) URLs remain prohibited. The 5,000,000-byte inline threshold
+and the 50,000,000-byte PDF ceiling are reviewed template constants; provider
+ceilings always win. The re-verified provider contracts live in
+`app/ai/contracts/providers.yaml` and fail fast on inconsistent declarations.
+
 ## Tooling
 
 Backend:
@@ -1040,6 +1060,24 @@ bytes, and no adapter receives a signed URL or storage credential. Large-file
 and provider-reference transfer modes are deferred to v0.8
 (`plans/AI_LARGE_ATTACHMENTS_V0_8_PLAN.md`).
 
+## AI large-file transfer modes (v0.8)
+
+The v0.8 amendment (ADR-0017) adds three non-inline transfer modes without
+changing the storage contract: provider uploads (transient sources),
+just-in-time managed download URLs (retained private S3-compatible sources)
+and private GCS staging references (Vertex `gs://`). Object metadata is
+inspected and organisation ownership authorised before any mode is selected;
+a 50 MB source is streamed through a bounded temporary-file seam and never
+accumulated in Python memory (Scope §2.3). Managed URLs are HTTPS, read-only,
+exact-object and short-lived (default 900 s, maximum 1,800 s), minted only
+after ownership, immutable object identity, size, MIME and digest validation,
+and their query strings are redacted from every log/error/telemetry boundary.
+Vertex stages to a user-provisioned, non-public, same-region GCS staging
+bucket referenced as `gs://...`; the application never creates or configures
+the bucket and runs no GCS cleanup scheduler — the deployer-owned Object
+Lifecycle Management rule (`age = 1`, asynchronous) is the cleanup backstop
+(Scope §2.4/§2.5).
+
 ---
 
 # 18. Background Jobs
@@ -1111,6 +1149,13 @@ cancelled
   synchronous path for small tasks and an `ai.execute` job on the `ai` queue
   for document-scale work; the durable record-then-enqueue rules below apply
   unchanged, and worker logs/metrics carry `ai_request_id` alongside `job_id`.
+- AI large-file transfers (v0.8) keep broker messages reference-only: retries
+  re-head and re-digest the private source before reuse or upload, worker
+  memory/concurrency stay bounded, and terminal outcomes trigger cleanup
+  without duplicate output/cost records. A bounded Dramatiq reconciliation job
+  covers only expired, orphaned or deletion-failed *provider-file* references;
+  it never processes managed signed URLs, GCS staging objects or feature-owned
+  sources (Scope §2.5, §6.7).
 
 Example queues:
 
@@ -1410,9 +1455,26 @@ regional pinning, and local/fake providers inherit their operator-controlled
 location. Defaults are honest for ordinary accounts and unsupported regions
 fail configuration validation; fallback never changes region implicitly, and
 routing metadata records the configured or observed region only where the
-provider exposes it. Provider-hosted uploads, provider file identifiers,
-`gs://` references and URL inputs are deferred to v0.8
-(`plans/AI_LARGE_ATTACHMENTS_V0_8_PLAN.md`).
+provider exposes it.
+
+Large-file and provider-reference input (v0.8, ADR-0017 amendment) is an
+extension of the same adapter boundary, never a new caller-facing surface:
+`app/ai/transfer.py` owns the provider-neutral transfer contracts
+(`inline`, `provider_upload`, `managed_signed_url`, `storage_reference`, the
+5,000,000-byte aggregate inline threshold and the 50,000,000-byte PDF
+ceiling) and `app/ai/staging.py` owns the provider-neutral staging/upload
+seam (`TransferStore`) that concrete adapters implement — OpenAI and Anthropic
+upload transient sources through their file APIs and ingest retained private
+S3 sources through just-in-time managed URLs, Vertex stages to its configured
+private same-region GCS bucket as a `gs://` reference, and Azure OpenAI,
+DeepSeek and local fail closed for non-inline files in v0.8. Provider
+capabilities and limits are re-verified against official documentation and
+recorded in `app/ai/contracts/providers.yaml` (verification date, API/version,
+retention/deletion, MIME/size limits, regional caveats); a loader validates
+the fixture at startup/CI and the registry rejects task/model declarations the
+contracts cannot support. No adapter ever receives a caller-supplied URL, and
+managed signed URLs are never returned, persisted, audited or logged (Scope
+§2.1–§2.5).
 
 ## Integration records
 
@@ -1573,7 +1635,15 @@ database-backed in `organisation_ai_settings`, default-off for new
 organisations, and enforced inside `AIService`, never only in a router
 (ADR-0017, v0.7 Scope §6.5). Attachment limits are configuration-backed
 template constants (5 MB per file, 10 MB combined) and per-model inline
-ceilings come from the model registry.
+ceilings come from the model registry. Large-file transfer modes (v0.8,
+ADR-0017 amendment) follow the same shape: the aggregate inline threshold
+(5,000,000 bytes) and PDF ceiling (50,000,000 bytes) are reviewed template
+constants, per-model per-mode MIME types and ceilings come from the model
+registry validated against the re-verified provider contracts in
+`app/ai/contracts/providers.yaml`, and typed deployment settings for enabled
+non-inline modes (provider upload expiry, managed signed-URL TTL, Vertex
+staging project/bucket/location) fail fast in production on incomplete or
+incompatible configuration (Scope §2.2).
 
 ## Feature flags
 
@@ -1646,6 +1716,11 @@ Never log:
   metadata bind `ai_request_id`, task, provider/model and routing metadata,
   never content. Attachment bytes exist only in worker memory for one provider
   call and are never persisted, placed on the job broker, or logged.
+- managed signed URLs and their query strings (v0.8, ADR-0017 amendment): a
+  URL minted for dispatch is a temporary bearer capability that is never
+  returned to the caller, persisted, audited or logged, and every
+  log/error/telemetry boundary redacts it. Database rows and broker messages
+  carry opaque external references (file ids or `gs://` URIs), never URLs.
 
 ---
 
@@ -1694,6 +1769,14 @@ feature_flag.changed
 ```
 
 Audit events are append-only from the application's point of view.
+
+AI large-file transfer lifecycle (v0.8, ADR-0017 amendment) joins the same
+append-only service with low-cardinality events: mode selection, transfer
+outcome/reuse, expiry, terminal deletion and reconciliation backlog. Audit
+and metric payloads carry opaque external references (provider file ids or
+`gs://` URIs) and identifiers — never attachment content, managed signed URLs
+or their query strings — and redaction tests prove every log/audit/telemetry/
+broker boundary stays URL- and content-free (Scope §2.3, §6.7).
 
 ---
 
@@ -1750,6 +1833,18 @@ for processing. Decompression-bomb protections, page limits and malware
 scanning remain deferred until server-side document processing exists
 (post-v1). The storage endpoint is a configured setting, never
 client-supplied, so storage adds no SSRF surface.
+
+Large-file and provider-reference input (v0.8, ADR-0017 amendment) adds the
+same controls to the AI path without weakening them: non-inline sources are
+verified for ownership, size, MIME and SHA-256 before any transfer, streamed
+through bounded temporary-file storage (never accumulated in memory), and
+provider-hosted copies and GCS staging objects are AI-owned derivatives whose
+deletion never touches the feature-owned source. Caller-supplied HTTP(S)
+URLs remain prohibited, so the SSRF boundary is unchanged; provider upload
+credentials, managed signed URLs and Vertex staging credentials stay in
+typed secret/configuration slots (BP §27), and managed URLs are exact-object,
+read-only, short-lived bearer capabilities that are never returned,
+persisted, audited or logged (Scope §2.2–§2.5).
 
 ## SSRF
 
@@ -1846,6 +1941,17 @@ import-boundary test proves no provider SDK is imported outside
 providers only against dedicated non-production accounts/projects in
 protected CI (ADR-0018: Vertex AI only for Google, never a Gemini API key).
 
+The v0.8 large-file transfer contracts (ADR-0017 amendment, Scope §6.1)
+add fake-backed contract tests to that default: the deterministic mode
+selector and fake staging store cover selection, reuse, expiry and deletion
+hermetically, the checked-in provider contract fixture is validated in CI
+(`make validate-ai-registries`), and registry/config mutation tests prove
+every inconsistent mode, source-lifecycle, MIME, threshold/ceiling, provider,
+expiry/TTL or regional declaration fails fast before dispatch. Opt-in
+provider contract tests for the transfer adapters stay `ai_contracts`-marked
+and run only against dedicated non-production accounts (Scope §6.4–§6.6);
+`make e2e` keeps the protected-route journeys green.
+
 ---
 
 # 32. Developer Tooling
@@ -1900,6 +2006,14 @@ make check
 Provider SDKs are regular dependencies and follow the same rules; an LLM
 provider SDK may only be added together with its adapter under
 `app/ai/providers/`, with the justification recorded (v0.7 Scope §6.3, ADR-0017).
+
+The v0.8 transfer contracts (ADR-0017 amendment) add no provider SDK in the
+contract checkpoint: `app/ai/transfer.py` and `app/ai/staging.py` are
+provider-neutral (PyYAML plus the existing runtime), the fixture and registry
+are validated by existing `make` targets, and an import-boundary test keeps
+transfer-mode and provider concepts inside `app/ai/`. A provider SDK may be
+added only together with its concrete `TransferStore` adapter in §6.4–§6.6,
+with its justification and review gate recorded.
 
 ---
 
@@ -1962,6 +2076,13 @@ credentials, Vertex credential material) and public API surface (the
 organisation-scoped demonstration endpoint); each work unit is reviewed
 through the same loop, and any provider SDK dependency is justified and pinned
 per §32.
+
+The v0.8 large-file transfer modes (ADR-0017 amendment) touch tenant isolation
+(organisation transfer policy, `ai_attachment_references`), secret/IAM
+handling (provider upload credentials, managed signed URLs, Vertex staging
+bucket and credentials), database migrations and provider data handling;
+each checkpoint names its review gate (Scope §6.1–§6.8) and prompt 03 cannot
+apply, commit or merge it until the required approval is recorded.
 
 ---
 

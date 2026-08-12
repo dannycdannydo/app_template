@@ -10,9 +10,10 @@ You are picking up after a review on the current release of the application star
 
 You need only two things, both already available:
 
-1. The reviewer's structured review (in the recent conversation or session output).
-2. The active execution contract: a ready plan in `plans/`, if one was used
-   for this work; otherwise the current `TEMPLATE_V0_N_SCOPE.md` scope file.
+1. The reviewer's structured review in `.handoff/review.md`.
+2. The exact active execution-contract path recorded in
+   `.handoff/implementation.md`: a `Status: Active` plan in `plans/`, if one was
+   used, or the relevant `TEMPLATE_V0_N_SCOPE.md` scope file.
 
 **You do not need to read the architecture blueprint or the implementation guide for this step.** This is a mechanical step: apply fixes, validate, check boxes, commit, merge.
 
@@ -24,7 +25,12 @@ You are the **implementer**, picking up after a review.
 
 1. Read `.handoff/review.md`. This is the reviewer's structured review — it contains the verdict and any must-fix, should-fix, and nit items. If the file does not exist, stop and tell the user to run `02-review` first.
 
-2. If the verdict was APPROVED with no must-fix or should-fix items, skip to step 5.
+   Also read `.handoff/implementation.md` to resolve the exact active contract
+   and work unit. Do not guess from the highest-numbered scope or another plan.
+
+2. If the verdict is `APPROVED` with no must-fix or should-fix items, skip to
+   step 5. Otherwise apply the review findings in steps 3–4; a `CHANGES
+   REQUESTED` verdict is the normal input for that correction path.
 
 3. Apply the must-fix items first. These are blocking — do not proceed until each is resolved.
 
@@ -34,18 +40,24 @@ You are the **implementer**, picking up after a review.
    - `make lint`
    - `make typecheck`
    - `make test`
+   - every additional command required by the active checkpoint/contract.
 
-6. **Update the active contract.** Change `[ ]` to `[x]` for every genuinely
-   complete checklist item. For a plan in `plans/`, once every implementation
-   task is checked, change its `Status:` line to `Complete`; otherwise retain
-   its active status. Leave unchecked any item where a should-fix was skipped
-   and note it in your report.
+   Then, if the work unit names a required human-review gate, verify the
+   review/handoff or contract contains explicit recorded approval for every
+   named category. Stop before changing checkboxes, committing or merging if it
+   is absent; never treat an automated/agent review as human approval.
+
+6. **Update the active contract.** Change `[ ]` to `[x]` only in the selected
+   subsection/checkpoint for every genuinely complete item approved by the
+   review. For a plan in `plans/`, once every implementation checkbox in every
+   checkpoint is checked, change the exact `Status: Active` line to
+   `Status: Complete`; otherwise retain it. Leave unchecked any incomplete item.
 
 7. **Commit.** Stage all relevant changes (implementation files + updated
    scope file or plan). Write a clear commit message:
 
    ```
-   Implement <subsection name> for template v0.N
+   Implement <work-unit name> for <template v0.N or plan name>
 
    <1-2 sentences on what this adds and why it matters for the template foundation.>
    ```
@@ -57,13 +69,18 @@ You are the **implementer**, picking up after a review.
 9. **Clear the handoff files.** Delete `.handoff/implementation.md` and `.handoff/review.md`. They have served their purpose and should not linger — the next cycle starts fresh.
 
 10. **Report status.** After committing and merging, state:
-   - which subsection was completed, committed and merged;
+   - which subsection/checkpoint was completed, committed and merged;
    - whether the review was clean or changes were applied (summarise);
    - validation results;
    - the commit hash and the PR number;
-   - which subsection is next in the sequence;
-   - if this was the last subsection in §6, note that §5 acceptance criteria should be verified before tagging v0.N.0.
+   - which subsection/checkpoint is next in sequence;
+   - if this completed a standalone plan, report `Status: Complete`;
+   - if this was the last release-scope subsection, note that its acceptance
+     criteria must be verified before tagging.
 
 ## Done means
 
-Review feedback is applied, validation passes, the scope file reflects the new state, and the work is committed and merged to `main`. The loop is ready to restart at `01-implement-next.md` for the next subsection — or, if the current release is complete, to verify acceptance criteria and tag the release.
+Review feedback is applied, validation passes, the active contract reflects the
+new state, and the work is committed and merged to `main`. The loop is ready to
+restart at `01-implement-next.md` for the next work unit, or to close the active
+plan/release when none remains.

@@ -7,11 +7,20 @@ task name and never see an SDK. The Scope §6.3 adapters are thin pinned HTTP
 clients (httpx, google-auth for Vertex credentials only) and any future SDK
 import is confined to the same directory; this test guards the boundary from
 day one so an adapter can never leak.
+
+v0.8 Scope §6.1 checkbox 3 adds the transfer-mode boundary: the
+provider-neutral transfer/reference contracts in ``app/ai/transfer.py`` and
+``app/ai/staging.py`` are internal to the AI layer — feature modules must not
+name a transfer mode or a provider reference — and ``AIRequest`` remains
+unchanged (a feature supplies only a task name and a private storage
+reference, never a transfer mode, provider file id, ``gs://`` URI or URL).
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+
+from app.ai.schemas import AIRequest
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 APP_ROOT = BACKEND_ROOT / "app"
@@ -22,6 +31,13 @@ APP_ROOT = BACKEND_ROOT / "app"
 AI_PROVIDER_SDKS = ("openai", "anthropic", "deepseek", "vertexai", "google", "azure")
 ALLOWED_DIR = "app/ai/providers"
 AI_DEMO_ROOT = APP_ROOT / "modules" / "ai_demo"
+
+# v0.8 Scope §6.1 checkbox 3: the provider-neutral transfer contracts live
+# under ``app/ai/`` and are internal. Feature modules may import ``AIService``
+# and the request/result schemas, but never the transfer-mode contract module,
+# the staging seam, or the provider contract fixtures — transfer modes and
+# provider references are selected and constructed inside the AI layer only.
+AI_INTERNAL_CONTRACT_MODULES = ("app.ai.transfer", "app.ai.staging", "app.ai.contracts")
 
 
 def _sdk_import_lines() -> list[tuple[Path, int, str]]:
@@ -45,6 +61,10 @@ def _sdk_import_lines() -> list[tuple[Path, int, str]]:
 
 def _matches_import(line: str, sdk: str) -> bool:
     return line.startswith((f"import {sdk}", f"import {sdk}.", f"from {sdk}", f"from {sdk}."))
+
+
+def _matches_module_import(line: str, module: str) -> bool:
+    return line.startswith((f"import {module}", f"from {module}"))
 
 
 def test_no_provider_sdk_imported_outside_app_ai_providers() -> None:
@@ -73,3 +93,88 @@ def test_ai_demo_does_not_import_ai_persistence_internals() -> None:
     assert violations == [], (
         f"feature modules must not import app.ai.persistence internals; found: {violations}"
     )
+
+
+def test_transfer_contracts_are_not_imported_outside_app_ai() -> None:
+    """Feature modules cannot name transfer modes or provider references.
+
+    v0.8 Scope §6.1 checkbox 3: every import of the transfer contract module,
+    the staging seam or the provider contract fixtures must live inside
+    ``app/ai/``. A feature module importing ``app.ai.transfer`` could name a
+    transfer mode or construct a provider reference, which the Scope §2.2
+    caller boundary forbids — the caller supplies only a task name and a
+    private storage reference.
+    """
+    violations: list[tuple[str, int, str]] = []
+    for path in sorted(APP_ROOT.rglob("*.py")):
+        relative = path.relative_to(BACKEND_ROOT).as_posix()
+        if relative.startswith("app/ai/"):
+            continue
+        for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            for module in AI_INTERNAL_CONTRACT_MODULES:
+                if _matches_module_import(stripped, module):
+                    violations.append((relative, line_number, stripped))
+                    break
+    assert violations == [], (
+        "transfer modes and provider references are internal to app/ai/ "
+        f"(v0.8 Scope §2.2); found: {violations}"
+    )
+
+
+def test_feature_modules_do_not_name_transfer_mode_literals() -> None:
+    """Feature code never names a transfer mode or constructs a gs:// reference.
+
+    A structural guard complementing the import check: modules outside
+    ``app/ai/`` must not write the transfer-mode literal strings or build
+    ``gs://`` / provider file-id references, because those concepts are
+    internal to the AI layer (Scope §2.2). ``storage_reference`` itself is the
+    legitimate caller-supplied field name and is not guarded here — a caller
+    can never *select* a mode, since ``AIRequest`` has no mode field. Comments
+    are ignored.
+    """
+    forbidden = {"provider_upload", "managed_signed_url", "gs://"}
+    violations: list[tuple[str, int, str]] = []
+    for path in sorted(APP_ROOT.rglob("*.py")):
+        relative = path.relative_to(BACKEND_ROOT).as_posix()
+        if relative.startswith("app/ai/"):
+            continue
+        for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            if any(token in stripped for token in forbidden):
+                violations.append((relative, line_number, stripped))
+    assert violations == [], (
+        "feature modules must not name transfer modes or provider references "
+        f"(v0.8 Scope §2.2); found: {violations}"
+    )
+
+
+def test_ai_request_contract_is_unchanged() -> None:
+    """The application-facing request carries no transfer/provider fields.
+
+    v0.8 Scope §2.2: ``AIRequest`` remains the same contract — task, text/
+    messages/storage_reference, output_schema, organisation/user ids and
+    bounded metadata. A caller can never request or override a transfer mode,
+    and no provider file id, ``gs://`` URI, URL or provider name field may be
+    added to the request schema.
+    """
+    forbidden_fields = {
+        "transfer_mode",
+        "provider",
+        "provider_file_id",
+        "provider_reference",
+        "gs_uri",
+        "url",
+        "signed_url",
+    }
+    present = set(AIRequest.model_fields)
+    assert present.isdisjoint(forbidden_fields), (
+        "AIRequest must not expose transfer-mode or provider-reference fields "
+        f"(v0.8 Scope §2.2); found: {sorted(present & forbidden_fields)}"
+    )
+    assert "storage_reference" in present
+    assert "task" in present

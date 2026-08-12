@@ -20,14 +20,23 @@ import {
  */
 
 test.describe('authentication journeys', () => {
+  // The two unauthenticated-redirect tests share an explicit, longer
+  // assertion timeout: they boot the SPA from a cold page load and the
+  // guard's redirect races the shared preview server under parallel workers,
+  // which previously made the default 5 s expect timeout flaky (23/24 green
+  // under full parallel runs). The assertion itself is unchanged — the URL
+  // must still land on /login — only the boot allowance is widened, so no
+  // coverage is weakened (blueprint §31).
+  const redirectTimeout = 15_000
+
   test('an unauthenticated visit to a protected route redirects to login', async ({ page }) => {
     await page.goto('/')
-    await expect(page).toHaveURL(/\/login/)
+    await expect(page).toHaveURL(/\/login/, { timeout: redirectTimeout })
   })
 
   test('an unauthenticated visit to the records route redirects to login', async ({ page }) => {
     await page.goto('/records')
-    await expect(page).toHaveURL(/\/login/)
+    await expect(page).toHaveURL(/\/login/, { timeout: redirectTimeout })
   })
 
   test('visiting /login while authenticated redirects to the shell', async ({ page }) => {

@@ -12,9 +12,10 @@ Read, in this order:
 
 1. `.handoff/scope.md` — the planner's handoff summary (which release, subsection ordering, blueprint mappings, open questions).
 2. The drafted scope file (the newest `TEMPLATE_V0_N_SCOPE.md` in the repo root).
-3. The corresponding `Template v0.N — <Title>` section in `IMPLEMENTATION_GUIDE.md`.
+3. The corresponding `Template v0.N — <Title>` section in
+   `IMPLEMENTATION_GUIDE.md`, when one exists.
 4. The previous scope file (for structural and convention comparison).
-5. Every release-specific design source named by the draft, guide or planner
+5. Every release-specific design source named by the draft, guide, prior scope or planner
    handoff (for example `plans/*_WORKFLOW_PLAN.md`) — especially its API-surface and
    frontend-route tables.
 6. The specific blueprint sections the planner mapped — verify their line ranges are accurate.

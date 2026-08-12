@@ -10,7 +10,11 @@ Work proceeds through a repeating cycle:
 00-scope-next → 00b-scope-review → 01-implement-next → 02-review → 03-apply-and-commit → 01-implement-next ...
 ```
 
-Prompt 00 runs **once per release** to draft the next scope file (`TEMPLATE_V0_N_SCOPE.md`) from the implementation guide; 00b reviews that draft before it is committed. The daily loop (01–03) then executes each subsection of the new scope file.
+Prompt 00 runs **once per release** to draft the next scope file
+(`TEMPLATE_V0_N_SCOPE.md`) from the implementation guide or a named release
+design source; 00b reviews that draft before it is committed. The daily loop
+(01–03) then executes either that release scope or the unique active standalone
+plan.
 
 | Prompt | When to use | Role | Outcome |
 | --- | --- | --- | --- |
@@ -19,7 +23,7 @@ Prompt 00 runs **once per release** to draft the next scope file (`TEMPLATE_V0_N
 | `01-implement-next.md` | Starting a new chunk of work | Implementer | Next unchecked task is built, tested, and ready for review |
 | `02-review.md` | After implementation | Reviewer | Structured review with approve / request-changes verdict |
 | `03-apply-and-commit.md` | After review | Implementer | Review feedback applied, task checked off, committed |
-| `05-discuss-and-plan.md` | Before implementation, for a smoke-test sweep or emerging idea | Planning partner | Agreed findings captured and, on request, a standalone implementation plan written |
+| `05-discuss-and-plan.md` | Before implementation, for a smoke-test sweep or emerging idea | Planning partner | Checkpointed standalone execution contract written as Draft, Active or Complete |
 
 ## The periodic audit
 
@@ -42,16 +46,20 @@ Prompt 01 starts work on the current branch; prompt 03 commits there. Do not pus
 
 The audit is **not** part of the daily loop. It reads the universal rule sections of the blueprint (§33 agent rules, §10 DB conventions, §12 API design, §13 API errors) and scans the codebase as it stands for drift and cross-cutting violations that a per-diff review cannot catch. A clean audit is a gating acceptance criterion for tagging each release (see scope §5).
 
-`05-discuss-and-plan` is also outside the daily loop. Use it before there is a
-defined work unit—for example, while manually smoke testing. It records and
-clarifies findings, then writes a reusable plan only when the user asks; the
-resulting plan enters the normal implement → review → apply-and-commit process.
+`05-discuss-and-plan` is also outside the daily loop. It writes a reusable plan
+only when the user asks. A plan ready for implementation contains the exact line
+`Status: Active`, ordered `### Pn` checkbox checkpoints, commands, acceptance
+criteria and a reference map. Prompt 01 prefers the unique active plan over the
+release scope. Draft/Complete plans are ignored, and more than one Active plan
+is a configuration error. `make validate-execution-contracts` enforces this
+shape and is part of `make check`.
 
 ## How to use them
 
 1. Open a fresh agent session (or continue an existing one).
 2. Paste the prompt for the role you need.
-3. The agent reads the project documents and handoff files, finds its place, and acts.
+3. The agent discovers the unique active plan, or falls back to the latest
+   release scope, then reads the project documents and handoff files.
 4. When the loop completes one task, start again with `01` for the next.
 
 ## How handoffs work between sessions
@@ -73,11 +81,13 @@ If `.handoff/scope.md` exists, a scope-plan review is waiting to happen (00b). I
 
 ## Token economy — how context is managed
 
-The architecture blueprint (`Internal_Custom_Application_Starter_Architecture_v2.md`) is ~2150 lines. Reading it in full on every step would waste context and dilute focus. The prompts are designed to avoid this:
+The architecture blueprint (`Internal_Custom_Application_Starter_Architecture_v2.md`) is large. Reading it in full on every step would waste context and dilute focus. The prompts are designed to avoid this:
 
-- **Prompt 01 (implement):** Reads the scope file, which contains a **blueprint reference map** (§7) mapping each checklist subsection to the specific blueprint sections that govern it. The implementer reads only those sections — typically 2–4 short sections, not the whole document.
-- **Prompt 02 (review):** Reads only the blueprint sections the implementer referenced in their handoff summary, plus the current scope contract/dependency chain needed for an independent interface-closure check. No blanket read.
-- **Prompt 03 (apply-and-commit):** Does **not** read the blueprint or implementation guide at all. It is a mechanical step — apply fixes, validate, tick boxes, commit. It needs only the review feedback and the scope checklist.
+- **Prompt 01 (implement):** Reads the active execution contract, whose
+  reference map maps each checklist work unit to its governing sources. The
+  implementer reads only those sections.
+- **Prompt 02 (review):** Reads only the governing sections the implementer referenced in their handoff summary, plus the active contract/dependency chain needed for an independent interface-closure check. No blanket read.
+- **Prompt 03 (apply-and-commit):** Does **not** read the blueprint or implementation guide at all. It is a mechanical step — apply fixes, validate, tick boxes, commit. It needs only the handoffs and active contract.
 - **Prompt 04 (audit):** Reads four cross-cutting rule sections of the blueprint (§33, §10, §12, §13) regardless of task, because it checks the whole codebase against universal rules. These sections are compact — together they are under 150 lines.
 
 The `IMPLEMENTATION_GUIDE.md` is referenced in prompt 01 as optional broader context and in prompt 00 as the authoritative source for the next release's capability list. Release-specific design sources named by the guide or scope (such as a workflow plan) are also authoritative for interface coverage during scope planning and scope review. They are not required for ordinary day-to-day code review unless the scope itself is incomplete or ambiguous.
@@ -88,11 +98,16 @@ Three documents exist in the repo root (plus one more per release):
 
 - `Internal_Custom_Application_Starter_Architecture_v2.md` — the long-term architecture standard. Read selectively, via the reference map.
 - `IMPLEMENTATION_GUIDE.md` — the build plan and incremental release sequence. Always read in prompt 00; optional elsewhere.
-- `TEMPLATE_V0_N_SCOPE.md` — the current release contract with the progress checklist and blueprint reference map (highest-numbered `TEMPLATE_V0_*_SCOPE.md` present). Always read.
+- `TEMPLATE_V0_N_SCOPE.md` — the current release contract, used when no active
+  standalone plan exists.
+- `plans/*.md` — standalone contracts. Only the unique exact `Status: Active`
+  plan participates in the daily loop.
 
 ## Notes
 
-- The unit of work is one subsection of the scope checklist (e.g. §6.2, §6.3). The implementer may batch closely related line items within a subsection.
+- The unit of work is one scope subsection (e.g. §6.2) or one standalone-plan
+  checkpoint (e.g. P2). Closely related line items may be batched only within
+  that unit.
 - If a review comes back clean (approved), skip the fix steps in `03` and go straight to commit.
 - The audit (`04`) runs on demand or at release gates — not after every commit. CRITICAL findings block the release tag; MAJOR and MINOR findings are fed back into the daily loop as follow-up work.
 - Prompt 00 runs once per release; prompts 01–03 loop within a release. After every subsection in §6 is checked and all acceptance criteria in §5 (including the clean audit) are met, the release is tagged and prompt 00 drafts the next scope file (`TEMPLATE_V0_N_SCOPE.md`).

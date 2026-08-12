@@ -11,6 +11,11 @@ parameter_defaults:
   temperature: 0
 output_schema: app.ai.tasks.schemas.DocumentClassificationResult
 declares_text_result: false
+# v0.8 Scope §2.2: the demonstration task permits inline only for now; a
+# non-inline mode is added in a later checkpoint together with the adapter that
+# can carry it.
+allowed_transfer_modes:
+  - inline
 # v0.7 Scope §2/§6.6 retention choice: the demonstration task opts into
 # retaining its validated output content so the durable result endpoint can
 # return the classification under the organisation's retention policy.
