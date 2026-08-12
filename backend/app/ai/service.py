@@ -296,6 +296,7 @@ class AIService:
         model_override: str | None = None,
         maximum_estimated_cost: Decimal | None = None,
         attachments: Sequence[Attachment] | None = None,
+        input_reference: str | None = None,
     ) -> AIResult:
         """Execute one task request and return a validated result.
 
@@ -357,6 +358,12 @@ class AIService:
                 "dispatch without organisation enforcement (v0.7 Scope §6.5)"
             )
 
+        # The durable-record input provenance (v0.7 Scope §6.6). A request that
+        # names a ``storage_reference`` records it directly; the durable-job
+        # boundary that decodes a private object into text input for a text
+        # task passes the reference here so the ``ai_requests``/``ai_outputs``
+        # rows still carry where the input came from (BP §28, ADR-0017).
+        effective_input_reference = input_reference or request.storage_reference
         execution_request_id = request_id or uuid4().hex
         task = self._resolve_task(request.task)
         prompt = self._resolve_prompt(task.prompt_name, task.prompt_version)
@@ -504,7 +511,7 @@ class AIService:
                             region=provider.region,
                             estimated_cost=decision.estimated_max_cost,
                             execution_maximum_estimated_cost=bounded_estimate,
-                            input_reference=request.storage_reference,
+                            input_reference=effective_input_reference,
                             input_digest=_attachment_set_digest(resolved_attachments),
                         )
                         if not reservation.created:
@@ -527,7 +534,7 @@ class AIService:
                             fallback_used=decision.fallback_used,
                             region=provider.region,
                             estimated_cost=decision.estimated_max_cost,
-                            input_reference=request.storage_reference,
+                            input_reference=effective_input_reference,
                             input_digest=_attachment_set_digest(resolved_attachments),
                         )
                 pending_attempts.append(pending_attempt)
@@ -617,7 +624,7 @@ class AIService:
                                     model,
                                     estimate_tokens(repair_request.prompt),
                                 ),
-                                input_reference=request.storage_reference,
+                                input_reference=effective_input_reference,
                                 input_digest=_attachment_set_digest(resolved_attachments),
                             )
                         pending_attempts.append(repair_attempt)
@@ -789,7 +796,7 @@ class AIService:
                         output_reference=None,
                         output_digest=_validated_output_digest(result.output),
                         retain_content=retain_output_content,
-                        input_reference=request.storage_reference,
+                        input_reference=effective_input_reference,
                         input_digest=_attachment_set_digest(resolved_attachments),
                     )
                 else:

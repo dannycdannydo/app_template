@@ -62,6 +62,7 @@ _AI_SETTINGS_ORG_ID = str(uuid.uuid4())
 _FILE_ID = str(uuid.uuid4())
 _JOB_ID = str(uuid.uuid4())
 _NOTIFICATION_ID = str(uuid.uuid4())
+_AI_REQUEST_ID = uuid.uuid4().hex
 
 _PRIVATE_KEY, _ = generate_key_pair()
 _OTHER_KEY, _ = generate_key_pair()
@@ -328,6 +329,27 @@ PROTECTED_ROUTES: list[RouteSpec] = [
             "retention_policy_days": None,
         },
         path_values={"organisation_id": _AI_SETTINGS_ORG_ID},
+    ),
+    # AI classification demonstration (Scope §6.6): the demo endpoint is
+    # org-scoped and gated by existing document permissions — triggering a
+    # classification is a document action (documents.upload, member and above;
+    # a read-only viewer is denied), and reading a durable result is a read
+    # (documents.read). There is no generic arbitrary-prompt surface: the only
+    # exposed task is the checked-in document.classify demonstration. The async
+    # acknowledgement is returned by the same POST based on the input form.
+    _route(
+        "POST",
+        "/api/v1/ai/classify",
+        org_scoped=True,
+        request_body={
+            "storage_reference": "organisations/00000000-0000-7000-8000-000000000000/ai/scratch/doc.txt"
+        },
+    ),
+    _route(
+        "GET",
+        "/api/v1/ai/classify/requests/{request_id}",
+        org_scoped=True,
+        path_values={"request_id": _AI_REQUEST_ID},
     ),
 ]
 

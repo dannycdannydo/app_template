@@ -181,10 +181,53 @@ Check items off only after review. Work is ordered so contracts and safety contr
 
 ## 6.6 Jobs, Example Integration and API/Frontend Surface
 
-- [ ] `ai.execute` Dramatiq queue/task integrated with the durable jobs service; request/job linkage, idempotency key, bounded concurrency/timeouts, status/progress and retry handling; messages carry storage references rather than bytes and every retry re-reads/revalidates the referenced object
-- [ ] Protected organisation-scoped demonstration endpoint/service for `document.classify` (sync only within limits; async otherwise), explicit response schemas and security-suite coverage; no generic arbitrary-prompt endpoint
-- [ ] Generated client and `src/queries/` composables only where the demonstration requires polling/result display; no component or Pinia store imports the API client directly
-- [ ] Tests: synchronous and queued paths, polling, organisation isolation, audit/usage rows, broker payload contains no attachment bytes, retry re-reads storage, keep/temporary lifecycle behavior, and a mocked Playwright journey if a UI is introduced
+- [x] `ai.execute` Dramatiq queue/task integrated with the durable jobs service; request/job linkage, idempotency key, bounded concurrency/timeouts, status/progress and retry handling; messages carry storage references rather than bytes and every retry re-reads/revalidates the referenced object
+- [x] Protected organisation-scoped demonstration endpoint/service for `document.classify` (sync only within limits; async otherwise), explicit response schemas and security-suite coverage; no generic arbitrary-prompt endpoint
+- [x] Generated client and `src/queries/` composables only where the demonstration requires polling/result display; no component or Pinia store imports the API client directly
+- [x] Tests: synchronous and queued paths, polling, organisation isolation, audit/usage rows, broker payload contains no attachment bytes, retry re-reads storage, keep/temporary lifecycle behavior, and a mocked Playwright journey if a UI is introduced
+
+> **Recorded human review and application authorisation (AGENTS.md — tenant-isolation and database-contract changes).**
+> On 2026-08-11, the first §6.6 review returned CHANGES REQUESTED: the durable
+> path decoded storage input into a substitute text request instead of passing
+> the storage reference through the service attachment boundary; no `ai_requests`
+> row existed before enqueue; multi-attempt replay reconciliation consulted only
+> attempt 1; the `202` response had no explicit OpenAPI schema; polling stopped on
+> the queued-window 404; and the full test command was not green. The repository
+> owner explicitly authorised the implementer to apply the corrections, including
+> the org-scoped `ai_requests` schema change, and approved the `queued` status
+> approach over the `attempt_number=0` alternative. The following corrected
+> changes are approved for application:
+>
+> 1. **Storage-reference attachment path** — the demo task now declares the
+>    `documents` capability and `storage_reference` input; both the synchronous
+>    and the durable paths call `AIService.execute(task="document.classify",
+>    storage_reference=...)` so the service resolves the private object to a
+>    bounded provider-neutral attachment (Acceptance §5.1), never decoding it
+>    into a substitute text request. Binary documents (PDF/image) are first-class
+>    inputs routed only to models declaring the `documents` capability.
+> 2. **Pre-enqueue AI request persistence** — `ai_requests.status` gains a
+>    `queued` state and the routing columns become nullable (additive Alembic
+>    migration `f2b3c4d5e6f7`); `enqueue_classify` writes the queued `ai_requests`
+>    row and the durable job row in one transaction before publishing the broker
+>    message (Acceptance §5.8), and `reserve()` adopts a `queued` row — promoting
+>    it to `running` with the budget reservation — at dispatch time, so budget
+>    reservation semantics are unchanged.
+> 3. **Execution-level outcome** — replay reconciliation and the result endpoint
+>    resolve the winning (succeeded) attempt across all attempts instead of
+>    hard-coding attempt 1, so a transient first failure followed by success (and
+>    a crash between AI settlement and job settlement) is reported correctly.
+> 4. **Status-specific OpenAPI** — the router declares the synchronous `200`
+>    (`DocumentClassifySyncResponse`) and accepted `202`
+>    (`DocumentClassifyAcceptedResponse`) response models explicitly; the
+>    generated client reflects both.
+> 5. **Coherent polling and retention** — the pre-enqueue queued row makes the
+>    result endpoint return `queued` immediately after the `202`, the task opts
+>    into output-content retention, and the frontend composable polls through the
+>    queued/running window to the terminal result.
+>
+> No authentication, permission-model, secret-handling, destructive-migration or
+> public-API-breaking changes are introduced by this work unit; the migration is
+> additive (a new enum value, nullable columns and a relaxed check constraint).
 
 ## 6.7 Operations, Documentation and Release Governance
 

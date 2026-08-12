@@ -234,8 +234,18 @@ def test_production_accepts_a_webhook_secret() -> None:
 # --- Object storage settings (Scope §6.1, blueprint §17) ---
 
 
-def test_storage_defaults_are_s3_with_dev_sensible_limits() -> None:
+def test_storage_defaults_are_s3_with_dev_sensible_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Scope §6.1: the provider defaults to s3; limits are dev-friendly."""
+    # A developer's shell may export STORAGE_* values; unset them so the field
+    # defaults (not the shell) are what this test asserts.
+    for var in (
+        "STORAGE_ENDPOINT_URL",
+        "STORAGE_PUBLIC_ENDPOINT_URL",
+        "STORAGE_REGION",
+    ):
+        monkeypatch.delenv(var, raising=False)
     settings = Settings(
         app_env="development",
         database_url="postgresql+asyncpg://x",
@@ -368,8 +378,19 @@ def test_production_rejects_fake_provider() -> None:
         )
 
 
-def test_production_requires_explicit_s3_configuration() -> None:
+def test_production_requires_explicit_s3_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Scope §4: production with storage_provider=s3 must set credentials/bucket/endpoint."""
+    # Unset leaked STORAGE_* shell exports so the "missing configuration"
+    # scenarios below are what actually runs.
+    for var in (
+        "STORAGE_ACCESS_KEY_ID",
+        "STORAGE_SECRET_ACCESS_KEY",
+        "STORAGE_ENDPOINT_URL",
+        "STORAGE_REGION",
+    ):
+        monkeypatch.delenv(var, raising=False)
     with pytest.raises(ValidationError, match="storage_access_key_id"):
         Settings(
             app_env="production",
@@ -383,6 +404,7 @@ def test_production_requires_explicit_s3_configuration() -> None:
             storage_secret_access_key="sk_storage_test",
             storage_bucket="files",
             storage_endpoint_url="https://s3.example.test",
+            ai_enabled_providers=[],
         )
 
     with pytest.raises(ValidationError, match="storage_endpoint_url"):
@@ -398,6 +420,7 @@ def test_production_requires_explicit_s3_configuration() -> None:
             storage_access_key_id="ak_test",
             storage_secret_access_key="sk_storage_test",
             storage_bucket="files",
+            ai_enabled_providers=[],
         )
 
 
@@ -529,8 +552,19 @@ def test_production_requires_tls_for_public_ipv6_redis() -> None:
 # --- Email settings (Scope §6.2, blueprint §20, ADR-0015) ---
 
 
-def test_email_settings_defaults() -> None:
+def test_email_settings_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     """Scope §6.2: smtp is the default provider; SMTP is unconfigured by default."""
+    # Unset leaked EMAIL_FROM/SMTP_* shell exports so the field defaults are
+    # what this test asserts.
+    for var in (
+        "EMAIL_FROM",
+        "SMTP_HOST",
+        "SMTP_PORT",
+        "SMTP_USERNAME",
+        "SMTP_PASSWORD",
+        "SMTP_USE_TLS",
+    ):
+        monkeypatch.delenv(var, raising=False)
     settings = Settings(
         app_env="development",
         database_url="postgresql+asyncpg://x",
@@ -589,8 +623,21 @@ def test_production_rejects_fake_email_provider() -> None:
         )
 
 
-def test_production_requires_explicit_smtp_configuration() -> None:
+def test_production_requires_explicit_smtp_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Scope §4: production with email_provider=smtp requires host/port/from."""
+    # Unset leaked EMAIL_FROM/SMTP_* shell exports so the "missing
+    # configuration" scenarios below are what actually runs.
+    for var in (
+        "EMAIL_FROM",
+        "SMTP_HOST",
+        "SMTP_PORT",
+        "SMTP_USERNAME",
+        "SMTP_PASSWORD",
+        "SMTP_USE_TLS",
+    ):
+        monkeypatch.delenv(var, raising=False)
     with pytest.raises(ValidationError, match="smtp_host"):
         Settings(
             app_env="production",
@@ -608,6 +655,7 @@ def test_production_requires_explicit_smtp_configuration() -> None:
             email_provider="smtp",
             email_from="no-reply@example.com",
             smtp_port=587,
+            ai_enabled_providers=[],
         )
 
     with pytest.raises(ValidationError, match="smtp_port"):
@@ -627,6 +675,7 @@ def test_production_requires_explicit_smtp_configuration() -> None:
             email_provider="smtp",
             email_from="no-reply@example.com",
             smtp_host="smtp.example.test",
+            ai_enabled_providers=[],
         )
 
     with pytest.raises(ValidationError, match="email_from"):
@@ -646,6 +695,7 @@ def test_production_requires_explicit_smtp_configuration() -> None:
             email_provider="smtp",
             smtp_host="smtp.example.test",
             smtp_port=587,
+            ai_enabled_providers=[],
         )
 
 

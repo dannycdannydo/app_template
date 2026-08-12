@@ -160,17 +160,23 @@ def bind_identity_context(*, user_id: str, organisation_id: str | None = None) -
     structlog.contextvars.bind_contextvars(**context)
 
 
-def bind_worker_context(*, job_id: str, resource_id: str | None = None) -> None:
+def bind_worker_context(
+    *, job_id: str, resource_id: str | None = None, ai_request_id: str | None = None
+) -> None:
     """Bind the durable job identity to the logging context in a worker task.
 
     Worker tasks call this first thing (after clearing context vars) so every
     log line an attempt emits carries the ``job_id``, and ``resource_id`` once
-    the row the job operates on is known. Context vars are per-async-task, so
-    a message cannot observe another message's context; the explicit clear is
-    a belt-and-braces guard for threads that process messages serially.
+    the row the job operates on is known. AI work (v0.7, blueprint §18) binds
+    ``ai_request_id`` alongside ``job_id`` so a request's logs are traceable
+    across attempts. Context vars are per-async-task, so a message cannot
+    observe another message's context; the explicit clear is a belt-and-braces
+    guard for threads that process messages serially.
     """
     structlog.contextvars.clear_contextvars()
     context: dict[str, str] = {"job_id": job_id}
     if resource_id is not None:
         context["resource_id"] = resource_id
+    if ai_request_id is not None:
+        context["ai_request_id"] = ai_request_id
     structlog.contextvars.bind_contextvars(**context)

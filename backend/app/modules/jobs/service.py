@@ -193,6 +193,7 @@ async def create_and_enqueue(
     input_reference: str,
     actor_user_id: uuid.UUID | None = None,
     task: Actor[Any, Any],
+    job_id: uuid.UUID | None = None,
 ) -> Job:
     """Write the durable ``queued`` row, then enqueue the task (BP §18 flow).
 
@@ -204,9 +205,14 @@ async def create_and_enqueue(
     picks up the message before the commit lands) is a transient failure on
     the worker side — the job row is not visible yet — which the bounded
     retry policy self-heals.
+
+    ``job_id`` optionally supplies a pre-generated id so a caller can add
+    companion rows (e.g. a pre-enqueue ``ai_requests`` linkage row) to the
+    same session before this call; the single commit then makes both rows
+    atomic (v0.7 Scope §5.8).
     """
     job = Job(
-        id=uuid7(),
+        id=job_id or uuid7(),
         organisation_id=organisation_id,
         job_type=job_type,
         status=JobStatus.QUEUED,
