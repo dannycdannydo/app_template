@@ -21,6 +21,7 @@ signed URL or ``gs://`` URI is never a caller-supplied input (Scope §2.2).
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
@@ -747,6 +748,34 @@ def source_lifecycle_for_reference(reference: str, organisation_id: UUID) -> Sou
     return SourceLifecycle.RETAINED
 
 
+def derive_idempotency_key(
+    *,
+    provider: str,
+    mode: TransferMode,
+    organisation_id: UUID,
+    logical_request_id: str,
+    source_digest: str,
+    region: str,
+) -> str:
+    """The structural idempotency key for one logical transfer.
+
+    v0.8 Scope §2.1/§2.3, §6.3: derived, never caller-supplied. Retries of one
+    logical request reconstruct the same key, while a changed provider, mode,
+    organisation, digest or region creates a different key and therefore a new
+    transfer. The key is the SHA-256 of the exact reuse predicate
+    (provider, mode, organisation, logical request, digest, region), so the
+    durable ``ai_attachment_references`` row, the :class:`TransferStore`
+    implementations and the managed-URL reuse path can never drift about which
+    transfer a retry reuses. The provider is part of the key because a store
+    instance is provider-specific; including it keeps the derived key
+    collision-free even where stores share a namespace.
+    """
+    raw = (
+        f"{provider}|{mode.value}|{organisation_id}|{logical_request_id}|{source_digest}|{region}"
+    ).encode()
+    return hashlib.sha256(raw).hexdigest()
+
+
 def _error_message(exc: ValidationError) -> str:
     """Format a pydantic error summary without echoing provider content."""
     return "; ".join(
@@ -778,6 +807,7 @@ __all__ = [
     "TransferMode",
     "TransferModeContract",
     "UploadExpiryContract",
+    "derive_idempotency_key",
     "load_transfer_contracts",
     "select_transfer_mode",
     "select_transfer_mode_for_policy",

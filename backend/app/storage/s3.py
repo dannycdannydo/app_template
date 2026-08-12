@@ -34,7 +34,7 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
-from app.storage.base import DEFAULT_SIGNED_URL_TTL, ObjectStorage
+from app.storage.base import DEFAULT_SIGNED_URL_TTL, ObjectStorage, WritableByteStream
 from app.storage.types import ObjectInfo, SignedUrl
 
 # S3 responses for "the object/bucket does not exist", reported with varying
@@ -44,6 +44,11 @@ _MISSING_OBJECT_CODES = {"404", "NoSuchKey", "NotFound"}
 # Codes S3-compatible services return when the bucket already exists, treated
 # as a successful (no-op) bucket creation.
 _BUCKET_ALREADY_EXISTS_CODES = {"BucketAlreadyExists", "BucketAlreadyOwnedByYou"}
+#: The bounded chunk size for the v0.8 streaming seam (Scope §2.3/§6.3): the
+#: body is pulled from S3 one chunk at a time and written straight to the
+#: destination, so a large object never accumulates in Python memory and the
+#: byte ceiling can be enforced mid-stream.
+_STREAM_CHUNK_BYTES = 1024 * 1024
 
 
 class S3Storage(ObjectStorage):
@@ -240,6 +245,68 @@ class S3Storage(ObjectStorage):
         finally:
             await asyncio.to_thread(body.close)
         return bytes(data)
+
+    async def stream_object(
+        self,
+        object_key: str,
+        *,
+        destination: WritableByteStream,
+        max_bytes: int | None = None,
+    ) -> None:
+        """Stream one object's body into the destination, chunk by chunk.
+
+        v0.8 Scope §2.3/§6.3: the non-inline transfer path streams a verified
+        private source into a secure temporary file through this seam. The
+        body is pulled in bounded chunks (``_STREAM_CHUNK_BYTES``) and written
+        straight to the destination, so a 50 MB source is never accumulated in
+        Python memory. When ``max_bytes`` is given, the count is enforced
+        mid-stream: the read stops (raising :class:`ValueError`) as soon as
+        the ceiling would be exceeded, without pulling the remainder of the
+        body — the same bounded contract as :meth:`read_object`, so a
+        head/read race still fails bounded (Scope §2.3, §5.8). Missing objects
+        raise :class:`KeyError`; the streaming body is always closed, including
+        on bounded-read failures, so repeated AI transfers never leak HTTP
+        connections.
+        """
+        try:
+            response = await asyncio.to_thread(
+                self._client.get_object,
+                Bucket=self._bucket,
+                Key=object_key,
+            )
+        except ClientError as exc:
+            if _error_code(exc) in _MISSING_OBJECT_CODES:
+                raise KeyError(f"object not found: {object_key}") from exc
+            raise
+        body = response.get("Body")
+        if body is None:
+            raise ValueError(f"provider returned no body for object: {object_key}")
+        try:
+            remaining = max_bytes
+            while True:
+                # Read at most the remaining allowance: the adapter never pulls
+                # a full chunk past the ``max_bytes`` ceiling. When the ceiling
+                # is reached exactly, one probe byte decides whether the body
+                # ends at the limit or must fail bounded (the probe is the only
+                # byte ever read beyond ``max_bytes``, and nothing of the
+                # remainder is buffered).
+                read_size = (
+                    _STREAM_CHUNK_BYTES
+                    if remaining is None
+                    else min(_STREAM_CHUNK_BYTES, remaining)
+                )
+                chunk = await asyncio.to_thread(body.read, read_size)
+                if not chunk:
+                    break
+                if remaining is not None:
+                    remaining -= len(chunk)
+                    if remaining == 0 and await asyncio.to_thread(body.read, 1):
+                        raise ValueError(
+                            f"object exceeds the {max_bytes} byte read limit: {object_key}"
+                        )
+                destination.write(chunk)
+        finally:
+            await asyncio.to_thread(body.close)
 
     async def delete_object(self, object_key: str) -> None:
         try:

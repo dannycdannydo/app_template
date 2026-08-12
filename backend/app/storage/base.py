@@ -11,11 +11,28 @@ from __future__ import annotations
 
 import uuid
 from abc import ABC, abstractmethod
+from collections.abc import Buffer
 from datetime import timedelta
+from typing import Protocol, runtime_checkable
 
 from app.storage.types import ObjectInfo, SignedUrl
 
 DEFAULT_SIGNED_URL_TTL = timedelta(minutes=15)
+
+
+@runtime_checkable
+class WritableByteStream(Protocol):
+    """The minimal write-only stream contract streaming consumers need.
+
+    ``stream_object`` writes into anything implementing this (a secure
+    temporary-file handle, a digest-computing wrapper, a test buffer), so the
+    storage interface never depends on a concrete stream class and the AI
+    layer can interpose digest/size bookkeeping around the write. The
+    signature mirrors the standard library's ``BufferedWriter.write`` so every
+    real binary stream satisfies it structurally.
+    """
+
+    def write(self, buffer: Buffer, /) -> int: ...
 
 
 class ObjectStorage(ABC):
@@ -83,6 +100,30 @@ class ObjectStorage(ABC):
         the whole body into memory, so a head/read race (the object grew or
         changed after ``head_object``) still fails bounded (Scope §6.4
         bounded-memory contract, §5.8).
+        """
+
+    @abstractmethod
+    async def stream_object(
+        self,
+        object_key: str,
+        *,
+        destination: WritableByteStream,
+        max_bytes: int | None = None,
+    ) -> None:
+        """Stream one object's body into an open writable binary stream, bounded.
+
+        v0.8 Scope §2.3/§6.3: the non-inline transfer path never accumulates a
+        large object in Python memory. The AI layer streams a verified private
+        source into a secure temporary file through this seam, computing the
+        SHA-256 digest incrementally and enforcing the byte ceiling during the
+        read, so a 50 MB source is never held in memory or embedded in JSON.
+
+        The adapter must not read more than ``max_bytes`` bytes from the
+        provider: a larger body raises :class:`ValueError` mid-stream without
+        buffering the remainder, mirroring :meth:`read_object`'s bounded read
+        so a head/read race still fails bounded. Raises :class:`KeyError` when
+        the object does not exist. The stream is closed even on failure, so
+        repeated AI transfers never leak provider connections.
         """
 
     @abstractmethod

@@ -376,14 +376,55 @@ platform configuration, secret handling and the additive public API change.
 
 Dependencies: Scope §6.2.
 
-- [ ] Add bounded object streaming/secure temporary-file support behind `ObjectStorage`; verify source ownership, size, MIME and SHA-256 without accumulating 50 MB in memory and preserve existing adapters/callers
-- [ ] Add just-in-time managed download-URL minting for retained private S3 objects behind `ObjectStorage`; require exact immutable object identity, HTTPS/read-only/short TTL and query-string redaction, and never return or persist the URL
-- [ ] Add the organisation-scoped `ai_attachment_references` table, migration, ORM model and complex/reused queries with the §2.3 fields, safe constraints/indexes and idempotency uniqueness
-- [ ] Implement transfer orchestration services for create/adopt/reuse/expire/delete with transaction boundaries, safe errors and explicit proof that AI cleanup never deletes the feature source
-- [ ] Integration tests cover cross-org denial, concurrent duplicate creation, digest change, expired reference replacement, forbidden persisted fields and rollback/error paths
+- [x] Add bounded object streaming/secure temporary-file support behind `ObjectStorage`; verify source ownership, size, MIME and SHA-256 without accumulating 50 MB in memory and preserve existing adapters/callers
+- [x] Add just-in-time managed download-URL minting for retained private S3 objects behind `ObjectStorage`; require exact immutable object identity, HTTPS/read-only/short TTL and query-string redaction, and never return or persist the URL
+- [x] Add the organisation-scoped `ai_attachment_references` table, migration, ORM model and complex/reused queries with the §2.3 fields, safe constraints/indexes and idempotency uniqueness
+- [x] Implement transfer orchestration services for create/adopt/reuse/expire/delete with transaction boundaries, safe errors and explicit proof that AI cleanup never deletes the feature source
+- [x] Integration tests cover cross-org denial, concurrent duplicate creation, digest change, expired reference replacement, forbidden persisted fields and rollback/error paths
 
 Human review required before application: tenant-isolation, migration and
 provider-reference data handling.
+
+> **Recorded human review and application authorisation (AGENTS.md — §6.3
+> tenant-isolation, database-migration and provider-reference-data-handling
+> categories).**
+> On 2026-08-12, after the v0.8 Scope §6.3 review requested changes (exact
+> immutable-identity/digest validation missing from just-in-time managed-URL
+> minting; an untracked provider copy when durable persistence fails after a
+> successful stage; deletion trusting a stale reference instead of the
+> authoritative live row; `adopt` touching a terminal row after replacement;
+> plus the non-blocking constraint/provider/expire-delete composition items),
+> the repository owner explicitly authorised the implementer to apply those
+> corrections and complete the validation/PR/merge workflow. The corrected
+> checkpoint is approved for application:
+>
+> 1. **Bounded streaming/secure temporary-file support** (`stream_object` on
+>    `ObjectStorage` with S3/fake adapters, `StreamedSource` with incremental
+>    SHA-256 and head/read race detection) verifying ownership, size, MIME and
+>    digest without accumulating the 50 MB ceiling in memory; existing
+>    adapters/callers preserved.
+> 2. **Managed download-URL minting** (`mint_managed_download_url` /
+>    `TransferOrchestrator.mint_managed_url`) re-heading the retained source
+>    and re-streaming it bounded so the incremental SHA-256 must equal the
+>    durable digest before a short-TTL HTTPS GET URL is minted; the URL is
+>    never persisted, returned or logged and is redacted at every boundary.
+> 3. **Organisation-scoped `ai_attachment_references` table** (additive
+>    migration `c3d4e5f6a7b8`, ORM model, org-scoped queries) with the §2.3
+>    fields, a partial unique index on live rows for retry-only reuse, the
+>    three non-inline transfer modes as a database invariant and forbidden
+>    URL/bytes columns; `alembic check` clean.
+> 4. **Transfer orchestration** (`TransferOrchestrator` +
+>    `SQLTransferReferenceStore`) with a compensated stage→persist boundary,
+>    authoritative live-row deletion (never a stale caller reference),
+>    live-row adoption after expired replacement, an expire→delete sweep that
+>    composes safely, and proof that AI cleanup never deletes the feature
+>    source.
+> 5. **Integration tests** covering cross-org denial, concurrent duplicate
+>    creation, digest change, expired replacement, forbidden persisted fields,
+>    rollback/error paths and the review's blocking regressions.
+>
+> No public API, frontend consumer or `PROTECTED_ROUTES` change is introduced
+> by this work unit (internal persistence/service surface only).
 
 ## 6.4 OpenAI Provider Upload and Managed URL
 
