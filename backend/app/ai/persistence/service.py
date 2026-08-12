@@ -80,7 +80,7 @@ from app.ai.persistence.queries import (
 from app.ai.registry import CapabilityCostModelRegistry, load_registry_bundle
 from app.ai.schemas import CostEstimate, TokenUsage
 from app.core.config import AI_KNOWN_PROVIDER_IDS
-from app.core.exceptions import ErrorDetail, NotFoundError, ValidationError
+from app.core.exceptions import ConflictError, ErrorDetail, NotFoundError, ValidationError
 from app.modules.audit.service import (
     ACTION_AI_BUDGET_DENIED,
     ACTION_AI_REQUEST_COMPLETED,
@@ -269,6 +269,7 @@ async def update_ai_settings(
     *,
     actor: User,
     organisation_id: uuid.UUID,
+    expected_version: int = 1,
     enabled: bool,
     allowed_provider_ids: list[str],
     allowed_model_ids: list[str],
@@ -280,9 +281,12 @@ async def update_ai_settings(
     """Replace one organisation's AI policy and audit the change.
 
     The registry validation runs before any write, so an invalid policy never
-    reaches the row; the audit event commits inside the same transaction. The
-    row is created when missing (the platform can enable AI for an
-    organisation whose row predates this release).
+    reaches the row. The settings row is locked before comparing the client's
+    version; a stale full replacement returns 409 instead of silently
+    overwriting another administrator's update (BP §10). The audit event
+    commits in the same transaction. The row is created when missing (the
+    platform can enable AI for an organisation whose row predates this
+    release), and that defensive default begins at version 1.
     """
     await _get_organisation_or_404(session, organisation_id)
     _validate_policy_identifiers(
@@ -291,14 +295,21 @@ async def update_ai_settings(
         provider_override=provider_override,
         model_override=model_override,
     )
-    rows = (await session.scalars(organisation_ai_settings_statement(organisation_id))).all()
+    rows = (
+        await session.scalars(organisation_ai_settings_for_update_statement(organisation_id))
+    ).all()
     settings_row = next(
         (row for row in rows if row.organisation_id == organisation_id),
         None,
     )
     if settings_row is None:
-        settings_row = OrganisationAISettings(organisation_id=organisation_id)
+        settings_row = OrganisationAISettings(organisation_id=organisation_id, version=1)
         session.add(settings_row)
+    if settings_row.version != expected_version:
+        raise ConflictError(
+            code="ai_settings_version_conflict",
+            message="The AI settings were changed by another administrator.",
+        )
     settings_row.enabled = enabled
     settings_row.allowed_provider_ids = allowed_provider_ids
     settings_row.allowed_model_ids = allowed_model_ids
@@ -307,6 +318,7 @@ async def update_ai_settings(
     settings_row.monthly_budget = monthly_budget
     settings_row.retention_policy_days = retention_policy_days
     settings_row.updated_by_user_id = actor.id
+    settings_row.version += 1
     await record_event(
         session,
         organisation_id=organisation_id,
@@ -322,6 +334,7 @@ async def update_ai_settings(
             "model_override": model_override,
             "monthly_budget": str(monthly_budget) if monthly_budget is not None else None,
             "retention_policy_days": retention_policy_days,
+            "version": settings_row.version,
         },
     )
     await session.commit()

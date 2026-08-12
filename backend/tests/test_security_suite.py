@@ -320,6 +320,7 @@ PROTECTED_ROUTES: list[RouteSpec] = [
         "/api/v1/platform/organisations/{organisation_id}/ai-settings",
         org_scoped=False,
         request_body={
+            "version": 1,
             "enabled": True,
             "allowed_provider_ids": ["fake"],
             "allowed_model_ids": [],

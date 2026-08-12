@@ -35,6 +35,7 @@ def _item(settings_row: OrganisationAISettings) -> PlatformOrganisationAISetting
     """Assemble the response shape from the ORM row (pure mapping)."""
     return PlatformOrganisationAISettingsResponse(
         organisation_id=settings_row.organisation_id,
+        version=settings_row.version,
         enabled=settings_row.enabled,
         allowed_provider_ids=list(settings_row.allowed_provider_ids),
         allowed_model_ids=list(settings_row.allowed_model_ids),
@@ -77,6 +78,7 @@ async def update_ai_settings_endpoint(
         session,
         actor=user,
         organisation_id=organisation_id,
+        expected_version=payload.version,
         enabled=payload.enabled,
         allowed_provider_ids=payload.allowed_provider_ids,
         allowed_model_ids=payload.allowed_model_ids,

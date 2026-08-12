@@ -123,6 +123,17 @@ def ai_request_record_statement(
     )
 
 
+def ai_output_for_request_statement(
+    organisation_id: uuid.UUID,
+    ai_request_id: uuid.UUID,
+) -> Select[tuple[AIOutputRecord]]:
+    """Return one validated output by its request id and organisation."""
+    return select(AIOutputRecord).where(
+        AIOutputRecord.organisation_id == organisation_id,
+        AIOutputRecord.ai_request_id == ai_request_id,
+    )
+
+
 def ai_month_spend_statement(
     organisation_id: uuid.UUID,
     month_start: datetime,

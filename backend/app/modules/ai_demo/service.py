@@ -28,15 +28,14 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.errors import AIError
-from app.ai.execution import JOB_TYPE_AI_EXECUTE, execute_ai_task_actor, request_id_for_job
-from app.ai.persistence.models import AIOutputRecord, AIRequestRecord, AIRequestStatus
-from app.ai.persistence.queries import ai_latest_attempt_statement, ai_winning_attempt_statement
-from app.ai.persistence.service import AIPersistencePortImpl
-from app.ai.runtime import get_ai_service
+from app.ai.execution import (
+    enqueue_document_classification,
+    execute_managed_ai,
+    get_ai_execution_snapshot,
+)
 from app.ai.schemas import AIRequest
 from app.ai.tasks.schemas import DocumentClassificationResult
 from app.core.exceptions import (
@@ -47,7 +46,6 @@ from app.core.exceptions import (
     ServiceUnavailableError,
     ValidationError,
 )
-from app.db.conventions import uuid7
 from app.modules.ai_demo.schemas import (
     ClassifyCost,
     ClassifyRouting,
@@ -56,7 +54,6 @@ from app.modules.ai_demo.schemas import (
     DocumentClassifyResultResponse,
     DocumentClassifySyncResponse,
 )
-from app.modules.jobs import service as jobs_service
 from app.modules.users.models import User
 
 #: The single demonstrated task (kept in sync with ``app.ai.execution``).
@@ -156,7 +153,8 @@ async def classify_sync(
     """
     _validate_storage_reference(storage_reference, organisation_id)
     try:
-        result = await get_ai_service().execute(
+        result = await execute_managed_ai(
+            session,
             AIRequest(
                 task=DEMO_TASK,
                 storage_reference=storage_reference,
@@ -164,7 +162,6 @@ async def classify_sync(
                 user_id=user.id,
                 metadata={"source": "ai_demo"},
             ),
-            recorder=AIPersistencePortImpl(session),
         )
     except AIError as exc:
         raise _translate_ai_error(exc) from exc
@@ -196,38 +193,22 @@ async def enqueue_classify(
 ) -> DocumentClassifyAcceptedResponse:
     """Persist the durable job + queued AI request, then enqueue (202 path).
 
-    A ``queued`` AI request row and the durable ``queued`` job row are written
-    in the same transaction before the broker message is published (v0.7 Scope
-    §5.8: create a durable job and AI request before enqueueing). The request
-    id is derived deterministically from the job id so the worker reconstructs
-    the §6.5 idempotency key without carrying it on the broker, and the result
-    endpoint is coherent immediately after the ``202`` acknowledgement.
+    The AI platform execution boundary writes a ``queued`` AI request row and
+    durable job row in the same transaction before publishing the broker
+    message (v0.7 Scope §5.8). The feature never imports persistence models or
+    query statements. The request id is derived deterministically from the job
+    id, and the result endpoint is coherent immediately after the ``202``.
     """
     _validate_storage_reference(storage_reference, organisation_id)
-    job_id = uuid7()
-    request_id = request_id_for_job(job_id)
-    queued_request = AIRequestRecord(
-        organisation_id=organisation_id,
-        user_id=user.id,
-        request_id=request_id,
-        attempt_number=1,
-        task=DEMO_TASK,
-        status=AIRequestStatus.QUEUED,
-        input_reference=storage_reference,
-    )
-    session.add(queued_request)
-    job = await jobs_service.create_and_enqueue(
+    queued = await enqueue_document_classification(
         session,
         organisation_id=organisation_id,
-        job_type=JOB_TYPE_AI_EXECUTE,
-        input_reference=storage_reference,
-        actor_user_id=user.id,
-        task=execute_ai_task_actor,
-        job_id=job_id,
+        user_id=user.id,
+        storage_reference=storage_reference,
     )
     return DocumentClassifyAcceptedResponse(
-        job_id=str(job.id),
-        request_id=request_id_for_job(job.id),
+        job_id=str(queued.job_id),
+        request_id=queued.request_id,
     )
 
 
@@ -245,29 +226,18 @@ async def get_classify_result(
     attempt failed (v0.7 Scope §6.4/§6.6). A foreign or unknown request id is a
     404 — indistinguishable from missing (BP §9).
     """
-    record = await session.scalar(ai_winning_attempt_statement(organisation_id, request_id))
-    if record is None:
-        record = await session.scalar(ai_latest_attempt_statement(organisation_id, request_id))
-    if record is None:
-        raise NotFoundError(
-            code="ai_request_not_found",
-            message="The classification result could not be found.",
-        )
+    record = await get_ai_execution_snapshot(
+        session,
+        organisation_id=organisation_id,
+        request_id=request_id,
+    )
     output: DocumentClassificationResult | None = None
-    if record.status == AIRequestStatus.SUCCEEDED:
-        output_record = await session.scalar(
-            select(AIOutputRecord).where(
-                AIOutputRecord.ai_request_id == record.id,
-                AIOutputRecord.organisation_id == organisation_id,
-            )
-        )
-        if output_record is not None and output_record.output_json is not None:
-            output = DocumentClassificationResult.model_validate(output_record.output_json)
-    is_terminal = record.status in (AIRequestStatus.SUCCEEDED, AIRequestStatus.FAILED)
+    if record.status == "succeeded" and record.output is not None:
+        output = DocumentClassificationResult.model_validate(record.output)
     routing: ClassifyRouting | None = None
     usage: ClassifyUsage | None = None
     cost: ClassifyCost | None = None
-    if record.status == AIRequestStatus.SUCCEEDED:
+    if record.status == "succeeded":
         routing = ClassifyRouting(
             provider=record.provider or "",
             model=record.model or "",
@@ -280,11 +250,11 @@ async def get_classify_result(
         cost = ClassifyCost(amount=record.cost, currency="USD")
     return DocumentClassifyResultResponse(
         request_id=record.request_id,
-        status=record.status.value,
+        status=record.status,
         error_code=record.error_code,
         output=output,
         routing=routing,
         usage=usage,
         cost=cost,
-        completed_at=record.updated_at if is_terminal else None,
+        completed_at=record.completed_at,
     )

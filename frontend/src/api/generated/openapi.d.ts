@@ -1726,6 +1726,8 @@ export interface components {
        * Format: uuid
        */
       organisation_id: string
+      /** Version */
+      version: number
       /** Enabled */
       enabled: boolean
       /** Allowed Provider Ids */
@@ -1763,6 +1765,8 @@ export interface components {
      *     ``None`` disables scheduled retention deletion.
      */
     PlatformOrganisationAISettingsUpdate: {
+      /** Version */
+      version: number
       /** Enabled */
       enabled: boolean
       /** Allowed Provider Ids */

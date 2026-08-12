@@ -92,7 +92,7 @@ async def delete_bootstrap_admin(
     """Tear down one bootstrap admin on both sides (WorkOS and the app DB).
 
     Deleting the internal ``users`` row cascades to the ``platform_memberships``
-    and ``bootstrap_state`` rows, which is what resets the one-time bootstrap:
+    and ``bootstrap_states`` rows, which is what resets the one-time bootstrap:
     the next ``make provision-admin`` + first login of a fresh email can grant
     ``platform_admin`` again. The admin's organisation memberships do not
     cascade, so their role grants and memberships are removed explicitly first

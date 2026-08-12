@@ -42,7 +42,7 @@ from app.ai.persistence.service import (
 )
 from app.ai.registry import load_registry_bundle
 from app.ai.schemas import CostEstimate, TokenUsage
-from app.core.exceptions import ValidationError
+from app.core.exceptions import ConflictError, ValidationError
 from app.modules.audit.service import (
     ACTION_AI_BUDGET_DENIED,
     ACTION_AI_REQUEST_COMPLETED,
@@ -218,6 +218,7 @@ async def test_update_settings_persists_and_audits(migrated_database: str) -> No
             assert settings_row.monthly_budget == Decimal("10.000000")
             assert settings_row.retention_policy_days == 30
             assert settings_row.updated_by_user_id == actor.id
+            assert settings_row.version == 2
 
             actions = (
                 await session.execute(
@@ -229,6 +230,56 @@ async def test_update_settings_persists_and_audits(migrated_database: str) -> No
                 )
             ).all()
             assert [action for (action,) in actions] == [ACTION_AI_SETTINGS_UPDATED]
+    finally:
+        await engine.dispose()
+
+
+async def test_update_settings_rejects_stale_version(migrated_database: str) -> None:
+    """A stale full replacement returns 409 semantics and changes nothing."""
+    engine, session_factory = _session_factory(migrated_database)
+    try:
+        async with session_factory() as session:
+            actor = await _seed_actor(session)
+            organisation = await _seed_organisation(session)
+            await _seed_settings(session, organisation.id)
+
+            first = await ai_persistence.update_ai_settings(
+                session,
+                actor=actor,
+                organisation_id=organisation.id,
+                expected_version=1,
+                enabled=True,
+                allowed_provider_ids=[],
+                allowed_model_ids=[],
+                provider_override=None,
+                model_override=None,
+                monthly_budget=Decimal("10.000000"),
+                retention_policy_days=30,
+            )
+            assert first.version == 2
+
+            with pytest.raises(ConflictError) as exc_info:
+                await ai_persistence.update_ai_settings(
+                    session,
+                    actor=actor,
+                    organisation_id=organisation.id,
+                    expected_version=1,
+                    enabled=False,
+                    allowed_provider_ids=[],
+                    allowed_model_ids=[],
+                    provider_override=None,
+                    model_override=None,
+                    monthly_budget=None,
+                    retention_policy_days=None,
+                )
+            assert exc_info.value.status_code == 409
+            assert exc_info.value.code == "ai_settings_version_conflict"
+
+            await session.refresh(first)
+            assert first.enabled is True
+            assert first.monthly_budget == Decimal("10.000000")
+            assert first.retention_policy_days == 30
+            assert first.version == 2
     finally:
         await engine.dispose()
 
