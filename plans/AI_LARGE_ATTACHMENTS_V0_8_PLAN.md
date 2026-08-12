@@ -1,6 +1,6 @@
 # Template v0.8 — Large AI Attachments and Reference Transfer Modes — Plan
 
-Status: Proposed follow-up to v0.7; not yet an approved release contract
+Status: Superseded as an execution contract by `TEMPLATE_V0_8_SCOPE.md`; retained as the design source
 
 Depends on: `TEMPLATE_V0_7_SCOPE.md` (§6.2–§6.7), ADR-0017, ADR-0018,
 `Internal_Custom_Application_Starter_Architecture_v2.md` (BP §17, §18, §23,

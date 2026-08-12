@@ -28,7 +28,7 @@ define load_env
 	set -a; [ -f .env ] && . ./.env; set +a;
 endef
 
-.PHONY: dev dev-docker worker migrate provision-admin provision-admin-delete lint typecheck test test-ai-contracts e2e format generate-client validate-ai-registries check
+.PHONY: dev dev-docker worker migrate provision-admin provision-admin-delete lint typecheck test test-ai-contracts e2e format generate-client validate-ai-registries validate-execution-contracts check
 
 ## Start PostgreSQL + Redis + MinIO + Mailhog in Docker, then run the API, the
 ## Dramatiq worker and the frontend natively with live reload (ADR-0008).
@@ -117,7 +117,11 @@ generate-client:
 validate-ai-registries:
 	cd backend && uv run python -m scripts.validate_ai_registries
 
+## Validate standalone plan discovery, checkpoints and reference-map coverage.
+validate-execution-contracts:
+	cd backend && uv run python -m scripts.validate_execution_contracts
+
 ## Full local quality gate: lint + typecheck + test + generated-client drift.
-check: lint typecheck test validate-ai-registries generate-client
+check: lint typecheck test validate-ai-registries validate-execution-contracts generate-client
 	@git diff --exit-code -- frontend/src/api/generated/openapi.d.ts
 	@echo "check passed: lint, typecheck, tests, and the generated client are all clean"

@@ -8,12 +8,25 @@ Paste this prompt to have the agent pick up the next unchecked work unit and imp
 
 You are building a reusable full-stack application starter template: FastAPI + SQLAlchemy 2 + Pydantic 2 + PostgreSQL + Vue 3 + TypeScript + Tailwind + shadcn-vue, modular monolith, WorkOS auth, Dramatiq jobs, provider-neutral storage.
 
-The build is **stage by stage**. The current release is the one whose scope file exists as `TEMPLATE_V0_N_SCOPE.md` (the highest-numbered such file, currently `TEMPLATE_V0_5_SCOPE.md`). Each subsection of the checklist is one work unit, worked through a three-step loop: implement → review → apply-and-commit.
+The build is **stage by stage**. Work is governed by one active execution
+contract: either a standalone plan in `plans/` whose exact status line is
+`Status: Active`, or otherwise the highest-numbered root
+`TEMPLATE_V0_*_SCOPE.md`. Each checklist subsection/checkpoint is one work unit,
+worked through a three-step loop: implement → review → apply-and-commit.
 
-Two local files govern this release — read them both first:
+Discover and read the contract first:
 
-1. The current scope file — `TEMPLATE_V0_N_SCOPE.md`, the highest-numbered `TEMPLATE_V0_*_SCOPE.md` in the repo root. It is the release contract: §2 deliverables, §3 exclusions, §4 commands, §5 acceptance criteria, §6 progress checklist, §7 blueprint reference map.
-2. `Internal_Custom_Application_Starter_Architecture_v2.md` — the architecture standard. **Do not read the whole file.** Use the reference map in §7 of the scope file to read only the blueprint sections relevant to the current task.
+1. Search `plans/*.md` for the exact line `Status: Active`. If exactly one
+   exists, it is the active contract. If more than one exists, stop and report
+   the conflicting paths. Ignore `Draft`, `Complete`, `Proposed` and descriptive
+   status text. If none exists, use the highest-numbered root
+   `TEMPLATE_V0_*_SCOPE.md`.
+2. The active contract supplies scope/exclusions, acceptance criteria, commands,
+   an ordered progress checklist (`§6` for a release scope or
+   `Implementation checkpoints` for a plan), and a reference map.
+3. `Internal_Custom_Application_Starter_Architecture_v2.md` is the architecture
+   standard. **Do not read the whole file.** Use the active contract's reference
+   map to read only the sections relevant to the selected work unit.
 
 `IMPLEMENTATION_GUIDE.md` exists if you need broader context on the release sequence, but it is optional for day-to-day work.
 
@@ -25,9 +38,14 @@ You are the **implementer**.
 
 1. Work on a **feature branch**, never `main`: `git checkout -b feature/<subsection-or-short-name>` if you are not already on one. CI runs only on pushes to `main` and on pull requests, so a branch keeps the gate quiet until the work unit is merged (see `CONTRIBUTING.md` → Branch workflow).
 
-2. Open the current scope file §6 and find the **next unchecked subsection** in sequence (6.1, then 6.2, etc.). If some items in a subsection are already checked, complete the remaining ones. Batch closely related line items within a single subsection.
+2. Find the **next unchecked work unit** in sequence: a §6 subsection in a
+   release scope or a `### Pn` checkpoint under `Implementation checkpoints` in
+   an active plan. If some items are already checked, complete the remaining
+   ones. Do not combine separate subsections/checkpoints.
 
-3. Consult §7 (blueprint reference map) and read **only** the listed blueprint sections for this subsection. Follow existing patterns already in the repo. Do not invent conventions that contradict the blueprint.
+3. Consult the contract's reference map and read **only** the listed governing
+   sections for this work unit. Follow existing patterns already in the repo.
+   Do not invent conventions that contradict the blueprint.
 
    Before coding, inspect the current API surface (routers and generated
    OpenAPI types) for every endpoint needed by this subsection and by any
@@ -37,7 +55,8 @@ You are the **implementer**.
    gap rather than quietly assuming it exists.
 
 4. State at the start of your work:
-   - which subsection and which checkbox items you will complete;
+   - the active contract path;
+   - which subsection/checkpoint and checkbox items you will complete;
    - which blueprint sections you read.
 
 5. Implement the work **fully and end-to-end**: real working files (no stubs, placeholders, or TODOs), configuration wired correctly, tests written where they naturally belong, imports/types/formatting clean.
@@ -46,14 +65,15 @@ You are the **implementer**.
    - `make lint`
    - `make typecheck`
    - `make test`
-   - any other relevant check from §4.
+   - every other relevant check from the contract's command/validation section.
 
 7. Fix anything that fails before declaring the work ready.
 
 8. **Write the handoff summary to a file.** This is required — do not skip it. Write to `.handoff/implementation.md` (this directory is gitignored). The file is what the reviewer reads in their session — they will not see your chat output. Include:
-   - subsection completed;
+   - active contract path and status;
+   - subsection/checkpoint completed;
    - files created or changed, with a one-line purpose each;
-   - which §6 items should now be checked;
+   - which checklist items should now be checked;
    - **which blueprint sections you followed** (the reviewer will read these);
    - any decisions made where the blueprint was silent or ambiguous;
    - any deviations from the plan and why;
@@ -63,7 +83,7 @@ You are the **implementer**.
      consumer; explicitly list required operations that are still absent;
    - validation commands run and their results.
 
-9. **Do not commit. Do not check off boxes.** Leave the work uncommitted so the reviewer can inspect the diff cleanly. The handoff file `.handoff/implementation.md` must exist before you hand off.
+9. **Do not commit. Do not check off boxes.** Leave the work uncommitted so the reviewer can inspect the diff cleanly. If the work unit names a human-review gate, call it out prominently; implementation may be reviewed, but prompt 03 cannot apply/commit it until the required approval is recorded. The handoff file `.handoff/implementation.md` must exist before you hand off.
 
 ## Done means
 
