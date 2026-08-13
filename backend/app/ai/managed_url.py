@@ -155,6 +155,10 @@ async def mint_managed_download_url(
     )
     if signed.method != "GET":
         raise TransferSourceError("the storage seam returned a non-read-only download URL")
+    # The URL is a temporary bearer capability: it must never travel to a
+    # provider unencrypted, so plain HTTP is rejected everywhere — a local
+    # (non-public) storage seam is served by the dev managed-URL staging path
+    # (app/ai/providers/gcs_managed_url.py) instead of a plaintext URL.
     if not signed.url.startswith("https://"):
         raise TransferSourceError("the storage seam returned a non-HTTPS download URL")
     return signed

@@ -6,6 +6,7 @@ import { client } from '@/api/client'
 import type { components } from '@/api/generated/openapi'
 import { useOrganisationStore } from '@/stores/organisation'
 import { jobsQueryKeys } from '@/queries/jobs'
+import { putFile, type UploadProgress } from '@/lib/upload'
 
 type ClassifyRequest = components['schemas']['DocumentClassifyRequest']
 type ClassifySyncResponse = components['schemas']['DocumentClassifySyncResponse']
@@ -13,6 +14,8 @@ type ClassifyAcceptedResponse = components['schemas']['DocumentClassifyAcceptedR
 type ClassifyResultResponse = components['schemas']['DocumentClassifyResultResponse']
 type AskRequest = components['schemas']['DocumentAskRequest']
 type AskResponse = components['schemas']['DocumentAskResponse']
+type ScratchUploadIntentRequest = components['schemas']['ScratchUploadIntentRequest']
+type ScratchUploadCompleteResponse = components['schemas']['ScratchUploadCompleteResponse']
 
 /**
  * Query-key factory for the AI classification demonstration (v0.7 Scope §6.6).
@@ -150,6 +153,56 @@ export function useAskMutation() {
       if (error) throw error
       if (!data) throw new Error('Empty ask response')
       return data as AskResponse
+    },
+  })
+}
+
+/**
+ * Full transient upload flow for the AI test screen (v0.8 Scope §2.2/§6.5):
+ * scratch intent → direct PUT → complete.
+ *
+ * The uploaded object lands in the organisation-scoped ``ai/scratch/``
+ * namespace, which the AI layer classifies as transient — a >5 MB PDF then
+ * routes through the provider-upload mode instead of the retained signed-URL
+ * path. No processing job exists for scratch objects: the mutation resolves
+ * with the storage reference the caller sends to the ask endpoint. The PUT
+ * goes to the signed URL through `putFile` (never the generated client), the
+ * same direct-upload transport the files module uses.
+ */
+export function useScratchUploadMutation(options?: {
+  onProgress?: (progress: UploadProgress) => void
+  onSuccess?: (storageReference: string) => void
+}) {
+  const organisation = useOrganisationStore()
+  const organisationId = computed(() => organisation.selectedOrganisationId)
+
+  return useMutation({
+    mutationFn: async (file: File): Promise<string> => {
+      if (organisationId.value === null) {
+        throw new Error('Cannot upload without a selected organisation')
+      }
+      const intent: ScratchUploadIntentRequest = {
+        original_filename: file.name,
+        content_type: file.type || 'application/octet-stream',
+        size_bytes: file.size,
+      }
+      const { data: intentData, error: intentError } = await client.POST(
+        '/api/v1/ai/scratch/uploads',
+        { body: intent },
+      )
+      if (intentError) throw intentError
+      if (!intentData) throw new Error('Empty scratch upload intent response')
+      await putFile(intentData.upload_url, file, options?.onProgress)
+      const { data: completeData, error: completeError } = await client.POST(
+        '/api/v1/ai/scratch/uploads/{upload_id}/complete',
+        { params: { path: { upload_id: intentData.upload_id } } },
+      )
+      if (completeError) throw completeError
+      if (!completeData) throw new Error('Empty scratch upload completion response')
+      return (completeData as ScratchUploadCompleteResponse).storage_reference
+    },
+    onSuccess: (reference) => {
+      options?.onSuccess?.(reference)
     },
   })
 }

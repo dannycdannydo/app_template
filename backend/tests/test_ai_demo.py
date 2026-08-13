@@ -464,6 +464,132 @@ async def test_post_validates_request_schema(context_app: ContextApp) -> None:
     assert extra.status_code == 422
 
 
+async def test_scratch_upload_intent_requires_documents_upload(context_app: ContextApp) -> None:
+    """A read-only viewer is denied the scratch upload intent (403)."""
+    app, state, private_key = context_app
+    org_id = uuid.uuid4()
+    user = make_user()
+    state.users[user.workos_user_id] = user
+    membership = make_membership(user, org_id)
+    state.lookup_queue = [user, membership]
+    state.granted_permissions = {"documents.read"}  # viewer-style: read only
+    async with context_client(app) as client:
+        response = await client.post(
+            "/api/v1/ai/scratch/uploads",
+            json={
+                "original_filename": "lease.pdf",
+                "content_type": "application/pdf",
+                "size_bytes": 4096,
+            },
+            headers=_auth_headers(make_token(private_key), org_id),
+        )
+    assert response.status_code == 403
+    assert response.json()["code"] == "permission_denied"
+
+
+async def test_scratch_upload_intent_and_complete_flow(context_app: ContextApp) -> None:
+    """The transient upload journey signs a PUT URL into ``ai/scratch/`` and the
+    completion returns the verified storage reference; a never-stored upload is
+    rejected and a non-PDF intent is a 422."""
+    app, state, private_key = context_app
+    org_id = uuid.uuid4()
+
+    def _stage() -> str:
+        # Dependencies resolve per request: stage a valid member each time.
+        user = make_user()
+        state.users[user.workos_user_id] = user
+        membership = make_membership(user, org_id)
+        state.lookup_queue = [user, membership]
+        state.granted_permissions = {"documents.upload"}
+        return make_token(private_key)
+
+    async with context_client(app) as client:
+        # A non-PDF declaration is rejected before any URL is signed.
+        rejected = await client.post(
+            "/api/v1/ai/scratch/uploads",
+            json={
+                "original_filename": "notes.txt",
+                "content_type": "text/plain",
+                "size_bytes": 1024,
+            },
+            headers=_auth_headers(_stage(), org_id),
+        )
+        assert rejected.status_code == 422
+
+        size = 4096
+        intent = await client.post(
+            "/api/v1/ai/scratch/uploads",
+            json={
+                "original_filename": "lease.pdf",
+                "content_type": "application/pdf",
+                "size_bytes": size,
+            },
+            headers=_auth_headers(_stage(), org_id),
+        )
+        assert intent.status_code == 201
+        body = intent.json()
+        assert body["upload_id"]
+        assert body["upload_url"].startswith("http")
+
+        # Completing before the bytes exist is rejected.
+        missing = await client.post(
+            f"/api/v1/ai/scratch/uploads/{body['upload_id']}/complete",
+            headers=_auth_headers(_stage(), org_id),
+        )
+        assert missing.status_code == 422
+
+        # Simulate the browser PUT, then complete.
+        key = f"organisations/{org_id}/ai/scratch/{body['upload_id']}.pdf"
+        await _fake_storage().put(key, b"%PDF-1.4" + b"x" * (size - len(b"%PDF-1.4")))
+        completed = await client.post(
+            f"/api/v1/ai/scratch/uploads/{body['upload_id']}/complete",
+            headers=_auth_headers(_stage(), org_id),
+        )
+        assert completed.status_code == 200
+        assert completed.json()["storage_reference"] == key
+
+
+async def test_scratch_upload_complete_rejects_stored_objects_outside_the_contract(
+    context_app: ContextApp,
+) -> None:
+    """Completion validates the *stored* object against the same PDF/ceiling
+    contract the intent declared, so a wrong-MIME object is never returned as
+    a "verified" reference that the next AI read would immediately reject."""
+    app, state, private_key = context_app
+    org_id = uuid.uuid4()
+
+    def _stage() -> str:
+        user = make_user()
+        state.users[user.workos_user_id] = user
+        membership = make_membership(user, org_id)
+        state.lookup_queue = [user, membership]
+        state.granted_permissions = {"documents.upload"}
+        return make_token(private_key)
+
+    async with context_client(app) as client:
+        size = 5
+        intent = await client.post(
+            "/api/v1/ai/scratch/uploads",
+            json={
+                "original_filename": "lease.pdf",
+                "content_type": "application/pdf",
+                "size_bytes": size,
+            },
+            headers=_auth_headers(_stage(), org_id),
+        )
+        assert intent.status_code == 201
+        body = intent.json()
+
+        # The browser PUTs a wrong-MIME object: completion must reject it.
+        key = f"organisations/{org_id}/ai/scratch/{body['upload_id']}.pdf"
+        await _fake_storage().put(key, b"hello", content_type="text/plain")
+        rejected = await client.post(
+            f"/api/v1/ai/scratch/uploads/{body['upload_id']}/complete",
+            headers=_auth_headers(_stage(), org_id),
+        )
+        assert rejected.status_code == 422
+
+
 async def test_get_result_requires_documents_read(context_app: ContextApp) -> None:
     """A caller without documents.read is denied the result read (403)."""
     app, state, private_key = context_app

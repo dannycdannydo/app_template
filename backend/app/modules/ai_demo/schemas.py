@@ -26,6 +26,10 @@ from app.ai.tasks.schemas import DocumentClassificationResult
 ClassifyStatus = Literal["queued", "running", "succeeded", "failed"]
 
 
+#: Bounded filename length mirrors the files module's declared-upload surface.
+SCRATCH_FILENAME_MAX_LENGTH = 255
+
+
 class ClassifyRouting(BaseModel):
     """Safe routing metadata: which provider/model/prompt served the request."""
 
@@ -135,3 +139,34 @@ class DocumentAskResponse(BaseModel):
     usage: ClassifyUsage
     cost: ClassifyCost
     completed_at: datetime
+
+
+class ScratchUploadIntentRequest(BaseModel):
+    """Declare one transient AI-scratch upload (v0.8 Scope §2.2/§6.5).
+
+    The demo's transient path lands bytes in the organisation-scoped
+    ``ai/scratch/`` namespace so the AI layer classifies the source as
+    transient and routes a >5 MB PDF through the provider-upload mode. The
+    declaration mirrors the files module's signed-upload flow: the browser
+    PUTs the bytes directly to the signed URL, then completes the upload.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    original_filename: str = Field(min_length=1, max_length=SCRATCH_FILENAME_MAX_LENGTH)
+    content_type: str = Field(min_length=1, max_length=128)
+    size_bytes: int = Field(gt=0)
+
+
+class ScratchUploadIntentResponse(BaseModel):
+    """The signed PUT target for one transient upload."""
+
+    upload_id: str
+    upload_url: str
+    expires_at: datetime
+
+
+class ScratchUploadCompleteResponse(BaseModel):
+    """The verified transient object's private storage reference."""
+
+    storage_reference: str

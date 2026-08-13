@@ -25,8 +25,10 @@ policy a derived application would have to undo.
 from __future__ import annotations
 
 from functools import lru_cache
+from urllib.parse import urlsplit
 
 from app.ai.providers.factory import get_provider_factory
+from app.ai.providers.gcs_managed_url import GcsManagedUrlStager
 from app.ai.providers.openai_upload import OpenAITransferStore
 from app.ai.providers.vertex_gcs import GcsTransferStore
 from app.ai.registry import load_registry_bundle
@@ -34,7 +36,9 @@ from app.ai.service import AIService
 from app.ai.staging import TransferStore
 from app.ai.storage_resolver import StorageAttachmentResolver
 from app.ai.transfer import TransferDeploymentPolicy, TransferMode
+from app.ai.transfer_orchestrator import ManagedUrlStager
 from app.core.config import get_settings
+from app.core.endpoint_safety import is_private_http_host
 from app.storage import get_storage
 
 
@@ -54,6 +58,7 @@ def _transfer_deployment_policy() -> TransferDeploymentPolicy:
         enabled_transfer_modes=frozenset(
             TransferMode(mode_id) for mode_id in settings.ai_enabled_transfer_modes
         ),
+        managed_url_ttl_seconds=settings.ai_managed_url_ttl_seconds,
     )
 
 
@@ -97,6 +102,57 @@ def _transfer_stores() -> dict[str, TransferStore]:
     return stores
 
 
+def _endpoint_is_local(endpoint: str) -> bool:
+    """Whether a presign endpoint is plain HTTP on a loopback/private host."""
+    if not endpoint:
+        return False
+    parsed = urlsplit(endpoint)
+    return parsed.scheme == "http" and is_private_http_host(parsed.hostname or "")
+
+
+def _storage_is_local() -> bool:
+    """Whether the storage seam presigns against a plain-HTTP local/private host.
+
+    The S3 adapter presigns against ``storage_public_endpoint_url`` when set
+    (the host the provider can reach), otherwise against
+    ``storage_endpoint_url``. A scheme of ``http`` on a loopback/private host
+    means the minted URL would be rejected by the HTTPS-only minter and
+    unreachable by any cloud provider — the managed-URL path must stage
+    through GCS instead (v0.8 Scope §2.3, §6.4/§6.5).
+    """
+    settings = get_settings()
+    presign_endpoint = settings.storage_public_endpoint_url or settings.storage_endpoint_url
+    return _endpoint_is_local(presign_endpoint)
+
+
+def _managed_url_stager() -> ManagedUrlStager | None:
+    """Build the dev managed-URL staging seam when the storage cannot presign
+    an HTTPS URL a provider could reach (v0.8 Scope §2.3, §6.4/§6.5).
+
+    With local MinIO in development, a retained >5 MB source is staged into
+    the user-provisioned GCS temp bucket (the same one Vertex ``storage_reference``
+    uses, with the deployer's ``age = 1`` lifecycle backstop) and the provider
+    receives a GCS v4 RSA-signed HTTPS URL. The stager is built only when the
+    deployment actually enables the managed-signed-url mode — a local storage
+    seam without the mode never pays for the wiring — and then the Vertex GCS
+    configuration is required (fail fast at startup, BP §27). With a public
+    HTTPS storage no stager is built and URLs are minted directly, so no copy
+    is ever made.
+    """
+    if not _storage_is_local():
+        return None
+    if TransferMode.MANAGED_SIGNED_URL not in _transfer_deployment_policy().enabled_transfer_modes:
+        return None
+    settings = get_settings()
+    return GcsManagedUrlStager(
+        project=settings.ai_vertex_project,
+        location=settings.ai_vertex_location,
+        bucket=settings.ai_vertex_temp_gcs_bucket,
+        credentials_path=settings.ai_vertex_credentials_path,
+        timeout_seconds=settings.ai_http_timeout_seconds,
+    )
+
+
 @lru_cache
 def get_ai_service() -> AIService:
     """Return the process-wide, fully wired :class:`AIService`.
@@ -122,4 +178,5 @@ def get_ai_service() -> AIService:
         transfer_deployment=_transfer_deployment_policy(),
         storage=get_storage(),
         transfer_stores=_transfer_stores(),
+        managed_url_stager=_managed_url_stager(),
     )

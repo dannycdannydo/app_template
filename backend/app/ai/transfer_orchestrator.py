@@ -34,13 +34,21 @@ from __future__ import annotations
 import contextlib
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Protocol
 from uuid import UUID
+
+import structlog
 
 from app.ai.errors import TransferExecutionUnavailableError
 from app.ai.managed_url import mint_managed_download_url
 from app.ai.persistence.references import TransferReferenceStore
 from app.ai.staging import ExternalFileReference, TransferStore
-from app.ai.transfer import SourceLifecycle, TransferMode, derive_idempotency_key
+from app.ai.transfer import (
+    MANAGED_URL_DEFAULT_TTL_SECONDS,
+    SourceLifecycle,
+    TransferMode,
+    derive_idempotency_key,
+)
 from app.storage.base import ObjectStorage
 from app.storage.types import SignedUrl
 
@@ -48,6 +56,34 @@ from app.storage.types import SignedUrl
 #: deletes through the store. The managed-signed-url mode has no provider copy:
 #: the URL is minted per dispatch and expires through its short TTL (Scope §2.3).
 _PROVIDER_COPY_MODES = frozenset({TransferMode.PROVIDER_UPLOAD, TransferMode.STORAGE_REFERENCE})
+
+#: Module logger. Mode/outcome metadata only — never object keys, gs:// URIs,
+#: signed URLs or content (BP §28).
+logger = structlog.get_logger()
+
+
+class ManagedUrlStager(Protocol):
+    """The dev managed-URL staging seam (v0.8 Scope §2.3, §6.4/§6.5).
+
+    A source storage that cannot produce a provider-reachable HTTPS signed URL
+    (local MinIO in development) is served by a stager that re-verifies the
+    retained source, stages a copy into the user-provisioned GCS temp bucket
+    and mints an HTTPS URL the provider can fetch. ``None`` (production with a
+    public HTTPS storage) mints the URL directly from the source storage.
+    """
+
+    @property
+    def region(self) -> str:
+        """The staging region (the configured Vertex location)."""
+        ...
+
+    async def mint(
+        self,
+        *,
+        reference: ExternalFileReference,
+        ttl_seconds: int,
+        source_storage: ObjectStorage,
+    ) -> SignedUrl: ...
 
 
 class TransferOrchestrator:
@@ -64,12 +100,14 @@ class TransferOrchestrator:
         self,
         *,
         storage: ObjectStorage,
-        store: TransferStore,
+        store: TransferStore | None = None,
         references: TransferReferenceStore,
+        managed_url_stager: ManagedUrlStager | None = None,
     ) -> None:
         self._storage = storage
         self._store = store
         self._references = references
+        self._managed_url_stager = managed_url_stager
 
     async def create_or_reuse_reference(
         self,
@@ -108,6 +146,10 @@ class TransferOrchestrator:
             # The store is the adapter for exactly one provider; a wiring error
             # that selects a different provider than the store stages through
             # must fail closed instead of silently staging a copy elsewhere.
+            if self._store is None:
+                raise TransferExecutionUnavailableError(
+                    "the selected transfer mode requires a provider transfer store"
+                )
             if provider_id != self._store.provider_id:
                 raise TransferExecutionUnavailableError(
                     "the selected provider does not match the transfer store"
@@ -242,6 +284,12 @@ class TransferOrchestrator:
                 "the durable reference does not match the caller's transfer"
             )
         if current.mode in _PROVIDER_COPY_MODES:
+            if self._store is None:
+                # Unreachable in normal wiring (creation requires the store);
+                # fail closed rather than deleting nothing silently.
+                raise TransferExecutionUnavailableError(
+                    "the selected transfer mode requires a provider transfer store"
+                )
             await self._store.delete(current)
         return await self._references.mark_deleted(
             organisation_id=current.organisation_id,
@@ -283,10 +331,30 @@ class TransferOrchestrator:
         boundary and the exact immutable object identity (a fresh head for size
         and MIME, plus a bounded re-stream re-verifying the SHA-256 digest)
         before minting a short-lived, read-only HTTPS URL (Scope §2.3, §6.3).
-        The URL is a temporary bearer capability for one dispatch: it is never
+        With a dev managed-URL stager wired (local storage seam), the verified
+        source is staged into the GCS temp bucket and the URL is minted from
+        the staged copy instead — the provider must be able to fetch it. The
+        URL is a temporary bearer capability for one dispatch: it is never
         returned to the caller, persisted, audited or logged — use
         :func:`~app.ai.managed_url.redact_signed_url` at every boundary.
         """
+        if self._managed_url_stager is not None:
+            logger.info(
+                "ai.managed_url.minting",
+                mode="gcs_staging",
+                region=self._managed_url_stager.region,
+                ttl_seconds=ttl_seconds or MANAGED_URL_DEFAULT_TTL_SECONDS,
+            )
+            return await self._managed_url_stager.mint(
+                reference=reference,
+                ttl_seconds=ttl_seconds or MANAGED_URL_DEFAULT_TTL_SECONDS,
+                source_storage=self._storage,
+            )
+        logger.info(
+            "ai.managed_url.minting",
+            mode="direct",
+            ttl_seconds=ttl_seconds or MANAGED_URL_DEFAULT_TTL_SECONDS,
+        )
         return await mint_managed_download_url(
             storage=self._storage,
             reference=reference,

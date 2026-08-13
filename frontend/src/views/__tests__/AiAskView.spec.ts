@@ -23,6 +23,15 @@ const mockShowApiErrorToast = vi.hoisted(() => vi.fn<(error: unknown, options?: 
 
 vi.mock('@/queries/ai', () => ({
   useAskMutation: mockUseAskMutation,
+  useScratchUploadMutation: vi.fn<
+    () => {
+      isPending: { value: boolean }
+      mutateAsync: ReturnType<typeof vi.fn>
+    }
+  >(() => ({
+    isPending: { value: false },
+    mutateAsync: vi.fn<() => Promise<unknown>>(),
+  })),
 }))
 
 vi.mock('@/lib/permissions', () => ({
@@ -44,6 +53,22 @@ vi.mock('@/components/application/FileUpload.vue', () => ({
       return {
         storageReference:
           'organisations/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/documents/99999999-9999-4999-8999-999999999999/original',
+      }
+    },
+  },
+}))
+
+vi.mock('@/components/application/ScratchFileUpload.vue', () => ({
+  default: {
+    name: 'ScratchFileUpload',
+    props: {},
+    emits: ['uploaded'],
+    template:
+      '<button data-testid="scratch-file-upload-stub" @click="$emit(\'uploaded\', scratchReference)">upload</button>',
+    setup() {
+      return {
+        scratchReference:
+          'organisations/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/ai/scratch/99999999-9999-4999-8999-999999999999.pdf',
       }
     },
   },
@@ -142,6 +167,8 @@ describe('AiAskView', () => {
     const submit = wrapper.find('[data-testid="ai-ask-submit"]')
     expect(submit.exists()).toBe(false) // no document uploaded yet: question card shows placeholder
 
+    // Use the permanent (retained document) mode so the FileUpload stub emits.
+    await wrapper.find('[data-testid="ai-ask-mode-permanent"]').setValue(true)
     // Upload a document (FileUpload stub emits the server-provided reference).
     await wrapper.find('[data-testid="file-upload-stub"]').trigger('click')
 
@@ -162,6 +189,7 @@ describe('AiAskView', () => {
     mutation.mutateAsync.mockResolvedValue(response)
     const wrapper = mountView()
 
+    await wrapper.find('[data-testid="ai-ask-mode-permanent"]').setValue(true)
     await wrapper.find('[data-testid="file-upload-stub"]').trigger('click')
     await wrapper.find('[data-testid="ai-ask-question-input"]').setValue('What is the term?')
     await wrapper.find('[data-testid="ai-ask-submit"]').trigger('click')
@@ -178,12 +206,35 @@ describe('AiAskView', () => {
     expect(wrapper.find('[data-testid="ai-ask-answer-card"]').text()).toContain('vertex')
   })
 
+  it('submits the scratch storage reference in transient mode', async () => {
+    stubPermissions(true)
+    const response = askResponse()
+    const mutation = stubMutation({
+      data: ref<AskResponse | undefined>(response),
+    })
+    mutation.mutateAsync.mockResolvedValue(response)
+    const wrapper = mountView()
+
+    // Transient is the default mode: the scratch upload stub emits a
+    // ``ai/scratch/`` reference that must reach the ask call unchanged.
+    await wrapper.find('[data-testid="scratch-file-upload-stub"]').trigger('click')
+    await wrapper.find('[data-testid="ai-ask-question-input"]').setValue('What is the term?')
+    await wrapper.find('[data-testid="ai-ask-submit"]').trigger('click')
+    await flushPromises()
+
+    expect(mutation.mutateAsync).toHaveBeenCalledWith({
+      storage_reference: `organisations/${ORG_ID}/ai/scratch/99999999-9999-4999-8999-999999999999.pdf`,
+      question: 'What is the term?',
+    })
+  })
+
   it('surfaces a failed ask through the error toast', async () => {
     stubPermissions(true)
     const mutation = stubMutation()
     mutation.mutateAsync.mockRejectedValue(new Error('provider unavailable'))
     const wrapper = mountView()
 
+    await wrapper.find('[data-testid="ai-ask-mode-permanent"]').setValue(true)
     await wrapper.find('[data-testid="file-upload-stub"]').trigger('click')
     await wrapper.find('[data-testid="ai-ask-question-input"]').setValue('What is the term?')
     await wrapper.find('[data-testid="ai-ask-submit"]').trigger('click')

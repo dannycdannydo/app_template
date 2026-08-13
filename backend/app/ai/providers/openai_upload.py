@@ -27,7 +27,11 @@ provider requests. The adapter:
   cleanup, removing only the AI-owned provider copy — never the feature-owned
   source object (Scope §2.5). Deletion failures propagate so the §6.7
   reconciliation job can cover them; the provider's enforced ``expires_after``
-  is the automatic-expiry backstop.
+  is the automatic-expiry backstop. A failure *after* the upload succeeded
+  (source mutation, malformed response) best-effort deletes the just-uploaded
+  file by the id the successful response names; a transport timeout after
+  provider acceptance leaves no id to act on, so that window is bounded by the
+  provider-enforced expiry only.
 
 Transport failures (timeouts, unreachable, 5xx, 429) surface as the existing
 retryable provider errors; permanent validation/refusal failures surface as
@@ -38,11 +42,10 @@ the source reference, a URL or the response body (BP §28).
 from __future__ import annotations
 
 import hashlib
-import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 from uuid import UUID
 
 import httpx
@@ -66,14 +69,16 @@ from app.ai.openai_staging import (
 from app.ai.providers.http_transport import (
     translate_http_exception,
 )
+from app.ai.providers.openai import REGIONAL_API_HOSTS
 from app.ai.staging import ExternalFileReference, ExternalReferenceStatus, TransferStore
 from app.ai.transfer import SourceLifecycle, TransferMode, derive_idempotency_key
 
-#: The OpenAI Files API root. ``expires_after`` is a JSON-string form field
-#: (``{"anchor": "created_at", "seconds": N}``) on the multipart upload and
-#: the file's ``expires_at`` (unix seconds) is echoed on the FileObject —
-#: both verified against the official reference on 2026-08-11
-#: (``app/ai/contracts/providers.yaml``).
+#: The OpenAI Files API root. ``expires_after`` is carried as flattened
+#: multipart form fields (``expires_after[anchor]``/``expires_after[seconds]``)
+#: matching the documented curl form and the SDK's own multipart serialization
+#: (a single JSON-string field is refused by the API); the file's ``expires_at``
+#: (unix seconds) is echoed on the FileObject. Both verified against the
+#: official reference on 2026-08-11 (``app/ai/contracts/providers.yaml``).
 _DEFAULT_API_ROOT = "https://api.openai.com/v1"
 
 #: The FileObject fields the upload/delete seams need.
@@ -186,6 +191,21 @@ class OpenAITransferStore(TransferStore):
                 f"expires_after bounds ({OPENAI_EXPIRES_AFTER_MIN_SECONDS}.."
                 f"{OPENAI_EXPIRES_AFTER_MAX_SECONDS} seconds)"
             )
+        # Defense in depth with the inference adapter (v0.7 Scope §6.3): a
+        # region derives the regional endpoint and an explicit base URL must
+        # name that region's domain, so a directly constructed store can never
+        # upload through the global endpoint while the reference is labelled
+        # regional (Scope §5.7 never-mislabel rule). The settings validator
+        # enforces the same relationship; this constructor re-checks it.
+        if region and not base_url:
+            base_url = f"https://{REGIONAL_API_HOSTS[region]}/v1"
+        elif region and base_url:
+            host = urlsplit(base_url).hostname or ""
+            if host != REGIONAL_API_HOSTS[region]:
+                raise AIInputValidationError(
+                    f"AI_OPENAI_BASE_URL host {host!r} conflicts with region {region!r}; "
+                    f"regional requests must use https://{REGIONAL_API_HOSTS[region]}/v1"
+                )
         self._base_url = (base_url or _DEFAULT_API_ROOT).rstrip("/")
         self._api_key = api_key
         # The configured deployment region (``ai_openai_region``: '' default or
@@ -223,7 +243,58 @@ class OpenAITransferStore(TransferStore):
             raise ProviderRateLimitError("the OpenAI Files API rate limited the request")
         if status >= 500:
             raise ProviderUnavailableError("the OpenAI Files API returned a server error")
+        # The status code is safe (low-cardinality) and is the fastest way to
+        # diagnose an upload refusal (e.g. a rejected field format) without
+        # logging the response body (BP §28).
+        logger.warning("ai.openai.upload.refused", status=status)
         raise TransferStagingError("the OpenAI Files API refused the request")
+
+    async def _best_effort_delete_uploaded(self, response: httpx.Response) -> None:
+        """Best-effort delete of a just-uploaded provider file after a staging failure.
+
+        Runs only when the upload succeeded but verification or response
+        parsing failed, so no reference exists yet. The file id is taken from
+        the successful response when it parses — source-mutation failures are
+        covered because the body still names the file — while an unparseable
+        or id-less body leaves nothing addressable to delete. A failed delete
+        is suppressed and logged by category only: the provider-enforced
+        ``expires_after`` still bounds the copy. A transport failure during the
+        upload itself never reaches here: the provider may have accepted the
+        file, but no id exists to act on, so that window stays bounded solely
+        by the same provider-enforced expiry. File ids and URLs are never
+        logged (BP §28).
+        """
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            logger.warning("ai.openai.upload.cleanup", outcome="no_file_id")
+            return
+        body_data = cast(dict[str, Any], body)
+        file_id = str(body_data.get(_FILE_ID_KEY) or "")
+        if not file_id:
+            logger.warning("ai.openai.upload.cleanup", outcome="no_file_id")
+            return
+        try:
+            response = await self._client.delete(
+                self._file_url(file_id), headers=self._auth_headers()
+            )
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "ai.openai.upload.cleanup",
+                outcome="delete_failed",
+                category=type(exc).__name__,
+            )
+        else:
+            if response.is_error:
+                logger.warning(
+                    "ai.openai.upload.cleanup",
+                    outcome="delete_refused",
+                    status=response.status_code,
+                )
+            else:
+                logger.warning("ai.openai.upload.cleanup", outcome="deleted")
 
     async def stage(
         self,
@@ -279,12 +350,15 @@ class OpenAITransferStore(TransferStore):
             source_path, size_bytes=size_bytes, chunk_size=OPENAI_UPLOAD_CHUNK_BYTES
         )
         try:
+            # The expiration policy travels as flattened multipart form fields
+            # (``expires_after[anchor]`` + ``expires_after[seconds]``) — the
+            # documented curl form and the SDK's multipart serialization; the
+            # API refuses a single JSON-string field. ``seconds`` is within the
+            # reviewed 1 hour..30 day bounds (Scope §2.4).
             data: dict[str, str] = {
                 "purpose": OPENAI_FILES_PURPOSE,
-                "expires_after": json.dumps(
-                    {"anchor": "created_at", "seconds": self._upload_expiry_seconds},
-                    sort_keys=True,
-                ),
+                "expires_after[anchor]": "created_at",
+                "expires_after[seconds]": str(self._upload_expiry_seconds),
             }
             files: dict[str, Any] = {
                 "file": (OPENAI_UPLOAD_FILENAME, file_wrapper, mime_type),
@@ -302,27 +376,36 @@ class OpenAITransferStore(TransferStore):
         finally:
             file_wrapper.close()
 
-        if file_wrapper.read_bytes != file_wrapper.size_bytes:
-            raise TransferStagingError("the verified source changed while being uploaded")
-        if file_wrapper.sha256_hex != source_digest:
-            raise TransferStagingError(
-                "the uploaded file digest does not match the verified source"
-            )
+        # The upload succeeded, so the provider now hosts a file. Every failure
+        # from here must remove that AI-owned copy before surfacing: no durable
+        # reference exists yet, so the orchestrator's compensation (which only
+        # runs once stage() returns) cannot cover this window and an untracked
+        # file would be unreachable by the reconciliation job.
         try:
-            body = response.json()
-        except ValueError as exc:
-            raise ProviderResponseError(
-                "the OpenAI Files API returned an unparseable response"
-            ) from exc
-        if not isinstance(body, dict):
-            raise ProviderResponseError("the OpenAI Files API returned a malformed response body")
-        body_data = cast(dict[str, Any], body)
-        file_id = str(body_data.get(_FILE_ID_KEY) or "")
-        if not file_id:
-            raise ProviderResponseError("the OpenAI Files API returned no file id")
-        expiry_timestamp = _file_expiry_timestamp(
-            body_data, fallback_seconds=self._upload_expiry_seconds
-        )
+            if file_wrapper.read_bytes != file_wrapper.size_bytes:
+                raise TransferStagingError("the verified source changed while being uploaded")
+            if file_wrapper.sha256_hex != source_digest:
+                raise TransferStagingError(
+                    "the uploaded file digest does not match the verified source"
+                )
+            try:
+                body = response.json()
+            except ValueError as exc:
+                raise ProviderResponseError(
+                    "the OpenAI Files API returned an unparseable response"
+                ) from exc
+            if not isinstance(body, dict):
+                raise ProviderResponseError("the OpenAI Files API returned a malformed response body")
+            body_data = cast(dict[str, Any], body)
+            file_id = str(body_data.get(_FILE_ID_KEY) or "")
+            if not file_id:
+                raise ProviderResponseError("the OpenAI Files API returned no file id")
+            expiry_timestamp = _file_expiry_timestamp(
+                body_data, fallback_seconds=self._upload_expiry_seconds
+            )
+        except Exception:
+            await self._best_effort_delete_uploaded(response)
+            raise
         reference = ExternalFileReference(
             mode=mode,
             provider=self.provider_id,

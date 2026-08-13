@@ -1099,8 +1099,7 @@ async def test_openai_staged_file_managed_url_dispatches_input_file_url() -> Non
         "https://minio.example.test/org-bucket/lease.pdf?"
         "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=secret-bearer-material"
     )
-    response = await adapter.complete(
-        _staged_request(
+    response = await adapter.complete(        _staged_request(
             staged_file=StagedFile(
                 external_id="organisations/00000000-0000-0000-0000-000000000000/lease.pdf",
                 mime_type="application/pdf",
@@ -1114,6 +1113,57 @@ async def test_openai_staged_file_managed_url_dispatches_input_file_url() -> Non
     # The external id (immutable source identity) is never sent to the provider.
     assert parts[1].get("file_id") is None
     assert response.finish_reason == "stop"
+
+
+async def test_openai_reports_routed_model_for_dated_snapshot_echo() -> None:
+    """OpenAI echoes a dated snapshot id (``gpt-4o-mini-2024-07-18``) for a
+    requested base model; the adapter reports the routed id so the service's
+    routing/accounting check never rejects a legitimate dispatch."""
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return _json_response(
+            _canned_responses_response(content='{"category": "lease"}', model="gpt-4o-mini-2024-07-18")
+        )
+
+    adapter = OpenAIAdapter(api_key="sk-test", client=_client(handler))
+    response = await adapter.complete(_staged_request())
+
+    assert response.model == "gpt-4o-mini"
+
+
+async def test_openai_reports_unrelated_echoed_model() -> None:
+    """A provider echoing a genuinely different model is not normalised away —
+    the service's mismatch guard must still be able to reject it."""
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return _json_response(_canned_responses_response(content="ok", model="gpt-4o"))
+
+    adapter = OpenAIAdapter(api_key="sk-test", client=_client(handler))
+    response = await adapter.complete(_staged_request())
+
+    assert response.model == "gpt-4o"
+
+
+async def test_openai_retains_non_snapshot_model_suffix() -> None:
+    """Only the reviewed dated snapshot shape (``-YYYY-MM-DD``) is normalised
+    to the routed id; an arbitrary suffix is retained so a provider model
+    mismatch in accounting/routing metadata is never hidden."""
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return _json_response(
+            _canned_responses_response(content="ok", model="gpt-4o-mini-2026-02-13-extra")
+        )
+
+    adapter = OpenAIAdapter(api_key="sk-test", client=_client(handler))
+    response = await adapter.complete(_staged_request())
+
+    assert response.model == "gpt-4o-mini-2026-02-13-extra"
 
 
 async def test_openai_managed_url_never_leaks_into_errors_or_logs() -> None:
@@ -1150,14 +1200,26 @@ async def test_openai_staged_file_and_attachments_are_mutually_exclusive() -> No
         )
 
 
-async def test_openai_managed_url_requires_a_staged_file() -> None:
-    adapter = OpenAIAdapter(api_key="sk-test")
-    with pytest.raises(AIInputValidationError):
-        await adapter.complete(
-            _request(
-                managed_url="https://minio.example.test/lease.pdf?X-Amz-Signature=x",
-            )
+async def test_openai_managed_url_alone_dispatches_input_file_url() -> None:
+    """A managed URL alone is a valid Responses-API dispatch (the retained
+    managed-signed-url source), carrying ``input_file.file_url`` (Scope §2.3)."""
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return _json_response(_canned_responses_response(content='{"category": "lease"}'))
+
+    adapter = OpenAIAdapter(api_key="sk-test", client=_client(handler))
+    managed_url = "https://minio.example.test/lease.pdf?X-Amz-Signature=x"
+    response = await adapter.complete(
+        _request(
+            managed_url=managed_url,
         )
+    )
+    body = json.loads(captured[0].content)
+    parts = _content_parts(body["input"][0]["content"])
+    assert parts[1] == {"type": "input_file", "file_url": managed_url}
+    assert response.finish_reason == "stop"
 
 
 @pytest.mark.parametrize(

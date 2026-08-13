@@ -367,6 +367,25 @@ PROTECTED_ROUTES: list[RouteSpec] = [
             "question": "What is this document about?",
         },
     ),
+    # AI demo transient upload surface (v0.8 Scope §2.2/§6.5): the scratch
+    # upload intent and completion are org-scoped document actions gated by
+    # documents.upload; the completion path value is a server-generated id.
+    _route(
+        "POST",
+        "/api/v1/ai/scratch/uploads",
+        org_scoped=True,
+        request_body={
+            "original_filename": "lease.pdf",
+            "content_type": "application/pdf",
+            "size_bytes": 1024,
+        },
+    ),
+    _route(
+        "POST",
+        "/api/v1/ai/scratch/uploads/{upload_id}/complete",
+        org_scoped=True,
+        path_values={"upload_id": "019ff4f4-add6-759e-aa21-7227a3609da8"},
+    ),
 ]
 
 # Signature-gated surface (Scope §6.8): the WorkOS webhook route is protected

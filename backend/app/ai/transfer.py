@@ -122,6 +122,11 @@ class TransferDeploymentPolicy:
     inline_aggregate_threshold_bytes: int = INLINE_AGGREGATE_THRESHOLD_BYTES
     max_large_attachment_bytes: int = MAX_LARGE_ATTACHMENT_BYTES
     enabled_transfer_modes: frozenset[TransferMode] = frozenset({TransferMode.INLINE})
+    #: The just-in-time managed signed-URL TTL for the ``managed_signed_url``
+    #: mode (Scope §2.2/§2.3): bounded to the reviewed window (900 s default,
+    #: 1,800 s maximum) by the typed settings validator and the provider
+    #: contracts, and applied when the executor mints one URL per dispatch.
+    managed_url_ttl_seconds: int = MANAGED_URL_DEFAULT_TTL_SECONDS
 
     @property
     def allowed_transfer_modes(self) -> frozenset[TransferMode]:

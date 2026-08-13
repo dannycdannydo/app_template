@@ -20,7 +20,6 @@ drift; live OpenAI behavior is covered by the opt-in ``ai_contracts`` test in
 from __future__ import annotations
 
 import hashlib
-import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -313,6 +312,43 @@ def test_store_constructor_requires_key_and_reviewed_expiry() -> None:
         )
 
 
+async def test_store_constructor_enforces_region_base_url_relationship(
+    source_pdf: tuple[Path, bytes],
+) -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return _json_response(_file_object())
+
+    # A region derives the regional endpoint (defense in depth with the
+    # inference adapter, v0.7 Scope §6.3): the upload never travels through
+    # the global endpoint while the reference is labelled regional.
+    store = OpenAITransferStore(
+        api_key="sk-test",
+        region="us",
+        upload_expiry_seconds=_EXPIRY_SECONDS,
+        client=_client(handler),
+    )
+    await store.stage(**_real_stage_args(source_pdf, region="us"))
+    assert captured[0].url == "https://us.api.openai.com/v1/files"
+    await store.aclose()
+    # An explicit base URL must name the region's domain, or construction fails.
+    with pytest.raises(AIInputValidationError):
+        OpenAITransferStore(
+            api_key="sk-test",
+            region="us",
+            base_url="https://api.openai.com/v1",
+            upload_expiry_seconds=_EXPIRY_SECONDS,
+        )
+    OpenAITransferStore(
+        api_key="sk-test",
+        region="eu",
+        base_url="https://eu.api.openai.com/v1",
+        upload_expiry_seconds=_EXPIRY_SECONDS,
+    )  # must not raise
+
+
 async def test_store_stage_uploads_multipart_with_purpose_and_expires_after(
     source_pdf: tuple[Path, bytes],
 ) -> None:
@@ -327,12 +363,14 @@ async def test_store_stage_uploads_multipart_with_purpose_and_expires_after(
     sent = captured[0]
     assert sent.url == "https://api.openai.com/v1/files"
     assert sent.headers["authorization"] == "Bearer sk-test"
-    # httpx encodes multipart fields; the plain fields carry purpose and the
-    # expires_after JSON object (anchor + seconds) verified 2026-08-11.
+    # httpx encodes multipart fields; ``expires_after`` travels as flattened
+    # fields (``expires_after[anchor]`` + ``expires_after[seconds]``) — the
+    # documented curl form and the SDK's multipart serialization (a single
+    # JSON-string field is refused by the API).
     text = sent.read().decode("latin-1")
     assert 'name="purpose"' in text and OPENAI_FILES_PURPOSE in text
-    expires_payload = json.loads(text.split('name="expires_after"')[1].split("\r\n--")[0].strip())
-    assert expires_payload == {"anchor": "created_at", "seconds": _EXPIRY_SECONDS}
+    assert 'name="expires_after[anchor]"' in text and "created_at" in text
+    assert 'name="expires_after[seconds]"' in text and str(_EXPIRY_SECONDS) in text
     assert reference.external_id == "file-abc123"
     assert reference.expires_at is not None
     _path, content = source_pdf
@@ -376,6 +414,65 @@ async def test_store_stage_verifies_the_uploaded_digest(
     # not byte-identical to the verified source, so no reference is created.
     with pytest.raises(TransferStagingError):
         await store.stage(**_real_stage_args(source_pdf, source_digest="b" * 64))
+    await store.aclose()
+
+
+async def test_store_stage_deletes_provider_file_when_post_upload_verification_fails(
+    source_pdf: tuple[Path, bytes],
+) -> None:
+    deleted: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return _json_response(_file_object())
+        deleted.append(request.url.path)
+        return _json_response({})
+
+    store = _store(client=_client(handler))
+    # The upload already succeeded; the digest check then fails, so the
+    # untracked provider copy must be deleted best-effort (the orchestrator's
+    # compensation only runs once stage() returns, and no durable row exists).
+    with pytest.raises(TransferStagingError):
+        await store.stage(**_real_stage_args(source_pdf, source_digest="b" * 64))
+    assert deleted == ["/v1/files/file-abc123"]
+    await store.aclose()
+
+
+async def test_store_stage_unparseable_response_leaves_no_file_to_delete(
+    source_pdf: tuple[Path, bytes],
+) -> None:
+    deleted: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "DELETE":
+            deleted.append(request.url.path)
+        return httpx.Response(
+            200, content=b"not json", request=httpx.Request("POST", "http://test")
+        )
+
+    store = _store(client=_client(handler))
+    with pytest.raises(ProviderResponseError):
+        await store.stage(**_real_stage_args(source_pdf))
+    # No file id is discoverable, so nothing addressable is deleted; the
+    # provider-enforced expires_after remains the bound for any accepted copy.
+    assert deleted == []
+    await store.aclose()
+
+
+async def test_store_stage_missing_file_id_leaves_no_file_to_delete(
+    source_pdf: tuple[Path, bytes],
+) -> None:
+    deleted: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "DELETE":
+            deleted.append(request.url.path)
+        return _json_response({"object": "file"})
+
+    store = _store(client=_client(handler))
+    with pytest.raises(ProviderResponseError):
+        await store.stage(**_real_stage_args(source_pdf))
+    assert deleted == []
     await store.aclose()
 
 
