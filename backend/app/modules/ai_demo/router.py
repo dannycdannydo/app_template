@@ -30,6 +30,9 @@ from app.modules.ai_demo.schemas import (
     DocumentClassifyRequest,
     DocumentClassifyResultResponse,
     DocumentClassifySyncResponse,
+    ScratchUploadCompleteResponse,
+    ScratchUploadIntentRequest,
+    ScratchUploadIntentResponse,
 )
 from app.modules.organisations.models import OrganisationMembership
 from app.modules.users.models import User
@@ -40,6 +43,14 @@ router = APIRouter(prefix="/api/v1/ai/classify", tags=["ai"])
 #: gated like every document action. The private reference + bounded question
 #: are forwarded unchanged; the AI layer decides inline vs Vertex GCS staging.
 ask_router = APIRouter(prefix="/api/v1/ai/ask", tags=["ai"])
+
+#: Demo-scoped transient upload surface (v0.8 Scope §2.2/§6.5): the AI test
+#: screen uploads a PDF into the organisation-scoped ``ai/scratch/`` namespace
+#: so the AI layer classifies the source as transient and routes a >5 MB PDF
+#: through the provider-upload mode. The platform files module stays untouched
+#: (it owns retained ``documents/`` records); this surface carries no durable
+#: file record — scratch objects are AI-owned throwaway inputs.
+scratch_router = APIRouter(prefix="/api/v1/ai/scratch", tags=["ai"])
 
 
 @router.post(
@@ -100,12 +111,13 @@ async def ask_document(
     membership: Annotated[OrganisationMembership, Depends(require_permission("documents.upload"))],
     user: Annotated[User, Depends(get_current_user)],
 ) -> DocumentAskResponse:
-    """Answer one question about a stored document (inline or GCS-staged).
+    """Answer one question about a stored document (inline or staged).
 
     The private storage reference and bounded question are passed to the
     ``document.ask`` task; ``AIService`` resolves the reference (inline at or
-    below the 5 MB threshold, Vertex private GCS staging above it) and the
-    validated answer is returned inline with safe routing/usage metadata.
+    below the 5 MB threshold, Vertex private GCS staging or the OpenAI Files
+    API upload path above it) and the validated answer is returned inline with
+    safe routing/usage metadata.
     """
     return await service.ask_sync(
         session,
@@ -114,3 +126,37 @@ async def ask_document(
         storage_reference=payload.storage_reference,
         question=payload.question,
     )
+
+
+@scratch_router.post("/uploads", response_model=ScratchUploadIntentResponse, status_code=201)
+async def create_scratch_upload_intent_endpoint(
+    payload: ScratchUploadIntentRequest,
+    session: Annotated[AsyncSession, Depends(get_db)],
+    membership: Annotated[OrganisationMembership, Depends(require_permission("documents.upload"))],
+) -> ScratchUploadIntentResponse:
+    """Start a transient upload into the AI scratch namespace (signed PUT URL)."""
+    upload_id, upload_url, expires_at = await service.create_scratch_upload_intent(
+        organisation_id=membership.organisation_id,
+        original_filename=payload.original_filename,
+        content_type=payload.content_type,
+        size_bytes=payload.size_bytes,
+    )
+    return ScratchUploadIntentResponse(
+        upload_id=upload_id,
+        upload_url=upload_url,
+        expires_at=expires_at,
+    )
+
+
+@scratch_router.post("/uploads/{upload_id}/complete", response_model=ScratchUploadCompleteResponse)
+async def complete_scratch_upload_endpoint(
+    upload_id: str,
+    session: Annotated[AsyncSession, Depends(get_db)],
+    membership: Annotated[OrganisationMembership, Depends(require_permission("documents.upload"))],
+) -> ScratchUploadCompleteResponse:
+    """Verify the stored transient object and return its storage reference."""
+    storage_reference = await service.complete_scratch_upload(
+        organisation_id=membership.organisation_id,
+        upload_id=upload_id,
+    )
+    return ScratchUploadCompleteResponse(storage_reference=storage_reference)

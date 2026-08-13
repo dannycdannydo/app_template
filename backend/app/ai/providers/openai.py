@@ -33,10 +33,12 @@ log line embeds it (BP §28).
 
 from __future__ import annotations
 
+import re
 from typing import Any, cast
 from urllib.parse import urlsplit
 
 import httpx
+import structlog
 
 from app.ai.attachments import OPENAI_INLINE_ATTACHMENT_MIME_TYPES
 from app.ai.errors import AIInputValidationError, ProviderResponseError
@@ -57,12 +59,23 @@ from app.ai.providers.openai_compatible import (
 )
 from app.ai.schemas import TokenUsage
 
+#: Module logger. Dispatch-shape booleans and failure categories only — never
+#: prompts, document content, credentials, URLs or raw provider responses
+#: (BP §28, ADR-0017).
+logger = structlog.get_logger()
+
 __all__ = ["OpenAIAdapter"]
 
 #: Regional chat-completions domains, keyed by the validated region values
 #: from settings (v0.7 Scope §6.3). A region setting alone must never change
 #: the wire request; the endpoint itself moves to the regional domain.
-_REGIONAL_API_HOSTS = {"us": "us.api.openai.com", "eu": "eu.api.openai.com"}
+REGIONAL_API_HOSTS = {"us": "us.api.openai.com", "eu": "eu.api.openai.com"}
+
+#: The reviewed snapshot shape the Responses API echoes for a requested model
+#: (``gpt-4o-mini-2024-07-18`` for a ``gpt-4o-mini`` request): a dated suffix.
+#: Only this exact shape is normalized to the routed id; any other suffix
+#: retains the echoed id so a provider model mismatch surfaces in accounting.
+_SNAPSHOT_MODEL_SUFFIX = re.compile(r"-\d{4}-\d{2}-\d{2}$")
 
 #: The Responses API ``input_file`` item carries a provider file id for a
 #: ``provider_upload`` reference. A file id is opaque provider state; a
@@ -80,10 +93,11 @@ def _openai_responses_file_parts(request: ProviderRequest) -> list[dict[str, Any
     managed URL exists only in this in-memory request for one dispatch.
     """
     staged = request.staged_file
+    if request.managed_url:
+        # The managed URL wins: a retained source never sends a file id.
+        return [{"type": _RESPONSES_FILE_ID, "file_url": request.managed_url}]
     if staged is None:
         raise AIInputValidationError("a staged file reference is required for file input")
-    if request.managed_url:
-        return [{"type": _RESPONSES_FILE_ID, "file_url": request.managed_url}]
     external_id = staged.external_id
     if "://" in external_id or external_id.startswith("gs:"):
         # A staged file carrying a URL or cloud URI as its external id is
@@ -130,7 +144,7 @@ class OpenAIAdapter(OpenAICompatibleAdapter):
             base_url = f"https://{region}.api.openai.com/v1"
         elif region and base_url:
             host = urlsplit(base_url).hostname or ""
-            expected = _REGIONAL_API_HOSTS[region]
+            expected = REGIONAL_API_HOSTS[region]
             if host != expected:
                 raise AIInputValidationError(
                     f"AI_OPENAI_BASE_URL host {host!r} conflicts with region {region!r}; "
@@ -156,9 +170,16 @@ class OpenAIAdapter(OpenAICompatibleAdapter):
             raise AIInputValidationError(
                 "a staged file and inline attachments are mutually exclusive"
             )
-        if request.staged_file is None:
-            raise AIInputValidationError("the Responses-API dispatch path requires a staged file")
-        if request.staged_file.mime_type not in self.supported_attachment_mime_types:
+        if request.staged_file is None and request.managed_url is None:
+            # The Responses-API document path needs one file input: a provider
+            # file id (provider_upload) or a just-in-time managed URL for a
+            # retained source (managed_signed_url, Scope §2.3/§6.5).
+            raise AIInputValidationError(
+                "the Responses-API dispatch path requires a staged file or a managed URL"
+            )
+        if request.staged_file is not None and request.staged_file.mime_type not in (
+            self.supported_attachment_mime_types
+        ):
             raise AIInputValidationError(
                 f"provider {self.provider_id!r} does not support staged file MIME type "
                 f"{request.staged_file.mime_type!r}"
@@ -204,6 +225,24 @@ class OpenAIAdapter(OpenAICompatibleAdapter):
     ) -> ProviderResponse:
         output = data.get("output")
         if not isinstance(output, list):
+            # A 200 without an ``output`` array is almost always the provider's
+            # error envelope or an incomplete file-backed dispatch. Log only
+            # low-cardinality classification metadata — the HTTP-equivalent
+            # status, the OpenAI error ``code``/``type`` and the top-level
+            # keys — never the message, prompts or content (BP §28).
+            error_code: str | None = None
+            error_envelope = data.get("error")
+            if isinstance(error_envelope, dict):
+                envelope: dict[str, Any] = cast(dict[str, Any], error_envelope)
+                raw_code = envelope.get("code") or envelope.get("type")
+                if isinstance(raw_code, str):
+                    error_code = raw_code
+            logger.warning(
+                "ai.openai.responses.unparseable",
+                response_status=data.get("status"),
+                error_code=error_code,
+                top_level_keys=sorted(data),
+            )
             raise ProviderResponseError("provider returned no usable output")
         content_parts: list[str] = []
         refused = False
@@ -239,7 +278,7 @@ class OpenAIAdapter(OpenAICompatibleAdapter):
             usage = TokenUsage(input_tokens=0, output_tokens=0)
         finish_reason = self._responses_finish_reason(data, refused=refused)
         return ProviderResponse(
-            model=str(data.get("model") or request.model),
+            model=self._response_model(data, request),
             content=content,
             structured=parse_structured_json(content) if request.output_schema else None,
             usage=usage,
@@ -264,7 +303,33 @@ class OpenAIAdapter(OpenAICompatibleAdapter):
             return FINISH_CONTENT_FILTER
         return FINISH_STOP
 
+    def _response_model(self, data: dict[str, Any], request: ProviderRequest) -> str:
+        """The model identifier reported for routing/accounting.
+
+        OpenAI echoes the requested id, or a dated snapshot of it — e.g. the
+        ``gpt-4o-mini-2024-07-18`` snapshot for a ``gpt-4o-mini`` request —
+        which is the same reviewed deployment. Only that reviewed snapshot
+        shape (a ``-YYYY-MM-DD`` suffix) is normalized to the routed id; any
+        other echoed id is retained so a genuinely different model surfaces as
+        a mismatch in the service's routing/accounting check instead of being
+        silently accepted.
+        """
+        echoed = str(data.get("model") or "")
+        if echoed == request.model:
+            return echoed
+        if echoed.startswith(f"{request.model}-") and _SNAPSHOT_MODEL_SUFFIX.search(echoed):
+            return request.model
+        return echoed or request.model
+
     async def _complete_responses(self, request: ProviderRequest) -> ProviderResponse:
+        # Dispatch-shape diagnostic (safe booleans only, BP §28): confirms
+        # which file-input form reached the wire — a provider file id
+        # (provider_upload) or a just-in-time managed URL (managed_signed_url).
+        logger.info(
+            "ai.openai.responses.dispatch",
+            has_staged_file=request.staged_file is not None,
+            has_managed_url=request.managed_url is not None,
+        )
         data, latency_ms = await post_json(
             self._client,
             self._responses_url(),

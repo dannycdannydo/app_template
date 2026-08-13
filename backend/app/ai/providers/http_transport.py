@@ -87,10 +87,18 @@ def raise_for_provider_status(
     if response.is_success:
         return
     status = response.status_code
+    # The status code is safe (low-cardinality, already carried by the app's
+    # request-finished events) and is the single most useful diagnostic when a
+    # provider rejects a request — e.g. an OpenAI 400 on a managed file URL
+    # versus a genuine 200-with-unparseable-body response. The response body
+    # is never logged (BP §28).
     if status == 429 or status in retryable_statuses:
+        logger.warning("ai.provider.http.non_success", status=status, kind="rate_limited")
         raise ProviderRateLimitError("provider rate limited the request")
     if status in unavailable_statuses:
+        logger.warning("ai.provider.http.non_success", status=status, kind="unavailable")
         raise ProviderUnavailableError("provider returned a server error")
+    logger.warning("ai.provider.http.non_success", status=status, kind="rejected")
     raise ProviderResponseError(f"provider rejected the request (HTTP {status})")
 
 

@@ -799,14 +799,55 @@ export interface paths {
     put?: never
     /**
      * Ask Document
-     * @description Answer one question about a stored document (inline or GCS-staged).
+     * @description Answer one question about a stored document (inline or staged).
      *
      *     The private storage reference and bounded question are passed to the
      *     ``document.ask`` task; ``AIService`` resolves the reference (inline at or
-     *     below the 5 MB threshold, Vertex private GCS staging above it) and the
-     *     validated answer is returned inline with safe routing/usage metadata.
+     *     below the 5 MB threshold, Vertex private GCS staging or the OpenAI Files
+     *     API upload path above it) and the validated answer is returned inline with
+     *     safe routing/usage metadata.
      */
     post: operations['ask_document_api_v1_ai_ask_post']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/api/v1/ai/scratch/uploads': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    /**
+     * Create Scratch Upload Intent Endpoint
+     * @description Start a transient upload into the AI scratch namespace (signed PUT URL).
+     */
+    post: operations['create_scratch_upload_intent_endpoint_api_v1_ai_scratch_uploads_post']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/api/v1/ai/scratch/uploads/{upload_id}/complete': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    /**
+     * Complete Scratch Upload Endpoint
+     * @description Verify the stored transient object and return its storage reference.
+     */
+    post: operations['complete_scratch_upload_endpoint_api_v1_ai_scratch_uploads__upload_id__complete_post']
     delete?: never
     options?: never
     head?: never
@@ -2033,6 +2074,47 @@ export interface components {
       title?: string | null
       /** Body */
       body?: string | null
+    }
+    /**
+     * ScratchUploadCompleteResponse
+     * @description The verified transient object's private storage reference.
+     */
+    ScratchUploadCompleteResponse: {
+      /** Storage Reference */
+      storage_reference: string
+    }
+    /**
+     * ScratchUploadIntentRequest
+     * @description Declare one transient AI-scratch upload (v0.8 Scope §2.2/§6.5).
+     *
+     *     The demo's transient path lands bytes in the organisation-scoped
+     *     ``ai/scratch/`` namespace so the AI layer classifies the source as
+     *     transient and routes a >5 MB PDF through the provider-upload mode. The
+     *     declaration mirrors the files module's signed-upload flow: the browser
+     *     PUTs the bytes directly to the signed URL, then completes the upload.
+     */
+    ScratchUploadIntentRequest: {
+      /** Original Filename */
+      original_filename: string
+      /** Content Type */
+      content_type: string
+      /** Size Bytes */
+      size_bytes: number
+    }
+    /**
+     * ScratchUploadIntentResponse
+     * @description The signed PUT target for one transient upload.
+     */
+    ScratchUploadIntentResponse: {
+      /** Upload Id */
+      upload_id: string
+      /** Upload Url */
+      upload_url: string
+      /**
+       * Expires At
+       * Format: date-time
+       */
+      expires_at: string
     }
     /**
      * UnreadCountResponse
@@ -3682,6 +3764,76 @@ export interface operations {
         }
         content: {
           'application/json': components['schemas']['DocumentAskResponse']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  create_scratch_upload_intent_endpoint_api_v1_ai_scratch_uploads_post: {
+    parameters: {
+      query?: never
+      header?: {
+        'x-org-id'?: string | null
+        authorization?: string | null
+      }
+      path?: never
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['ScratchUploadIntentRequest']
+      }
+    }
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ScratchUploadIntentResponse']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  complete_scratch_upload_endpoint_api_v1_ai_scratch_uploads__upload_id__complete_post: {
+    parameters: {
+      query?: never
+      header?: {
+        'x-org-id'?: string | null
+        authorization?: string | null
+      }
+      path: {
+        upload_id: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ScratchUploadCompleteResponse']
         }
       }
       /** @description Validation Error */

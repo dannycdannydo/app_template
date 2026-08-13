@@ -99,7 +99,7 @@ from app.ai.transfer import (
     select_transfer_mode_for_policy,
     source_lifecycle_for_reference,
 )
-from app.ai.transfer_orchestrator import TransferOrchestrator
+from app.ai.transfer_orchestrator import ManagedUrlStager, TransferOrchestrator
 from app.observability.metrics import (
     observe_ai_attempt,
     observe_ai_fallback,
@@ -362,6 +362,7 @@ class AIService:
         transfer_deployment: TransferDeploymentPolicy | None = None,
         storage: ObjectStorage | None = None,
         transfer_stores: Mapping[str, TransferStore] | None = None,
+        managed_url_stager: ManagedUrlStager | None = None,
         allow_unmanaged_execution: bool = False,
     ) -> None:
         if provider is not None:
@@ -392,6 +393,10 @@ class AIService:
         # fails closed on a selected non-inline mode before any transfer.
         self._storage = storage
         self._transfer_stores = dict(transfer_stores or {})
+        # v0.8 Scope §2.3/§6.4-§6.5: the dev managed-URL staging seam — used
+        # when the source storage cannot produce a provider-reachable HTTPS
+        # signed URL (local MinIO); ``None`` mints the URL directly.
+        self._managed_url_stager = managed_url_stager
         # Test-only seam (v0.7 Scope §6.5): ``execute`` without a recorder
         # port is refused by default so the supported entry point can never
         # bypass organisation enforcement; deterministic service tests that
@@ -518,13 +523,25 @@ class AIService:
             raise TransferModeUnavailableError(
                 "no permitted/provider-supported transfer mode is eligible for this attachment set"
             )
-        if selected is TransferMode.STORAGE_REFERENCE:
-            # v0.8 Scope §2.4/§6.3: the Vertex private GCS staging seam. The
-            # execution itself happens in ``execute``; selection returning the
-            # mode here means the seam must be provisioned — the service's
-            # storage and the routed provider's transfer store — or the
-            # selection fails closed before any external transfer.
+        if selected in (TransferMode.STORAGE_REFERENCE, TransferMode.PROVIDER_UPLOAD):
+            # v0.8 Scope §2.4/§6.3-§6.5: the provider-copy staging seam. The
+            # storage-reference mode stages into the Vertex private GCS bucket;
+            # the provider-upload mode stages a transient source through the
+            # routed provider's own upload store (OpenAI Files API). Both
+            # require the process-wide storage and the routed provider's
+            # transfer store, or the selection fails closed before any external
+            # transfer (Scope §2.2 "fail closed, never silently downgrade").
             if self._storage is None or self._transfer_stores.get(model.provider) is None:
+                raise TransferExecutionUnavailableError(
+                    "the selected transfer mode is not executable by this release"
+                )
+            return selected
+        if selected is TransferMode.MANAGED_SIGNED_URL:
+            # v0.8 Scope §2.3/§6.3: the just-in-time managed-URL seam has no
+            # provider copy — the short-lived signed URL is minted per dispatch
+            # from the retained source — so only the process-wide storage is
+            # required here (the durable reference store is per-call).
+            if self._storage is None:
                 raise TransferExecutionUnavailableError(
                     "the selected transfer mode is not executable by this release"
                 )
@@ -802,29 +819,43 @@ class AIService:
                         organisation_id=request.organisation_id,
                         large_source=large_source,
                     )
-                # v0.8 Scope §2.3/§2.4: a selected storage_reference mode stages
+                # v0.8 Scope §2.3/§2.4/§6.5: a selected non-inline mode stages
                 # the verified private source into the provider's staging form
-                # (Vertex private GCS bucket) and hands the adapter the opaque
-                # provider-neutral reference. The stream is bounded and
-                # verified before staging; a retry reuses the live durable
-                # reference through the orchestrator instead of staging twice
-                # (retry-only reuse, Scope §2.1).
+                # (Vertex private GCS bucket for storage_reference, the
+                # provider's own upload API for provider_upload, a durable
+                # reference plus a just-in-time signed URL for managed_signed_url)
+                # and hands the adapter the opaque provider-neutral reference.
+                # The stream is bounded and verified before staging; a retry
+                # reuses the live durable reference through the orchestrator
+                # instead of staging twice (retry-only reuse, Scope §2.1).
                 staged_reference: ExternalFileReference | None = None
                 staged_orchestrator: TransferOrchestrator | None = None
-                if selected_transfer_mode is TransferMode.STORAGE_REFERENCE:
-                    if large_source is None or self._storage is None:
+                if selected_transfer_mode in (
+                    TransferMode.STORAGE_REFERENCE,
+                    TransferMode.PROVIDER_UPLOAD,
+                    TransferMode.MANAGED_SIGNED_URL,
+                ):
+                    if large_source is None or self._storage is None or transfer_references is None:
                         raise TransferExecutionUnavailableError(
                             "the selected transfer mode is not executable by this release"
                         )
-                    store = self._transfer_stores.get(model.provider)
-                    if store is None or transfer_references is None:
-                        raise TransferExecutionUnavailableError(
-                            "the selected transfer mode is not executable by this release"
-                        )
+                    if selected_transfer_mode is TransferMode.MANAGED_SIGNED_URL:
+                        # No provider-hosted copy: the managed-signed-url mode
+                        # only builds the durable reference here; the
+                        # short-lived signed URL itself is minted per dispatch
+                        # (Scope §2.3), so no provider transfer store is needed.
+                        store: TransferStore | None = None
+                    else:
+                        store = self._transfer_stores.get(model.provider)
+                        if store is None:
+                            raise TransferExecutionUnavailableError(
+                                "the selected transfer mode is not executable by this release"
+                            )
                     staged_orchestrator = TransferOrchestrator(
                         storage=self._storage,
                         store=store,
                         references=transfer_references,
+                        managed_url_stager=self._managed_url_stager,
                     )
                     async with StreamedSource(
                         storage=self._storage,
@@ -837,7 +868,7 @@ class AIService:
                             organisation_id=request.organisation_id,
                             logical_request_id=execution_request_id,
                             provider_id=model.provider,
-                            mode=TransferMode.STORAGE_REFERENCE,
+                            mode=selected_transfer_mode,
                             source_reference=large_source.reference,
                             source_digest=source.sha256_digest,
                             size_bytes=source.size_bytes,
@@ -849,6 +880,22 @@ class AIService:
                             expires_at=None,
                             source_path=source.path,
                         )
+                # v0.8 Scope §2.3: a just-in-time managed download URL is
+                # minted per dispatch/retry for a selected managed-signed-url
+                # mode (never persisted, redacted at every log boundary). The
+                # URL is the temporary bearer capability one attempt sends as
+                # the provider's URL file input.
+                managed_url: str | None = None
+                if (
+                    selected_transfer_mode is TransferMode.MANAGED_SIGNED_URL
+                    and staged_reference is not None
+                    and staged_orchestrator is not None
+                ):
+                    signed = await staged_orchestrator.mint_managed_url(
+                        reference=staged_reference,
+                        ttl_seconds=self._transfer_deployment.managed_url_ttl_seconds,
+                    )
+                    managed_url = signed.url
                 provider_request = ProviderRequest(
                     task=task.name,
                     model=model.model,
@@ -871,8 +918,10 @@ class AIService:
                             mime_type=staged_reference.mime_type,
                         )
                         if staged_reference is not None
+                        and selected_transfer_mode is not TransferMode.MANAGED_SIGNED_URL
                         else None
                     ),
+                    managed_url=managed_url,
                 )
                 # One durable row per actual dispatch (v0.7 Scope §2). The
                 # first attempt gates the execution's bounded worst-case budget
@@ -1186,6 +1235,11 @@ class AIService:
                 ),
                 model=pending_attempts[-1].decision.model.model if pending_attempts else None,
                 error_code=failure.error_code,
+                # The exception message is the redaction-safe surface (AIError
+                # messages never echo references, ids, URLs or content — BP
+                # §28) and is the single fastest way to diagnose a staging
+                # failure without enabling debug logging.
+                error_message=str(failure),
                 attempts=len(pending_attempts),
             )
             raise failure

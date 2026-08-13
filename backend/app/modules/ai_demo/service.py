@@ -27,6 +27,7 @@ message, never embedding provider output, prompts or document content.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -46,6 +47,7 @@ from app.core.exceptions import (
     ServiceUnavailableError,
     ValidationError,
 )
+from app.db.conventions import uuid7
 from app.modules.ai_demo.schemas import (
     ClassifyCost,
     ClassifyRouting,
@@ -56,6 +58,7 @@ from app.modules.ai_demo.schemas import (
     DocumentClassifySyncResponse,
 )
 from app.modules.users.models import User
+from app.storage import get_storage
 
 #: The single demonstrated task (kept in sync with ``app.ai.execution``).
 DEMO_TASK = "document.classify"
@@ -282,11 +285,12 @@ async def ask_sync(
 
     The private ``storage_reference`` is resolved by ``AIService`` itself: a
     PDF at or below the inline threshold becomes a bounded inline attachment,
-    and a larger PDF is streamed bounded into the Vertex private GCS staging
-    path before dispatch (v0.8 Scope §2.2/§2.4). The bounded question travels
-    as a metadata variable so the feature-facing ``AIRequest`` contract stays
-    unchanged; the answer is validated text, never unvalidated provider
-    output (v0.7 Scope §6.4).
+    and a larger PDF is streamed bounded into a non-inline staging path — the
+    Vertex private GCS bucket or the OpenAI Files API upload — before dispatch
+    (v0.8 Scope §2.2/§2.4/§6.5). The bounded question travels as a metadata
+    variable so the feature-facing ``AIRequest`` contract stays unchanged; the
+    answer is validated text, never unvalidated provider output (v0.7 Scope
+    §6.4).
     """
     _validate_storage_reference(storage_reference, organisation_id)
     try:
@@ -324,3 +328,98 @@ async def ask_sync(
         cost=ClassifyCost(amount=result.cost.amount, currency=result.cost.currency),
         completed_at=result.completed_at,
     )
+
+
+#: The transient upload ceiling mirrors the AI large-file template ceiling
+#: (v0.8 Scope §2.2): the demo's scratch path carries exactly one PDF of at
+#: most the 50,000,000-byte large-file ceiling, so an intent never signs a
+#: PUT URL for bytes the AI layer would then refuse.
+#:
+#: The organisation-scoped AI scratch namespace is re-declared here rather
+#: than imported from ``app.ai.transfer`` (v0.8 Scope §6.1 checkbox 3 import
+#: boundary — feature modules never import the transfer contract module). It
+#: mirrors the AI layer's own ``SCRATCH_KEY_TEMPLATE`` classifier: objects
+#: under this prefix are classified as transient sources, so a >5 MB PDF
+#: uploaded here routes through the provider-upload mode. The demo test suite
+#: pins this exact format against the ask flow.
+SCRATCH_KEY_TEMPLATE = "organisations/{organisation_id}/ai/scratch/"
+
+
+def _validate_scratch_upload(*, content_type: str, size_bytes: int) -> None:
+    from app.core.config import get_settings
+
+    if content_type != "application/pdf":
+        raise ValidationError(
+            code="unsupported_content_type",
+            message="Only PDF documents can be uploaded to the AI scratch area.",
+        )
+    ceiling = get_settings().ai_max_large_attachment_bytes
+    if size_bytes > ceiling:
+        raise ValidationError(
+            code="upload_too_large",
+            message=f"The declared size exceeds the AI large-file ceiling of {ceiling} bytes.",
+        )
+
+
+def scratch_object_key(organisation_id: uuid.UUID, upload_id: uuid.UUID) -> str:
+    """The server-generated object key for one transient scratch upload."""
+    return SCRATCH_KEY_TEMPLATE.format(organisation_id=organisation_id) + f"{upload_id}.pdf"
+
+
+async def create_scratch_upload_intent(
+    *,
+    organisation_id: uuid.UUID,
+    original_filename: str,
+    content_type: str,
+    size_bytes: int,
+) -> tuple[str, str, datetime]:
+    """Start the demo's transient upload: validate, generate the key, sign a PUT URL.
+
+    The scratch namespace carries no durable file record — the object is a
+    throwaway AI input whose lifecycle the AI retention sweep owns (v0.7 Scope
+    §6.5) — so only the declared PDF/ceiling contract is validated here and
+    the browser PUTs the bytes directly to the signed URL. The AI layer
+    re-verifies ownership, size, MIME and digest when the reference is used.
+    ``original_filename`` is metadata-only for the demo contract: the server
+    always generates the object key from the upload id, so the client-provided
+    name never influences storage or routing.
+    """
+    _validate_scratch_upload(content_type=content_type, size_bytes=size_bytes)
+    upload_id = uuid7()
+    object_key = scratch_object_key(organisation_id, upload_id)
+    signed_url = await get_storage().create_upload_url(
+        file_id=upload_id,
+        object_key=object_key,
+        content_type=content_type,
+        size_bytes=size_bytes,
+    )
+    return str(upload_id), signed_url.url, signed_url.expires_at
+
+
+async def complete_scratch_upload(
+    *,
+    organisation_id: uuid.UUID,
+    upload_id: str,
+) -> str:
+    """Verify the browser stored the transient object and return its reference.
+
+    The object key is server-generated from the validated ``upload_id``; the
+    completion re-heads the object so a client can never claim an upload that
+    was never stored, and validates the stored object against the same
+    PDF/ceiling contract the intent declared — no declared metadata is
+    persisted, so the stored object itself is the only honest source for the
+    size/MIME contract. The AI layer performs the authoritative ownership and
+    digest verification when the reference is resolved at ask time.
+    """
+    try:
+        parsed = uuid.UUID(upload_id)
+    except ValueError as exc:
+        raise ValidationError(
+            code="invalid_upload_id", message="The upload id is not valid."
+        ) from exc
+    object_key = scratch_object_key(organisation_id, parsed)
+    info = await get_storage().head_object(object_key)
+    if info is None:
+        raise ValidationError(code="upload_not_found", message="The upload could not be verified.")
+    _validate_scratch_upload(content_type=info.content_type or "", size_bytes=info.size_bytes)
+    return object_key

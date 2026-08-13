@@ -135,9 +135,19 @@ explicit operator procedure.
    - `storage_reference` (Vertex): exactly one PDF above the threshold, staged
      into the GCS bucket, referenced as `fileData`, deleted best-effort after
      the terminal outcome.
-   - `provider_upload` / `managed_signed_url`: declared in the contracts but
-     not yet executable (OpenAI/Anthropic checkpoints §6.5/§6.6) — fail
-     closed before any transfer.
+   - `provider_upload` (OpenAI): exactly one transient PDF above the
+     threshold, streamed bounded into the Files API (`purpose=user_data`,
+     configured `expires_after`), dispatched as `input_file.file_id`, deleted
+     best-effort after the terminal outcome (v0.8 Scope §6.5).
+   - `managed_signed_url`: exactly one retained PDF above the threshold gets
+     a short-lived read-only HTTPS URL (default TTL 900 s, max 1,800 s) minted
+     just-in-time per dispatch from the source storage and sent as
+     `input_file.file_url` — no provider copy is ever made. A local storage
+     seam (MinIO over plain HTTP, which the minter refuses and a provider
+     could not reach anyway) is served in development by staging the verified
+     source into the user-provisioned GCS temp bucket and minting a GCS v4
+     RSA-signed HTTPS URL from the staged copy (`app/ai/runtime.py` wires the
+     seam only when the deployment enables the mode). Anthropic §6.6 pending.
 6. **Dispatch + validation**: the provider adapter runs; the output must
    validate against the task's declared contract (structured schema or
    explicit text result) or it fails — unvalidated data is never returned.
@@ -300,5 +310,5 @@ credentials.
 | --- | --- | --- |
 | `inline` | yes | default; ≤ 5,000,000 aggregate bytes |
 | `storage_reference` | yes (Vertex) | private GCS staging, `age = 1` lifecycle backstop |
-| `provider_upload` | no | OpenAI §6.5 / Anthropic §6.6 pending |
-| `managed_signed_url` | no | same checkpoints pending |
+| `provider_upload` | yes (OpenAI) | Files API `user_data` upload, `expires_after`, best-effort delete |
+| `managed_signed_url` | yes | direct signed URL from public HTTPS storage; with a local (MinIO) storage seam in development the source is staged into the GCS temp bucket and a GCS v4-signed HTTPS URL is minted instead (Anthropic §6.6 pending) |

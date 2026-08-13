@@ -10,12 +10,17 @@ parameter_defaults:
   max_tokens: 1024
   temperature: 0
 declares_text_result: true
-# v0.8 Scope §2.2: the demonstration QA task carries a PDF inline at or below
-# the 5,000,000-byte aggregate threshold and through the Vertex private GCS
-# staging path (storage_reference) above it, matching the Vertex model and
-# provider transfer contract.
+# v0.8 Scope §2.2/§6.5: the demonstration QA task carries a PDF inline at or
+# below the 5,000,000-byte aggregate threshold and above it through a
+# non-inline staging path the routed model/provider declare: the Vertex
+# private GCS staging path (storage_reference) when Vertex is routed, the
+# OpenAI Files API upload path (provider_upload) for a transient scratch
+# source, or the just-in-time signed-URL path (managed_signed_url) for a
+# retained private source when the OpenAI adapter is routed.
 allowed_transfer_modes:
   - inline
+  - provider_upload
+  - managed_signed_url
   - storage_reference
 # The QA demo does not opt into retaining validated output content: the
 # durable record keeps status, routing and usage only (BP §28, ADR-0017).
@@ -29,10 +34,13 @@ fallback_policy:
   allow_local: true
 model_preferences:
   # Vertex first so the UI test routes through Vertex when the adapter is
-  # configured (v0.8 Scope §6.4); the deterministic fake stays as the
-  # configured-provider fallback so the default suite exercises the same task
-  # hermetically and the demo keeps working without provider credentials.
+  # configured (v0.8 Scope §6.4); OpenAI next so an OpenAI-only deployment
+  # routes a transient PDF through the Files API upload path (§6.5); the
+  # deterministic fake stays as the configured-provider fallback so the
+  # default suite exercises the same task hermetically and the demo keeps
+  # working without provider credentials.
   - vertex.gemini-2.0-flash
+  - openai.gpt-4o-mini
   - fake.document-classifier
 quality_tier: economy
 latency_tier: interactive

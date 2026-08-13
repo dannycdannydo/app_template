@@ -3,6 +3,7 @@ import { BotIcon, FileQuestionIcon, LoaderCircleIcon, SendIcon } from '@lucide/v
 import { computed, ref } from 'vue'
 
 import FileUpload from '@/components/application/FileUpload.vue'
+import ScratchFileUpload from '@/components/application/ScratchFileUpload.vue'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Label } from '@/components/ui/label'
@@ -13,22 +14,27 @@ import { showApiErrorToast } from '@/lib/toast'
 import { useAskMutation } from '@/queries/ai'
 
 /**
- * AI test screen (v0.8 Scope §2.2/§6.4).
+ * AI test screen (v0.8 Scope §2.2/§6.4/§6.5).
  *
  * The minimal intelligence-layer harness: upload a PDF, ask one bounded
- * question about it and read the validated answer. The backend decides the
- * transfer path — inline at or below the 5 MB aggregate threshold, private
- * Vertex GCS staging above it — and this view never names a provider or
- * storage path. The server-generated object key is reconstructed from the
- * resolved membership and the uploaded file id (the same format the files
- * module owns); the backend re-validates ownership on every request.
+ * question about it and read the validated answer. The upload mode selects
+ * which namespace the file lands in and therefore which source lifecycle the
+ * AI layer classifies — ``transient`` uploads into ``ai/scratch/`` so a >5 MB
+ * PDF routes through the provider-upload mode (OpenAI Files API), while
+ * ``permanent`` uploads through the files module into ``documents/`` so the
+ * source is retained and a >5 MB PDF routes through the just-in-time
+ * managed-URL mode. The backend decides the exact transfer path and this view
+ * never names a provider; the backend re-validates ownership on every request.
  *
  * The upload/ask affordances are gated by the documents.upload role bundle
  * (`useFilePermissions`); the backend stays the enforcement point.
  */
 
+type StorageMode = 'transient' | 'permanent'
+
 const { permissions, mePending } = useFilePermissions()
 
+const storageMode = ref<StorageMode>('transient')
 const storageReference = ref<string | null>(null)
 const question = ref('')
 const askMutation = useAskMutation()
@@ -59,7 +65,7 @@ async function submitQuestion(): Promise<void> {
       <h1 class="text-2xl font-semibold">AI test</h1>
       <p class="text-muted-foreground mt-1 text-sm">
         Upload a PDF, ask a question about it, and read the answer. Small files travel inline;
-        larger ones stage through private GCS before Vertex processes them.
+        larger ones stage through a private transfer path before the provider processes them.
       </p>
     </div>
 
@@ -73,8 +79,51 @@ async function submitQuestion(): Promise<void> {
           The file uploads directly to storage through a signed URL; use it to ask questions.
         </CardDescription>
       </CardHeader>
-      <CardContent>
-        <FileUpload accept=".pdf,application/pdf" @uploaded="onUploaded" />
+      <CardContent class="space-y-4">
+        <fieldset class="space-y-2">
+          <legend class="sr-only">Storage mode</legend>
+          <p class="text-muted-foreground text-xs">How should this file be stored?</p>
+          <div class="flex gap-2">
+            <label
+              class="hover:border-ring/50 focus-within:ring-ring/50 flex-1 cursor-pointer rounded-lg border px-3 py-2 text-sm outline-none focus-within:ring-2"
+              :class="storageMode === 'transient' ? 'border-ring bg-muted' : 'bg-transparent'"
+            >
+              <input
+                v-model="storageMode"
+                type="radio"
+                value="transient"
+                class="sr-only"
+                data-testid="ai-ask-mode-transient"
+              />
+              <span class="font-medium">Transient</span>
+              <span class="text-muted-foreground block text-xs">
+                Scratch storage; expires after use
+              </span>
+            </label>
+            <label
+              class="hover:border-ring/50 focus-within:ring-ring/50 flex-1 cursor-pointer rounded-lg border px-3 py-2 text-sm outline-none focus-within:ring-2"
+              :class="storageMode === 'permanent' ? 'border-ring bg-muted' : 'bg-transparent'"
+            >
+              <input
+                v-model="storageMode"
+                type="radio"
+                value="permanent"
+                class="sr-only"
+                data-testid="ai-ask-mode-permanent"
+              />
+              <span class="font-medium">Permanent</span>
+              <span class="text-muted-foreground block text-xs">
+                Retained document; signed URL fetch
+              </span>
+            </label>
+          </div>
+        </fieldset>
+        <ScratchFileUpload
+          v-if="storageMode === 'transient'"
+          accept=".pdf,application/pdf"
+          @uploaded="onUploaded"
+        />
+        <FileUpload v-else accept=".pdf,application/pdf" @uploaded="onUploaded" />
       </CardContent>
     </Card>
 
