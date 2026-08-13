@@ -41,7 +41,11 @@ interface UploadMutationOptions {
   onProgress?: (progress: { loaded: number; total: number }) => void
   onSuccess?: (result: {
     organisationId: string
-    file: { id: string; processing_job_id: string | null }
+    file: {
+      id: string
+      processing_job_id: string | null
+      storage_reference?: string | null
+    }
   }) => void
 }
 

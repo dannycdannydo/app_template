@@ -162,7 +162,7 @@ describe('PlatformOrganisationAISettingsView', () => {
     // even though the OpenAPI schema declares a string — the form must
     // tolerate both shapes without throwing.
     getMock.mockResolvedValue({
-      data: settingsRow({ monthly_budget: 25.5 }),
+      data: settingsRow({ monthly_budget: 25.5 as unknown as string }),
       error: undefined,
     })
     putMock.mockResolvedValue({ data: settingsRow({ version: 2 }), error: undefined })
