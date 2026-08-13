@@ -35,6 +35,7 @@ from app.ai.providers.deepseek import DeepSeekAdapter
 from app.ai.providers.local import LocalOpenAICompatibleAdapter
 from app.ai.providers.openai import OpenAIAdapter
 from app.ai.providers.vertex import VertexAIAdapter
+from app.ai.staging import StagedFile
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 
@@ -1000,3 +1001,284 @@ def test_vertex_and_azure_regions_are_derived_from_configuration(
     assert AnthropicAdapter(api_key="ant-test").region == ""
     assert DeepSeekAdapter(api_key="ds-test").region == ""
     assert LocalOpenAICompatibleAdapter(base_url="http://127.0.0.1:11434/v1").region == ""
+
+
+# --- v0.8 §6.5 OpenAI staged-file Responses-API dispatch ----------------------
+#
+# A non-inline transfer hands the OpenAI adapter a StagedFile; OpenAI's native
+# file-input contract is the Responses API ``input_file`` item — a provider
+# file id (provider_upload) or a just-in-time managed download URL for a
+# retained private S3 source (managed_signed_url). The adapter switches the
+# whole dispatch to POST /responses; every other request keeps chat
+# completions. The managed URL is a one-dispatch bearer capability that is
+# never returned, persisted, audited or logged (BP §28).
+
+
+def _canned_responses_response(
+    *,
+    content: str,
+    usage: dict[str, int] | None = None,
+    **overrides: object,
+) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "id": "resp-1",
+        "object": "response",
+        "model": "gpt-4o-mini",
+        "output": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": content}],
+            }
+        ],
+        "usage": usage or {"input_tokens": 10, "output_tokens": 5},
+    }
+    data.update(overrides)
+    return data
+
+
+def _staged_request(**overrides: object) -> ProviderRequest:
+    payload: dict[str, object] = {
+        "task": "document.classify",
+        "model": "gpt-4o-mini",
+        "prompt": "Classify the supplied non-sensitive sample document.",
+        "max_tokens": 256,
+        "temperature": 0.0,
+        "staged_file": StagedFile(
+            external_id="file-abc123",
+            mime_type="application/pdf",
+        ),
+    }
+    payload.update(overrides)
+    return ProviderRequest.model_validate(payload)
+
+
+async def test_openai_staged_file_id_dispatches_via_responses_api() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return _json_response(_canned_responses_response(content='{"category": "lease"}'))
+
+    adapter = OpenAIAdapter(api_key="sk-test", client=_client(handler))
+    response = await adapter.complete(_staged_request(output_schema="demo.ClassificationResult"))
+
+    assert len(captured) == 1
+    sent = captured[0]
+    assert sent.url == "https://api.openai.com/v1/responses"
+    assert sent.headers["authorization"] == "Bearer sk-test"
+    body = json.loads(sent.content)
+    assert body["model"] == "gpt-4o-mini"
+    assert body["max_output_tokens"] == 256
+    assert body["temperature"] == 0.0
+    message = body["input"][0]
+    assert message["role"] == "user"
+    parts = _content_parts(message["content"])
+    assert parts[0]["type"] == "input_text"
+    assert parts[0]["text"].endswith("Respond with a single JSON object.")
+    assert parts[1] == {"type": "input_file", "file_id": "file-abc123"}
+
+    assert response.model == "gpt-4o-mini"
+    assert response.structured == {"category": "lease"}
+    assert response.usage.input_tokens == 10
+    assert response.usage.output_tokens == 5
+    assert response.finish_reason == "stop"
+    assert response.latency_ms >= 0
+
+
+async def test_openai_staged_file_managed_url_dispatches_input_file_url() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return _json_response(_canned_responses_response(content='{"category": "lease"}'))
+
+    adapter = OpenAIAdapter(api_key="sk-test", client=_client(handler))
+    managed_url = (
+        "https://minio.example.test/org-bucket/lease.pdf?"
+        "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=secret-bearer-material"
+    )
+    response = await adapter.complete(
+        _staged_request(
+            staged_file=StagedFile(
+                external_id="organisations/00000000-0000-0000-0000-000000000000/lease.pdf",
+                mime_type="application/pdf",
+            ),
+            managed_url=managed_url,
+        )
+    )
+    body = json.loads(captured[0].content)
+    parts = _content_parts(body["input"][0]["content"])
+    assert parts[1] == {"type": "input_file", "file_url": managed_url}
+    # The external id (immutable source identity) is never sent to the provider.
+    assert parts[1].get("file_id") is None
+    assert response.finish_reason == "stop"
+
+
+async def test_openai_managed_url_never_leaks_into_errors_or_logs() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return _json_response({"error": {"message": "boom"}}, status=429)
+
+    adapter = OpenAIAdapter(api_key="sk-test", client=_client(handler))
+    managed_url = (
+        "https://minio.example.test/lease.pdf?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=secret"
+    )
+    with pytest.raises(ProviderRateLimitError) as excinfo:
+        await adapter.complete(
+            _staged_request(
+                staged_file=StagedFile(
+                    external_id="organisations/00000000-0000-0000-0000-000000000000/lease.pdf",
+                    mime_type="application/pdf",
+                ),
+                managed_url=managed_url,
+            )
+        )
+    assert excinfo.value.retryable is True
+    assert "X-Amz-Signature" not in str(excinfo.value)
+    assert "minio" not in str(excinfo.value)
+
+
+async def test_openai_staged_file_and_attachments_are_mutually_exclusive() -> None:
+    adapter = OpenAIAdapter(api_key="sk-test")
+    with pytest.raises(AIInputValidationError):
+        await adapter.complete(
+            _staged_request(
+                attachments=[
+                    _attachment(display_name="lease.pdf", mime_type="application/pdf")
+                ]
+            )
+        )
+
+
+async def test_openai_managed_url_requires_a_staged_file() -> None:
+    adapter = OpenAIAdapter(api_key="sk-test")
+    with pytest.raises(AIInputValidationError):
+        await adapter.complete(
+            _request(
+                managed_url="https://minio.example.test/lease.pdf?X-Amz-Signature=x",
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "external_id",
+    ["https://example.test/lease.pdf", "gs://bucket/obj", "s3://bucket/obj"],
+)
+async def test_openai_staged_file_with_url_shaped_external_id_is_rejected(
+    external_id: str,
+) -> None:
+    adapter = OpenAIAdapter(api_key="sk-test")
+    with pytest.raises(AIInputValidationError):
+        await adapter.complete(
+            _staged_request(
+                staged_file=StagedFile(external_id=external_id, mime_type="application/pdf"),
+            )
+        )
+
+
+async def test_openai_responses_native_json_schema_structured_output() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return _json_response(_canned_responses_response(content='{"category": "lease"}'))
+
+    adapter = OpenAIAdapter(api_key="sk-test", client=_client(handler))
+    schema = {
+        "type": "object",
+        "properties": {"category": {"type": "string"}},
+        "required": ["category"],
+    }
+    await adapter.complete(
+        _staged_request(output_schema="demo.ClassificationResult", output_json_schema=schema)
+    )
+    body = json.loads(captured[0].content)
+    assert body["text"]["format"] == {
+        "type": "json_schema",
+        "name": "structured_output",
+        "schema": schema,
+        "strict": False,
+    }
+
+
+async def test_openai_responses_json_mode_appends_instruction() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return _json_response(_canned_responses_response(content='{"category": "lease"}'))
+
+    adapter = OpenAIAdapter(api_key="sk-test", client=_client(handler))
+    await adapter.complete(_staged_request(output_schema="demo.ClassificationResult"))
+    body = json.loads(captured[0].content)
+    assert body["text"] == {"format": {"type": "json_object"}}
+    assert body["input"][0]["content"][0]["text"].endswith(
+        "Respond with a single JSON object."
+    )
+
+
+async def test_openai_responses_finish_reason_mapping() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _json_response(
+            _canned_responses_response(
+                content="partial", incomplete_details={"reason": "max_output_tokens"}
+            )
+        )
+
+    adapter = OpenAIAdapter(api_key="sk-test", client=_client(handler))
+    response = await adapter.complete(_staged_request())
+    assert response.finish_reason == "length"
+
+    def refusal_handler(request: httpx.Request) -> httpx.Response:
+        return _json_response(
+            _canned_responses_response(
+                content="", output=[{"type": "refusal", "refusal": "refused"}]
+            )
+        )
+
+    adapter = OpenAIAdapter(api_key="sk-test", client=_client(refusal_handler))
+    response = await adapter.complete(_staged_request())
+    assert response.finish_reason == "content_filter"
+
+
+async def test_openai_responses_error_mapping_is_safe() -> None:
+    def rate_limited(request: httpx.Request) -> httpx.Response:
+        return _json_response({"error": {"message": "secret"}}, status=429)
+
+    adapter = OpenAIAdapter(api_key="sk-test", client=_client(rate_limited))
+    with pytest.raises(ProviderRateLimitError) as excinfo:
+        await adapter.complete(_staged_request())
+    assert excinfo.value.retryable is True
+    assert "secret" not in str(excinfo.value)
+
+    def server_error(request: httpx.Request) -> httpx.Response:
+        return _json_response({}, status=503)
+
+    adapter = OpenAIAdapter(api_key="sk-test", client=_client(server_error))
+    with pytest.raises(ProviderUnavailableError) as excinfo:
+        await adapter.complete(_staged_request())
+    assert excinfo.value.retryable is True
+
+
+async def test_openai_compatible_adapters_fail_closed_on_staged_file() -> None:
+    """Azure, DeepSeek and local share the chat-completions base and have no
+    v0.8 staged-file path; they must fail before dispatch (Scope §2.4)."""
+    for adapter in (
+        AzureOpenAIAdapter(
+            endpoint="https://my-resource.openai.azure.com",
+            api_key="az-test",
+            api_version="2024-08-01-preview",
+            client=_client(_empty_response_handler),
+        ),
+        DeepSeekAdapter(api_key="ds-test", client=_client(_empty_response_handler)),
+        LocalOpenAICompatibleAdapter(
+            base_url="http://127.0.0.1:11434/v1", client=_client(_empty_response_handler)
+        ),
+    ):
+        with pytest.raises(AIInputValidationError):
+            await adapter.complete(_staged_request())
+        await adapter.aclose()

@@ -27,6 +27,7 @@ from __future__ import annotations
 from functools import lru_cache
 
 from app.ai.providers.factory import get_provider_factory
+from app.ai.providers.openai_upload import OpenAITransferStore
 from app.ai.providers.vertex_gcs import GcsTransferStore
 from app.ai.registry import load_registry_bundle
 from app.ai.service import AIService
@@ -59,17 +60,20 @@ def _transfer_deployment_policy() -> TransferDeploymentPolicy:
 def _transfer_stores() -> dict[str, TransferStore]:
     """Build the provider-neutral transfer stores the deployment enables.
 
-    v0.8 Scope §2.4/§6.4: the Vertex ``storage_reference`` mode is served by
-    the private same-region GCS staging adapter. The store is built only when
-    the deployment enabled the mode and the Vertex provider is enabled (the
-    typed-settings validator already required the user-provisioned bucket); a
-    deployment that enables no non-inline mode builds no store, so selection
-    fails closed exactly where the policy says it must.
+    v0.8 Scope §2.4/§6.4-§6.5: the ``storage_reference`` mode is served by the
+    private same-region GCS staging adapter, and the ``provider_upload`` mode
+    for OpenAI by the Files API upload store (purpose ``user_data``, configured
+    ``expires_after``). Each store is built only when the deployment enabled
+    the mode and the owning provider is enabled (the typed-settings validator
+    already required the mode's configuration); a deployment that enables no
+    non-inline mode builds no store, so selection fails closed exactly where
+    the policy says it must.
     """
     settings = get_settings()
+    deployment = _transfer_deployment_policy()
     stores: dict[str, TransferStore] = {}
     if (
-        TransferMode.STORAGE_REFERENCE in _transfer_deployment_policy().enabled_transfer_modes
+        TransferMode.STORAGE_REFERENCE in deployment.enabled_transfer_modes
         and "vertex" in settings.ai_enabled_providers
     ):
         stores["vertex"] = GcsTransferStore(
@@ -77,6 +81,17 @@ def _transfer_stores() -> dict[str, TransferStore]:
             location=settings.ai_vertex_location,
             bucket=settings.ai_vertex_temp_gcs_bucket,
             credentials_path=settings.ai_vertex_credentials_path,
+            timeout_seconds=settings.ai_http_timeout_seconds,
+        )
+    if (
+        TransferMode.PROVIDER_UPLOAD in deployment.enabled_transfer_modes
+        and "openai" in settings.ai_enabled_providers
+    ):
+        stores["openai"] = OpenAITransferStore(
+            api_key=settings.ai_openai_api_key,
+            base_url=settings.ai_openai_base_url,
+            region=settings.ai_openai_region,
+            upload_expiry_seconds=settings.ai_upload_expiry_seconds,
             timeout_seconds=settings.ai_http_timeout_seconds,
         )
     return stores

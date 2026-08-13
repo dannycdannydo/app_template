@@ -47,11 +47,15 @@ class StagedFile(BaseModel):
 
     When a non-inline transfer staged a provider-side or cloud-side copy, the
     execution seam passes the adapter this provider-neutral carrier: the opaque
-    external reference (a provider file id or a ``gs://`` URI — never a managed
-    signed URL) and its MIME type. The adapter maps it to its native file-input
-    form (Vertex ``fileData``, OpenAI/Anthropic file-id or URL document
-    sources). It never carries bytes, credentials, a URL or a raw response, and
-    it is never persisted or logged (BP §28).
+    external reference (a provider file id, a ``gs://`` URI, or — for the
+    managed-signed-url mode, which has no provider copy — the immutable source
+    reference itself) and its MIME type. The adapter maps it to its native
+    file-input form (Vertex ``fileData``, OpenAI/Anthropic file-id or URL
+    document sources). A just-in-time managed download URL for a retained
+    source is minted at dispatch time and travels in the request's
+    ``managed_url`` field, never inside this carrier. It never carries bytes,
+    credentials, a URL or a raw response, and it is never persisted or logged
+    (BP §28).
     """
 
     model_config = {"extra": "forbid"}

@@ -70,6 +70,8 @@ for _var in (
     "AI_VERTEX_PROJECT",
     "AI_VERTEX_LOCATION",
     "AI_VERTEX_CREDENTIALS_PATH",
+    "AI_VERTEX_TEMP_GCS_BUCKET",
+    "AI_ENABLED_TRANSFER_MODES",
     "AI_LOCAL_BASE_URL",
     "AI_LOCAL_API_KEY",
     # HTTP(S)/proxy variables: httpx.AsyncClient reads these on construction

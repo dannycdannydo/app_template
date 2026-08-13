@@ -97,10 +97,24 @@ models:
     priority: 1000
     max_attachment_bytes: 5242880
     max_total_attachment_bytes: 10485760
-    # v0.8 Scope §2.2: real-provider models declare inline only until their
-    # adapter checkpoint adds a reviewed non-inline mode (§6.4–§6.6).
+    # v0.8 Scope §2.2/§6.5: the OpenAI adapter checkpoint adds the two reviewed
+    # non-inline modes — provider_upload for transient sources (Files API
+    # purpose=user_data, configured expires_after) and managed_signed_url for
+    # retained private S3 sources (Responses input_file.file_url) — with
+    # per-mode PDF ceilings mirroring the provider transfer contract.
     allowed_transfer_modes:
       - inline
+      - provider_upload
+      - managed_signed_url
+    transfer_mode_limits:
+      provider_upload:
+        mime_types:
+          - application/pdf
+        max_bytes: 50000000
+      managed_signed_url:
+        mime_types:
+          - application/pdf
+        max_bytes: 50000000
     attachment_mime_types:
       - application/json
       - application/pdf
@@ -138,7 +152,7 @@ models:
     priority: 1000
     max_attachment_bytes: 5242880
     max_total_attachment_bytes: 10485760
-    # v0.8 Scope §2.2: inline only until the §6.5 adapter checkpoint lands.
+    # v0.8 Scope §2.2: inline only until the §6.6 adapter checkpoint lands.
     allowed_transfer_modes:
       - inline
     attachment_mime_types:

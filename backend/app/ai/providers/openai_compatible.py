@@ -46,13 +46,13 @@ from app.ai.schemas import TokenUsage
 # OpenAI's JSON mode requires the word "json" to appear in the messages; the
 # rendered task prompt is a reviewed asset that must not depend on it, so the
 # adapter appends this explicit instruction when structured output is asked.
-_JSON_INSTRUCTION = "\n\nRespond with a single JSON object."
+JSON_INSTRUCTION = "\n\nRespond with a single JSON object."
 # Native JSON-schema structured output name (Scope §6.4). ``strict=False`` is
 # deliberate: the service generates the schema from the feature's Pydantic
 # model, which may contain optional fields a strict subset would reject, and
 # the service always re-validates the provider output against that model, so
 # the schema is a strong shape hint rather than the safety boundary.
-_NATIVE_OUTPUT_NAME = "structured_output"
+NATIVE_OUTPUT_NAME = "structured_output"
 
 
 # Native inline attachment forms (v0.7 Scope §6.3 attachment amendment,
@@ -162,6 +162,16 @@ class OpenAICompatibleAdapter(LLMProvider):
             raise AIInputValidationError(
                 f"provider {self.provider_id!r} does not support document attachments"
             )
+        if request.staged_file is not None or request.managed_url is not None:
+            # Defense in depth: the chat-completions wire format carried by
+            # this adapter base (OpenAI-compatible servers, DeepSeek, Azure,
+            # local) has no v0.8 staged-file path. The OpenAI adapter routes a
+            # staged file to the Responses API itself; every other adapter must
+            # fail before dispatch rather than silently drop the input (Scope
+            # §2.4 fail-closed matrix).
+            raise AIInputValidationError(
+                f"provider {self.provider_id!r} does not support staged file inputs"
+            )
         if request.attachments:
             # Pre-dispatch MIME guard (v0.7 Scope §6.3 attachment amendment):
             # even a directly constructed adapter fails closed on a MIME type
@@ -184,13 +194,13 @@ class OpenAICompatibleAdapter(LLMProvider):
             content = [
                 {
                     "type": "text",
-                    "text": request.prompt + (_JSON_INSTRUCTION if request.output_schema else ""),
+                    "text": request.prompt + (JSON_INSTRUCTION if request.output_schema else ""),
                 },
                 *_openai_attachment_parts(list(request.attachments)),
             ]
         else:
             content = (
-                request.prompt + _JSON_INSTRUCTION if request.output_schema else request.prompt
+                request.prompt + JSON_INSTRUCTION if request.output_schema else request.prompt
             )
         payload: dict[str, Any] = {
             "model": request.model,
@@ -209,7 +219,7 @@ class OpenAICompatibleAdapter(LLMProvider):
                 payload["response_format"] = {
                     "type": "json_schema",
                     "json_schema": {
-                        "name": _NATIVE_OUTPUT_NAME,
+                        "name": NATIVE_OUTPUT_NAME,
                         "schema": request.output_json_schema,
                         "strict": False,
                     },
