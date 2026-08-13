@@ -131,7 +131,7 @@ def test_factory_constructs_each_enabled_provider(
             return _FakeCredentials(), None
 
         monkeypatch.setattr(
-            "app.ai.providers.vertex.google_auth_default",
+            "app.ai.providers._google_credentials.google_auth_default",
             _fake_google_auth,
         )
     settings = _unvalidated(ai_enabled_providers=[provider_id], **overrides)

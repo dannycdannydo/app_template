@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from app.ai.attachments import MAX_ATTACHMENT_COUNT, Attachment
 from app.ai.schemas import TokenUsage
+from app.ai.staging import StagedFile
 
 
 class ProviderRequest(BaseModel):
@@ -58,6 +59,13 @@ class ProviderRequest(BaseModel):
     attachments: list[Attachment] = Field(
         default_factory=lambda: [], max_length=MAX_ATTACHMENT_COUNT
     )
+    # A provider-side staged file (v0.8 Scope §2.4): when a non-inline transfer
+    # staged a copy, the execution seam passes this carrier and the adapter
+    # maps it to its native file-input form (Vertex ``fileData``, OpenAI/
+    # Anthropic file-id or URL document sources) instead of embedding bytes.
+    # It is mutually exclusive with ``attachments`` — a dispatch carries either
+    # the inline set or exactly one staged file, never both.
+    staged_file: StagedFile | None = Field(default=None)
 
 
 class ProviderResponse(BaseModel):

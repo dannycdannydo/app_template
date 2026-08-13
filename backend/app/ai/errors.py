@@ -105,6 +105,27 @@ class TransferExecutionUnavailableError(AIError):
         super().__init__(message, retryable=False)
 
 
+class TransferStagingError(AIError):
+    """A provider-side or cloud-side staging failure (v0.8 Scope §2.4, §6.4).
+
+    Raised by the Vertex GCS staging adapter (and its fake) when the configured
+    bucket fails the fail-closed validation — multi-region, cross-region,
+    foreign project, public access or a name mismatch — when a staged object
+    does not match the verified source (size, MIME or digest), or when a
+    best-effort terminal delete cannot complete. The message never echoes the
+    object reference or a ``gs://`` URI (BP §28). Permanent for the same
+    configuration/transfer: fix the bucket or re-stage; retrying the identical
+    staging call cannot help. Transient transport failures (timeouts, 5xx) are
+    raised as the existing retryable provider errors instead, so only genuine
+    validation/consistency failures are permanent.
+    """
+
+    error_code = "transfer_staging_failed"
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, retryable=False)
+
+
 class TransferSourceError(AIError):
     """A private source object could not be verified for a non-inline transfer.
 

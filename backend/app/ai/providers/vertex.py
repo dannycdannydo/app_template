@@ -19,22 +19,16 @@ scope (Scope §3).
 from __future__ import annotations
 
 import base64
-from pathlib import Path
 from typing import Any, cast
 
 import httpx
-import urllib3
-
-# Vertex-specific credential imports, allowed only inside app/ai/providers/
-# (ADR-0017 import-boundary rule). google-auth ships partial type stubs; the
-# credentials are treated as an opaque server-side token holder, so the
-# strict-mode ignores are targeted to the untyped seams only.
-from google.auth import default as google_auth_default  # pyright: ignore[reportUnknownVariableType]
-from google.auth.transport import urllib3 as google_auth_urllib3
-from google.oauth2 import service_account  # pyright: ignore[reportUnknownVariableType]
 
 from app.ai.attachments import VERTEX_INLINE_ATTACHMENT_MIME_TYPES, Attachment
-from app.ai.errors import AIInputValidationError, ProviderResponseError
+from app.ai.errors import AIInputValidationError, ProviderResponseError, TransferStagingError
+from app.ai.providers._google_credentials import (
+    google_authorization_header,
+    load_google_credentials,
+)
 from app.ai.providers.base import LLMProvider, ProviderRequest, ProviderResponse
 from app.ai.providers.http_transport import (
     FINISH_CONTENT_FILTER,
@@ -46,8 +40,8 @@ from app.ai.providers.http_transport import (
 )
 from app.ai.providers.openai_compatible import parse_structured_json
 from app.ai.schemas import TokenUsage
+from app.ai.vertex_staging import parse_gs_uri
 
-_CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 # Google returns 403 for both permission errors and quota exhaustion; both are
 # permanent from the adapter's perspective (quota is reviewed configuration,
 # not something one retry fixes), so the default 4xx mapping applies.
@@ -87,6 +81,37 @@ def _vertex_inline_parts(attachments: list[Attachment]) -> list[dict[str, Any]]:
     return parts
 
 
+def _vertex_file_parts(request: ProviderRequest) -> list[dict[str, Any]]:
+    """Native non-inline file parts for a staged ``gs://`` reference (v0.8 Scope §2.4).
+
+    A ``storage_reference`` transfer stages the verified source into the
+    configured private GCS staging bucket and passes the resulting ``gs://``
+    URI as Vertex ``fileData``. The bucket/project/region/prefix validation
+    happened in the staging adapter before this reference was created; here the
+    adapter only verifies the reference shape and the reviewed MIME type, then
+    emits ``fileData.fileUri`` / ``fileData.mimeType`` (REST JSON naming, never
+    the proto ``file_data`` keys). Bytes are never embedded: the provider reads
+    the object from the same-region bucket.
+    """
+    staged = request.staged_file
+    if staged is None:
+        return []
+    if staged.mime_type not in VERTEX_INLINE_ATTACHMENT_MIME_TYPES:
+        raise AIInputValidationError(
+            f"provider {request.model!r} does not support staged file MIME type "
+            f"{staged.mime_type!r}"
+        )
+    # Shape guard before dispatch: only a well-formed private gs:// reference
+    # may reach generateContent (Scope §2.2 caller-URL prohibition, §5.7). The
+    # staging adapter validated the bucket itself; here a malformed reference
+    # is an input error and fails before any HTTP dispatch.
+    try:
+        parse_gs_uri(staged.external_id)
+    except TransferStagingError as exc:
+        raise AIInputValidationError(str(exc)) from exc
+    return [{"fileData": {"fileUri": staged.external_id, "mimeType": staged.mime_type}}]
+
+
 class VertexAIAdapter(LLMProvider):
     """Vertex AI Gemini ``generateContent`` adapter."""
 
@@ -114,37 +139,11 @@ class VertexAIAdapter(LLMProvider):
         # The location is the declared data-residency region (ADR-0018) and is
         # reported in ``ProviderResponse.region`` for routing metadata.
         self.region = location
-        self._credentials: Any = self._load_credentials(credentials_path)
+        self._credentials: Any = load_google_credentials(credentials_path)
         self._client = client or httpx.AsyncClient(timeout=timeout_seconds)
 
-    @staticmethod
-    def _load_credentials(credentials_path: str) -> Any:
-        if credentials_path:
-            path = Path(credentials_path).expanduser()
-            if not path.is_file():
-                raise AIInputValidationError(
-                    f"vertex credentials file is not readable: {credentials_path}"
-                )
-            credentials: Any = cast(
-                Any,
-                service_account.Credentials.from_service_account_file(  # pyright: ignore[reportUnknownMemberType]
-                    str(path), scopes=[_CLOUD_PLATFORM_SCOPE]
-                ),
-            )
-            return credentials
-        adc_result: Any = google_auth_default(  # pyright: ignore[reportUnknownVariableType]
-            scopes=[_CLOUD_PLATFORM_SCOPE]
-        )
-        return adc_result[0]
-
     def _auth_headers(self) -> dict[str, str]:
-        credentials: Any = self._credentials
-        if credentials is None:
-            raise ProviderResponseError("vertex credentials are unavailable")
-        if credentials.token is None or not credentials.valid:
-            pool: Any = urllib3.PoolManager()
-            credentials.refresh(google_auth_urllib3.Request(pool))
-        return {"Authorization": f"Bearer {credentials.token}"}
+        return {"Authorization": google_authorization_header(self._credentials)}
 
     def _generate_url(self, request: ProviderRequest) -> str:
         # Regional endpoint: location is explicit configuration (data
@@ -191,7 +190,16 @@ class VertexAIAdapter(LLMProvider):
             if request.output_json_schema is not None:
                 generation_config["responseJsonSchema"] = request.output_json_schema
         parts: list[dict[str, Any]] = [{"text": request.prompt}]
-        if request.attachments:
+        if request.staged_file is not None:
+            # A non-inline transfer replaces the inline attachment set with
+            # exactly one staged file; combining both would be a dispatch
+            # ambiguity and fails closed (Scope §2.1 decision 3: one PDF).
+            if request.attachments:
+                raise AIInputValidationError(
+                    "a staged file cannot be combined with inline attachments"
+                )
+            parts.extend(_vertex_file_parts(request))
+        elif request.attachments:
             parts.extend(_vertex_inline_parts(list(request.attachments)))
         payload: dict[str, Any] = {"contents": [{"role": "user", "parts": parts}]}
         if generation_config:

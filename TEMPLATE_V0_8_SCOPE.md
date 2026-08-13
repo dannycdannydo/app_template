@@ -271,9 +271,9 @@ fake-provider transfer tests are mandatory in the normal CI gate.
 | Provider-neutral transfer selection | §5.1–§5.3 | Scope §6.1–§6.2 | Internal `AIService`; no new feature endpoint or frontend consumer | Registry, routing, policy-intersection, pre-dispatch denial and import-boundary tests |
 | Organisation transfer policy | §5.2, §5.9 | Scope §6.2 | Existing platform `GET`/`PUT /api/v1/platform/organisations/{organisation_id}/ai-settings`; extended explicit request/response schemas; generated types only, no new view | API integration, optimistic concurrency, default-off, platform/cross-plane and generated-client drift tests |
 | Durable reference/idempotency boundary | §5.3–§5.5, §5.8 | Scope §6.3 | Internal persistence/service surface; no public endpoint | Migration, PostgreSQL tenant isolation, concurrency, retry reuse, digest mismatch, expiry and source-ownership tests |
-| OpenAI provider upload / managed URL | §5.4–§5.6, §5.8 | Scope §6.4 | Internal provider/storage adapters only | Fake upload/use/delete and retained-source URL tests plus opt-in non-production contract |
-| Anthropic provider upload / managed URL | §5.4–§5.6, §5.8 | Scope §6.5 | Internal provider/storage adapters only | Fake upload/use/delete and retained-source URL tests plus opt-in non-production contract |
-| Vertex private GCS reference | §5.4–§5.7 | Scope §6.6 | Internal storage/provider adapters only | Fake staging/use/delete, IAM/region fail-closed and documented-lifecycle tests plus opt-in non-production contract |
+| Vertex private GCS reference | §5.4–§5.7 | Scope §6.4 | Internal storage/provider adapters only | Fake staging/use/delete, IAM/region fail-closed and documented-lifecycle tests plus opt-in non-production contract |
+| OpenAI provider upload / managed URL | §5.4–§5.6, §5.8 | Scope §6.5 | Internal provider/storage adapters only | Fake upload/use/delete and retained-source URL tests plus opt-in non-production contract |
+| Anthropic provider upload / managed URL | §5.4–§5.6, §5.8 | Scope §6.6 | Internal provider/storage adapters only | Fake upload/use/delete and retained-source URL tests plus opt-in non-production contract |
 | Cleanup and crash recovery | §5.4–§5.5, §5.8 | Scope §6.7 | Provider-file Dramatiq reconciliation only; existing AI result polling remains unchanged | Terminal-path, redelivery, worker-crash, provider-file reconciliation, URL expiry and leakage tests |
 | Operations and release closure | §5.7–§5.10 | Scope §6.8 | Configuration/docs/metrics; no new route or UI | Production-config, observability/redaction, full gate, provider contracts, e2e and architecture audit |
 
@@ -426,7 +426,21 @@ provider-reference data handling.
 > No public API, frontend consumer or `PROTECTED_ROUTES` change is introduced
 > by this work unit (internal persistence/service surface only).
 
-## 6.4 OpenAI Provider Upload and Managed URL
+## 6.4 Vertex Private GCS Reference
+
+Dependencies: Scope §6.3.
+
+- [x] Add the private GCS staging adapter/configuration with bounded upload, metadata/head and best-effort terminal delete; keep Google auth/storage behavior behind adapters and add no browser-facing or public URL path, bucket creation or lifecycle mutation
+- [x] Validate actual bucket project, regional location, private access, approved prefix, object size/MIME/digest and Vertex location before creating a `gs://` `fileData` reference
+- [x] Implement idempotent stage/reference/use and best-effort terminal delete behavior; fail closed for multi-region, cross-region, foreign-project, public or mismatched objects; document that deployers configure live-object deletion with `age = 1` and that lifecycle execution is asynchronous
+- [x] Fake-backed tests cover staging and best-effort deletion without an application GCS reconciliation job; opt-in Vertex contract tests use a user-provisioned dedicated non-production project/bucket and ADC/workload identity, never a Gemini API key
+
+Human review required before application/enabling: infrastructure, IAM/secret
+handling, tenant isolation and regional data movement. **Approved** (human
+review recorded for all four §6.4 gate categories: infrastructure, IAM/secret
+handling, tenant isolation and regional data movement).
+
+## 6.5 OpenAI Provider Upload and Managed URL
 
 Dependencies: Scope §6.3.
 
@@ -437,7 +451,7 @@ Dependencies: Scope §6.3.
 Human review required before enabling the mode: provider data retention,
 regional configuration and secret handling.
 
-## 6.5 Anthropic Provider Upload and Managed URL
+## 6.6 Anthropic Provider Upload and Managed URL
 
 Dependencies: Scope §6.3.
 
@@ -447,18 +461,6 @@ Dependencies: Scope §6.3.
 
 Human review required before enabling the mode: beta-provider contract, provider
 data retention, inference geography and secret handling.
-
-## 6.6 Vertex Private GCS Reference
-
-Dependencies: Scope §6.3.
-
-- [ ] Add the private GCS staging adapter/configuration with bounded upload, metadata/head and best-effort terminal delete; keep Google auth/storage behavior behind adapters and add no browser-facing or public URL path, bucket creation or lifecycle mutation
-- [ ] Validate actual bucket project, regional location, private access, approved prefix, object size/MIME/digest and Vertex location before creating a `gs://` `fileData` reference
-- [ ] Implement idempotent stage/reference/use and best-effort terminal delete behavior; fail closed for multi-region, cross-region, foreign-project, public or mismatched objects; document that deployers configure live-object deletion with `age = 1` and that lifecycle execution is asynchronous
-- [ ] Fake-backed tests cover staging and best-effort deletion without an application GCS reconciliation job; opt-in Vertex contract tests use a user-provisioned dedicated non-production project/bucket and ADC/workload identity, never a Gemini API key
-
-Human review required before application/enabling: infrastructure, IAM/secret
-handling, tenant isolation and regional data movement.
 
 ## 6.7 Durable Jobs, Cleanup Reconciliation and Observability
 
@@ -494,9 +496,9 @@ existing governing rules below.
 | **Scope §6.1** Contracts/architecture | **BP §2–§5** (lines 40–263), **BP §17** (898–1044), **BP §23** (1359–1449), **BP §27–§33** (1534–1994) | Modular boundaries, v0.7 attachment/storage boundary, provider adapters, configuration/never-log, audit/security/testing/tooling, human review and ADR format |
 | **Scope §6.2** Policy/registry/API | **BP §7** (317–371), **BP §9–§13** (432–765), **BP §27** (1534–1603), **BP §31** (1777–1850) | Schema separation, tenant/database/API conventions, typed/default-off AI policy, security matrix |
 | **Scope §6.3** Streaming/persistence | **BP §10–§11** (543–643), **BP §17** (898–1044), **BP §23** (1359–1449), **BP §29–§31** (1652–1850) | Constraints/transactions, private object ownership, adapter boundary, audit/security/testing |
-| **Scope §6.4** OpenAI upload | **BP §23** (1359–1449), **BP §27–§28** (1534–1651), **BP §30–§33** (1700–1967) | Adapter isolation, typed secrets/regions, never-log rules, file security, tests and dependency/review rules |
-| **Scope §6.5** Anthropic upload | **BP §23** (1359–1449), **BP §27–§28** (1534–1651), **BP §30–§33** (1700–1967) | Adapter isolation, inference geography/configuration, retention-safe observability, security and contract tests |
-| **Scope §6.6** Vertex GCS reference | **BP §17** (898–1044), **BP §23** (1359–1449), **BP §27–§33** (1534–1967), **BP §38** (2203–2226) | Provider-neutral storage, Vertex adapter/auth boundary, region/IAM controls, environment isolation and human review |
+| **Scope §6.4** Vertex GCS reference | **BP §17** (898–1044), **BP §23** (1359–1449), **BP §27–§33** (1534–1967), **BP §38** (2203–2226) | Provider-neutral storage, Vertex adapter/auth boundary, region/IAM controls, environment isolation and human review |
+| **Scope §6.5** OpenAI upload | **BP §23** (1359–1449), **BP §27–§28** (1534–1651), **BP §30–§33** (1700–1967) | Adapter isolation, typed secrets/regions, never-log rules, file security, tests and dependency/review rules |
+| **Scope §6.6** Anthropic upload | **BP §23** (1359–1449), **BP §27–§28** (1534–1651), **BP §30–§33** (1700–1967) | Adapter isolation, inference geography/configuration, retention-safe observability, security and contract tests |
 | **Scope §6.7** Jobs/cleanup/metrics | **BP §18** (1045–1150), **BP §28–§31** (1604–1850) | Durable idempotent jobs, retries/queues, safe metrics/logs/audit, security and integration tests |
 | **Scope §6.8** Operations/governance | **BP §28** (1604–1651), **BP §30–§34** (1700–1994), **BP §37–§38** (2160–2226), **BP §42** (2337–2358) | Never-log/security controls, reviews/ADRs, CI, environment separation, template validation |
 

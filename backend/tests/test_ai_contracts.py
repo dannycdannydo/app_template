@@ -15,7 +15,11 @@ never a Gemini API key (ADR-0018).
 
 from __future__ import annotations
 
+import hashlib
 import os
+import tempfile
+import uuid
+from pathlib import Path
 
 import pytest
 
@@ -26,6 +30,8 @@ from app.ai.providers.deepseek import DeepSeekAdapter
 from app.ai.providers.local import LocalOpenAICompatibleAdapter
 from app.ai.providers.openai import OpenAIAdapter
 from app.ai.providers.vertex import VertexAIAdapter
+from app.ai.providers.vertex_gcs import GcsTransferStore
+from app.ai.transfer import SourceLifecycle, TransferMode
 
 
 def _request(model: str) -> ProviderRequest:
@@ -125,3 +131,75 @@ async def test_local_live_contract() -> None:
         )
     model = os.environ.get("AI_CONTRACTS_LOCAL_MODEL", "qwen2.5:0.5b")
     await _probe(LocalOpenAICompatibleAdapter(base_url=base_url), model)
+
+
+def _fixture_pdf_bytes() -> bytes:
+    """A tiny, non-sensitive, well-formed PDF fixture (v0.8 Scope §4)."""
+    return (
+        b"%PDF-1.4\n"
+        b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n"
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] "
+        b"/Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n"
+        b"4 0 obj\n<< /Length 44 >>\nstream\nBT /F1 12 Tf 20 100 Td (contract fixture) Tj ET\nendstream\nendobj\n"
+        b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n"
+        b"trailer\n<< /Root 1 0 R >>\n%%EOF\n"
+    )
+
+
+@pytest.mark.ai_contracts
+async def test_vertex_gcs_staging_live_contract() -> None:
+    """Stage and best-effort-delete one fixture PDF in a dedicated GCS bucket.
+
+    v0.8 Scope §2.4/§6.4 checkbox 4: the opt-in Vertex GCS contract test uses a
+    user-provisioned, dedicated non-production project/bucket and ADC or an
+    approved service-account key — never a Gemini API key (ADR-0018). It
+    verifies the real bucket validation (single-region, same-project, private),
+    the bounded upload, the size/MIME/digest re-verification and the terminal
+    delete. It skips cleanly when the dedicated configuration is absent, so the
+    target is a no-op in CI until a project is deliberately configured.
+    """
+    project = os.environ.get("AI_CONTRACTS_VERTEX_PROJECT")
+    location = os.environ.get("AI_CONTRACTS_VERTEX_LOCATION")
+    bucket = os.environ.get("AI_CONTRACTS_VERTEX_TEMP_GCS_BUCKET")
+    if not project or not location or not bucket:
+        pytest.skip(
+            "AI_CONTRACTS_VERTEX_PROJECT/AI_CONTRACTS_VERTEX_LOCATION/"
+            "AI_CONTRACTS_VERTEX_TEMP_GCS_BUCKET not configured; "
+            "skipping live Vertex GCS staging contract test"
+        )
+    store = GcsTransferStore(
+        project=project,
+        location=location,
+        bucket=bucket,
+        credentials_path=os.environ.get("AI_CONTRACTS_VERTEX_CREDENTIALS_PATH", ""),
+    )
+    content = _fixture_pdf_bytes()
+    digest = hashlib.sha256(content).hexdigest()
+    organisation_id = uuid.uuid4()
+    try:
+        with tempfile.NamedTemporaryFile(prefix="ai-vertex-contract-", suffix=".pdf") as handle:
+            handle.write(content)
+            handle.flush()
+            source_path = Path(handle.name)
+            reference = await store.stage(
+                mode=TransferMode.STORAGE_REFERENCE,
+                organisation_id=organisation_id,
+                logical_request_id=f"contract-{organisation_id.hex[:8]}",
+                source_reference=f"organisations/{organisation_id}/documents/lease.pdf",
+                source_digest=digest,
+                mime_type="application/pdf",
+                size_bytes=len(content),
+                source_lifecycle=SourceLifecycle.RETAINED,
+                region=location,
+                expires_at=None,
+                source_path=source_path,
+            )
+        assert reference.external_id.startswith("gs://")
+        assert f"gs://{bucket}/" in reference.external_id
+        assert reference.provider == "vertex"
+        assert reference.region == location
+        # Best-effort terminal delete of the AI-owned staged copy.
+        await store.delete(reference)
+    finally:
+        await store.aclose()

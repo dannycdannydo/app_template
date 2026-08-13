@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import contextlib
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import UUID
 
 from app.ai.errors import TransferExecutionUnavailableError
@@ -84,16 +85,19 @@ class TransferOrchestrator:
         source_lifecycle: SourceLifecycle,
         region: str,
         expires_at: datetime | None,
+        source_path: Path | None = None,
     ) -> ExternalFileReference:
         """Stage one source object and persist (or adopt) its durable reference.
 
         The caller has already verified the source (ownership, size, MIME and
         SHA-256 — Scope §2.3/§6.3 streaming seam) and selected the mode
-        (Scope §6.2). For ``provider_upload``/``storage_reference`` the
-        provider store stages the copy (idempotent on the derived key: a retry
-        receives the live reference instead of a second upload, Scope §2.1);
-        for ``managed_signed_url`` there is no provider copy and the reference
-        is built directly. The durable row is created or adopted
+        (Scope §6.2), and ``source_path`` is the verified secure temporary file
+        that verified copy was streamed into. For ``provider_upload``/
+        ``storage_reference`` the provider store stages the copy from that file
+        (idempotent on the derived key: a retry receives the live reference
+        instead of a second upload, Scope §2.1); for ``managed_signed_url``
+        there is no provider copy and the reference is built directly. The
+        durable row is created or adopted
         (:meth:`TransferReferenceStore.create_or_adopt`), so a retry of one
         logical request keeps exactly one live reference. ``inline`` is refused
         — it produces no durable reference.
@@ -119,6 +123,7 @@ class TransferOrchestrator:
                 source_lifecycle=source_lifecycle,
                 region=region,
                 expires_at=expires_at,
+                source_path=source_path,
             )
             try:
                 return await self._references.create_or_adopt(staged)

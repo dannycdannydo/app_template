@@ -326,7 +326,7 @@ async def test_vertex_contract_uses_regional_endpoint_and_bearer(
 ) -> None:
     captured: list[httpx.Request] = []
     monkeypatch.setattr(
-        "app.ai.providers.vertex.google_auth_default",
+        "app.ai.providers._google_credentials.google_auth_default",
         _fake_google_auth,
     )
 
@@ -385,7 +385,7 @@ async def test_vertex_requires_project_and_location() -> None:
 
 async def test_vertex_content_filter_finish_reason(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "app.ai.providers.vertex.google_auth_default",
+        "app.ai.providers._google_credentials.google_auth_default",
         _fake_google_auth,
     )
 
@@ -452,7 +452,9 @@ def test_provider_document_support_declarations_are_truthful(
     the shared payload builder fails an attachment-bearing request before
     dispatch rather than silently dropping the input.
     """
-    monkeypatch.setattr("app.ai.providers.vertex.google_auth_default", _fake_google_auth)
+    monkeypatch.setattr(
+        "app.ai.providers._google_credentials.google_auth_default", _fake_google_auth
+    )
     assert DeepSeekAdapter(api_key="ds-test").supports_documents is False
     assert (
         LocalOpenAICompatibleAdapter(base_url="http://127.0.0.1:11434/v1").supports_documents
@@ -707,7 +709,7 @@ async def test_vertex_maps_attachments_to_native_inline_data(
 ) -> None:
     captured: list[httpx.Request] = []
     monkeypatch.setattr(
-        "app.ai.providers.vertex.google_auth_default",
+        "app.ai.providers._google_credentials.google_auth_default",
         _fake_google_auth,
     )
 
@@ -755,7 +757,7 @@ async def test_vertex_maps_text_plain_attachments_to_inline_data(
     so text/plain is part of the declared MIME set."""
     captured: list[httpx.Request] = []
     monkeypatch.setattr(
-        "app.ai.providers.vertex.google_auth_default",
+        "app.ai.providers._google_credentials.google_auth_default",
         _fake_google_auth,
     )
 
@@ -849,7 +851,9 @@ async def test_vertex_rejects_mime_types_outside_inline_data_contract(
     """Vertex inlineData carries images, PDF and plain text; CSV/Markdown/JSON
     are outside that contract and fail before dispatch (v0.7 Scope §6.3
     attachment amendment)."""
-    monkeypatch.setattr("app.ai.providers.vertex.google_auth_default", _fake_google_auth)
+    monkeypatch.setattr(
+        "app.ai.providers._google_credentials.google_auth_default", _fake_google_auth
+    )
     adapter = VertexAIAdapter(
         project="demo-project",
         location="europe-west1",
@@ -977,7 +981,9 @@ async def test_anthropic_default_sends_no_inference_geo_field() -> None:
 def test_vertex_and_azure_regions_are_derived_from_configuration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("app.ai.providers.vertex.google_auth_default", _fake_google_auth)
+    monkeypatch.setattr(
+        "app.ai.providers._google_credentials.google_auth_default", _fake_google_auth
+    )
     vertex = VertexAIAdapter(
         project="demo-project",
         location="europe-west1",
