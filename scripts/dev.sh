@@ -7,6 +7,18 @@
 
 set -u
 
+# Some VPN clients export a SOCKS proxy such as ``socks://127.0.0.1:2080``.
+# HTTPX (used by the WorkOS adapter) cannot construct a client from that URL,
+# which prevents authenticated local API requests from reaching WorkOS. This
+# is deliberately opt-in and only lives in the native local-development
+# supervisor; production and Compose processes are unaffected.
+case "${DEV_DISABLE_PROXY:-}" in
+  1|true|TRUE|yes|YES|on|ON)
+    unset ALL_PROXY all_proxy HTTP_PROXY http_proxy HTTPS_PROXY https_proxy NO_PROXY no_proxy
+    echo "DEV_DISABLE_PROXY enabled: starting local processes without proxy environment variables"
+    ;;
+esac
+
 api_pid=""
 worker_pid=""
 frontend_pid=""

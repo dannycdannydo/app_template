@@ -49,6 +49,12 @@ AI_INTERNAL_CONTRACT_MODULES = (
     "app.ai.managed_url",
     "app.ai.persistence.references",
     "app.ai.transfer_orchestrator",
+    # §6.4 internal seam: the provider-neutral Vertex GCS staging contracts
+    # and fake construct ``gs://`` references and name the storage_reference
+    # mode — internal to app/ai/ exactly like the contract modules. The real
+    # adapter lives under app/ai/providers/ and is already covered by the
+    # providers-only SDK rule.
+    "app.ai.vertex_staging",
 )
 
 

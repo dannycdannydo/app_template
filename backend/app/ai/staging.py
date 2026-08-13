@@ -26,6 +26,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
 from uuid import UUID
 
 from pydantic import BaseModel, Field, computed_field
@@ -39,6 +40,24 @@ class ExternalReferenceStatus(StrEnum):
     LIVE = "live"
     EXPIRED = "expired"
     DELETED = "deleted"
+
+
+class StagedFile(BaseModel):
+    """A provider-side staged file handed to an adapter for dispatch (v0.8 Scope §2.4).
+
+    When a non-inline transfer staged a provider-side or cloud-side copy, the
+    execution seam passes the adapter this provider-neutral carrier: the opaque
+    external reference (a provider file id or a ``gs://`` URI — never a managed
+    signed URL) and its MIME type. The adapter maps it to its native file-input
+    form (Vertex ``fileData``, OpenAI/Anthropic file-id or URL document
+    sources). It never carries bytes, credentials, a URL or a raw response, and
+    it is never persisted or logged (BP §28).
+    """
+
+    model_config = {"extra": "forbid"}
+
+    external_id: str = Field(min_length=1, max_length=2048)
+    mime_type: str = Field(min_length=1, max_length=128)
 
 
 class ExternalFileReference(BaseModel):
@@ -107,12 +126,18 @@ class TransferStore(ABC):
         source_lifecycle: SourceLifecycle,
         region: str,
         expires_at: datetime | None,
+        source_path: Path | None = None,
     ) -> ExternalFileReference:
         """Stage one source object and return the new external reference.
 
         Idempotent on the derived idempotency key: a retry that already staged
         a live matching reference receives that reference instead of a second
-        upload. Raises a safe AI error on failure; never returns bytes, a
+        upload. ``source_path`` is the verified secure temporary-file path the
+        caller streamed through :class:`~app.ai.streamed_source.StreamedSource`
+        (v0.8 Scope §2.3); a concrete adapter that needs the source bytes
+        (provider uploads, GCS staging) streams it bounded and computes the
+        digest incrementally, while the deterministic fake stores no bytes and
+        ignores it. Raises a safe AI error on failure; never returns bytes, a
         signed URL or credentials.
         """
 
@@ -179,6 +204,7 @@ class FakeTransferStore(TransferStore):
         source_lifecycle: SourceLifecycle,
         region: str,
         expires_at: datetime | None,
+        source_path: Path | None = None,
     ) -> ExternalFileReference:
         key = derive_idempotency_key(
             provider=self.provider_id,
@@ -273,5 +299,6 @@ __all__ = [
     "ExternalFileReference",
     "ExternalReferenceStatus",
     "FakeTransferStore",
+    "StagedFile",
     "TransferStore",
 ]

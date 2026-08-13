@@ -1128,7 +1128,9 @@ def test_vertex_uses_response_json_schema_for_native_output(
     def _fake_google_auth(scopes: Any = None) -> tuple[Any, None]:
         return _FakeCredentials(), None
 
-    monkeypatch.setattr("app.ai.providers.vertex.google_auth_default", _fake_google_auth)
+    monkeypatch.setattr(
+        "app.ai.providers._google_credentials.google_auth_default", _fake_google_auth
+    )
 
     class _Nested(BaseModel):
         label: str

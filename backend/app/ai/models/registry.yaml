@@ -225,7 +225,7 @@ models:
     priority: 1000
     max_attachment_bytes: 5242880
     max_total_attachment_bytes: 10485760
-    # v0.8 Scope §2.2: inline only until the §6.6 Vertex GCS staging checkpoint.
+    # v0.8 Scope §2.2: inline only until the §6.4 Vertex GCS staging checkpoint.
     allowed_transfer_modes:
       - inline
     attachment_mime_types:
