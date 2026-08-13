@@ -182,7 +182,9 @@ def _service(
         transfer_deployment=TransferDeploymentPolicy(
             inline_aggregate_threshold_bytes=_INLINE_THRESHOLD,
             max_large_attachment_bytes=50_000_000,
-            enabled_transfer_modes=frozenset(enabled_transfer_modes or {TransferMode.STORAGE_REFERENCE}),
+            enabled_transfer_modes=frozenset(
+                enabled_transfer_modes or {TransferMode.STORAGE_REFERENCE}
+            ),
         ),
         storage=storage,
         transfer_stores={"fake": store},
@@ -190,7 +192,9 @@ def _service(
     return service, fake_provider, store, references
 
 
-def _ask_request(storage_reference: str, *, question: str = "What is in this document?") -> AIRequest:
+def _ask_request(
+    storage_reference: str, *, question: str = "What is in this document?"
+) -> AIRequest:
     return AIRequest(
         task="document.ask",
         storage_reference=storage_reference,

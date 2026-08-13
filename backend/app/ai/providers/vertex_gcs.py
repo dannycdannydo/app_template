@@ -208,9 +208,7 @@ class GcsTransferStore(TransferStore):
             )
             raise ProviderUnavailableError("the GCS staging endpoint is unreachable") from exc
 
-    async def _delete(
-        self, url: str, *, headers: dict[str, str]
-    ) -> httpx.Response:
+    async def _delete(self, url: str, *, headers: dict[str, str]) -> httpx.Response:
         """One GCS DELETE with the same transport-error translation as ``_get``."""
         try:
             return await self._client.delete(url, headers=headers)
@@ -236,9 +234,7 @@ class GcsTransferStore(TransferStore):
         url = f"{_STORAGE_API}/projects/{quote(self._project, safe='')}/serviceAccount"
         response = await self._get(url, headers=self._auth_headers())
         if response.is_error:
-            raise TransferStagingError(
-                "the configured Google Cloud project could not be verified"
-            )
+            raise TransferStagingError("the configured Google Cloud project could not be verified")
         try:
             data = cast(dict[str, Any], response.json())
         except ValueError as exc:
@@ -247,9 +243,7 @@ class GcsTransferStore(TransferStore):
             ) from exc
         match = re.search(r"service-(\d+)@", str(data.get("email_address") or ""))
         if match is None:
-            raise TransferStagingError(
-                "the configured Google Cloud project could not be verified"
-            )
+            raise TransferStagingError("the configured Google Cloud project could not be verified")
         number = match.group(1)
         self._resolved_project_number = number
         return number
