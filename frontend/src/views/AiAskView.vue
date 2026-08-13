@@ -11,7 +11,6 @@ import { formatDateTime } from '@/lib/format'
 import { useFilePermissions } from '@/lib/permissions'
 import { showApiErrorToast } from '@/lib/toast'
 import { useAskMutation } from '@/queries/ai'
-import { useOrganisationStore } from '@/stores/organisation'
 
 /**
  * AI test screen (v0.8 Scope §2.2/§6.4).
@@ -28,7 +27,6 @@ import { useOrganisationStore } from '@/stores/organisation'
  * (`useFilePermissions`); the backend stays the enforcement point.
  */
 
-const organisation = useOrganisationStore()
 const { permissions, mePending } = useFilePermissions()
 
 const storageReference = ref<string | null>(null)
