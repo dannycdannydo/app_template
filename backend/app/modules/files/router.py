@@ -84,6 +84,7 @@ async def complete_upload_endpoint(
     )
     response = FileCompleteResponse.model_validate(file)
     response.processing_job_id = processing_job_id
+    response.storage_reference = service.object_key_for(membership.organisation_id, file.id)
     return response
 
 

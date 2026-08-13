@@ -27,6 +27,7 @@ attempt. Unvalidated structured data is never returned as success.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
@@ -34,6 +35,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from functools import lru_cache
+from pathlib import Path
 from time import perf_counter
 from typing import Any
 from uuid import UUID, uuid4
@@ -41,7 +43,7 @@ from uuid import UUID, uuid4
 import structlog
 from pydantic import BaseModel, ValidationError
 
-from app.ai.attachments import Attachment, validate_attachment_set
+from app.ai.attachments import ALLOWED_ATTACHMENT_MIME_TYPES, Attachment, validate_attachment_set
 from app.ai.errors import (
     AIError,
     AIInputValidationError,
@@ -61,6 +63,7 @@ from app.ai.errors import (
     TransferModeUnavailableError,
 )
 from app.ai.persistence.port import AIPersistencePort, OrganisationAIPolicy
+from app.ai.persistence.references import TransferReferenceStore
 from app.ai.providers.base import LLMProvider, ProviderRequest
 from app.ai.registry import (
     ModelDefinition,
@@ -79,7 +82,13 @@ from app.ai.registry import (
     resolve_output_schema,
 )
 from app.ai.schemas import AIRequest, AIResult, CostEstimate, RoutingMetadata, TokenUsage
-from app.ai.storage_resolver import AttachmentResolutionContext, AttachmentResolver
+from app.ai.staging import ExternalFileReference, StagedFile, TransferStore
+from app.ai.storage_resolver import (
+    EXTENSION_MIME_TYPES,
+    AttachmentResolutionContext,
+    AttachmentResolver,
+)
+from app.ai.streamed_source import StreamedSource
 from app.ai.transfer import (
     NON_INLINE_MIME_TYPES,
     SourceLifecycle,
@@ -90,12 +99,14 @@ from app.ai.transfer import (
     select_transfer_mode_for_policy,
     source_lifecycle_for_reference,
 )
+from app.ai.transfer_orchestrator import TransferOrchestrator
 from app.observability.metrics import (
     observe_ai_attempt,
     observe_ai_fallback,
     observe_ai_retry,
     observe_ai_validation_failure,
 )
+from app.storage.base import ObjectStorage
 
 #: Module logger. AI log lines bind ``ai_request_id``, task, provider/model,
 #: prompt name/version and safe error codes only — never prompts, provider
@@ -254,6 +265,49 @@ class _PendingAttempt:
     error_code: str | None = None
 
 
+@dataclass
+class _LargeSource:
+    """Head-verified facts about a source object above the inline threshold.
+
+    v0.8 Scope §2.3/§6.3: the non-inline path decides from head metadata
+    *before* any bytes are read. The inline resolver caps at 5,000,000 bytes
+    (``MAX_ATTACHMENT_BYTES``), so a storage-referenced object whose head size
+    exceeds the deployment's inline threshold is routed to the streaming/
+    staging seam instead: only the size, allowlisted MIME type and display
+    name are known here; the verified copy and digest come from
+    :class:`StreamedSource` later.
+    """
+
+    reference: str
+    size_bytes: int
+    mime_type: str
+    display_name: str
+
+
+def _resolve_large_mime_type(content_type: str | None, reference: str) -> str:
+    """Resolve the allowlisted MIME type of a large object, failing closed.
+
+    Mirrors the inline resolver's MIME resolution (stored content type wins,
+    extension fallback otherwise) against the full template allowlist; the
+    v0.8 large-path shape gate (exactly one ``application/pdf``) is applied by
+    the mode selector itself so a large non-PDF gets the shape error, not a
+    confusing MIME error (Scope §2.1 decision 3, §5.3).
+    """
+    if content_type:
+        candidate = content_type.strip().lower().split(";")[0]
+        if candidate in ALLOWED_ATTACHMENT_MIME_TYPES:
+            return candidate
+        raise AIInputValidationError(
+            "the referenced storage object has an unsupported content type"
+        )
+    fallback = EXTENSION_MIME_TYPES.get(Path(reference.rstrip("/")).suffix.lower())
+    if fallback is None:
+        raise AIInputValidationError(
+            "the referenced storage object declares no supported content type"
+        )
+    return fallback
+
+
 class AIService:
     """Provider-neutral executor for one AI task.
 
@@ -278,6 +332,14 @@ class AIService:
     5,000,000-byte threshold), which is also the deterministic default under
     test.
 
+    ``storage`` and ``transfer_stores`` (v0.8 Scope §2.3/§6.3) provision the
+    non-inline execution seam: ``storage`` streams a verified private source
+    bounded into a secure temporary file and ``transfer_stores`` maps provider
+    id → the provider-neutral :class:`TransferStore` that stages it (Vertex
+    GCS staging under §6.4, the deterministic fake under test). Without them a
+    selected non-inline mode fails closed before any external transfer, so a
+    service wired for inline-only testing can never stage anywhere.
+
     Enforcement is fail closed (v0.7 Scope §2/§6.5): the documented
     application-facing entry point ``execute`` requires the persistence/policy
     port, and execution without it raises unless the explicit test-only
@@ -298,6 +360,8 @@ class AIService:
         attachment_resolver: AttachmentResolver | None = None,
         redactor: Redactor | None = None,
         transfer_deployment: TransferDeploymentPolicy | None = None,
+        storage: ObjectStorage | None = None,
+        transfer_stores: Mapping[str, TransferStore] | None = None,
         allow_unmanaged_execution: bool = False,
     ) -> None:
         if provider is not None:
@@ -321,6 +385,13 @@ class AIService:
         # default (inline only at the 5,000,000-byte threshold), so a service
         # wired without the typed settings can never select a non-inline mode.
         self._transfer_deployment = transfer_deployment or TransferDeploymentPolicy()
+        # v0.8 Scope §2.3/§6.3: the non-inline execution seam. ``storage``
+        # streams a verified private source bounded into a secure temporary
+        # file; ``transfer_stores`` maps provider id → the provider-neutral
+        # store that stages it. Both are optional: a service without them
+        # fails closed on a selected non-inline mode before any transfer.
+        self._storage = storage
+        self._transfer_stores = dict(transfer_stores or {})
         # Test-only seam (v0.7 Scope §6.5): ``execute`` without a recorder
         # port is refused by default so the supported entry point can never
         # bypass organisation enforcement; deterministic service tests that
@@ -349,6 +420,7 @@ class AIService:
         resolved_attachments: Sequence[Attachment],
         source_reference: str | None,
         organisation_id: UUID,
+        large_source: _LargeSource | None = None,
     ) -> TransferMode:
         """Deterministically select the transfer mode for a resolved set.
 
@@ -387,15 +459,26 @@ class AIService:
         dispatch.
         """
         deployment = self._transfer_deployment
-        aggregate_bytes = sum(attachment.size for attachment in resolved_attachments)
+        if large_source is not None:
+            # v0.8 Scope §2.3: a large source was headed before any bytes were
+            # read. Selection runs on the head metadata (size + MIME); the
+            # verified copy and digest are streamed later by the seam, so the
+            # 50 MB ceiling is never accumulated in memory.
+            aggregate_bytes = large_source.size_bytes
+            attachment_mime_types = [large_source.mime_type]
+            attachment_sizes = [large_source.size_bytes]
+            resolved_attachments = []  # type: ignore[assignment]
+        else:
+            aggregate_bytes = sum(attachment.size for attachment in resolved_attachments)
+            attachment_mime_types = [attachment.mime_type for attachment in resolved_attachments]
+            attachment_sizes = [attachment.size for attachment in resolved_attachments]
         # v0.8 large-path shape gate (Scope §2.1 decision 3, §5.3): exactly one
         # PDF, and nothing else above the deployment threshold — an operator
         # diagnosing a denial gets the shape reason up front rather than a
         # generic no-eligible-mode error. Below the threshold the shape is
         # irrelevant because inline is the only selectable mode there.
         if aggregate_bytes > deployment.inline_aggregate_threshold_bytes and (
-            len(resolved_attachments) != 1
-            or resolved_attachments[0].mime_type not in NON_INLINE_MIME_TYPES
+            len(attachment_mime_types) != 1 or attachment_mime_types[0] not in NON_INLINE_MIME_TYPES
         ):
             raise TransferModeUnavailableError(
                 "the non-inline transfer path accepts exactly one application/pdf; "
@@ -419,8 +502,8 @@ class AIService:
         )
         selected = select_transfer_mode_for_policy(
             aggregate_bytes=aggregate_bytes,
-            attachment_sizes=[attachment.size for attachment in resolved_attachments],
-            attachment_mime_types=[attachment.mime_type for attachment in resolved_attachments],
+            attachment_sizes=attachment_sizes,
+            attachment_mime_types=attachment_mime_types,
             source_lifecycle=source_lifecycle,
             organisation_allowed_modes=organisation_modes,
             organisation_max_large_attachment_bytes=organisation_max_bytes,
@@ -435,6 +518,17 @@ class AIService:
             raise TransferModeUnavailableError(
                 "no permitted/provider-supported transfer mode is eligible for this attachment set"
             )
+        if selected is TransferMode.STORAGE_REFERENCE:
+            # v0.8 Scope §2.4/§6.3: the Vertex private GCS staging seam. The
+            # execution itself happens in ``execute``; selection returning the
+            # mode here means the seam must be provisioned — the service's
+            # storage and the routed provider's transfer store — or the
+            # selection fails closed before any external transfer.
+            if self._storage is None or self._transfer_stores.get(model.provider) is None:
+                raise TransferExecutionUnavailableError(
+                    "the selected transfer mode is not executable by this release"
+                )
+            return selected
         if selected is not TransferMode.INLINE:
             raise TransferExecutionUnavailableError(
                 "the selected transfer mode is not executable by this release"
@@ -453,6 +547,7 @@ class AIService:
         maximum_estimated_cost: Decimal | None = None,
         attachments: Sequence[Attachment] | None = None,
         input_reference: str | None = None,
+        transfer_references: TransferReferenceStore | None = None,
     ) -> AIResult:
         """Execute one task request and return a validated result.
 
@@ -548,13 +643,34 @@ class AIService:
         failure: AIError | None = None
         result: AIResult | None = None
         winning_attempt: _PendingAttempt | None = None
+        # v0.8 Scope §2.5: the staged AI-owned reference (if any) for terminal
+        # best-effort cleanup. Hoisted so the tail can run after every outcome,
+        # including a pre-loop failure where nothing was ever staged.
+        staged_orchestrator: TransferOrchestrator | None = None
+        staged_reference: ExternalFileReference | None = None
         try:
             # Input-form validation first (v0.7 Scope §6.4): a task whose
             # prompt declares ``text`` must receive text input — a storage
             # reference can never silently satisfy it — and vice versa.
             self._validate_input_form(prompt, request)
-            resolved_attachments = await self._resolve_attachments(request, attachments)
-            rendered = self._render_prompt(prompt, request, resolved_attachments)
+            # v0.8 Scope §2.3: a storage-referenced object is headed first. A
+            # head size above the deployment's inline threshold routes the
+            # request to the streaming/staging seam (the inline resolver caps
+            # at MAX_ATTACHMENT_BYTES, so it can never resolve a large object);
+            # everything else resolves inline exactly as before.
+            large_source = await self._head_large_source(request) if attachments is None else None
+            if large_source is not None:
+                resolved_attachments = []
+            else:
+                resolved_attachments = await self._resolve_attachments(request, attachments)
+            rendered = self._render_prompt(
+                prompt,
+                request,
+                resolved_attachments,
+                reference_display_names=(
+                    [large_source.display_name] if large_source is not None else None
+                ),
+            )
             # The effective output schema is resolved exactly once: a request
             # override wins, and an empty-string override is treated as "no
             # override" so the provider request and output validation can never
@@ -590,6 +706,17 @@ class AIService:
                 retain_output_content = (
                     task.retains_output_content and policy.retention_policy_days is not None
                 )
+            # The provider map is authoritative for routing: when the caller
+            # and the organisation policy impose no provider restriction, the
+            # router only ever considers models whose adapter is configured in
+            # this service. A task's model preferences therefore resolve to
+            # the configured provider — Vertex when the adapter is enabled,
+            # the deterministic fake otherwise — instead of routing to a model
+            # the service could never dispatch through (the same fail-closed
+            # outcome as before, raised by the router instead of the provider
+            # map).
+            if allowed_providers is None:
+                allowed_providers = sorted(self._providers)
 
             # v0.8 Scope §6.2: routing and mode selection are one coherent
             # decision. The router receives the same effective transfer-mode
@@ -664,15 +791,64 @@ class AIService:
                 # set that needs a non-inline mode fails closed here — never by
                 # silently riding the inline path above the aggregate
                 # threshold (Scope §5.2, §6.2).
-                if resolved_attachments:
-                    self._select_transfer_mode(
+                selected_transfer_mode = TransferMode.INLINE
+                if resolved_attachments or large_source is not None:
+                    selected_transfer_mode = self._select_transfer_mode(
                         policy=policy,
                         task=task,
                         model=model,
                         resolved_attachments=resolved_attachments,
                         source_reference=effective_input_reference,
                         organisation_id=request.organisation_id,
+                        large_source=large_source,
                     )
+                # v0.8 Scope §2.3/§2.4: a selected storage_reference mode stages
+                # the verified private source into the provider's staging form
+                # (Vertex private GCS bucket) and hands the adapter the opaque
+                # provider-neutral reference. The stream is bounded and
+                # verified before staging; a retry reuses the live durable
+                # reference through the orchestrator instead of staging twice
+                # (retry-only reuse, Scope §2.1).
+                staged_reference: ExternalFileReference | None = None
+                staged_orchestrator: TransferOrchestrator | None = None
+                if selected_transfer_mode is TransferMode.STORAGE_REFERENCE:
+                    if large_source is None or self._storage is None:
+                        raise TransferExecutionUnavailableError(
+                            "the selected transfer mode is not executable by this release"
+                        )
+                    store = self._transfer_stores.get(model.provider)
+                    if store is None or transfer_references is None:
+                        raise TransferExecutionUnavailableError(
+                            "the selected transfer mode is not executable by this release"
+                        )
+                    staged_orchestrator = TransferOrchestrator(
+                        storage=self._storage,
+                        store=store,
+                        references=transfer_references,
+                    )
+                    async with StreamedSource(
+                        storage=self._storage,
+                        reference=large_source.reference,
+                        organisation_id=request.organisation_id,
+                        max_bytes=self._transfer_deployment.max_large_attachment_bytes,
+                        allowed_mime_types=NON_INLINE_MIME_TYPES,
+                    ) as source:
+                        staged_reference = await staged_orchestrator.create_or_reuse_reference(
+                            organisation_id=request.organisation_id,
+                            logical_request_id=execution_request_id,
+                            provider_id=model.provider,
+                            mode=TransferMode.STORAGE_REFERENCE,
+                            source_reference=large_source.reference,
+                            source_digest=source.sha256_digest,
+                            size_bytes=source.size_bytes,
+                            mime_type=source.mime_type,
+                            source_lifecycle=source_lifecycle_for_reference(
+                                large_source.reference, request.organisation_id
+                            ),
+                            region=provider.region,
+                            expires_at=None,
+                            source_path=source.path,
+                        )
                 provider_request = ProviderRequest(
                     task=task.name,
                     model=model.model,
@@ -689,6 +865,14 @@ class AIService:
                     ),
                     metadata=request.metadata,
                     attachments=resolved_attachments,
+                    staged_file=(
+                        StagedFile(
+                            external_id=staged_reference.external_id,
+                            mime_type=staged_reference.mime_type,
+                        )
+                        if staged_reference is not None
+                        else None
+                    ),
                 )
                 # One durable row per actual dispatch (v0.7 Scope §2). The
                 # first attempt gates the execution's bounded worst-case budget
@@ -939,6 +1123,17 @@ class AIService:
                 )
         except AIError as exc:
             failure = exc
+
+        # v0.8 Scope §2.5 terminal cleanup: after success, permanent failure or
+        # exhausted retries the AI-owned staging copy is deleted best-effort
+        # through the orchestrator. A deletion failure is suppressed — the
+        # deployer-owned GCS lifecycle (age = 1) and the §6.7 reconciliation
+        # job are the backstop — and never masks the execution outcome. The
+        # orchestrator only ever deletes the provider-side copy, never the
+        # feature-owned source object.
+        if staged_orchestrator is not None and staged_reference is not None:
+            with contextlib.suppress(Exception):
+                await staged_orchestrator.delete_reference(reference=staged_reference)
 
         if failure is not None:
             if recorder is not None and pending_attempts:
@@ -1197,6 +1392,33 @@ class AIService:
                 raise AIInputValidationError(str(exc)) from exc
         return []
 
+    async def _head_large_source(self, request: AIRequest) -> _LargeSource | None:
+        """Head a storage-referenced object and route oversized ones to the seam.
+
+        v0.8 Scope §2.3: the non-inline path is decided from head metadata
+        *before* any bytes are read. Returns ``None`` when the reference is
+        at or below the deployment's inline threshold (the inline resolver
+        handles it), the service has no storage/deployment wiring (the inline
+        path will fail closed with its own error), or the object is missing
+        (the inline resolver reports the safe missing-object error). For an
+        oversized object it returns the head facts with an allowlisted MIME
+        type; the verified copy and digest are streamed by the seam only after
+        mode selection.
+        """
+        if request.storage_reference is None or self._storage is None:
+            return None
+        info = await self._storage.head_object(request.storage_reference)
+        if info is None:
+            return None
+        if info.size_bytes <= self._transfer_deployment.inline_aggregate_threshold_bytes:
+            return None
+        return _LargeSource(
+            reference=request.storage_reference,
+            size_bytes=info.size_bytes,
+            mime_type=_resolve_large_mime_type(info.content_type, request.storage_reference),
+            display_name=Path(request.storage_reference.rstrip("/")).name or "document",
+        )
+
     def _output_json_schema(self, output_schema: str | None) -> dict[str, Any] | None:
         """Generate the JSON Schema for the task's Pydantic output model.
 
@@ -1262,7 +1484,11 @@ class AIService:
                 raise AIInputValidationError("task requires a storage reference")
 
     def _render_prompt(
-        self, prompt: PromptDefinition, request: AIRequest, attachments: list[Attachment]
+        self,
+        prompt: PromptDefinition,
+        request: AIRequest,
+        attachments: list[Attachment],
+        reference_display_names: Sequence[str] | None = None,
     ) -> str:
         """Render the prompt template with allowlisted variables only.
 
@@ -1276,7 +1502,10 @@ class AIService:
         input never reaches the provider. A ``storage_reference`` variable
         renders only the resolved attachments' approved display names — the
         private reference itself is never rendered as if it were document
-        content (ADR-0017) and never reaches the provider.
+        content (ADR-0017) and never reaches the provider. A v0.8 large source
+        (above the inline threshold) has no inline attachment set; its display
+        name is supplied through ``reference_display_names`` so the reference
+        renders identically without any bytes being read.
         """
 
         values: dict[str, str] = {}
@@ -1297,11 +1526,14 @@ class AIService:
             elif variable == "storage_reference":
                 if request.storage_reference is None:
                     raise AIInputValidationError("task requires a storage reference")
-                if not attachments:
+                names = [attachment.display_name for attachment in attachments]
+                if not names and reference_display_names:
+                    names = list(reference_display_names)
+                if not names:
                     raise AIInputValidationError(
                         "task requires a storage reference but no attachment was resolved"
                     )
-                values[variable] = ", ".join(attachment.display_name for attachment in attachments)
+                values[variable] = ", ".join(names)
             else:
                 raise AIInputValidationError(f"task requires input variable {variable!r}")
 
@@ -1318,6 +1550,14 @@ class AIService:
             raise
         except Exception as exc:
             # Normalise unexpected adapter failures into the safe taxonomy.
+            # Only the exception category is logged — never the message, which
+            # could contain URLs, credentials or content (BP §28, ADR-0017).
+            logger.warning(
+                "ai.provider.unexpected_failure",
+                provider=provider.provider_id,
+                model=provider_request.model,
+                exception_type=type(exc).__name__,
+            )
             raise ProviderResponseError("provider returned an unexpected error") from exc
 
     def _prepare_repair_request(

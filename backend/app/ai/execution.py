@@ -55,6 +55,7 @@ from app.ai.persistence.queries import (
     ai_output_for_request_statement,
     ai_winning_attempt_statement,
 )
+from app.ai.persistence.references import SQLTransferReferenceStore
 from app.ai.persistence.service import AIPersistencePortImpl
 from app.ai.schemas import AIRequest, AIResult
 from app.core.exceptions import NotFoundError
@@ -137,11 +138,18 @@ async def execute_managed_ai(
     *,
     request_id: str | None = None,
 ) -> AIResult:
-    """Execute through ``AIService`` with the platform persistence boundary."""
+    """Execute through ``AIService`` with the platform persistence boundary.
+
+    The caller-bound session backs both the AI request records and the v0.8
+    durable transfer-reference store, so a non-inline transfer stages, records
+    and (best-effort) deletes within the same organisation-scoped persistence
+    boundary (Scope §6.3) without any transaction spanning provider I/O.
+    """
     return await runtime.get_ai_service().execute(
         request,
         recorder=AIPersistencePortImpl(session),
         request_id=request_id,
+        transfer_references=SQLTransferReferenceStore(session),
     )
 
 

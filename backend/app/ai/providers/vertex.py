@@ -253,12 +253,32 @@ class VertexAIAdapter(LLMProvider):
         )
 
     async def complete(self, request: ProviderRequest) -> ProviderResponse:
-        data, latency_ms = await post_json(
-            self._client,
-            self._generate_url(request),
-            headers=self._auth_headers(),
-            payload=self._build_payload(request),
-        )
+        try:
+            data, latency_ms = await post_json(
+                self._client,
+                self._generate_url(request),
+                headers=self._auth_headers(),
+                payload=self._build_payload(request),
+            )
+        except ProviderResponseError as exc:
+            # Google answers 403 for both permission errors and quota
+            # exhaustion, and the provider body (never surfaced, BP §28) is
+            # the only place the exact reason lives. Re-raise with a safe,
+            # actionable hint so an operator diagnosing a blocked deployment
+            # learns the standard fixes without the body.
+            if "(HTTP 403)" in str(exc.args[0]):
+                raise ProviderResponseError(
+                    "vertex rejected the request (HTTP 403); verify the Vertex AI API "
+                    "is enabled for the configured project and the service account has "
+                    "the Vertex AI User role in the configured location"
+                ) from exc
+            if "(HTTP 404)" in str(exc.args[0]):
+                raise ProviderResponseError(
+                    f"vertex rejected the request (HTTP 404); model {request.model!r} is "
+                    "not available in the configured location, or the model id is wrong — "
+                    "verify the exact published model name and its regional availability"
+                ) from exc
+            raise
         return self._parse_response(request, data, latency_ms)
 
     async def aclose(self) -> None:

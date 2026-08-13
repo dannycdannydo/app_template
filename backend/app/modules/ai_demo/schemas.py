@@ -103,3 +103,35 @@ class DocumentClassifyResultResponse(BaseModel):
     usage: ClassifyUsage | None = None
     cost: ClassifyCost | None = None
     completed_at: datetime | None = None
+
+
+# The bounded question length mirrors AI_METADATA_MAX_VALUE_LENGTH: the
+# question travels to the AI layer as a bounded metadata variable so the
+# feature-facing AIRequest contract stays unchanged (v0.8 Scope §2.2).
+ASK_QUESTION_MAX_LENGTH = 512
+
+
+class DocumentAskRequest(BaseModel):
+    """One QA submission: a private storage reference plus a bounded question.
+
+    ``sync=true`` is the only path for the demonstration: the reference is
+    resolved to a bounded attachment (or, above the inline threshold, staged
+    through the Vertex private GCS path) and the answer is returned inline.
+    The question is bounded to the AI metadata value limit (v0.8 Scope §2.2).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    storage_reference: str = Field(max_length=1024)
+    question: str = Field(min_length=1, max_length=ASK_QUESTION_MAX_LENGTH)
+
+
+class DocumentAskResponse(BaseModel):
+    """The synchronous answer (200) with safe routing/usage metadata."""
+
+    request_id: str
+    output: str
+    routing: ClassifyRouting
+    usage: ClassifyUsage
+    cost: ClassifyCost
+    completed_at: datetime

@@ -51,6 +51,7 @@ from app.storage.fake import FakeObjectStorage
 
 _ORGANISATION_ID = uuid.uuid4()
 _PROJECT = "fixture-project"
+_PROJECT_NUMBER = "123456789012"
 _LOCATION = "europe-west1"
 _BUCKET = "fixture-ai-staging"
 
@@ -609,8 +610,9 @@ async def test_vertex_adapter_rejects_staged_file_combined_with_inline_attachmen
 def _bucket_json() -> dict[str, Any]:
     return {
         "name": _BUCKET,
+        "projectNumber": _PROJECT_NUMBER,
         "location": _LOCATION,
-        "locationType": "SINGLE_REGION",
+        "locationType": "region",
         "iamConfiguration": {"uniformBucketLevelAccess": {"enabled": True}},
         "versioning": {"enabled": False},
     }
@@ -658,7 +660,14 @@ class _GcsServer:
         path = request.url.path
         method = request.method
         self.calls.append(f"{method} {path}")
-        if path.endswith(f"/projects/{_PROJECT}/buckets/{_BUCKET}"):
+        if path.endswith("/serviceAccount"):
+            return httpx.Response(
+                200,
+                json={
+                    "email_address": f"service-{_PROJECT_NUMBER}@gs-project-accounts.iam.gserviceaccount.com"
+                },
+            )
+        if path.endswith(f"/b/{_BUCKET}"):
             if self.bucket_status >= 400:
                 return httpx.Response(self.bucket_status)
             return httpx.Response(200, json=self.bucket)

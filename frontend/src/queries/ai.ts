@@ -11,6 +11,8 @@ type ClassifyRequest = components['schemas']['DocumentClassifyRequest']
 type ClassifySyncResponse = components['schemas']['DocumentClassifySyncResponse']
 type ClassifyAcceptedResponse = components['schemas']['DocumentClassifyAcceptedResponse']
 type ClassifyResultResponse = components['schemas']['DocumentClassifyResultResponse']
+type AskRequest = components['schemas']['DocumentAskRequest']
+type AskResponse = components['schemas']['DocumentAskResponse']
 
 /**
  * Query-key factory for the AI classification demonstration (v0.7 Scope §6.6).
@@ -121,6 +123,33 @@ export function useClassifyResultQuery(requestId: MaybeRefOrGetter<string>) {
     refetchInterval: (query) => {
       const status = (query.state.data as ClassifyResultResponse | undefined)?.status
       return status !== undefined && ACTIVE_CLASSIFY_STATUSES.has(status) ? 1000 : false
+    },
+  })
+}
+
+/**
+ * Submit one ``document.ask`` question about a stored document (v0.8 Scope
+ * §2.2/§6.4).
+ *
+ * Synchronous only: the reference is resolved server-side (inline at or below
+ * the 5 MB threshold, Vertex private GCS staging above it) and the mutation
+ * resolves with the validated text answer plus safe routing/usage metadata.
+ * Like every org-scoped call it reads the selected organisation from Pinia;
+ * the generated client is never imported outside this query layer (BP §15).
+ */
+export function useAskMutation() {
+  const organisation = useOrganisationStore()
+  const organisationId = computed(() => organisation.selectedOrganisationId)
+
+  return useMutation({
+    mutationFn: async (payload: AskRequest) => {
+      if (organisationId.value === null) {
+        throw new Error('Cannot ask about a document without a selected organisation')
+      }
+      const { data, error } = await client.POST('/api/v1/ai/ask', { body: payload })
+      if (error) throw error
+      if (!data) throw new Error('Empty ask response')
+      return data as AskResponse
     },
   })
 }

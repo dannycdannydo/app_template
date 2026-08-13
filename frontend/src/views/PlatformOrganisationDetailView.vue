@@ -467,13 +467,24 @@ const loadError = computed<ApiError | null>(() =>
           <span v-else>No WorkOS mapping yet (backfilled at first invite).</span>
         </p>
       </div>
-      <Button
-        data-testid="platform-invite-user-button"
-        @click="router.push({ name: 'platform-invite-user', params: { organisationId } })"
-      >
-        <UserPlusIcon class="size-4" />
-        Invite user
-      </Button>
+      <div class="flex shrink-0 gap-2">
+        <Button
+          variant="outline"
+          data-testid="platform-ai-settings-button"
+          @click="
+            router.push({ name: 'platform-organisation-ai-settings', params: { organisationId } })
+          "
+        >
+          AI settings
+        </Button>
+        <Button
+          data-testid="platform-invite-user-button"
+          @click="router.push({ name: 'platform-invite-user', params: { organisationId } })"
+        >
+          <UserPlusIcon class="size-4" />
+          Invite user
+        </Button>
+      </div>
     </div>
 
     <Card v-if="orgPending" data-testid="platform-organisation-loading">

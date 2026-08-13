@@ -119,6 +119,11 @@ const router = createRouter({
           component: () => import('@/views/FilesListView.vue'),
         },
         {
+          path: 'ai/ask',
+          name: 'ai-ask',
+          component: () => import('@/views/AiAskView.vue'),
+        },
+        {
           path: 'notifications',
           name: 'notifications',
           component: () => import('@/views/NotificationsListView.vue'),
@@ -149,6 +154,13 @@ const router = createRouter({
           path: 'platform/organisations/:organisationId',
           name: 'platform-organisation-detail',
           component: () => import('@/views/PlatformOrganisationDetailView.vue'),
+          props: true,
+          meta: { requiresPlatformAdmin: true },
+        },
+        {
+          path: 'platform/organisations/:organisationId/ai-settings',
+          name: 'platform-organisation-ai-settings',
+          component: () => import('@/views/PlatformOrganisationAISettingsView.vue'),
           props: true,
           meta: { requiresPlatformAdmin: true },
         },

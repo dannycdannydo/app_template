@@ -24,6 +24,10 @@ type PlatformFeatureFlagUpdate = components['schemas']['PlatformFeatureFlagUpdat
 type PlatformAdminListItem = components['schemas']['PlatformAdminListItem']
 type PlatformAdminListResponse = components['schemas']['PlatformAdminListResponse']
 type PlatformUserListResponse = components['schemas']['PlatformUserListResponse']
+type PlatformOrganisationAISettingsResponse =
+  components['schemas']['PlatformOrganisationAISettingsResponse']
+type PlatformOrganisationAISettingsUpdate =
+  components['schemas']['PlatformOrganisationAISettingsUpdate']
 
 /**
  * Pagination parameters accepted by the platform query layer (Scope §6.9).
@@ -72,6 +76,8 @@ export const platformQueryKeys = {
     organisationId
       ? (['platform', 'feature-flags', organisationId] as const)
       : (['platform', 'feature-flags'] as const),
+  aiSettings: (organisationId: string) =>
+    ['platform', 'organisations', organisationId, 'ai-settings'] as const,
   auditList: (params: PlatformAuditParams) => ['platform', 'audit', 'list', params] as const,
 }
 
@@ -650,4 +656,75 @@ export function usePlatformAdminStatus() {
     mePending: isPending,
     meError: isError,
   }
+}
+
+/**
+ * One organisation's AI policy as the admin centre sees it (v0.7 Scope §6.5,
+ * v0.8 Scope §6.2).
+ *
+ * Platform-gated server-side (never org-scoped, no `X-Org-Id`); the caller is
+ * a platform administrator administering an organisation they may not belong
+ * to, so the key lives under the `platform` root like every platform query.
+ */
+export function usePlatformAISettingsQuery(organisationId: MaybeRefOrGetter<string>) {
+  const resolvedId = computed(() => toValue(organisationId))
+  return useQuery({
+    queryKey: computed(() =>
+      resolvedId.value === ''
+        ? (['platform', 'organisations', null] as const)
+        : platformQueryKeys.aiSettings(resolvedId.value),
+    ),
+    queryFn: async () => {
+      const { data, error } = await client.GET(
+        '/api/v1/platform/organisations/{organisation_id}/ai-settings',
+        { params: { path: { organisation_id: resolvedId.value } } },
+      )
+      if (error) throw error
+      if (!data) throw new Error('Empty platform AI settings response')
+      return data as PlatformOrganisationAISettingsResponse
+    },
+    enabled: computed(() => resolvedId.value !== ''),
+    retry: false,
+    staleTime: 30_000,
+  })
+}
+
+/**
+ * Replace one organisation's AI policy (v0.7 Scope §6.5, v0.8 Scope §6.2).
+ *
+ * The payload carries the optimistic-concurrency `version` from the GET; a
+ * stale update is rejected server-side with a conflict. Success invalidates
+ * the settings key so the form and any other consumer re-read the new
+ * version.
+ */
+export function useUpdatePlatformAISettingsMutation(options?: {
+  onSuccess?: (settings: PlatformOrganisationAISettingsResponse) => void
+}) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async ({
+      organisationId,
+      payload,
+    }: {
+      organisationId: string
+      payload: PlatformOrganisationAISettingsUpdate
+    }) => {
+      const { data, error } = await client.PUT(
+        '/api/v1/platform/organisations/{organisation_id}/ai-settings',
+        {
+          params: { path: { organisation_id: organisationId } },
+          body: payload,
+        },
+      )
+      if (error) throw error
+      if (!data) throw new Error('Empty update platform AI settings response')
+      return data
+    },
+    onSuccess: (settings) => {
+      void queryClient.invalidateQueries({
+        queryKey: platformQueryKeys.aiSettings(settings.organisation_id),
+      })
+      options?.onSuccess?.(settings)
+    },
+  })
 }

@@ -355,6 +355,18 @@ PROTECTED_ROUTES: list[RouteSpec] = [
         org_scoped=True,
         path_values={"request_id": _AI_REQUEST_ID},
     ),
+    # AI document QA demonstration (v0.8 Scope §2.2/§6.4): synchronous only,
+    # org-scoped and gated by the existing documents.upload permission like
+    # every document action; there is no arbitrary-prompt surface.
+    _route(
+        "POST",
+        "/api/v1/ai/ask",
+        org_scoped=True,
+        request_body={
+            "storage_reference": "organisations/00000000-0000-7000-8000-000000000000/ai/scratch/doc.txt",
+            "question": "What is this document about?",
+        },
+    ),
 ]
 
 # Signature-gated surface (Scope §6.8): the WorkOS webhook route is protected

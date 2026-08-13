@@ -27,8 +27,10 @@ from __future__ import annotations
 from functools import lru_cache
 
 from app.ai.providers.factory import get_provider_factory
+from app.ai.providers.vertex_gcs import GcsTransferStore
 from app.ai.registry import load_registry_bundle
 from app.ai.service import AIService
+from app.ai.staging import TransferStore
 from app.ai.storage_resolver import StorageAttachmentResolver
 from app.ai.transfer import TransferDeploymentPolicy, TransferMode
 from app.core.config import get_settings
@@ -54,6 +56,32 @@ def _transfer_deployment_policy() -> TransferDeploymentPolicy:
     )
 
 
+def _transfer_stores() -> dict[str, TransferStore]:
+    """Build the provider-neutral transfer stores the deployment enables.
+
+    v0.8 Scope §2.4/§6.4: the Vertex ``storage_reference`` mode is served by
+    the private same-region GCS staging adapter. The store is built only when
+    the deployment enabled the mode and the Vertex provider is enabled (the
+    typed-settings validator already required the user-provisioned bucket); a
+    deployment that enables no non-inline mode builds no store, so selection
+    fails closed exactly where the policy says it must.
+    """
+    settings = get_settings()
+    stores: dict[str, TransferStore] = {}
+    if (
+        TransferMode.STORAGE_REFERENCE in _transfer_deployment_policy().enabled_transfer_modes
+        and "vertex" in settings.ai_enabled_providers
+    ):
+        stores["vertex"] = GcsTransferStore(
+            project=settings.ai_vertex_project,
+            location=settings.ai_vertex_location,
+            bucket=settings.ai_vertex_temp_gcs_bucket,
+            credentials_path=settings.ai_vertex_credentials_path,
+            timeout_seconds=settings.ai_http_timeout_seconds,
+        )
+    return stores
+
+
 @lru_cache
 def get_ai_service() -> AIService:
     """Return the process-wide, fully wired :class:`AIService`.
@@ -77,4 +105,6 @@ def get_ai_service() -> AIService:
         providers=providers,
         attachment_resolver=StorageAttachmentResolver(get_storage()),
         transfer_deployment=_transfer_deployment_policy(),
+        storage=get_storage(),
+        transfer_stores=_transfer_stores(),
     )

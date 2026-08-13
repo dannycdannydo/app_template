@@ -788,6 +788,31 @@ export interface paths {
     patch?: never
     trace?: never
   }
+  '/api/v1/ai/ask': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    /**
+     * Ask Document
+     * @description Answer one question about a stored document (inline or GCS-staged).
+     *
+     *     The private storage reference and bounded question are passed to the
+     *     ``document.ask`` task; ``AIService`` resolves the reference (inline at or
+     *     below the 5 MB threshold, Vertex private GCS staging above it) and the
+     *     validated answer is returned inline with safe routing/usage metadata.
+     */
+    post: operations['ask_document_api_v1_ai_ask_post']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
   '/api/v1/webhooks/workos': {
     parameters: {
       query?: never
@@ -902,6 +927,39 @@ export interface components {
       input_tokens: number
       /** Output Tokens */
       output_tokens: number
+    }
+    /**
+     * DocumentAskRequest
+     * @description One QA submission: a private storage reference plus a bounded question.
+     *
+     *     ``sync=true`` is the only path for the demonstration: the reference is
+     *     resolved to a bounded attachment (or, above the inline threshold, staged
+     *     through the Vertex private GCS path) and the answer is returned inline.
+     *     The question is bounded to the AI metadata value limit (v0.8 Scope §2.2).
+     */
+    DocumentAskRequest: {
+      /** Storage Reference */
+      storage_reference: string
+      /** Question */
+      question: string
+    }
+    /**
+     * DocumentAskResponse
+     * @description The synchronous answer (200) with safe routing/usage metadata.
+     */
+    DocumentAskResponse: {
+      /** Request Id */
+      request_id: string
+      /** Output */
+      output: string
+      routing: components['schemas']['ClassifyRouting']
+      usage: components['schemas']['ClassifyUsage']
+      cost: components['schemas']['ClassifyCost']
+      /**
+       * Completed At
+       * Format: date-time
+       */
+      completed_at: string
     }
     /**
      * DocumentClassificationResult
@@ -1075,6 +1133,8 @@ export interface components {
       updated_at: string
       /** Processing Job Id */
       processing_job_id?: string | null
+      /** Storage Reference */
+      storage_reference?: string | null
     }
     /**
      * FileDetail
@@ -3586,6 +3646,42 @@ export interface operations {
         }
         content: {
           'application/json': components['schemas']['DocumentClassifyResultResponse']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  ask_document_api_v1_ai_ask_post: {
+    parameters: {
+      query?: never
+      header?: {
+        'x-org-id'?: string | null
+        authorization?: string | null
+      }
+      path?: never
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['DocumentAskRequest']
+      }
+    }
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['DocumentAskResponse']
         }
       }
       /** @description Validation Error */
