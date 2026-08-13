@@ -308,7 +308,9 @@ def test_store_constructor_requires_key_and_reviewed_expiry() -> None:
     with pytest.raises(AIInputValidationError):
         OpenAITransferStore(api_key="", upload_expiry_seconds=_EXPIRY_SECONDS)
     with pytest.raises(AIInputValidationError):
-        OpenAITransferStore(api_key="sk-test", upload_expiry_seconds=OPENAI_EXPIRES_AFTER_MIN_SECONDS - 1)
+        OpenAITransferStore(
+            api_key="sk-test", upload_expiry_seconds=OPENAI_EXPIRES_AFTER_MIN_SECONDS - 1
+        )
 
 
 async def test_store_stage_uploads_multipart_with_purpose_and_expires_after(
@@ -329,9 +331,7 @@ async def test_store_stage_uploads_multipart_with_purpose_and_expires_after(
     # expires_after JSON object (anchor + seconds) verified 2026-08-11.
     text = sent.read().decode("latin-1")
     assert 'name="purpose"' in text and OPENAI_FILES_PURPOSE in text
-    expires_payload = json.loads(
-        text.split('name="expires_after"')[1].split("\r\n--")[0].strip()
-    )
+    expires_payload = json.loads(text.split('name="expires_after"')[1].split("\r\n--")[0].strip())
     assert expires_payload == {"anchor": "created_at", "seconds": _EXPIRY_SECONDS}
     assert reference.external_id == "file-abc123"
     assert reference.expires_at is not None
@@ -401,13 +401,9 @@ async def test_store_stage_refuses_before_any_upload_when_invalid(
 
     store = _store(client=_client(handler))
     with pytest.raises(TransferStagingError):
-        await store.stage(
-            **_real_stage_args(source_pdf, mime_type="image/png")
-        )
+        await store.stage(**_real_stage_args(source_pdf, mime_type="image/png"))
     with pytest.raises(TransferStagingError):
-        await store.stage(
-            **_real_stage_args(source_pdf, source_lifecycle=SourceLifecycle.RETAINED)
-        )
+        await store.stage(**_real_stage_args(source_pdf, source_lifecycle=SourceLifecycle.RETAINED))
     assert calls == 0
     await store.aclose()
 
@@ -416,6 +412,7 @@ async def test_store_stage_maps_rate_limit_and_server_errors_as_retryable(
     source_pdf: tuple[Path, bytes],
 ) -> None:
     for status in (429, 503):
+
         def handler(request: httpx.Request, _status: int = status) -> httpx.Response:
             return _json_response({}, status=_status)
 
@@ -442,9 +439,7 @@ async def test_store_stage_maps_permanent_refusal_without_leaking_details(
     source_pdf: tuple[Path, bytes],
 ) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        return _json_response(
-            {"error": {"message": "super-secret-provider-body"}}, status=400
-        )
+        return _json_response({"error": {"message": "super-secret-provider-body"}}, status=400)
 
     store = _store(client=_client(handler))
     with pytest.raises(TransferStagingError) as excinfo:

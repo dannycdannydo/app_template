@@ -103,9 +103,7 @@ async def test_openai_files_upload_dispatch_delete_live_contract() -> None:
                 mode=TransferMode.PROVIDER_UPLOAD,
                 organisation_id=organisation_id,
                 logical_request_id=f"contract-{organisation_id.hex[:8]}",
-                source_reference=(
-                    f"organisations/{organisation_id}/ai/scratch/lease.pdf"
-                ),
+                source_reference=(f"organisations/{organisation_id}/ai/scratch/lease.pdf"),
                 source_digest=digest,
                 mime_type="application/pdf",
                 size_bytes=len(content),

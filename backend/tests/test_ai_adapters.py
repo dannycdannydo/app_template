@@ -1124,9 +1124,7 @@ async def test_openai_managed_url_never_leaks_into_errors_or_logs() -> None:
         return _json_response({"error": {"message": "boom"}}, status=429)
 
     adapter = OpenAIAdapter(api_key="sk-test", client=_client(handler))
-    managed_url = (
-        "https://minio.example.test/lease.pdf?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=secret"
-    )
+    managed_url = "https://minio.example.test/lease.pdf?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=secret"
     with pytest.raises(ProviderRateLimitError) as excinfo:
         await adapter.complete(
             _staged_request(
@@ -1147,9 +1145,7 @@ async def test_openai_staged_file_and_attachments_are_mutually_exclusive() -> No
     with pytest.raises(AIInputValidationError):
         await adapter.complete(
             _staged_request(
-                attachments=[
-                    _attachment(display_name="lease.pdf", mime_type="application/pdf")
-                ]
+                attachments=[_attachment(display_name="lease.pdf", mime_type="application/pdf")]
             )
         )
 
@@ -1216,9 +1212,7 @@ async def test_openai_responses_json_mode_appends_instruction() -> None:
     await adapter.complete(_staged_request(output_schema="demo.ClassificationResult"))
     body = json.loads(captured[0].content)
     assert body["text"] == {"format": {"type": "json_object"}}
-    assert body["input"][0]["content"][0]["text"].endswith(
-        "Respond with a single JSON object."
-    )
+    assert body["input"][0]["content"][0]["text"].endswith("Respond with a single JSON object.")
 
 
 async def test_openai_responses_finish_reason_mapping() -> None:

@@ -157,9 +157,7 @@ class OpenAIAdapter(OpenAICompatibleAdapter):
                 "a staged file and inline attachments are mutually exclusive"
             )
         if request.staged_file is None:
-            raise AIInputValidationError(
-                "the Responses-API dispatch path requires a staged file"
-            )
+            raise AIInputValidationError("the Responses-API dispatch path requires a staged file")
         if request.staged_file.mime_type not in self.supported_attachment_mime_types:
             raise AIInputValidationError(
                 f"provider {self.provider_id!r} does not support staged file MIME type "
@@ -169,9 +167,7 @@ class OpenAIAdapter(OpenAICompatibleAdapter):
             {
                 "type": "input_text",
                 "text": (
-                    request.prompt + JSON_INSTRUCTION
-                    if request.output_schema
-                    else request.prompt
+                    request.prompt + JSON_INSTRUCTION if request.output_schema else request.prompt
                 ),
             },
             *_openai_responses_file_parts(request),

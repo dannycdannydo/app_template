@@ -104,13 +104,9 @@ def validate_openai_upload(
     reference or a URI (BP §28).
     """
     if mode is not TransferMode.PROVIDER_UPLOAD:
-        raise TransferStagingError(
-            "the OpenAI upload store stages provider_upload transfers only"
-        )
+        raise TransferStagingError("the OpenAI upload store stages provider_upload transfers only")
     if mime_type not in OPENAI_UPLOAD_MIME_TYPES:
-        raise TransferStagingError(
-            "the OpenAI upload path accepts exactly one application/pdf"
-        )
+        raise TransferStagingError("the OpenAI upload path accepts exactly one application/pdf")
     if size_bytes > OPENAI_UPLOAD_MAX_BYTES:
         raise TransferStagingError("the uploaded object exceeds the reviewed large-file ceiling")
     if source_lifecycle is not SourceLifecycle.TRANSIENT:

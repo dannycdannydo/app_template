@@ -199,9 +199,7 @@ class OpenAICompatibleAdapter(LLMProvider):
                 *_openai_attachment_parts(list(request.attachments)),
             ]
         else:
-            content = (
-                request.prompt + JSON_INSTRUCTION if request.output_schema else request.prompt
-            )
+            content = request.prompt + JSON_INSTRUCTION if request.output_schema else request.prompt
         payload: dict[str, Any] = {
             "model": request.model,
             "messages": [{"role": "user", "content": content}],
