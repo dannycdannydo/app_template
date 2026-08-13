@@ -66,6 +66,16 @@ class ProviderRequest(BaseModel):
     # It is mutually exclusive with ``attachments`` — a dispatch carries either
     # the inline set or exactly one staged file, never both.
     staged_file: StagedFile | None = Field(default=None)
+    # A just-in-time minted managed download URL for a retained private S3
+    # source (v0.8 Scope §2.3/§2.4, managed-signed-url mode). The service mints
+    # it immediately before this dispatch and the adapter maps it to its native
+    # file-URL input form (OpenAI/Anthropic Responses ``input_file.file_url``).
+    # It exists only in worker memory for one provider call — it is never
+    # returned to the caller, persisted, audited or logged, and its query
+    # string is redacted at every log/error boundary (BP §28). It is only
+    # meaningful together with ``staged_file`` and is mutually exclusive with
+    # inline ``attachments``.
+    managed_url: str | None = Field(default=None, max_length=4096)
 
 
 class ProviderResponse(BaseModel):

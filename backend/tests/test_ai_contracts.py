@@ -29,8 +29,10 @@ from app.ai.providers.base import LLMProvider, ProviderRequest
 from app.ai.providers.deepseek import DeepSeekAdapter
 from app.ai.providers.local import LocalOpenAICompatibleAdapter
 from app.ai.providers.openai import OpenAIAdapter
+from app.ai.providers.openai_upload import OpenAITransferStore
 from app.ai.providers.vertex import VertexAIAdapter
 from app.ai.providers.vertex_gcs import GcsTransferStore
+from app.ai.staging import StagedFile
 from app.ai.transfer import SourceLifecycle, TransferMode
 
 
@@ -63,6 +65,75 @@ async def test_openai_live_contract() -> None:
         )
     model = os.environ.get("AI_CONTRACTS_OPENAI_MODEL", "gpt-4o-mini")
     await _probe(OpenAIAdapter(api_key=api_key), model)
+
+
+@pytest.mark.ai_contracts
+async def test_openai_files_upload_dispatch_delete_live_contract() -> None:
+    """Upload, dispatch with, and delete one fixture PDF through the OpenAI
+    Files/Responses APIs (v0.8 Scope §2.4, §6.5 checkbox 3).
+
+    The opt-in contract test uses a dedicated non-production OpenAI API key
+    (``AI_CONTRACTS_*`` namespace), verifies the reviewed upload contract
+    (purpose ``user_data``, configured ``expires_after``), dispatches the file
+    id through the Responses API ``input_file`` item and performs the
+    best-effort terminal delete. It skips cleanly when the key is absent, so
+    the target is a no-op in CI until deliberately configured.
+    """
+    api_key = os.environ.get("AI_CONTRACTS_OPENAI_API_KEY")
+    if not api_key:
+        pytest.skip(
+            "AI_CONTRACTS_OPENAI_API_KEY not configured; skipping live OpenAI Files contract test"
+        )
+    model = os.environ.get("AI_CONTRACTS_OPENAI_MODEL", "gpt-4o-mini")
+    expiry_seconds = 3_600  # the reviewed OpenAI expires_after minimum
+    content = _fixture_pdf_bytes()
+    digest = hashlib.sha256(content).hexdigest()
+    organisation_id = uuid.uuid4()
+    store = OpenAITransferStore(
+        api_key=api_key,
+        region="",
+        upload_expiry_seconds=expiry_seconds,
+    )
+    reference = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix="ai-openai-contract-", suffix=".pdf") as handle:
+            handle.write(content)
+            handle.flush()
+            reference = await store.stage(
+                mode=TransferMode.PROVIDER_UPLOAD,
+                organisation_id=organisation_id,
+                logical_request_id=f"contract-{organisation_id.hex[:8]}",
+                source_reference=(f"organisations/{organisation_id}/ai/scratch/lease.pdf"),
+                source_digest=digest,
+                mime_type="application/pdf",
+                size_bytes=len(content),
+                source_lifecycle=SourceLifecycle.TRANSIENT,
+                region="",
+                expires_at=None,
+                source_path=Path(handle.name),
+            )
+        assert reference.external_id.startswith("file-")
+        assert reference.provider == "openai"
+        assert reference.expires_at is not None
+        # Dispatch the uploaded file id through the Responses API input_file.
+        adapter = OpenAIAdapter(api_key=api_key)
+        response = await adapter.complete(
+            ProviderRequest(
+                task="document.classify",
+                model=model,
+                prompt="Reply with the single word OK and nothing else.",
+                max_tokens=8,
+                temperature=0,
+                staged_file=StagedFile(
+                    external_id=reference.external_id, mime_type="application/pdf"
+                ),
+            )
+        )
+        assert isinstance(response.content, str)
+        # Best-effort terminal delete of the AI-owned provider copy.
+        await store.delete(reference)
+    finally:
+        await store.aclose()
 
 
 @pytest.mark.ai_contracts

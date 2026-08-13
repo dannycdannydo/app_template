@@ -444,12 +444,31 @@ handling, tenant isolation and regional data movement).
 
 Dependencies: Scope §6.3.
 
-- [ ] Implement streamed OpenAI `user_data` upload, shortest configured `expires_after`, Responses file-id input and delete for transient sources; implement managed file-URL input for retained private S3 sources behind the adapter; no generic AI service code imports provider HTTP shapes
-- [ ] Enforce the PDF/50,000,000-byte/model/context/region policy before upload and normalize upload, expiry, use and deletion failures into safe retryable/permanent AI errors
-- [ ] Fake-backed tests cover source-lifecycle selection, upload/use/delete, managed-URL fetch, URL non-persistence/redaction/expiry, retry reuse, terminal cleanup, timeout and deletion failure; opt-in non-production OpenAI contract tests verify current behavior and skip cleanly without credentials
+- [x] Implement streamed OpenAI `user_data` upload, shortest configured `expires_after`, Responses file-id input and delete for transient sources; implement managed file-URL input for retained private S3 sources behind the adapter; no generic AI service code imports provider HTTP shapes
+- [x] Enforce the PDF/50,000,000-byte/model/context/region policy before upload and normalize upload, expiry, use and deletion failures into safe retryable/permanent AI errors
+- [x] Fake-backed tests cover source-lifecycle selection, upload/use/delete, managed-URL fetch, URL non-persistence/redaction/expiry, retry reuse, terminal cleanup, timeout and deletion failure; opt-in non-production OpenAI contract tests verify current behavior and skip cleanly without credentials
 
 Human review required before enabling the mode: provider data retention,
 regional configuration and secret handling.
+
+> **Recorded human review and application authorisation (AGENTS.md — §6.5
+> provider-data-retention, regional-configuration and secret-handling
+> categories).**
+> On 2026-08-13, after the v0.8 Scope §6.5 review returned `APPROVED` (no
+> must-fix or should-fix blocking items), the human reviewer explicitly
+> approved the checkpoint for application. The three §6.5 gate categories are
+> covered by the reviewed surface: the OpenAI upload store and Responses-API
+> dispatch enforce the provider retention contract (`user_data` purpose,
+> `expires_after` bounds 1 h..30 d, provider-reported `expires_at` as the
+> durable expiry, best-effort terminal delete) and the region/model/context
+> policy before any upload; the managed URL travels only in the in-memory
+> `ProviderRequest.managed_url` field and is never persisted, logged or
+> returned; and no secret handling is introduced beyond the existing
+> `AI_OPENAI_API_KEY` adapter credential.
+>
+> No authentication, permission-model, tenant-isolation, destructive-migration
+> or public-API change is introduced by this work unit (internal
+> provider/storage-adapter surface only).
 
 ## 6.6 Anthropic Provider Upload and Managed URL
 
