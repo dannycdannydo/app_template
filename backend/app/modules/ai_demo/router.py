@@ -128,9 +128,7 @@ async def ask_document(
     )
 
 
-@scratch_router.post(
-    "/uploads", response_model=ScratchUploadIntentResponse, status_code=201
-)
+@scratch_router.post("/uploads", response_model=ScratchUploadIntentResponse, status_code=201)
 async def create_scratch_upload_intent_endpoint(
     payload: ScratchUploadIntentRequest,
     session: Annotated[AsyncSession, Depends(get_db)],
@@ -150,9 +148,7 @@ async def create_scratch_upload_intent_endpoint(
     )
 
 
-@scratch_router.post(
-    "/uploads/{upload_id}/complete", response_model=ScratchUploadCompleteResponse
-)
+@scratch_router.post("/uploads/{upload_id}/complete", response_model=ScratchUploadCompleteResponse)
 async def complete_scratch_upload_endpoint(
     upload_id: str,
     session: Annotated[AsyncSession, Depends(get_db)],

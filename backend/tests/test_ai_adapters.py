@@ -1099,7 +1099,8 @@ async def test_openai_staged_file_managed_url_dispatches_input_file_url() -> Non
         "https://minio.example.test/org-bucket/lease.pdf?"
         "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=secret-bearer-material"
     )
-    response = await adapter.complete(        _staged_request(
+    response = await adapter.complete(
+        _staged_request(
             staged_file=StagedFile(
                 external_id="organisations/00000000-0000-0000-0000-000000000000/lease.pdf",
                 mime_type="application/pdf",
@@ -1124,7 +1125,9 @@ async def test_openai_reports_routed_model_for_dated_snapshot_echo() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         captured.append(request)
         return _json_response(
-            _canned_responses_response(content='{"category": "lease"}', model="gpt-4o-mini-2024-07-18")
+            _canned_responses_response(
+                content='{"category": "lease"}', model="gpt-4o-mini-2024-07-18"
+            )
         )
 
     adapter = OpenAIAdapter(api_key="sk-test", client=_client(handler))

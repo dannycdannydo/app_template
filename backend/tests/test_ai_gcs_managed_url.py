@@ -87,9 +87,11 @@ class _GcsTransport(httpx.AsyncBaseTransport):
         # the transport cannot re-read the stream — the staged content is the
         # verified source by construction and the store independently checks
         # the incremental SHA-256 of the bytes it actually sent.
-        self._staged_md5 = __import__("base64").b64encode(
-            __import__("hashlib").md5(self._pdf).digest()
-        ).decode("ascii")
+        self._staged_md5 = (
+            __import__("base64")
+            .b64encode(__import__("hashlib").md5(self._pdf).digest())
+            .decode("ascii")
+        )
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -135,7 +137,9 @@ class _GcsTransport(httpx.AsyncBaseTransport):
                 },
                 request=request,
             )
-        return httpx.Response(404, text=f"unexpected: {request.method} {request.url}", request=request)
+        return httpx.Response(
+            404, text=f"unexpected: {request.method} {request.url}", request=request
+        )
 
 
 @pytest.fixture
@@ -147,7 +151,9 @@ def gcs_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, st
         serialization.PrivateFormat.PKCS8,
         serialization.NoEncryption(),
     ).decode("ascii")
-    info = _service_account_info(pem, client_email="fixture@fixture-project.iam.gserviceaccount.com")
+    info = _service_account_info(
+        pem, client_email="fixture@fixture-project.iam.gserviceaccount.com"
+    )
     key_path = tmp_path / "sakey.json"
     key_path.write_text(json.dumps(info), encoding="utf-8")
     # The store refreshes a Bearer token through the network; the auth header
@@ -185,7 +191,9 @@ async def test_stager_mints_gcs_https_url_for_a_retained_source(
     reference = _reference(digest=hashlib.sha256(pdf).hexdigest(), size_bytes=len(pdf))
 
     stager = _stager(key_path, _GcsTransport(pdf=pdf))
-    signed = await stager.mint(reference=reference, ttl_seconds=_TTL_SECONDS, source_storage=storage)
+    signed = await stager.mint(
+        reference=reference, ttl_seconds=_TTL_SECONDS, source_storage=storage
+    )
 
     assert signed.method == "GET"
     assert signed.expires_at is not None
@@ -235,7 +243,10 @@ async def test_stager_rejects_a_non_managed_reference(
     await storage.put(_SOURCE_KEY, pdf, content_type="application/pdf")
     reference = _reference(digest=hashlib.sha256(pdf).hexdigest(), size_bytes=len(pdf))
     reference = reference.model_copy(
-        update={"mode": TransferMode.STORAGE_REFERENCE, "source_lifecycle": SourceLifecycle.TRANSIENT}
+        update={
+            "mode": TransferMode.STORAGE_REFERENCE,
+            "source_lifecycle": SourceLifecycle.TRANSIENT,
+        }
     )
 
     stager = _stager(key_path, _GcsTransport(pdf=pdf))
@@ -243,7 +254,9 @@ async def test_stager_rejects_a_non_managed_reference(
         await stager.mint(reference=reference, ttl_seconds=_TTL_SECONDS, source_storage=storage)
 
 
-def test_stager_requires_a_signer(gcs_setup: tuple[Path, str], monkeypatch: pytest.MonkeyPatch) -> None:
+def test_stager_requires_a_signer(
+    gcs_setup: tuple[Path, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Credentials without a private-key signer cannot sign v4 URLs: fail fast
     at wiring rather than at dispatch."""
     key_path, _ = gcs_setup
@@ -347,9 +360,7 @@ async def test_orchestrator_mint_managed_url_routes_through_stager() -> None:
     class _References:
         """Protocol-compliant no-op reference store (mint never touches it)."""
 
-        async def create_or_adopt(
-            self, reference: ExternalFileReference
-        ) -> ExternalFileReference:
+        async def create_or_adopt(self, reference: ExternalFileReference) -> ExternalFileReference:
             return reference
 
         async def find_live(self, **kwargs: object) -> ExternalFileReference | None:

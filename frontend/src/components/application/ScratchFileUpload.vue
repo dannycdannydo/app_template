@@ -214,11 +214,7 @@ const pickerId = 'scratch-file-upload-input'
       </p>
 
       <div v-if="phase === 'idle' || phase === 'error'" class="flex items-center gap-2">
-        <Button
-          data-testid="scratch-file-upload-submit"
-          :disabled="busy"
-          @click="startUpload"
-        >
+        <Button data-testid="scratch-file-upload-submit" :disabled="busy" @click="startUpload">
           <RefreshCwIcon v-if="phase === 'error'" class="size-4" />
           <FileUpIcon v-else class="size-4" />
           {{ phase === 'error' ? 'Try again' : 'Upload' }}

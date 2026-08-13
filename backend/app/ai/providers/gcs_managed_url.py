@@ -67,7 +67,9 @@ def _canonical_uri(bucket: str, object_key: str) -> str:
     separators and every segment percent-encoded (``organisations/x/y.pdf``
     stays three segments, never ``%2F``-joined).
     """
-    segments = [quote(bucket, safe="")] + [quote(segment, safe="") for segment in object_key.split("/")]
+    segments = [quote(bucket, safe="")] + [
+        quote(segment, safe="") for segment in object_key.split("/")
+    ]
     return "/" + "/".join(segments)
 
 
@@ -117,8 +119,7 @@ def mint_gcs_v4_signed_url(
     encoded = [(quote(name, safe=""), quote(value, safe="")) for name, value in params]
     canonical_query = "&".join(f"{name}={value}" for name, value in encoded)
     canonical_request = (
-        f"GET\n{canonical_uri}\n{canonical_query}\n"
-        f"host:{_GCS_HOST}\n\nhost\nUNSIGNED-PAYLOAD"
+        f"GET\n{canonical_uri}\n{canonical_query}\nhost:{_GCS_HOST}\n\nhost\nUNSIGNED-PAYLOAD"
     )
     string_to_sign = (
         f"GOOG4-RSA-SHA256\n{timestamp}\n{scope}\n"
@@ -128,10 +129,7 @@ def mint_gcs_v4_signed_url(
     # base64 — the exact wire form the official google-cloud-storage library
     # emits; hex is also URL-safe, so no query escaping is needed.
     signature = binascii.hexlify(signer.sign(string_to_sign.encode("utf-8"))).decode("ascii")
-    return (
-        f"https://{_GCS_HOST}{canonical_uri}?{canonical_query}"
-        f"&X-Goog-Signature={signature}"
-    )
+    return f"https://{_GCS_HOST}{canonical_uri}?{canonical_query}&X-Goog-Signature={signature}"
 
 
 class GcsManagedUrlStager:

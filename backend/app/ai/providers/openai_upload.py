@@ -395,7 +395,9 @@ class OpenAITransferStore(TransferStore):
                     "the OpenAI Files API returned an unparseable response"
                 ) from exc
             if not isinstance(body, dict):
-                raise ProviderResponseError("the OpenAI Files API returned a malformed response body")
+                raise ProviderResponseError(
+                    "the OpenAI Files API returned a malformed response body"
+                )
             body_data = cast(dict[str, Any], body)
             file_id = str(body_data.get(_FILE_ID_KEY) or "")
             if not file_id:

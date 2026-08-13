@@ -420,8 +420,6 @@ async def complete_scratch_upload(
     object_key = scratch_object_key(organisation_id, parsed)
     info = await get_storage().head_object(object_key)
     if info is None:
-        raise ValidationError(
-            code="upload_not_found", message="The upload could not be verified."
-        )
+        raise ValidationError(code="upload_not_found", message="The upload could not be verified.")
     _validate_scratch_upload(content_type=info.content_type or "", size_bytes=info.size_bytes)
     return object_key
