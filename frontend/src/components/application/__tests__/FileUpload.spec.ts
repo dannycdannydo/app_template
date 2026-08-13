@@ -142,12 +142,18 @@ describe('FileUpload', () => {
     // Completion returns a processing job id → the component starts polling.
     mutationOptions.onSuccess?.({
       organisationId: ORG_A,
-      file: { id: FILE_ID, processing_job_id: JOB_ID },
+      file: {
+        id: FILE_ID,
+        processing_job_id: JOB_ID,
+        storage_reference: `organisations/${ORG_A}/documents/${FILE_ID}/original`,
+      },
     })
     await nextTick()
     expect(wrapper.find('[data-testid="file-upload-progress"]').text()).toContain('100%')
     const uploadedEvents = wrapper.emitted('uploaded')
-    expect(uploadedEvents?.[uploadedEvents.length - 1]).toEqual([FILE_ID])
+    expect(uploadedEvents?.[uploadedEvents.length - 1]).toEqual([
+      `organisations/${ORG_A}/documents/${FILE_ID}/original`,
+    ])
 
     // The polled job drives progress from here on.
     jobData.value = runningJob(60)
@@ -170,7 +176,11 @@ describe('FileUpload', () => {
 
     mutationOptions.onSuccess?.({
       organisationId: ORG_A,
-      file: { id: FILE_ID, processing_job_id: JOB_ID },
+      file: {
+        id: FILE_ID,
+        processing_job_id: JOB_ID,
+        storage_reference: `organisations/${ORG_A}/documents/${FILE_ID}/original`,
+      },
     })
     await nextTick()
 
@@ -207,7 +217,11 @@ describe('FileUpload', () => {
 
     mutationOptions.onSuccess?.({
       organisationId: ORG_A,
-      file: { id: FILE_ID, processing_job_id: null },
+      file: {
+        id: FILE_ID,
+        processing_job_id: null,
+        storage_reference: `organisations/${ORG_A}/documents/${FILE_ID}/original`,
+      },
     })
     await nextTick()
 

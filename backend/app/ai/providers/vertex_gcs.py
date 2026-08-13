@@ -39,6 +39,7 @@ from __future__ import annotations
 import base64
 import collections.abc as collections_abc
 import hashlib
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -46,6 +47,7 @@ from urllib.parse import quote
 from uuid import UUID
 
 import httpx
+import structlog
 
 from app.ai.errors import (
     AIInputValidationError,
@@ -138,6 +140,11 @@ class _FileDigestStream(httpx.AsyncByteStream):
         return base64.b64encode(self._md5.digest()).decode("ascii")
 
 
+#: Module logger. GCS failure log lines carry the exception category only —
+#: never URLs, credentials, object keys or content (BP §28).
+logger = structlog.get_logger()
+
+
 class GcsTransferStore(TransferStore):
     """Vertex ``storage_reference`` staging over the GCS JSON API."""
 
@@ -166,6 +173,10 @@ class GcsTransferStore(TransferStore):
         self.region = location
         self._credentials: Any = load_google_credentials(credentials_path)
         self._client = client or httpx.AsyncClient(timeout=timeout_seconds)
+        #: Resolved project number of the configured project, cached after the
+        #: first bucket verification (ownership is proven by comparing it with
+        #: the bucket's reported projectNumber).
+        self._resolved_project_number: str | None = None
         #: In-process live reference cache keyed by the derived idempotency
         #: key (retry-only reuse within one logical request, Scope §2.1). The
         #: durable row remains the authoritative dedup across processes.
@@ -174,21 +185,87 @@ class GcsTransferStore(TransferStore):
     def _auth_headers(self) -> dict[str, str]:
         return {"Authorization": google_authorization_header(self._credentials)}
 
+    async def _get(
+        self,
+        url: str,
+        *,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str],
+    ) -> httpx.Response:
+        """One GCS GET with transport failures translated to the safe taxonomy.
+
+        A blocked or failing connection (Google unreachable, VPN issue,
+        TLS failure) must surface as a retryable provider error, never a raw
+        httpx exception that escapes as an opaque 500/502. Only the exception
+        category is logged (BP §28).
+        """
+        try:
+            return await self._client.get(url, params=params, headers=headers)
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "ai.gcs.http.transport_failure",
+                exception_type=type(exc).__name__,
+            )
+            raise ProviderUnavailableError("the GCS staging endpoint is unreachable") from exc
+
+    async def _delete(
+        self, url: str, *, headers: dict[str, str]
+    ) -> httpx.Response:
+        """One GCS DELETE with the same transport-error translation as ``_get``."""
+        try:
+            return await self._client.delete(url, headers=headers)
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "ai.gcs.http.transport_failure",
+                exception_type=type(exc).__name__,
+            )
+            raise ProviderUnavailableError("the GCS staging endpoint is unreachable") from exc
+
+    async def _project_number(self) -> str:
+        """Resolve the configured project's numeric id (cached).
+
+        GCS reports bucket ownership as the owning project's *number*, while
+        the deployment configuration names the project by id or number. The
+        project's GCS service account email embeds the number, so it is
+        resolved once through the documented
+        ``projects/{project}/serviceAccount`` endpoint and reused for every
+        ownership check. An unverifiable project fails closed.
+        """
+        if self._resolved_project_number is not None:
+            return self._resolved_project_number
+        url = f"{_STORAGE_API}/projects/{quote(self._project, safe='')}/serviceAccount"
+        response = await self._get(url, headers=self._auth_headers())
+        if response.is_error:
+            raise TransferStagingError(
+                "the configured Google Cloud project could not be verified"
+            )
+        try:
+            data = cast(dict[str, Any], response.json())
+        except ValueError as exc:
+            raise TransferStagingError(
+                "the configured Google Cloud project could not be verified"
+            ) from exc
+        match = re.search(r"service-(\d+)@", str(data.get("email_address") or ""))
+        if match is None:
+            raise TransferStagingError(
+                "the configured Google Cloud project could not be verified"
+            )
+        number = match.group(1)
+        self._resolved_project_number = number
+        return number
+
     async def _bucket_metadata(self) -> StagingBucketMetadata:
         """Read and verify the actual configured bucket (Scope §2.4 checkbox 2).
 
-        The **project-scoped** bucket read (``projects/{project}/buckets/
-        {bucket}``) only succeeds when the bucket belongs to the configured
-        Google Cloud project — a foreign-project bucket returns 404/403 and
-        fails closed here. The bucket IAM policy is then inspected for public
-        bindings; together with the uniform-access requirement this proves the
-        bucket is private before any upload.
+        The bucket is read through the standard GCS ``b/{bucket}`` endpoint and
+        its reported ``projectNumber`` must equal the configured project's
+        resolved number — a foreign-project bucket fails closed here. The
+        bucket IAM policy is then inspected for public bindings; together with
+        the uniform-access requirement this proves the bucket is private before
+        any upload.
         """
-        url = (
-            f"{_STORAGE_API}/projects/{quote(self._project, safe='')}"
-            f"/buckets/{quote(self._bucket, safe='')}"
-        )
-        response = await self._client.get(
+        url = f"{_STORAGE_API}/b/{quote(self._bucket, safe='')}"
+        response = await self._get(
             url, params={"fields": _BUCKET_FIELDS}, headers=self._auth_headers()
         )
         if response.is_error:
@@ -203,7 +280,11 @@ class GcsTransferStore(TransferStore):
             raise ProviderResponseError(
                 "the GCS staging bucket returned an unreadable response"
             ) from exc
-        location_type_raw = str(data.get("locationType") or "")
+        if str(data.get("projectNumber") or "") != await self._project_number():
+            raise TransferStagingError(
+                "the GCS staging bucket belongs to a different Google Cloud project"
+            )
+        location_type_raw = str(data.get("locationType") or "").strip().lower()
         try:
             location_type = GcsBucketLocationType(location_type_raw)
         except ValueError as exc:
@@ -224,7 +305,7 @@ class GcsTransferStore(TransferStore):
         )
         return StagingBucketMetadata(
             name=str(data.get("name") or ""),
-            project=self._project,  # proven by the project-scoped read
+            project=str(data.get("projectNumber") or ""),  # proven ownership
             location=str(data.get("location") or ""),
             location_type=location_type,
             uniform_bucket_level_access=bool(uniform_access.get("enabled") is True),
@@ -234,7 +315,7 @@ class GcsTransferStore(TransferStore):
 
     async def _bucket_has_public_read(self) -> bool:
         """Whether any IAM binding grants public read access (Scope §2.4)."""
-        response = await self._client.get(
+        response = await self._get(
             f"{_STORAGE_API}/b/{quote(self._bucket, safe='')}/iam",
             params={"fields": "bindings"},
             headers=self._auth_headers(),
@@ -263,7 +344,7 @@ class GcsTransferStore(TransferStore):
 
     async def _object_metadata(self, object_key: str) -> StagedObjectMetadata | None:
         """Head one staged object's metadata, or ``None`` when missing."""
-        response = await self._client.get(
+        response = await self._get(
             f"{_STORAGE_API}/b/{quote(self._bucket, safe='')}/o/{quote(object_key, safe='')}",
             params={"fields": _OBJECT_FIELDS},
             headers=self._auth_headers(),
@@ -324,6 +405,10 @@ class GcsTransferStore(TransferStore):
         try:
             response = await self._client.send(request)
         except httpx.HTTPError as exc:
+            logger.warning(
+                "ai.gcs.http.transport_failure",
+                exception_type=type(exc).__name__,
+            )
             raise ProviderUnavailableError(
                 "the staged object could not be uploaded to GCS"
             ) from exc
@@ -420,7 +505,7 @@ class GcsTransferStore(TransferStore):
         validate_vertex_staging_bucket(
             bucket_name=self._bucket,
             metadata=metadata,
-            configured_project=self._project,
+            configured_project=await self._project_number(),
             configured_location=self._location,
         )
         object_key = vertex_staging_object_key(
@@ -529,7 +614,7 @@ class GcsTransferStore(TransferStore):
         bucket, object_key = parse_gs_uri(record.external_id)
         if bucket != self._bucket:
             raise TransferStagingError("the staged object belongs to a foreign GCS bucket")
-        response = await self._client.delete(
+        response = await self._delete(
             f"{_STORAGE_API}/b/{quote(bucket, safe='')}/o/{quote(object_key, safe='')}",
             headers=self._auth_headers(),
         )

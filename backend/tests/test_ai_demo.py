@@ -155,6 +155,64 @@ async def test_classify_sync_returns_result_and_records_request(migrated_databas
         await _dispose_engine(engine)
 
 
+async def test_ask_sync_returns_answer_and_records_request(migrated_database: str) -> None:
+    """A synchronous ``document.ask`` runs through the runtime service (fake
+    provider under test), returns the validated text answer and settles a
+    durable ``ai_requests`` row for the task (v0.8 Scope §2.2/§6.4)."""
+    engine, session_factory = _session_factory(migrated_database)
+    try:
+        async with session_factory() as session:
+            organisation, user = await _seed_org_user_and_enable_ai(session)
+            storage_key = await _put_document(organisation.id)
+            result = await demo_service.ask_sync(
+                session,
+                organisation_id=organisation.id,
+                user=user,
+                storage_reference=storage_key,
+                question="What kind of document is this?",
+            )
+        assert isinstance(result.output, str) and result.output
+        assert result.routing.provider == "fake"
+        assert result.usage.input_tokens >= 0
+        async with session_factory() as session:
+            record = await session.scalar(_request_statement(organisation.id, result.request_id))
+        assert record is not None
+        assert record.status == AIRequestStatus.SUCCEEDED
+        assert record.task == "document.ask"
+        assert record.user_id == user.id
+    finally:
+        await _dispose_engine(engine)
+
+
+async def test_ask_sync_disabled_ai_is_rejected(migrated_database: str) -> None:
+    """A disabled organisation is rejected before dispatch (default-off)."""
+    engine, session_factory = _session_factory(migrated_database)
+    try:
+        async with session_factory() as session:
+            organisation = Organisation(name=f"Disabled Ask Org {uuid.uuid4().hex[:8]}")
+            session.add(organisation)
+            await session.flush()
+            await create_default_settings(session, organisation_id=organisation.id)
+            user = User(
+                workos_user_id=f"disabled_ask_{uuid.uuid4().hex[:8]}",
+                email="disabled-ask@example.com",
+                name="Disabled Ask",
+            )
+            session.add(user)
+            await session.commit()
+            storage_key = await _put_document(organisation.id)
+            with pytest.raises(ServiceUnavailableError):
+                await demo_service.ask_sync(
+                    session,
+                    organisation_id=organisation.id,
+                    user=user,
+                    storage_reference=storage_key,
+                    question="Is this allowed?",
+                )
+    finally:
+        await _dispose_engine(engine)
+
+
 async def test_classify_sync_disabled_ai_is_rejected(migrated_database: str) -> None:
     engine, session_factory = _session_factory(migrated_database)
     try:
@@ -422,3 +480,66 @@ async def test_get_result_requires_documents_read(context_app: ContextApp) -> No
         )
     assert response.status_code == 403
     assert response.json()["code"] == "permission_denied"
+
+
+async def test_ask_requires_documents_upload(context_app: ContextApp) -> None:
+    """A read-only viewer is denied the ask endpoint (403)."""
+    app, state, private_key = context_app
+    org_id = uuid.uuid4()
+    user = make_user()
+    state.users[user.workos_user_id] = user
+    membership = make_membership(user, org_id)
+    state.lookup_queue = [user, membership]
+    state.granted_permissions = {"documents.read"}  # viewer-style: read only
+    async with context_client(app) as client:
+        response = await client.post(
+            "/api/v1/ai/ask",
+            json={
+                "storage_reference": f"organisations/{org_id}/ai/scratch/doc.txt",
+                "question": "What is this?",
+            },
+            headers=_auth_headers(make_token(private_key), org_id),
+        )
+    assert response.status_code == 403
+    assert response.json()["code"] == "permission_denied"
+
+
+async def test_ask_validates_request_schema(context_app: ContextApp) -> None:
+    """A missing question, an empty question or an unknown field is a 422."""
+    app, state, private_key = context_app
+    org_id = uuid.uuid4()
+
+    def _stage() -> str:
+        user = make_user()
+        state.users[user.workos_user_id] = user
+        membership = make_membership(user, org_id)
+        state.lookup_queue = [user, membership]
+        state.granted_permissions = {"documents.upload"}
+        return make_token(private_key)
+
+    async with context_client(app) as client:
+        missing = await client.post(
+            "/api/v1/ai/ask",
+            json={"storage_reference": f"organisations/{org_id}/ai/scratch/doc.txt"},
+            headers=_auth_headers(_stage(), org_id),
+        )
+        empty = await client.post(
+            "/api/v1/ai/ask",
+            json={
+                "storage_reference": f"organisations/{org_id}/ai/scratch/doc.txt",
+                "question": "",
+            },
+            headers=_auth_headers(_stage(), org_id),
+        )
+        extra = await client.post(
+            "/api/v1/ai/ask",
+            json={
+                "storage_reference": f"organisations/{org_id}/ai/scratch/doc.txt",
+                "question": "What is this?",
+                "sync": True,
+            },
+            headers=_auth_headers(_stage(), org_id),
+        )
+    assert missing.status_code == 422
+    assert empty.status_code == 422
+    assert extra.status_code == 422

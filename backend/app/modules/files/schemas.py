@@ -86,6 +86,11 @@ class FileCompleteResponse(FileDetail):
     """
 
     processing_job_id: uuid.UUID | None = None
+    # Added for consumers that need to pass the server-owned object reference
+    # to another backend capability. The router always populates it; the
+    # default is required here because the ORM object itself has no such API
+    # field during ``model_validate``.
+    storage_reference: str | None = None
 
 
 class FileListResponse(BaseModel):

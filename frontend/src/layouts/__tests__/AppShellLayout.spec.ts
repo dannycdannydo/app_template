@@ -116,12 +116,14 @@ describe('AppShellLayout', () => {
     expect(wrapper.find('[data-testid="user-menu-trigger"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="mobile-nav-trigger"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="sidebar-toggle"]').exists()).toBe(true)
-    // Sidebar navigation links are present (Home, Records, Files, Notifications, About).
+    // Sidebar navigation links are present (Home, Records, Files, AI test,
+    // Notifications, About).
     const links = wrapper.find('[data-testid="sidebar"] nav').findAll('a')
     expect(links.map((link) => link.text())).toEqual([
       'Home',
       'Records',
       'Files',
+      'AI test',
       'Notifications',
       'About',
     ])

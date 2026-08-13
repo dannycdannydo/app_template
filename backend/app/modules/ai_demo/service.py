@@ -50,6 +50,7 @@ from app.modules.ai_demo.schemas import (
     ClassifyCost,
     ClassifyRouting,
     ClassifyUsage,
+    DocumentAskResponse,
     DocumentClassifyAcceptedResponse,
     DocumentClassifyResultResponse,
     DocumentClassifySyncResponse,
@@ -59,8 +60,15 @@ from app.modules.users.models import User
 #: The single demonstrated task (kept in sync with ``app.ai.execution``).
 DEMO_TASK = "document.classify"
 
+#: The document QA demonstration task (v0.8 Scope §2.2, §6.4): a bounded
+#: question plus a private PDF, inline at or below the 5,000,000-byte
+#: threshold and through the Vertex private GCS staging path above it.
+ASK_TASK = "document.ask"
+
 #: Each AI error code maps to one HTTP-shaped API error so the router never
-#: handles AI taxonomy itself. Messages stay generic and safe (BP §28).
+#: handles AI taxonomy itself. Messages stay generic and safe (BP §28) and
+#: take a subject noun (classification / question) so both demonstrations
+#: surface accurate wording without duplicating the taxonomy.
 _AI_ERROR_MAP: dict[str, APIError] = {
     "ai_unavailable": ServiceUnavailableError(
         code="ai_unavailable", message="AI is not enabled for this organisation."
@@ -69,7 +77,7 @@ _AI_ERROR_MAP: dict[str, APIError] = {
         code="budget_exceeded", message="The organisation's AI budget is exhausted."
     ),
     "ai_input_invalid": ValidationError(
-        code="ai_input_invalid", message="The classification request input is invalid."
+        code="ai_input_invalid", message="The {subject} request input is invalid."
     ),
     "output_validation_failed": ValidationError(
         code="output_validation_failed",
@@ -77,17 +85,17 @@ _AI_ERROR_MAP: dict[str, APIError] = {
     ),
     "model_not_available": ServiceUnavailableError(
         code="model_not_available",
-        message="No model is available to serve this classification right now.",
+        message="No model is available to serve this {subject} right now.",
     ),
     "task_not_found": NotFoundError(
-        code="task_not_found", message="The classification task is not configured."
+        code="task_not_found", message="The {subject} task is not configured."
     ),
     "prompt_not_found": NotFoundError(
-        code="prompt_not_found", message="The classification prompt is not configured."
+        code="prompt_not_found", message="The {subject} prompt is not configured."
     ),
     "output_schema_invalid": ServiceUnavailableError(
         code="output_schema_invalid",
-        message="The classification output schema is misconfigured.",
+        message="The {subject} output schema is misconfigured.",
     ),
     "provider_unavailable": ServiceUnavailableError(
         code="provider_unavailable", message="The AI provider is unavailable."
@@ -107,13 +115,15 @@ _AI_ERROR_MAP: dict[str, APIError] = {
 }
 
 
-def _translate_ai_error(exc: AIError) -> APIError:
+def _translate_ai_error(exc: AIError, *, subject: str = "classification") -> APIError:
     """Map one AI taxonomy error to its HTTP-shaped API error (BP §13)."""
     mapped = _AI_ERROR_MAP.get(exc.error_code)
     if mapped is not None:
-        return mapped
+        # Rebuild the mapped error with the subject-aware message; a fresh
+        # instance per request so the shared map is never mutated.
+        return type(mapped)(code=mapped.code, message=mapped.message.format(subject=subject))
     return ServiceUnavailableError(
-        code=exc.error_code, message="The classification could not be completed."
+        code=exc.error_code, message=f"The {subject} could not be completed."
     )
 
 
@@ -257,4 +267,60 @@ async def get_classify_result(
         usage=usage,
         cost=cost,
         completed_at=record.completed_at,
+    )
+
+
+async def ask_sync(
+    session: AsyncSession,
+    *,
+    organisation_id: uuid.UUID,
+    user: User,
+    storage_reference: str,
+    question: str,
+) -> DocumentAskResponse:
+    """Run one document QA request synchronously and return the answer.
+
+    The private ``storage_reference`` is resolved by ``AIService`` itself: a
+    PDF at or below the inline threshold becomes a bounded inline attachment,
+    and a larger PDF is streamed bounded into the Vertex private GCS staging
+    path before dispatch (v0.8 Scope §2.2/§2.4). The bounded question travels
+    as a metadata variable so the feature-facing ``AIRequest`` contract stays
+    unchanged; the answer is validated text, never unvalidated provider
+    output (v0.7 Scope §6.4).
+    """
+    _validate_storage_reference(storage_reference, organisation_id)
+    try:
+        result = await execute_managed_ai(
+            session,
+            AIRequest(
+                task=ASK_TASK,
+                storage_reference=storage_reference,
+                organisation_id=organisation_id,
+                user_id=user.id,
+                metadata={"question": question, "source": "ai_demo"},
+            ),
+        )
+    except AIError as exc:
+        raise _translate_ai_error(exc, subject="question") from exc
+    if not isinstance(result.output, str) or not result.output:
+        raise ServiceUnavailableError(
+            code="output_validation_failed",
+            message="The answer output was not in the expected shape.",
+        )
+    return DocumentAskResponse(
+        request_id=result.request_id,
+        output=result.output,
+        routing=ClassifyRouting(
+            provider=result.routing.provider,
+            model=result.routing.model,
+            prompt_name=result.routing.prompt_name,
+            prompt_version=result.routing.prompt_version,
+            fallback_used=result.routing.fallback_used,
+            region=result.routing.region,
+        ),
+        usage=ClassifyUsage(
+            input_tokens=result.usage.input_tokens, output_tokens=result.usage.output_tokens
+        ),
+        cost=ClassifyCost(amount=result.cost.amount, currency=result.cost.currency),
+        completed_at=result.completed_at,
     )

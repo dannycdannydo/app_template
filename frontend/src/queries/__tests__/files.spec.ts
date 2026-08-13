@@ -66,6 +66,7 @@ const fileDetail: FileDetail = {
 const completeResponse: FileCompleteResponse = {
   ...fileDetail,
   status: 'uploaded',
+  storage_reference: `organisations/${ORG_A}/documents/${FILE_ID}/original`,
   processing_job_id: JOB_ID,
 }
 

@@ -17,12 +17,15 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, cast
 
+import structlog
 import urllib3
 from google.auth import default as google_auth_default  # pyright: ignore[reportUnknownVariableType]
 from google.auth.transport import urllib3 as google_auth_urllib3
 from google.oauth2 import service_account  # pyright: ignore[reportUnknownVariableType]
 
-from app.ai.errors import AIInputValidationError, ProviderResponseError
+from app.ai.errors import AIInputValidationError, ProviderUnavailableError
+
+logger = structlog.get_logger()
 
 #: The cloud-platform scope both Google-backed adapters request; it is what
 #: service-account keys are loaded with and what ADC refresh honours.
@@ -61,15 +64,26 @@ def google_authorization_header(credentials: Any) -> str:
 
     The token is refreshed lazily through the urllib3 transport already
     provided by boto3 so no extra HTTP client dependency is pulled in
-    (pyproject, v0.7 Scope §6.3). Raises a safe provider error when the
-    credentials are unavailable; the token is never logged or embedded in an
-    error message (BP §28).
+    (pyproject, v0.7 Scope §6.3). A refresh failure (Google blocked,
+    certificate or network issue, malformed key) is translated into the safe
+    retryable provider taxonomy so the service retries it like any other
+    transient provider failure — never a raw SDK exception that escapes as an
+    opaque 502. Only the failure category is logged; the token, the key and
+    the credential material are never logged or embedded in an error message
+    (BP §28).
     """
     if credentials is None:
-        raise ProviderResponseError("google credentials are unavailable")
+        raise ProviderUnavailableError("google credentials are unavailable")
     if credentials.token is None or not credentials.valid:
-        pool: Any = urllib3.PoolManager()
-        credentials.refresh(google_auth_urllib3.Request(pool))
+        try:
+            pool: Any = urllib3.PoolManager()
+            credentials.refresh(google_auth_urllib3.Request(pool))
+        except Exception as exc:
+            logger.warning(
+                "ai.google.credentials.refresh_failed",
+                exception_type=type(exc).__name__,
+            )
+            raise ProviderUnavailableError("google credential refresh failed") from exc
     return f"Bearer {credentials.token}"
 
 

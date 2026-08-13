@@ -225,9 +225,17 @@ models:
     priority: 1000
     max_attachment_bytes: 5242880
     max_total_attachment_bytes: 10485760
-    # v0.8 Scope §2.2: inline only until the §6.4 Vertex GCS staging checkpoint.
+    # v0.8 Scope §2.4/§6.4: the Vertex model also declares the reviewed
+    # storage_reference mode (private same-region GCS staging bucket) with a
+    # per-mode PDF ceiling that mirrors the provider transfer contract.
     allowed_transfer_modes:
       - inline
+      - storage_reference
+    transfer_mode_limits:
+      storage_reference:
+        mime_types:
+          - application/pdf
+        max_bytes: 50000000
     attachment_mime_types:
       - application/pdf
       - image/jpeg
@@ -239,5 +247,46 @@ models:
       input_price_per_million_tokens: "0.10"
       output_price_per_million_tokens: "0.40"
       effective_date: 2026-08-10
+      owner: Template maintainers
+    available: true
+  # Vertex AI Gemini 3.5 Flash (ADR-0018): same adapter, project/location and
+  # transfer-mode contract as gemini-2.0-flash. Pricing below mirrors the
+  # 2.0-flash basis as a placeholder — review the published Gemini 3.5 Flash
+  # rates and update the effective_date/owner before relying on cost
+  # accounting for this model.
+  - id: vertex.gemini-3.5-flash
+    provider: vertex
+    model: gemini-3.5-flash
+    capabilities:
+      - structured_output
+      - documents
+    context_window: 1000000
+    supported_parameters:
+      - max_tokens
+      - temperature
+    quality_tier: economy
+    latency_tier: interactive
+    priority: 1000
+    max_attachment_bytes: 5242880
+    max_total_attachment_bytes: 10485760
+    allowed_transfer_modes:
+      - inline
+      - storage_reference
+    transfer_mode_limits:
+      storage_reference:
+        mime_types:
+          - application/pdf
+        max_bytes: 50000000
+    attachment_mime_types:
+      - application/pdf
+      - image/jpeg
+      - image/png
+      - image/webp
+      - text/plain
+    pricing:
+      currency: USD
+      input_price_per_million_tokens: "0.10"
+      output_price_per_million_tokens: "0.40"
+      effective_date: 2026-08-13
       owner: Template maintainers
     available: true

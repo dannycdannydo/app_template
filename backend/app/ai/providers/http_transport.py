@@ -19,6 +19,7 @@ import time
 from typing import Any, cast
 
 import httpx
+import structlog
 
 from app.ai.errors import (
     ProviderError,
@@ -27,6 +28,8 @@ from app.ai.errors import (
     ProviderTimeoutError,
     ProviderUnavailableError,
 )
+
+logger = structlog.get_logger()
 
 # Statuses every adapter maps the same way: 429 is a rate limit (retryable),
 # 5xx an unavailable server (retryable); everything else 4xx is a permanent
@@ -47,12 +50,25 @@ def translate_http_exception(exc: httpx.HTTPError) -> ProviderError:
     """Translate an httpx transport exception into the normalised taxonomy.
 
     Timeouts and transport failures are retryable; anything else (a malformed
-    request produced by us) is a permanent response error.
+    request produced by us) is a permanent response error. Only the exception
+    category is logged — never the URL, request or response body, any of which
+    could carry content or credentials (BP §28, ADR-0017).
     """
     if isinstance(exc, httpx.TimeoutException):
+        logger.warning("ai.provider.http.transport_failure", kind="timeout")
         return ProviderTimeoutError("provider request timed out")
     if isinstance(exc, httpx.TransportError):
+        logger.warning(
+            "ai.provider.http.transport_failure",
+            kind="unreachable",
+            exception_type=type(exc).__name__,
+        )
         return ProviderUnavailableError("provider endpoint is unreachable")
+    logger.warning(
+        "ai.provider.http.transport_failure",
+        kind="other",
+        exception_type=type(exc).__name__,
+    )
     return ProviderResponseError("provider request failed")
 
 

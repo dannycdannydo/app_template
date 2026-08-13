@@ -91,15 +91,16 @@ _STAGED_SUFFIX = ".pdf"
 class GcsBucketLocationType(StrEnum):
     """The GCS bucket location type reported by the service (Scope §2.4).
 
-    Only ``SINGLE_REGION`` is acceptable for AI staging: the regional Vertex
+    Only ``region`` is acceptable for AI staging: the regional Vertex
     endpoint and the staging bucket must stay in the same configured location
     (same-region transfer, Scope §5.7). Dual- and multi-region buckets are
-    rejected before any upload.
+    rejected before any upload. The values are the GCS JSON API's own
+    ``locationType`` strings (lowercase).
     """
 
-    SINGLE_REGION = "SINGLE_REGION"
-    DUAL_REGION = "DUAL_REGION"
-    MULTI_REGION = "MULTI_REGION"
+    SINGLE_REGION = "region"
+    DUAL_REGION = "dual-region"
+    MULTI_REGION = "multi-region"
 
 
 class StagingBucketMetadata(BaseModel):
@@ -236,7 +237,10 @@ def validate_vertex_staging_bucket(
         raise TransferStagingError(
             "the staging bucket belongs to a different Google Cloud project than the configured Vertex project"
         )
-    if metadata.location != configured_location:
+    # GCS reports locations in upper case (EUROPE-WEST2); the deployment
+    # configuration is conventionally lowercase, so the comparison is
+    # case-insensitive (Scope §5.7 same-region rule).
+    if metadata.location.casefold() != configured_location.casefold():
         raise TransferStagingError("the staging bucket is not in the configured Vertex location")
     if metadata.location_type is not GcsBucketLocationType.SINGLE_REGION:
         raise TransferStagingError(

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import {
   BellIcon,
+  BotIcon,
   FilesIcon,
   HomeIcon,
   InfoIcon,
@@ -45,6 +46,7 @@ const NAV_ITEMS: NavItem[] = [
   { to: '/', label: 'Home', icon: HomeIcon },
   { to: '/records', label: 'Records', icon: ListIcon },
   { to: '/files', label: 'Files', icon: FilesIcon },
+  { to: '/ai/ask', label: 'AI test', icon: BotIcon },
   { to: '/notifications', label: 'Notifications', icon: BellIcon },
   { to: '/about', label: 'About', icon: InfoIcon },
 ]

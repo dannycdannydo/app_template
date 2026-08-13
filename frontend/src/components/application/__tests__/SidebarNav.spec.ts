@@ -50,6 +50,7 @@ function buildRouter() {
     routes: [
       { path: '/', name: 'home', component: { template: '<div>home</div>' } },
       { path: '/records', name: 'records', component: { template: '<div>records</div>' } },
+      { path: '/ai/ask', name: 'ai-ask', component: { template: '<div>ai-ask</div>' } },
       { path: '/about', name: 'about', component: { template: '<div>about</div>' } },
       { path: '/platform', name: 'platform', component: { template: '<div>platform</div>' } },
     ],

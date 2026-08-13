@@ -31,14 +31,16 @@ import { useJobQuery } from '@/queries/jobs'
 const props = withDefaults(
   defineProps<{
     onFileProcessed?: () => void
+    accept?: string
   }>(),
   {
     onFileProcessed: undefined,
+    accept: undefined,
   },
 )
 
 const emit = defineEmits<{
-  (e: 'uploaded', fileId: string): void
+  (e: 'uploaded', storageReference: string): void
 }>()
 
 type Phase =
@@ -67,7 +69,9 @@ const uploadMutation = useUploadFileMutation({
     progress.value = 100
     processingJobId.value = result.file.processing_job_id ?? null
     phase.value = processingJobId.value === null ? 'done' : 'processing'
-    emit('uploaded', result.file.id)
+    if (result.file.storage_reference) {
+      emit('uploaded', result.file.storage_reference)
+    }
   },
 })
 
@@ -173,6 +177,7 @@ const pickerId = 'file-upload-input'
           :id="pickerId"
           ref="fileInput"
           type="file"
+          :accept="props.accept"
           class="sr-only"
           data-testid="file-upload-input"
           @change="onFilePicked"

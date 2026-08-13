@@ -17,6 +17,7 @@ import type { components } from '@/api/generated/openapi'
 import {
   aiQueryKeys,
   isClassifyAccepted,
+  useAskMutation,
   useClassifyMutation,
   useClassifyResultQuery,
 } from '@/queries/ai'
@@ -210,5 +211,73 @@ describe('ai query composables', () => {
     await flushPromises()
     expect(captured.result.data.value?.status).toBe('succeeded')
     expect(pollDecision(aiQueryKeys.result(ORG_A, REQUEST_ID))).toBe(false)
+  })
+
+  it('submits a document question through the generated ask endpoint', async () => {
+    const organisation = useOrganisationStore()
+    organisation.setSelectedOrganisation(ORG_A)
+    postMock.mockResolvedValue({
+      data: {
+        request_id: REQUEST_ID,
+        output: 'The renewal term is twelve months.',
+        routing: {
+          provider: 'fake',
+          model: 'fake-model-document.classify',
+          prompt_name: 'document.ask',
+          prompt_version: 1,
+          fallback_used: false,
+          region: '',
+        },
+        usage: { input_tokens: 10, output_tokens: 5 },
+        cost: { amount: '0.000000', currency: 'USD' },
+        completed_at: '2026-01-01T00:00:00Z',
+      },
+      error: undefined,
+    })
+
+    const CapturingComponent = defineComponent({
+      setup() {
+        const mutation = useAskMutation()
+        return { mutation }
+      },
+      template: '<div />',
+    })
+    const wrapper = mount(CapturingComponent, {
+      global: { plugins: [pinia, [VueQueryPlugin, { queryClient }]] },
+    })
+    wrapper.vm.mutation.mutate({
+      storage_reference: STORAGE_REF,
+      question: 'What is the renewal term?',
+    })
+    await flushPromises()
+    await flushPromises()
+
+    expect(postMock).toHaveBeenCalledWith('/api/v1/ai/ask', {
+      body: { storage_reference: STORAGE_REF, question: 'What is the renewal term?' },
+    })
+    expect(wrapper.vm.mutation.isSuccess.value).toBe(true)
+    expect(wrapper.vm.mutation.data.value?.output).toBe('The renewal term is twelve months.')
+  })
+
+  it('rejects an ask without a selected organisation before any HTTP call', async () => {
+    const CapturingComponent = defineComponent({
+      setup() {
+        const mutation = useAskMutation()
+        return { mutation }
+      },
+      template: '<div />',
+    })
+    const wrapper = mount(CapturingComponent, {
+      global: { plugins: [pinia, [VueQueryPlugin, { queryClient }]] },
+    })
+    wrapper.vm.mutation.mutate({
+      storage_reference: STORAGE_REF,
+      question: 'What is this?',
+    })
+    await flushPromises()
+    await flushPromises()
+
+    expect(postMock).not.toHaveBeenCalled()
+    expect(wrapper.vm.mutation.isError.value).toBe(true)
   })
 })
