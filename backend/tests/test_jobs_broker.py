@@ -44,6 +44,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from dramatiq.brokers.redis import RedisBroker
+from dramatiq.middleware import CurrentMessage
 from dramatiq.worker import Worker
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -52,6 +53,7 @@ from sqlalchemy.pool import NullPool
 from app.modules.files import service as files_service
 from app.modules.files import tasks as files_tasks
 from app.modules.files.models import FileStatus
+from app.modules.jobs import execution as jobs_execution
 from app.modules.jobs import service as jobs_service
 from app.modules.jobs import tasks as jobs_tasks
 from app.modules.jobs.models import Job, JobStatus
@@ -63,6 +65,7 @@ from app.modules.notifications.models import (
 )
 from app.modules.organisations.models import Organisation
 from app.modules.users.models import User
+from app.observability.metrics import JOBS_STALE_MESSAGES_TOTAL
 from app.storage import FakeObjectStorage, get_storage
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -193,32 +196,58 @@ def _session_factory(database_url: str) -> Any:
 
 
 def _make_round_trip_task(session_factory: Any) -> Any:
-    """An async task that drives a job through running -> succeeded."""
+    """An async task that drives a job through running -> succeeded.
+
+    The handler runs through the shared execution wrapper (plan P2), so the
+    worker-side claim/ownership path is exercised on the real broker.
+    """
 
     async def _run(job_id: str) -> None:
-        async with session_factory() as session:
-            job_id_uuid = uuid.UUID(job_id)
-            await jobs_service.mark_running(session, job_id=job_id_uuid)
-            await jobs_service.update_progress(session, job_id=job_id_uuid, progress=50)
-            await jobs_service.update_progress(session, job_id=job_id_uuid, progress=100)
-            await jobs_service.succeed(session, job_id=job_id_uuid, result_reference="file-1")
+        job_id_uuid = uuid.UUID(job_id)
+
+        async def _drive(
+            context: Any, session: Any
+        ) -> None:
+            await jobs_service.update_progress(
+                session,
+                job_id=job_id_uuid,
+                progress=50,
+                owner_token=context.owner_token,
+            )
+            await jobs_service.update_progress(
+                session,
+                job_id=job_id_uuid,
+                progress=100,
+                owner_token=context.owner_token,
+            )
+            await jobs_service.succeed(
+                session,
+                job_id=job_id_uuid,
+                result_reference="file-1",
+                owner_token=context.owner_token,
+            )
+
+        await jobs_execution.run_claimed(job_id=job_id_uuid, handler=_drive)
 
     return dramatiq.actor(queue_name=_QUEUE, **jobs_service.retry_policy())(_run)
 
 
 def _make_transient_failure_task(session_factory: Any) -> Any:
-    """An async task that marks the job running, then fails transiently.
+    """An async task that claims the job, then fails transiently.
 
-    Marking running first mirrors what every real task does (Scope §6.5's
-    ``process_file`` starts with ``mark_running``), so the durable
-    ``attempt_count`` reflects all ``MAX_ATTEMPTS`` attempts.
+    Claiming first mirrors what every real task does (plan P2: the execution
+    wrapper claims before the domain work), so the durable ``attempt_count``
+    reflects all ``MAX_ATTEMPTS`` attempts and each transient failure releases
+    the owned attempt back to ``queued`` for the next retry.
     """
 
     async def _run(job_id: str) -> None:
-        async with session_factory() as session:
-            job_id_uuid = uuid.UUID(job_id)
-            await jobs_service.mark_running(session, job_id=job_id_uuid)
-        raise RuntimeError("storage temporarily unreachable")
+        job_id_uuid = uuid.UUID(job_id)
+
+        async def _fail_transient(context: Any, session: Any) -> None:
+            raise RuntimeError("storage temporarily unreachable")
+
+        await jobs_execution.run_claimed(job_id=job_id_uuid, handler=_fail_transient)
 
     options: dict[str, Any] = {
         **jobs_service.retry_policy(),
@@ -312,6 +341,266 @@ async def test_transient_exhaustion_records_failed_status(
     assert failed.attempt_count == jobs_service.MAX_ATTEMPTS
 
 
+# --- P2 attempt-correlation: the exhausted message bridge on the real broker ---
+#
+# The finalizer correlates the exhausted message with the attempt it actually
+# claimed via a stamp (dispatch id + owner token) the execution wrapper writes
+# into the message options at claim time. These tests pin that bridge on the
+# real broker: the stamp must survive the Retries middleware's forwarding and
+# must be what decides between a genuine exhausted settlement and a stale
+# no-op, including the two races the dispatch-only correlation left open.
+
+
+async def _create_queued_job(
+    session_factory: Any, organisation_id: uuid.UUID
+) -> uuid.UUID:
+    """Create a durable ``queued`` job row directly (no task enqueued)."""
+    async with session_factory() as session:
+        job = Job(
+            organisation_id=organisation_id,
+            job_type="file.processing",
+            status=JobStatus.QUEUED,
+            progress=0,
+            input_reference="file-1",
+        )
+        session.add(job)
+        await session.commit()
+        return job.id
+
+
+def _enqueue_exhausted_message(
+    broker: RedisBroker,
+    job_id: uuid.UUID,
+    *,
+    dispatch_id: uuid.UUID | None,
+    owner_token: uuid.UUID | None,
+) -> None:
+    """Enqueue an exhausted-handler message exactly as the Retries middleware would.
+
+    The middleware calls ``target_actor.send(message.asdict(), retry_info)``
+    after the last failed attempt, so the handler message carries the task
+    message dict (with the wrapper's claim stamp in ``options``) and the retry
+    info as its two positional arguments.
+    """
+    options: dict[str, Any] = {}
+    if dispatch_id is not None and owner_token is not None:
+        options = {
+            "dispatch_id": str(dispatch_id),
+            "owner_token": str(owner_token),
+        }
+    broker.enqueue(  # pyright: ignore[reportUnknownMemberType]
+        dramatiq.Message(
+            queue_name=jobs_tasks.HANDLER_QUEUE,
+            actor_name=jobs_service.MARK_FAILED_AFTER_RETRIES_ACTOR,
+            args=(
+                {"kwargs": {"job_id": str(job_id)}, "options": options},
+                {
+                    "retries": jobs_service.MAX_ATTEMPTS - 1,
+                    "max_retries": jobs_service.MAX_ATTEMPTS - 1,
+                },
+            ),
+            kwargs={},
+            options={},
+        )
+    )
+
+
+def _stale_messages_count() -> float:
+    """Current value of the stale-messages operator counter (public API)."""
+    for metric in JOBS_STALE_MESSAGES_TOTAL.collect():
+        for sample in metric.samples:
+            return float(sample.value)
+    return 0.0
+
+
+async def _wait_for_stale_count(previous: float, *, timeout: float = 20.0) -> None:
+    """Wait until the real finalizer acknowledged a message as stale."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _stale_messages_count() > previous:
+            return
+        await asyncio.sleep(0.1)
+    raise AssertionError("exhausted handler never processed the stale message")
+
+
+async def test_exhausted_handler_receives_claim_stamp_after_retries(
+    migrated_database: str, broker_and_worker: tuple[RedisBroker, Worker]
+) -> None:
+    """The claim stamp survives retries and reaches the exhausted handler (P2).
+
+    A task that claims and then fails transiently retries through the real
+    Retries middleware; on exhaustion the forwarded message must carry the
+    dispatch id and owner token the wrapper stamped at the last claim. This
+    pins the bridge the finalizer's attempt correlation depends on, and
+    proves ``CurrentMessage`` is visible inside an async actor with the stamp.
+    """
+    session_factory = _session_factory(migrated_database)
+    organisation = await _create_org(session_factory)
+    capture_actor_name = f"capture-exhausted-{uuid.uuid4().hex[:8]}"
+    captured: dict[str, Any] = {}
+
+    async def _run(job_id: str) -> None:
+        job_id_uuid = uuid.UUID(job_id)
+
+        async def _fail_transient(context: Any, session: Any) -> None:
+            # CurrentMessage is visible inside the async actor and carries the
+            # stamp the wrapper wrote at claim time.
+            message = CurrentMessage.get_current_message()
+            assert message is not None
+            assert message.options.get("dispatch_id") == str(context.dispatch_id)
+            assert message.options.get("owner_token") == str(context.owner_token)
+            raise RuntimeError("storage temporarily unreachable")
+
+        await jobs_execution.run_claimed(job_id=job_id_uuid, handler=_fail_transient)
+
+    async def _capture_exhausted(
+        message_dict: dict[str, Any], retry_info: dict[str, Any]
+    ) -> None:
+        captured["message_dict"] = message_dict
+        captured["retry_info"] = retry_info
+
+    task = dramatiq.actor(
+        queue_name=_QUEUE,
+        max_retries=1,
+        min_backoff=_EXHAUST_MIN_BACKOFF_MS,
+        throws=(),
+        on_retry_exhausted=capture_actor_name,
+    )(_run)
+    dramatiq.actor(
+        actor_name=capture_actor_name,
+        queue_name=jobs_tasks.HANDLER_QUEUE,
+        max_retries=0,
+        throws=(),
+    )(_capture_exhausted)
+
+    async with session_factory() as session:
+        job = await jobs_service.create_and_enqueue(
+            session,
+            organisation_id=organisation.id,
+            job_type="file.processing",
+            input_reference="file-1",
+            task=task,
+        )
+        job_id = job.id
+
+    deadline = time.monotonic() + 20.0
+    while "message_dict" not in captured and time.monotonic() < deadline:
+        await asyncio.sleep(0.1)
+    assert "message_dict" in captured, "exhausted handler never ran"
+    assert captured["retry_info"]["retries"] == 1
+
+    # The forwarded message carries the stamp of the last (current) claim,
+    # exactly matching the durable row's dispatch and owner token.
+    options = captured["message_dict"]["options"]
+    async with session_factory() as session:
+        row = await session.get(Job, job_id)
+        assert row is not None
+        assert options["dispatch_id"] == str(row.dispatch_id)
+        assert options["owner_token"] == str(row.owner_token)
+
+
+async def test_exhausted_message_with_superseded_token_is_stale(
+    migrated_database: str, broker_and_worker: tuple[RedisBroker, Worker]
+) -> None:
+    """Broker race 1: a rotated token protects the newer queued attempt (P2).
+
+    Attempt A of dispatch D exhausts while attempt B (a retry of the *same*
+    dispatch, which rotated the owner token) sits queued with no live lease.
+    A's exhausted message travels the real broker with A's stamp; the finalizer
+    must acknowledge it without failing B.
+    """
+    broker, _worker = broker_and_worker
+    session_factory = _session_factory(migrated_database)
+    organisation = await _create_org(session_factory)
+    job_id = await _create_queued_job(session_factory, organisation.id)
+
+    async with session_factory() as session:
+        claim_a = await jobs_service.claim_dispatch(session, job_id=job_id)
+        assert claim_a.dispatch_id is not None
+        assert claim_a.owner_token is not None
+        await jobs_service.release_dispatch(
+            session, job_id=job_id, owner_token=claim_a.owner_token
+        )
+        claim_b = await jobs_service.claim_dispatch(session, job_id=job_id)
+        assert claim_b.dispatch_id == claim_a.dispatch_id
+        assert claim_b.owner_token != claim_a.owner_token
+        assert claim_b.owner_token is not None
+        await jobs_service.release_dispatch(
+            session, job_id=job_id, owner_token=claim_b.owner_token
+        )
+        a_dispatch = claim_a.dispatch_id
+        a_token = claim_a.owner_token
+        assert a_dispatch is not None and a_token is not None
+
+    baseline_stale = _stale_messages_count()
+    _enqueue_exhausted_message(
+        broker, job_id, dispatch_id=a_dispatch, owner_token=a_token
+    )
+    await _wait_for_stale_count(baseline_stale)
+
+    async with session_factory() as session:
+        row = await session.get(Job, job_id)
+        assert row is not None
+        assert row.status == JobStatus.QUEUED
+        assert row.error_code is None
+        assert row.dispatch_id == a_dispatch
+
+
+async def test_exhausted_message_without_stamp_is_stale_for_claimed_row(
+    migrated_database: str, broker_and_worker: tuple[RedisBroker, Worker]
+) -> None:
+    """Broker race 2: a never-claimed duplicate cannot fail around a release (P2).
+
+    A duplicate deferred on every attempt never claims, so its exhausted
+    message carries no stamp. If the live owner released back to ``queued``
+    just before the finalizer runs, the stamp-less message must be a stale
+    no-op: the row now carries an owner credential and only the attempt that
+    stamped it may settle it.
+    """
+    broker, _worker = broker_and_worker
+    session_factory = _session_factory(migrated_database)
+    organisation = await _create_org(session_factory)
+    job_id = await _create_queued_job(session_factory, organisation.id)
+
+    async with session_factory() as session:
+        claim = await jobs_service.claim_dispatch(session, job_id=job_id)
+        assert claim.owner_token is not None
+        await jobs_service.release_dispatch(
+            session, job_id=job_id, owner_token=claim.owner_token
+        )
+
+    baseline_stale = _stale_messages_count()
+    _enqueue_exhausted_message(broker, job_id, dispatch_id=None, owner_token=None)
+    await _wait_for_stale_count(baseline_stale)
+
+    async with session_factory() as session:
+        row = await session.get(Job, job_id)
+        assert row is not None
+        assert row.status == JobStatus.QUEUED
+        assert row.error_code is None
+
+
+async def test_exhausted_message_settles_legacy_unclaimed_row(
+    migrated_database: str, broker_and_worker: tuple[RedisBroker, Worker]
+) -> None:
+    """Broker positive control: the stamp-less legacy settlement still works (P2).
+
+    A row that has never been claimed (no dispatch id, no owner credential) is
+    the explicit legacy case: a stamp-less exhausted message settles it failed
+    through the real broker, so pre-ownership jobs still record their
+    exhausted failure.
+    """
+    broker, _worker = broker_and_worker
+    session_factory = _session_factory(migrated_database)
+    organisation = await _create_org(session_factory)
+    job_id = await _create_queued_job(session_factory, organisation.id)
+
+    _enqueue_exhausted_message(broker, job_id, dispatch_id=None, owner_token=None)
+    settled = await _wait_for_status(session_factory, job_id, JobStatus.FAILED)
+    assert settled.error_code == jobs_service.ERROR_CODE_RETRIES_EXHAUSTED
+    assert settled.error_message == jobs_service.ERROR_MESSAGE_RETRIES_EXHAUSTED
+
+
 async def test_upload_complete_process_job_runs_on_real_broker(
     migrated_database: str, broker_and_worker: tuple[RedisBroker, Worker]
 ) -> None:
@@ -388,6 +677,11 @@ async def test_file_ready_loop_runs_on_real_broker(
     engine = create_async_engine(migrated_database, poolclass=NullPool)
     task_factory = async_sessionmaker(engine, expire_on_commit=False)
     monkeypatch.setattr(notifications_tasks, "async_session_factory", task_factory)
+    # The email task drives its domain work through the shared execution
+    # wrapper (plan P2), which opens its sessions through the wrapper's module
+    # factory; point it at the same per-test NullPool engine so the direct
+    # handler call below stays on this test's event loop.
+    monkeypatch.setattr(jobs_execution, "async_session_factory", task_factory)
     organisation = await _create_org(session_factory)
     async with session_factory() as session:
         uploader = User(

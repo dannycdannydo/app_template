@@ -278,6 +278,35 @@ def test_worker_concurrency_must_be_at_least_one() -> None:
         )
 
 
+def test_job_delivery_defaults_are_600s_time_limit_and_900s_lease() -> None:
+    """Plan P2: standard actor time limit and a lease that exceeds it by >=60s."""
+    settings = Settings(app_env="test", database_url="postgresql+asyncpg://x")
+    assert settings.job_task_time_limit_ms == 600_000
+    assert settings.job_execution_lease_seconds == 900
+    assert settings.job_execution_lease_seconds * 1000 >= (
+        settings.job_task_time_limit_ms + 60_000
+    )
+
+
+def test_execution_lease_must_exceed_task_time_limit_by_60_seconds() -> None:
+    """A lease shorter than the time limit would let duplicates take over a live attempt."""
+    with pytest.raises(ValidationError, match="job_execution_lease_seconds"):
+        Settings(
+            app_env="development",
+            database_url="postgresql+asyncpg://x",
+            job_task_time_limit_ms=600_000,
+            job_execution_lease_seconds=300,
+        )
+    # Exactly the required margin is accepted.
+    settings = Settings(
+        app_env="development",
+        database_url="postgresql+asyncpg://x",
+        job_task_time_limit_ms=600_000,
+        job_execution_lease_seconds=660,
+    )
+    assert settings.job_execution_lease_seconds == 660
+
+
 def test_storage_public_endpoint_defaults_to_endpoint() -> None:
     settings = Settings(
         app_env="development",

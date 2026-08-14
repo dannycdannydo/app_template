@@ -63,6 +63,7 @@ from app.core.logging import bind_worker_context
 from app.db.conventions import uuid7
 from app.db.session import async_session_factory
 from app.modules.jobs import service as jobs_service
+from app.modules.jobs.execution import DurableJobContext, run_claimed
 
 #: The durable ``job_type`` this task owns (v0.7 Scope §2/§6.6). The
 #: execution boundary names it when it writes the row, so the constant lives
@@ -240,7 +241,9 @@ async def execute_ai_task(job_id: str) -> None:
     provider-neutral attachment on every attempt (v0.7 Scope §2/§6.6), and
     dispatches with the job-derived request id. On a replay the job is
     reconciled to the winning attempt's terminal state; on any other AI
-    failure the job is marked ``failed`` permanently.
+    failure the job is marked ``failed`` permanently. Execution ownership
+    (durable delivery plan P2) is handled by the shared wrapper: a duplicate
+    with a live lease is deferred and a stale attempt is a no-op.
     """
     job_uuid = uuid.UUID(job_id)
     # The deterministic request id is derived before the first log line so
@@ -255,80 +258,108 @@ async def execute_ai_task(job_id: str) -> None:
             logger.info("ai.execute.skipped", reason="terminal_state")
             return
 
-        if job.job_type != JOB_TYPE_AI_EXECUTE:
-            await jobs_service.fail(
-                session,
-                job_id=job_uuid,
-                error_code=ERROR_CODE_INVALID_JOB_CONTEXT,
-                error_message="The AI job has an invalid task type.",
-            )
-            logger.warning(
-                "ai.execute.failed",
-                error_code=ERROR_CODE_INVALID_JOB_CONTEXT,
-                reason="wrong_job_type",
-            )
-            raise jobs_service.JobPermanentError("the AI job context is invalid")
+    await run_claimed(job_id=job_uuid, handler=_execute_ai_attempt)
 
-        await jobs_service.mark_running(session, job_id=job_uuid)
-        if job.created_by_user_id is None:
-            # A durable AI job always records the initiating user (the demo
-            # service passes the authenticated caller). A row without one is a
-            # malformed/foreign context: fail permanently rather than retry.
-            failure = _PermanentJobFailure(
-                ERROR_CODE_INVALID_JOB_CONTEXT,
-                "The AI job has no initiating user.",
-            )
-            await _fail_permanent(session, job_uuid, failure)
-            raise jobs_service.JobPermanentError(failure.message)
-        if not job.input_reference:
-            failure = _PermanentJobFailure(
-                ERROR_CODE_INVALID_JOB_CONTEXT,
-                "The AI job has no storage reference to process.",
-            )
-            await _fail_permanent(session, job_uuid, failure)
-            raise jobs_service.JobPermanentError(failure.message)
 
-        try:
-            result = await execute_managed_ai(
-                session,
-                AIRequest(
-                    task=DEMO_TASK,
-                    storage_reference=job.input_reference,
-                    organisation_id=job.organisation_id,
-                    user_id=job.created_by_user_id,
-                    metadata={"source": "ai_demo", "job_id": str(job_uuid)},
-                ),
-                request_id=request_id,
-            )
-        except AIRequestReplayError:
-            # A previous attempt reserved this execution id. Reconcile the job
-            # to the durable row's state instead of re-dispatching (v0.7 Scope
-            # §6.5/§6.6): a re-delivered message never double-charges budget or
-            # duplicates a terminal output record.
-            await _reconcile_replay(session, job_uuid, job.organisation_id, request_id)
-            return
-        except AIError as exc:
-            await _fail_permanent(
-                session,
-                job_uuid,
-                _PermanentJobFailure(exc.error_code, exc.args[0] if exc.args else str(exc)),
-            )
-            logger.warning("ai.execute.failed", error_code=exc.error_code)
-            raise jobs_service.JobPermanentError(
-                f"the AI execution failed ({exc.error_code})"
-            ) from exc
+async def _execute_ai_attempt(context: DurableJobContext, session: AsyncSession) -> None:
+    """One owned attempt of the ``ai.execute`` job (plan P2 ownership).
 
-        await jobs_service.succeed(
+    The job row, its storage reference and the initiating user come from the
+    claimed context; every durable mutation names the captured owner token so
+    a stale attempt can never settle a newer owner.
+    """
+    job_uuid = context.job_id
+    request_id = request_id_for_job(job_uuid)
+    job = context.job
+    if job.job_type != JOB_TYPE_AI_EXECUTE:
+        # The wrong-type settlement runs under the claimed owner (plan P2), so
+        # it is accepted even once every job row carries a dispatch id (P3):
+        # the handler fails the durable row with the invalid-context error
+        # before raising the never-retried permanent error.
+        await jobs_service.fail(
             session,
             job_id=job_uuid,
-            result_reference=result.request_id,
+            error_code=ERROR_CODE_INVALID_JOB_CONTEXT,
+            error_message="The AI job has an invalid task type.",
+            owner_token=context.owner_token,
         )
-        logger.info(
-            "ai.execute.succeeded",
-            ai_request_id=result.request_id,
-            provider=result.routing.provider,
-            model=result.routing.model,
+        logger.warning(
+            "ai.execute.failed",
+            error_code=ERROR_CODE_INVALID_JOB_CONTEXT,
+            reason="wrong_job_type",
         )
+        raise jobs_service.JobPermanentError("the AI job context is invalid")
+    if job.created_by_user_id is None:
+        # A durable AI job always records the initiating user (the demo
+        # service passes the authenticated caller). A row without one is a
+        # malformed/foreign context: fail permanently rather than retry.
+        failure = _PermanentJobFailure(
+            ERROR_CODE_INVALID_JOB_CONTEXT,
+            "The AI job has no initiating user.",
+        )
+        await _fail_permanent(
+            session, job_uuid, failure, owner_token=context.owner_token
+        )
+        raise jobs_service.JobPermanentError(failure.message)
+    if not job.input_reference:
+        failure = _PermanentJobFailure(
+            ERROR_CODE_INVALID_JOB_CONTEXT,
+            "The AI job has no storage reference to process.",
+        )
+        await _fail_permanent(
+            session, job_uuid, failure, owner_token=context.owner_token
+        )
+        raise jobs_service.JobPermanentError(failure.message)
+
+    try:
+        result = await execute_managed_ai(
+            session,
+            AIRequest(
+                task=DEMO_TASK,
+                storage_reference=job.input_reference,
+                organisation_id=job.organisation_id,
+                user_id=job.created_by_user_id,
+                metadata={"source": "ai_demo", "job_id": str(job_uuid)},
+            ),
+            request_id=request_id,
+        )
+    except AIRequestReplayError:
+        # A previous attempt reserved this execution id. Reconcile the job
+        # to the durable row's state instead of re-dispatching (v0.7 Scope
+        # §6.5/§6.6): a re-delivered message never double-charges budget or
+        # duplicates a terminal output record.
+        await _reconcile_replay(
+            session,
+            job_uuid,
+            job.organisation_id,
+            request_id,
+            owner_token=context.owner_token,
+        )
+        return
+    except AIError as exc:
+        await _fail_permanent(
+            session,
+            job_uuid,
+            _PermanentJobFailure(exc.error_code, exc.args[0] if exc.args else str(exc)),
+            owner_token=context.owner_token,
+        )
+        logger.warning("ai.execute.failed", error_code=exc.error_code)
+        raise jobs_service.JobPermanentError(
+            f"the AI execution failed ({exc.error_code})"
+        ) from exc
+
+    await jobs_service.succeed(
+        session,
+        job_id=job_uuid,
+        result_reference=result.request_id,
+        owner_token=context.owner_token,
+    )
+    logger.info(
+        "ai.execute.succeeded",
+        ai_request_id=result.request_id,
+        provider=result.routing.provider,
+        model=result.routing.model,
+    )
 
 
 class _PermanentJobFailure(Exception):
@@ -345,6 +376,8 @@ async def _reconcile_replay(
     job_uuid: uuid.UUID,
     organisation_id: uuid.UUID,
     request_id: str,
+    *,
+    owner_token: uuid.UUID,
 ) -> None:
     """Settle the durable job to match an existing AI request's outcome.
 
@@ -359,11 +392,17 @@ async def _reconcile_replay(
     With no succeeded attempt, the latest row's status is the outcome. A row
     still ``running`` or ``queued`` is a crashed previous attempt; the job
     fails conservatively and the retention sweep reconciles the stale
-    reservation later (v0.7 Scope §6.5).
+    reservation later (v0.7 Scope §6.5). Every settlement names the captured
+    owner token (plan P2) so a stale attempt cannot settle a newer owner.
     """
     winning = await session.scalar(ai_winning_attempt_statement(organisation_id, request_id))
     if winning is not None:
-        await jobs_service.succeed(session, job_id=job_uuid, result_reference=request_id)
+        await jobs_service.succeed(
+            session,
+            job_id=job_uuid,
+            result_reference=request_id,
+            owner_token=owner_token,
+        )
         logger.info("ai.execute.reconciled", ai_request_id=request_id, status="succeeded")
         return
     latest = await session.scalar(ai_latest_attempt_statement(organisation_id, request_id))
@@ -378,6 +417,7 @@ async def _reconcile_replay(
                 ERROR_CODE_REQUEST_IN_PROGRESS,
                 "The AI request could not be reconciled.",
             ),
+            owner_token=owner_token,
         )
         raise jobs_service.JobPermanentError("the AI request row vanished during replay")
     if latest.status.value in ("running", "queued"):
@@ -388,6 +428,7 @@ async def _reconcile_replay(
                 ERROR_CODE_REQUEST_IN_PROGRESS,
                 "A previous attempt of this AI request is still in progress.",
             ),
+            owner_token=owner_token,
         )
         raise jobs_service.JobPermanentError("the AI request is still in progress")
     await _fail_permanent(
@@ -397,12 +438,17 @@ async def _reconcile_replay(
             latest.error_code or "ai_execution_failed",
             latest.error_code or "The AI request previously failed.",
         ),
+        owner_token=owner_token,
     )
     raise jobs_service.JobPermanentError("the AI request previously failed")
 
 
 async def _fail_permanent(
-    session: AsyncSession, job_uuid: uuid.UUID, failure: _PermanentJobFailure
+    session: AsyncSession,
+    job_uuid: uuid.UUID,
+    failure: _PermanentJobFailure,
+    *,
+    owner_token: uuid.UUID,
 ) -> None:
     """Mark the durable job failed with a safe error code before raising."""
     await jobs_service.fail(
@@ -410,6 +456,7 @@ async def _fail_permanent(
         job_id=job_uuid,
         error_code=failure.error_code,
         error_message=failure.message,
+        owner_token=owner_token,
     )
     logger.warning("ai.execute.failed", error_code=failure.error_code)
 

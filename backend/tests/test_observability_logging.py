@@ -186,12 +186,17 @@ async def test_worker_tasks_emit_context_bound_log_lines(
     # --- jobs task: the retries-exhausted finalizer logs with job_id only. ---
     recorded: list[str] = []
 
-    async def _fail(
-        session: object, *, job_id: object, error_code: str, error_message: str
-    ) -> None:
-        recorded.append(error_code)
+    async def _settle(
+        session: object,
+        *,
+        job_id: object,
+        exhausted_dispatch_id: object,
+        exhausted_owner_token: object,
+    ) -> object:
+        recorded.append("settled")
+        return object()
 
-    monkeypatch.setattr(jobs_service, "fail", _fail)
+    monkeypatch.setattr(jobs_service, "settle_after_retries_exhausted", _settle)
 
     message_dict: dict[str, object] = {"kwargs": {"job_id": JOB_ID}}
     with _capture_logs() as logs:
@@ -201,7 +206,7 @@ async def test_worker_tasks_emit_context_bound_log_lines(
     recorded_lines = [entry for entry in logs if entry["event"] == "job.retries_exhausted.recorded"]
     assert started and started[0]["job_id"] == JOB_ID
     assert recorded_lines and recorded_lines[0]["job_id"] == JOB_ID
-    assert recorded == [jobs_service.ERROR_CODE_RETRIES_EXHAUSTED]
+    assert recorded == ["settled"]
 
     # A stale message whose durable row is still absent after bounded retries
     # is acknowledged with one structured warning instead of failing the
@@ -209,17 +214,42 @@ async def test_worker_tasks_emit_context_bound_log_lines(
     from app.core.exceptions import NotFoundError
 
     async def _missing(
-        session: object, *, job_id: object, error_code: str, error_message: str
-    ) -> None:
+        session: object,
+        *,
+        job_id: object,
+        exhausted_dispatch_id: object,
+        exhausted_owner_token: object,
+    ) -> object:
         raise NotFoundError(code="job_not_found", message="The job could not be found.")
 
-    monkeypatch.setattr(jobs_service, "fail", _missing)
+    monkeypatch.setattr(jobs_service, "settle_after_retries_exhausted", _missing)
     with _capture_logs() as logs:
         await jobs_tasks.mark_job_failed_after_retries(message_dict, {})
 
     skipped = [entry for entry in logs if entry["event"] == "job.retries_exhausted.skipped"]
     assert skipped and skipped[0]["job_id"] == JOB_ID
     assert skipped[0]["reason"] == "job_not_found"
+
+    # A terminal, still-leased or superseded dispatch makes the exhausted
+    # message stale: the finalizer acknowledges it (with the operator-visible
+    # signal) without failing the job a live attempt still owns (plan P2).
+    async def _stale(
+        session: object,
+        *,
+        job_id: object,
+        exhausted_dispatch_id: object,
+        exhausted_owner_token: object,
+    ) -> object:
+        return None
+
+    monkeypatch.setattr(jobs_service, "settle_after_retries_exhausted", _stale)
+    with _capture_logs() as logs:
+        await jobs_tasks.mark_job_failed_after_retries(message_dict, {})
+
+    stale_skips = [
+        entry for entry in logs if entry["event"] == "job.retries_exhausted.skipped"
+    ]
+    assert stale_skips and stale_skips[0]["reason"] == "stale_dispatch"
 
 
 async def test_ai_execute_started_log_binds_deterministic_request_id(

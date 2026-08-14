@@ -149,6 +149,13 @@ class Job(Base):
     # attempt before a stale/duplicate may take it over. A non-terminal legacy
     # row without a dispatch id receives one atomically on first claim.
     dispatch_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True, default=None)
+    # ``owner_token`` is the attempt-distinguishing ownership credential: it is
+    # rotated on every claim (including an expired-lease takeover and a retry
+    # re-claim), so a superseded attempt's captured token can never mutate the
+    # row, while ``dispatch_id`` keeps identifying the outbox dispatch. A row
+    # never claimed has no token yet; pre-claim settlement from old releases is
+    # the only case that may mutate without one.
+    owner_token: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True, default=None)
     execution_lease_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
     )

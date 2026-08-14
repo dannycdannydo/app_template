@@ -326,9 +326,16 @@ async def test_migration_adds_outbox_table_and_job_columns(migrated_database: st
                     "WHERE table_name = 'jobs' AND column_name = 'execution_lease_expires_at')"
                 )
             )
+            token_column = await connection.scalar(
+                text(
+                    "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
+                    "WHERE table_name = 'jobs' AND column_name = 'owner_token')"
+                )
+            )
         assert outbox_exists is True
         assert dispatch_column is True
         assert lease_column is True
+        assert token_column is True
     finally:
         await engine.dispose()
 

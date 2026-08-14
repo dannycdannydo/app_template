@@ -611,6 +611,13 @@ async def task_session_factory(
     engine = create_async_engine(migrated_database, poolclass=NullPool)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     monkeypatch.setattr(notifications_tasks, "async_session_factory", factory)
+    # The task drives its domain work through the shared execution wrapper
+    # (plan P2), which opens its own sessions through the wrapper's module
+    # factory; point it at the same NullPool engine so direct handler calls
+    # stay on this test's event loop.
+    from app.modules.jobs import execution as jobs_execution
+
+    monkeypatch.setattr(jobs_execution, "async_session_factory", factory)
     yield factory
     await engine.dispose()
 
@@ -812,7 +819,14 @@ async def test_send_notification_email_rejects_wrong_job_type(
     migrated_database: str,
     task_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """The email actor cannot execute a durable job owned by another task."""
+    """The email actor cannot execute a durable job owned by another task.
+
+    The wrong-type settlement runs under the claimed owner (plan P2), so it is
+    accepted even once every job row carries a dispatch id (P3): a row
+    pre-populated with a dispatch id is claimed, then failed with the
+    invalid-context error instead of bouncing off the owner check as
+    ``StaleDispatchError``.
+    """
     engine = create_async_engine(migrated_database, poolclass=NullPool)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     stub_task = _stub_task()
@@ -828,6 +842,8 @@ async def test_send_notification_email_rejects_wrong_job_type(
                 delivery_task=stub_task,
             )
             job.job_type = "file.processing"
+            # P3 populates the dispatch id on every durable job at creation.
+            job.dispatch_id = uuid.uuid4()
             await session.commit()
             job_id = job.id
             delivery_id = delivery.id

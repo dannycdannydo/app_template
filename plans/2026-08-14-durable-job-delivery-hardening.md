@@ -333,23 +333,23 @@ Human review required before application: none; the migration is additive and no
 
 Dependencies: P1
 
-- [ ] Replace permissive `mark_running` behaviour with atomic claim, lease
+- [x] Replace permissive `mark_running` behaviour with atomic claim, lease
   renewal, transient release and owner-checked progress/success/failure helpers.
   Existing messages still carry only `job_id`; a non-terminal legacy row with
   no dispatch id receives one atomically on first claim.
-- [ ] Add a shared durable-actor execution wrapper that captures the dispatch
+- [x] Add a shared durable-actor execution wrapper that captures the dispatch
   owner, defers a duplicate until its active lease expires, releases ownership
   before propagating a transient error, preserves permanent-failure semantics
   and prevents a stale attempt from settling a newer owner.
-- [ ] Apply the wrapper/owner token contract to file processing, notification
+- [x] Apply the wrapper/owner token contract to file processing, notification
   email and AI execution while preserving each domain service, progress,
   audit, provider and terminal-idempotency boundary; update the retries-
   exhausted actor to settle only the currently owned dispatch.
-- [ ] Put the 600,000 ms task time limit into the shared retry policy, add the
+- [x] Put the 600,000 ms task time limit into the shared retry policy, add the
   900-second execution-lease setting and startup validation, renew leases on
   progress, and add bounded safe structured logs for claimed, deferred,
   released, taken-over and stale-settlement outcomes.
-- [ ] Add unit and real-database tests for simultaneous duplicate claims,
+- [x] Add unit and real-database tests for simultaneous duplicate claims,
   sequential retry, transient release, lease renewal/expiry takeover,
   terminal duplicates, stale-owner progress/success/failure, exhausted stale
   messages and old one-argument broker messages; keep existing file/email/AI
