@@ -520,14 +520,30 @@ Dependencies: Scope §6.4–§6.6.
 Human review required before application: background cleanup behavior and
 provider-data deletion guarantees.
 
+> **Recorded human review and application authorisation (AGENTS.md — background
+> cleanup behavior and provider-data deletion guarantees).**
+> On 2026-08-14, after review of the complete §6.7 implementation (PR #72),
+> the repository owner explicitly approved the background cleanup behavior and
+> provider-data deletion guarantees for application. The reviewed surface
+> covers the bounded Dramatiq reconciliation sweep that processes only
+> expired, orphaned and deletion-failed provider-file references with
+> idempotent claims and bounded backoff, best-effort terminal deletion of
+> provider-hosted copies with the safe `provider_reference_deletion_failed`
+> error code stamped on durable rows, the documented operational schedule,
+> and the low-cardinality audit events/metrics that never carry content,
+> request ids, object keys or signed URLs. Managed URLs, Vertex GCS staging
+> objects and feature-owned sources are never processed by the sweep. No
+> authentication, permission-model, tenant-isolation, destructive-migration
+> or public-API change is introduced by this work unit.
+
 ## 6.8 Operations, Documentation and Release Governance
 
 Dependencies: Scope §6.1–§6.7.
 
-- [ ] Update `.env.example`, `.env.production.example`, README, `SECURITY.md` and the AI runbook with mode enablement, 5 MB threshold, signed-URL TTL/redaction, provider retention/deletion, Vertex project/bucket/location/IAM, the required console-configured `age = 1` lifecycle, asynchronous deletion and soft-delete/versioning/retention caveats
-- [ ] Confirm Azure/DeepSeek/local non-inline rejection, caller-supplied URL prohibition, managed-URL controls, absence of application GCS bucket/lifecycle/cleanup automation, provider import boundaries, migration validity, generated-client drift and all fake/provider contract suites
-- [ ] Record every required human review, document any dependency justification, run `make check`, relevant opt-in contracts and `make e2e`, and resolve all failures
-- [ ] Run `prompts/04-architecture-audit.md`; resolve every CRITICAL/MAJOR finding before marking v0.8 complete or tagging `v0.8.0`
+- [x] Update `.env.example`, `.env.production.example`, README, `SECURITY.md` and the AI runbook with mode enablement, 5 MB threshold, signed-URL TTL/redaction, provider retention/deletion, Vertex project/bucket/location/IAM, the required console-configured `age = 1` lifecycle, asynchronous deletion and soft-delete/versioning/retention caveats
+- [x] Confirm Azure/DeepSeek/local non-inline rejection, caller-supplied URL prohibition, managed-URL controls, absence of application GCS bucket/lifecycle/cleanup automation, provider import boundaries, migration validity, generated-client drift and all fake/provider contract suites
+- [x] Record every required human review, document any dependency justification, run `make check`, relevant opt-in contracts and `make e2e`, and resolve all failures
+- [x] Run `prompts/04-architecture-audit.md`; resolve every CRITICAL/MAJOR finding before marking v0.8 complete or tagging `v0.8.0`
 
 ---
 
