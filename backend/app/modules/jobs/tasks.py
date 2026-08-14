@@ -24,9 +24,11 @@ from typing import Any
 import dramatiq
 import structlog
 
+from app.core.exceptions import NotFoundError
 from app.core.logging import bind_worker_context
 from app.db.session import async_session_factory
 from app.modules.jobs import service as jobs_service
+from app.observability.metrics import JOBS_STALE_MESSAGES_TOTAL
 
 # The handler runs on the default queue: it is job infrastructure, not a
 # workload, so it never competes with the workload queues (blueprint §18
@@ -63,12 +65,22 @@ async def mark_job_failed_after_retries(
     bind_worker_context(job_id=str(job_id))
     logger.info("job.retries_exhausted.started")
     async with async_session_factory() as session:
-        await jobs_service.fail(
-            session,
-            job_id=job_id,
-            error_code=jobs_service.ERROR_CODE_RETRIES_EXHAUSTED,
-            error_message=jobs_service.ERROR_MESSAGE_RETRIES_EXHAUSTED,
-        )
+        try:
+            await jobs_service.fail(
+                session,
+                job_id=job_id,
+                error_code=jobs_service.ERROR_CODE_RETRIES_EXHAUSTED,
+                error_message=jobs_service.ERROR_MESSAGE_RETRIES_EXHAUSTED,
+            )
+        except NotFoundError:
+            # The original task has already exhausted its bounded retries, so
+            # a still-missing row cannot be the normal enqueue-before-commit
+            # race. A reset, retention action or malformed external message
+            # has made this message stale; acknowledge it without creating a
+            # second dead letter, while retaining an operator-visible signal.
+            JOBS_STALE_MESSAGES_TOTAL.inc()
+            logger.warning("job.retries_exhausted.skipped", reason="job_not_found")
+            return
         logger.info("job.retries_exhausted.recorded")
 
 

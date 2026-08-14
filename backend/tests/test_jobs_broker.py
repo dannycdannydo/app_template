@@ -131,6 +131,7 @@ async def broker_and_worker() -> AsyncIterator[tuple[RedisBroker, Worker]]:
     """
     from app.broker import worker_middleware
 
+    previous_broker = dramatiq.get_broker()
     broker = RedisBroker(
         url=_REDIS_URL,
         namespace=f"jobs-test-{uuid.uuid4().hex[:8]}",
@@ -157,17 +158,27 @@ async def broker_and_worker() -> AsyncIterator[tuple[RedisBroker, Worker]]:
     assert handler.actor_name == jobs_service.MARK_FAILED_AFTER_RETRIES_ACTOR
     worker = Worker(broker, worker_threads=2)
     worker.start()
-    yield broker, worker
-    worker.stop()
-    broker.flush_all()
-    # The handlers (and Scope §6.5's process_file) run on the worker's AsyncIO
-    # event-loop thread but use the process-wide engine (async_session_factory).
-    # Dispose the pool so no loop-bound connection outlives this test's worker:
-    # the next test's worker runs on a fresh loop and would otherwise reuse a
-    # connection "attached to a different loop", failing every task.
-    from app.db.session import engine
+    try:
+        yield broker, worker
+    finally:
+        worker.stop()
+        broker.flush_all()
+        # ``flush_all`` removes declared queues but Dramatiq keeps broker
+        # heartbeats in a namespace-level key. Remove that final test-owned key
+        # so repeated integration runs do not leak Redis state.
+        broker.client.delete(  # pyright: ignore[reportUnknownMemberType]
+            f"{broker.namespace}:__heartbeats__"
+        )
+        dramatiq.set_broker(previous_broker)
+        # The handlers (and v0.5 Scope §6.5's process_file) run on the worker's
+        # AsyncIO event-loop thread but use the process-wide engine
+        # (async_session_factory). Dispose the pool so no loop-bound connection
+        # outlives this test's worker: the next test's worker runs on a fresh
+        # loop and would otherwise reuse a connection "attached to a different
+        # loop", failing every task.
+        from app.db.session import engine
 
-    await engine.dispose()
+        await engine.dispose()
 
 
 def _session_factory(database_url: str) -> Any:

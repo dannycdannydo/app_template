@@ -66,6 +66,10 @@ JOBS_FAILED_TOTAL = Counter(
     "Durable jobs failed",
     ["job_type"],
 )
+JOBS_STALE_MESSAGES_TOTAL = Counter(
+    "jobs_stale_messages_total",
+    "Dramatiq messages discarded because their durable job row is absent",
+)
 
 # AI execution metrics (v0.7 Scope §6.7, blueprint §28): one sample per
 # provider execution, labelled only with low-cardinality registry ids — task,

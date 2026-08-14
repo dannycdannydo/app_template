@@ -33,6 +33,7 @@ _ALL_METRICS = (
     "jobs_enqueued_total",
     "jobs_succeeded_total",
     "jobs_failed_total",
+    "jobs_stale_messages_total",
 )
 
 

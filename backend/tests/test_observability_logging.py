@@ -203,6 +203,24 @@ async def test_worker_tasks_emit_context_bound_log_lines(
     assert recorded_lines and recorded_lines[0]["job_id"] == JOB_ID
     assert recorded == [jobs_service.ERROR_CODE_RETRIES_EXHAUSTED]
 
+    # A stale message whose durable row is still absent after bounded retries
+    # is acknowledged with one structured warning instead of failing the
+    # finalizer and creating a second dead letter.
+    from app.core.exceptions import NotFoundError
+
+    async def _missing(
+        session: object, *, job_id: object, error_code: str, error_message: str
+    ) -> None:
+        raise NotFoundError(code="job_not_found", message="The job could not be found.")
+
+    monkeypatch.setattr(jobs_service, "fail", _missing)
+    with _capture_logs() as logs:
+        await jobs_tasks.mark_job_failed_after_retries(message_dict, {})
+
+    skipped = [entry for entry in logs if entry["event"] == "job.retries_exhausted.skipped"]
+    assert skipped and skipped[0]["job_id"] == JOB_ID
+    assert skipped[0]["reason"] == "job_not_found"
+
 
 async def test_ai_execute_started_log_binds_deterministic_request_id(
     monkeypatch: pytest.MonkeyPatch,
