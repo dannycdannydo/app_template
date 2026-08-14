@@ -50,6 +50,7 @@ from app.modules.audit.models import AuditEvent
 from app.modules.files import service as files_service
 from app.modules.files import tasks as files_tasks
 from app.modules.files.models import File, FileStatus
+from app.modules.jobs import execution as jobs_execution
 from app.modules.jobs import service as jobs_service
 from app.modules.jobs.models import Job, JobStatus
 from app.modules.notifications import service as notifications_service
@@ -68,49 +69,53 @@ _QUEUE = "test-files-jobs"
 
 
 async def test_file_worker_rejects_wrong_durable_job_type(
-    monkeypatch: pytest.MonkeyPatch,
+    migrated_database: str,
 ) -> None:
-    """The document actor fails before touching storage for another task type."""
-    job_id = uuid.UUID("00000000-0000-7000-8000-000000000041")
-    failed: list[tuple[str, str]] = []
+    """The document actor fails another task type's job under the claim (P2).
 
-    class _Session:
-        async def __aenter__(self) -> _Session:
-            return self
+    The wrong-type settlement runs under the claimed owner, so it is accepted
+    even once every job row carries a dispatch id (P3): a row pre-populated
+    with a dispatch id is claimed, then failed with the invalid-context error
+    and the never-retried permanent error, instead of bouncing off the owner
+    check as ``StaleDispatchError``.
+    """
+    engine = create_async_engine(migrated_database, poolclass=NullPool)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            organisation = await _create_org(session, "File Wrong Type Ltd")
 
-        async def __aexit__(self, *args: object) -> None:
-            return None
+            def _noop(**kwargs: str) -> None:
+                return None
 
-    class _WrongTypeJob:
-        input_reference = "00000000-0000-7000-8000-000000000042"
-        status = JobStatus.QUEUED
-        job_type = notifications_tasks.JOB_TYPE_NOTIFICATION_EMAIL
+            # A uniquely named task so the durable row can be written without
+            # colliding with other actors declared on the shared stub broker.
+            task = dramatiq.actor(
+                actor_name=f"wrong_type_file_{uuid.uuid4().hex[:8]}", queue_name=_QUEUE
+            )(_noop)
+            job = await jobs_service.create_and_enqueue(
+                session,
+                organisation_id=organisation.id,
+                job_type=notifications_tasks.JOB_TYPE_NOTIFICATION_EMAIL,
+                input_reference="file-1",
+                task=task,
+            )
+            # P3 populates the dispatch id on every durable job at creation.
+            job.dispatch_id = uuid.uuid4()
+            await session.commit()
+            job_id = job.id
 
-    async def _get_job(session: object, *, job_id: uuid.UUID) -> _WrongTypeJob:
-        return _WrongTypeJob()
+        with pytest.raises(jobs_service.JobPermanentError):
+            await files_tasks.process_file(str(job_id))
 
-    async def _fail(
-        session: object,
-        *,
-        job_id: uuid.UUID,
-        error_code: str,
-        error_message: str,
-    ) -> None:
-        failed.append((error_code, error_message))
-
-    monkeypatch.setattr(files_tasks, "async_session_factory", _Session)
-    monkeypatch.setattr(jobs_service, "get_job_for_task", _get_job)
-    monkeypatch.setattr(jobs_service, "fail", _fail)
-
-    with pytest.raises(jobs_service.JobPermanentError):
-        await files_tasks.process_file(str(job_id))
-
-    assert failed == [
-        (
-            files_tasks.ERROR_CODE_INVALID_JOB_CONTEXT,
-            "The file job has an invalid task type.",
-        )
-    ]
+        async with session_factory() as session:
+            row = await session.get(Job, job_id)
+            assert row is not None
+            assert row.status == JobStatus.FAILED
+            assert row.error_code == files_tasks.ERROR_CODE_INVALID_JOB_CONTEXT
+            assert row.error_message == "The file job has an invalid task type."
+    finally:
+        await engine.dispose()
 
 
 def _database_reachable(database_url: str) -> bool:
@@ -549,6 +554,7 @@ async def test_file_ready_loop_creates_notification_and_delivers_email(
     engine = create_async_engine(migrated_database, poolclass=NullPool)
     task_factory = async_sessionmaker(engine, expire_on_commit=False)
     monkeypatch.setattr(notifications_tasks, "async_session_factory", task_factory)
+    monkeypatch.setattr(jobs_execution, "async_session_factory", task_factory)
     try:
         async with session_factory() as session:
             organisation = await _create_org(session, "File Loop Ready Ltd")
@@ -639,6 +645,7 @@ async def test_failed_file_loop_creates_notification_and_delivery_failure_is_aud
     engine = create_async_engine(migrated_database, poolclass=NullPool)
     task_factory = async_sessionmaker(engine, expire_on_commit=False)
     monkeypatch.setattr(notifications_tasks, "async_session_factory", task_factory)
+    monkeypatch.setattr(jobs_execution, "async_session_factory", task_factory)
 
     class _FailingProvider:
         async def send_email(self, **kwargs: Any) -> Any:
@@ -733,6 +740,7 @@ async def test_file_loop_no_double_send_on_retry(
     engine = create_async_engine(migrated_database, poolclass=NullPool)
     task_factory = async_sessionmaker(engine, expire_on_commit=False)
     monkeypatch.setattr(notifications_tasks, "async_session_factory", task_factory)
+    monkeypatch.setattr(jobs_execution, "async_session_factory", task_factory)
     try:
         async with session_factory() as session:
             organisation = await _create_org(session, "File Loop No Double Ltd")

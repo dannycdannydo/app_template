@@ -14,14 +14,17 @@ the task notifies the uploader. A file that reaches ``ready`` produces a
 file that fails produces ``file.failed`` the same way (the notification and
 delivery creation is idempotent, so a retried message cannot double-notify).
 
-Idempotency follows the rules in ``jobs.service`` (BP §18): the task re-runs
-safely on a retried or re-delivered message. A job that already reached a
-terminal state is left untouched (terminal states are never re-run); the file
-transition helpers each return early when the file is already in (or past)
-the target state. Permanent failures mark the durable row and the file
-themselves and then raise :class:`JobPermanentError`, which the retry policy
-declares in ``throws`` so it is never retried; transient errors propagate and
-the Retries middleware retries them up to ``MAX_ATTEMPTS``.
+Idempotency and execution ownership follow the durable delivery plan (P2):
+the task runs its domain work through ``app.modules.jobs.execution``'s shared
+wrapper, which claims the dispatch atomically, defers a duplicate with a live
+lease, releases ownership before a transient error propagates and treats a
+stale attempt as a no-op. A job that already reached a terminal state is left
+untouched (terminal states are never re-run); the file transition helpers each
+return early when the file is already in (or past) the target state. Permanent
+failures mark the durable row and the file themselves and then raise
+:class:`JobPermanentError`, which the retry policy declares in ``throws`` so
+it is never retried; transient errors propagate after the wrapper releases the
+attempt, and the Retries middleware retries them up to ``MAX_ATTEMPTS``.
 
 The handler function is deliberately separate from its actor declaration so a
 test can re-declare it bound to its own broker (the same pattern as
@@ -44,6 +47,7 @@ from app.db.session import async_session_factory
 from app.modules.files import service as files_service
 from app.modules.files.models import File
 from app.modules.jobs import service as jobs_service
+from app.modules.jobs.execution import DurableJobContext, run_claimed
 from app.modules.notifications import service as notifications_service
 from app.modules.users.models import User
 from app.storage import get_storage
@@ -75,13 +79,16 @@ logger = structlog.get_logger()
 async def process_file(job_id: str) -> None:
     """Verify the stored object and move the file to ``ready``, with progress.
 
-    One attempt of the file-processing job: load the durable row, mark it
-    ``running``, then re-verify the stored object against the file record's
-    declaration (existence and size, mirroring the completion-time check). On
-    success the file advances to ``ready`` and the job to ``succeeded`` with
-    progress 100; on a permanent failure the file is marked ``failed`` and the
-    job ``failed`` with the matching ``error_code`` before
-    :class:`JobPermanentError` is raised so the message is never retried.
+    One attempt of the file-processing job: load the durable row, skip a
+    terminal job (terminal states are never re-run, acceptance §5.7), reject
+    a foreign job type permanently, then run the attempt through the shared
+    execution wrapper (plan P2), which claims the dispatch and re-verifies
+    the stored object against the file record's declaration (existence and
+    size, mirroring the completion-time check). On success the file advances
+    to ``ready`` and the job to ``succeeded`` with progress 100; on a
+    permanent failure the file is marked ``failed`` and the job ``failed``
+    with the matching ``error_code`` before :class:`JobPermanentError` is
+    raised so the message is never retried.
     """
     job_uuid = uuid.UUID(job_id)
     bind_worker_context(job_id=str(job_uuid))
@@ -95,103 +102,130 @@ async def process_file(job_id: str) -> None:
             logger.info("file.processing.skipped", reason="terminal_state")
             return
 
-        if job.job_type != JOB_TYPE_FILE_PROCESSING:
-            await jobs_service.fail(
-                session,
-                job_id=job_uuid,
-                error_code=ERROR_CODE_INVALID_JOB_CONTEXT,
-                error_message="The file job has an invalid task type.",
-            )
-            logger.warning(
-                "file.processing.failed",
-                error_code=ERROR_CODE_INVALID_JOB_CONTEXT,
-                reason="wrong_job_type",
-            )
-            raise jobs_service.JobPermanentError("the file job context is invalid")
+    await run_claimed(job_id=job_uuid, handler=_process_file_attempt)
 
-        await jobs_service.mark_running(session, job_id=job_uuid)
-        file_id = uuid.UUID(job.input_reference)
-        try:
-            file = await files_service.get_file(
-                session,
-                organisation_id=job.organisation_id,
-                file_id=file_id,
-            )
-        except NotFoundError as exc:
-            # The file row is gone or soft-deleted while the job was queued.
-            # No file row to fail, so the durable job alone records it; a
-            # retry cannot fix a missing row, so this is a permanent failure.
-            await jobs_service.fail(
-                session,
-                job_id=job_uuid,
-                error_code=ERROR_CODE_FILE_NOT_FOUND,
-                error_message="The file this job processes no longer exists.",
-            )
-            logger.warning("file.processing.failed", error_code=ERROR_CODE_FILE_NOT_FOUND)
-            raise jobs_service.JobPermanentError(
-                "the file referenced by the job does not exist"
-            ) from exc
 
-        await jobs_service.update_progress(session, job_id=job_uuid, progress=_PROGRESS_VERIFYING)
-        object_info = await get_storage().head_object(file.object_key)
-        verified = object_info is not None and object_info.size_bytes == file.size_bytes
-        if not verified:
-            reason = "object_missing" if object_info is None else "size_mismatch"
-            await files_service.mark_file_failed(
-                session,
-                organisation_id=job.organisation_id,
-                file_id=file.id,
-                reason=reason,
-            )
-            await _notify_uploader(
-                session,
-                organisation_id=job.organisation_id,
-                file=file,
-                notification_type=notifications_service.NOTIFICATION_TYPE_FILE_FAILED,
-                title=notifications_service.FILE_FAILED_TITLE,
-                body=notifications_service.FILE_FAILED_BODY.format(filename=file.original_filename),
-            )
-            await jobs_service.fail(
-                session,
-                job_id=job_uuid,
-                error_code=ERROR_CODE_VERIFICATION_FAILED,
-                error_message=("The stored object could not be verified while processing."),
-            )
-            logger.warning(
-                "file.processing.failed",
-                error_code=ERROR_CODE_VERIFICATION_FAILED,
-                reason=reason,
-            )
-            raise jobs_service.JobPermanentError(
-                f"the stored object could not be verified ({reason})"
-            )
-
-        await jobs_service.update_progress(session, job_id=job_uuid, progress=_PROGRESS_VERIFIED)
-        await files_service.mark_file_processing(
+async def _process_file_attempt(context: DurableJobContext, session: AsyncSession) -> None:
+    """One owned attempt of the file-processing job (plan P2 ownership)."""
+    job = context.job
+    if job.job_type != JOB_TYPE_FILE_PROCESSING:
+        # The wrong-type settlement runs under the claimed owner (plan P2), so
+        # it is accepted even once every job row carries a dispatch id (P3):
+        # the handler fails the durable row with the invalid-context error
+        # before raising the never-retried permanent error.
+        await jobs_service.fail(
             session,
-            organisation_id=job.organisation_id,
-            file_id=file.id,
+            job_id=context.job_id,
+            error_code=ERROR_CODE_INVALID_JOB_CONTEXT,
+            error_message="The file job has an invalid task type.",
+            owner_token=context.owner_token,
         )
-        await jobs_service.update_progress(session, job_id=job_uuid, progress=_PROGRESS_PROCESSING)
-        await files_service.mark_file_ready(
+        logger.warning(
+            "file.processing.failed",
+            error_code=ERROR_CODE_INVALID_JOB_CONTEXT,
+            reason="wrong_job_type",
+        )
+        raise jobs_service.JobPermanentError("the file job context is invalid")
+    file_id = uuid.UUID(job.input_reference)
+    try:
+        file = await files_service.get_file(
+            session,
+            organisation_id=job.organisation_id,
+            file_id=file_id,
+        )
+    except NotFoundError as exc:
+        # The file row is gone or soft-deleted while the job was queued.
+        # No file row to fail, so the durable job alone records it; a
+        # retry cannot fix a missing row, so this is a permanent failure.
+        await jobs_service.fail(
+            session,
+            job_id=context.job_id,
+            error_code=ERROR_CODE_FILE_NOT_FOUND,
+            error_message="The file this job processes no longer exists.",
+            owner_token=context.owner_token,
+        )
+        logger.warning("file.processing.failed", error_code=ERROR_CODE_FILE_NOT_FOUND)
+        raise jobs_service.JobPermanentError(
+            "the file referenced by the job does not exist"
+        ) from exc
+
+    await jobs_service.update_progress(
+        session,
+        job_id=context.job_id,
+        progress=_PROGRESS_VERIFYING,
+        owner_token=context.owner_token,
+    )
+    object_info = await get_storage().head_object(file.object_key)
+    verified = object_info is not None and object_info.size_bytes == file.size_bytes
+    if not verified:
+        reason = "object_missing" if object_info is None else "size_mismatch"
+        await files_service.mark_file_failed(
             session,
             organisation_id=job.organisation_id,
             file_id=file.id,
+            reason=reason,
         )
         await _notify_uploader(
             session,
             organisation_id=job.organisation_id,
             file=file,
-            notification_type=notifications_service.NOTIFICATION_TYPE_FILE_READY,
-            title=notifications_service.FILE_READY_TITLE,
-            body=notifications_service.FILE_READY_BODY.format(filename=file.original_filename),
+            notification_type=notifications_service.NOTIFICATION_TYPE_FILE_FAILED,
+            title=notifications_service.FILE_FAILED_TITLE,
+            body=notifications_service.FILE_FAILED_BODY.format(filename=file.original_filename),
         )
-        await jobs_service.succeed(
+        await jobs_service.fail(
             session,
-            job_id=job_uuid,
-            result_reference=str(file.id),
+            job_id=context.job_id,
+            error_code=ERROR_CODE_VERIFICATION_FAILED,
+            error_message=("The stored object could not be verified while processing."),
+            owner_token=context.owner_token,
         )
-        logger.info("file.processing.succeeded", file_id=str(file.id))
+        logger.warning(
+            "file.processing.failed",
+            error_code=ERROR_CODE_VERIFICATION_FAILED,
+            reason=reason,
+        )
+        raise jobs_service.JobPermanentError(
+            f"the stored object could not be verified ({reason})"
+        )
+
+    await jobs_service.update_progress(
+        session,
+        job_id=context.job_id,
+        progress=_PROGRESS_VERIFIED,
+        owner_token=context.owner_token,
+    )
+    await files_service.mark_file_processing(
+        session,
+        organisation_id=job.organisation_id,
+        file_id=file.id,
+    )
+    await jobs_service.update_progress(
+        session,
+        job_id=context.job_id,
+        progress=_PROGRESS_PROCESSING,
+        owner_token=context.owner_token,
+    )
+    await files_service.mark_file_ready(
+        session,
+        organisation_id=job.organisation_id,
+        file_id=file.id,
+    )
+    await _notify_uploader(
+        session,
+        organisation_id=job.organisation_id,
+        file=file,
+        notification_type=notifications_service.NOTIFICATION_TYPE_FILE_READY,
+        title=notifications_service.FILE_READY_TITLE,
+        body=notifications_service.FILE_READY_BODY.format(filename=file.original_filename),
+    )
+    await jobs_service.succeed(
+        session,
+        job_id=context.job_id,
+        result_reference=str(file.id),
+        owner_token=context.owner_token,
+    )
+    logger.info("file.processing.succeeded", file_id=str(file.id))
 
 
 async def _notify_uploader(

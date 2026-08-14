@@ -11,7 +11,7 @@ from __future__ import annotations
 from dramatiq.broker import Broker
 from dramatiq.brokers.redis import RedisBroker
 from dramatiq.brokers.stub import StubBroker
-from dramatiq.middleware import AsyncIO, Middleware, default_middleware
+from dramatiq.middleware import AsyncIO, CurrentMessage, Middleware, default_middleware
 
 from app.core.config import get_settings
 from app.observability.sentry import SentryWorkerMiddleware
@@ -25,10 +25,14 @@ def worker_middleware() -> MiddlewareStack:
     The Dramatiq defaults handle retries, time limits, callbacks, pipelines,
     shutdown notifications and age limits. ``AsyncIO`` supplies the managed
     event-loop thread required by async actors, and the Sentry middleware
-    reports unhandled task exceptions when configured.
+    reports unhandled task exceptions when configured. ``CurrentMessage``
+    exposes the running message to the execution wrapper (plan P2), which
+    stamps the claimed dispatch id into its options so the retries-exhausted
+    finalizer can correlate a superseded message.
     """
     return [
         AsyncIO(),
+        CurrentMessage(),
         SentryWorkerMiddleware(),
         *(middleware() for middleware in default_middleware),
     ]

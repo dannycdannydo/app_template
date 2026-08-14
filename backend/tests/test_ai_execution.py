@@ -206,6 +206,55 @@ async def _audit_count(session_factory: Any, *, resource_id: str, action: str) -
         return count or 0
 
 
+async def test_ai_worker_rejects_wrong_durable_job_type(
+    migrated_database: str,
+) -> None:
+    """The AI actor fails another task type's job under the claim (P2).
+
+    The wrong-type settlement runs under the claimed owner, so it is accepted
+    even once every job row carries a dispatch id (P3): a row pre-populated
+    with a dispatch id is claimed, then failed with the invalid-context error
+    and the never-retried permanent error, instead of bouncing off the owner
+    check as ``StaleDispatchError``.
+    """
+    engine = create_async_engine(migrated_database, poolclass=NullPool)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    def _noop(**kwargs: str) -> None:
+        return None
+
+    task = dramatiq.actor(
+        actor_name=f"wrong_type_ai_{uuid.uuid4().hex[:8]}", queue_name=_QUEUE
+    )(_noop)
+    try:
+        async with session_factory() as session:
+            organisation = await _seed_organisation(session)
+            user = await _seed_user(session)
+            job = await jobs_service.create_and_enqueue(
+                session,
+                organisation_id=organisation.id,
+                job_type="file.processing",
+                input_reference="organisations/x/ai/scratch/doc.txt",
+                actor_user_id=user.id,
+                task=task,
+            )
+            # P3 populates the dispatch id on every durable job at creation.
+            job.dispatch_id = uuid.uuid4()
+            await session.commit()
+            job_id = job.id
+
+        with pytest.raises(jobs_service.JobPermanentError):
+            await execute_ai_task(str(job_id))
+
+        async with session_factory() as session:
+            row = await session.get(Job, job_id)
+            assert row is not None
+            assert row.status == JobStatus.FAILED
+            assert row.error_code == "invalid_ai_job_context"
+    finally:
+        await engine.dispose()
+
+
 async def test_worker_classifies_text_document_and_records_request(
     migrated_database: str, broker_and_worker: tuple[StubBroker, Worker, Any]
 ) -> None:

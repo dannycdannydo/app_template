@@ -4,33 +4,50 @@ The job service is the single owner of the durable ``jobs`` table:
 
 - :func:`create_and_enqueue` is the only way a job is created: it writes the
   durable ``queued`` row first, then enqueues the Dramatiq task, in one
-  transaction (BP §18 flow, BP §11 — record-then-enqueue; the transactional
-  outbox is deferred post-v1, so the narrow commit-after-enqueue window is
-  self-healed by the retry policy, see below).
-- :func:`mark_running`, :func:`update_progress`, :func:`succeed` and
-  :func:`fail` are the helpers the worker tasks call; each owns its own
-  transaction (BP §11) and refuses to move a terminal state (acceptance §5.7:
-  terminal states are never re-run).
+  transaction (BP §18 flow, BP §11 — record-then-enqueue). The durable
+  delivery plan replaces this with a transaction-owned outbox schedule (P3);
+  until then this function remains the producer path.
+- :func:`claim_dispatch` is the atomic worker-side claim (durable delivery
+  plan P2): it transitions ``queued`` -> ``running`` (or takes over an expired
+  lease), assigns a dispatch identity to a legacy row on first claim,
+  increments ``attempt_count``, sets the execution lease and rotates the
+  attempt-distinguishing ``owner_token``. A duplicate whose lease is still
+  live is *deferred*, never executed concurrently.
+- :func:`release_dispatch` returns an owned attempt to ``queued`` after a
+  transient failure; :func:`update_progress`, :func:`succeed` and
+  :func:`fail` are the owner-checked mutation helpers the worker tasks call
+  through the shared execution wrapper (``app.modules.jobs.execution``). Every
+  mutation verifies the owner token captured at claim time, so an
+  expired/stale attempt can never overwrite a newer owner — including after an
+  expired-lease takeover, which rotates the token — and terminal settlement
+  clears the lease.
+- :func:`settle_after_retries_exhausted` is the finalizer the Retries
+  middleware messages when a job's transient retries ran out: it settles only
+  the dispatch the exhausted message attempted (correlated by the dispatch id
+  the wrapper stamps into the message at claim time), and treats a terminal
+  job, a still-live lease or a superseded dispatch as a stale message.
 
 The retry policy: transient errors are retried up to ``MAX_ATTEMPTS``;
 permanent validation errors raise :class:`JobPermanentError`, which tasks
 declare in their ``throws`` so the Retries middleware never retries them (and
-the task marks the durable row ``failed`` itself). When transient retries are
-exhausted, the Retries middleware sends the ``mark_job_failed_after_retries``
-actor (``app.modules.jobs.tasks``), which records the failure on the durable
-row so a job never sits in ``running`` forever.
+the task marks the durable row ``failed`` itself). The standard actor time
+limit (600,000 ms by default) is part of the shared policy, and the execution
+lease exceeds it by at least 60 seconds (validated at startup).
 """
 
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from typing import Any
 
 from dramatiq import Actor
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.exceptions import ConflictError, ErrorDetail, NotFoundError, ValidationError
 from app.db.conventions import uuid7
 from app.modules.audit.service import (
@@ -74,6 +91,79 @@ class JobPermanentError(Exception):
     """
 
 
+class DispatchDeferredError(Exception):
+    """Raised by the execution wrapper when another live attempt owns the job.
+
+    A duplicate message that finds a non-expired execution lease on the job
+    row raises this transient error (it is deliberately *not* in the retry
+    policy's ``throws``), so the Retries middleware retries it. The
+    retries-exhausted finalizer refuses to settle a dispatch that still has a
+    live lease, so a deferred duplicate can never fail a job a live attempt is
+    working on.
+    """
+
+    def __init__(self, job_id: uuid.UUID, deferred_until: datetime) -> None:
+        super().__init__(f"job {job_id} is leased until {deferred_until.isoformat()}")
+        self.job_id = job_id
+        self.deferred_until = deferred_until
+
+
+class StaleDispatchError(Exception):
+    """Raised when an attempt no longer owns the job's current dispatch.
+
+    Worker mutations (progress, success, failure, release) verify the owner
+    token captured at claim time against the job row. A mismatch means the
+    attempt was superseded (a takeover or retry rotated the token, or a newer
+    dispatch replaced it) or the row reached a terminal state under a
+    different owner; the execution wrapper catches this and treats the message
+    as a no-op, so a stale attempt cannot update progress, succeed, fail or
+    release over a newer owner.
+    """
+
+    def __init__(
+        self,
+        job_id: uuid.UUID,
+        current_owner_token: uuid.UUID | None,
+        captured_owner_token: uuid.UUID | None,
+    ):
+        super().__init__(
+            f"attempt owned by token {captured_owner_token} no longer owns job {job_id} "
+            f"(current owner token: {current_owner_token})"
+        )
+        self.job_id = job_id
+        self.current_owner_token = current_owner_token
+        self.captured_owner_token = captured_owner_token
+
+
+class ClaimOutcome(StrEnum):
+    """Outcome of an atomic worker-side claim (durable delivery plan P2)."""
+
+    CLAIMED = "claimed"
+    DEFERRED = "deferred"
+    STALE = "stale"
+
+
+@dataclass(frozen=True)
+class ClaimResult:
+    """The outcome of :func:`claim_dispatch`.
+
+    ``job`` is the durable row (``CLAIMED``: the fresh owner; ``STALE``: the
+    terminal row; ``DEFERRED``: the leased row). ``dispatch_id`` is the
+    dispatch the caller now owns (``CLAIMED`` only); ``owner_token`` is the
+    attempt-distinguishing credential rotated for this claim (``CLAIMED``
+    only); ``deferred_until`` is the live lease bound a deferred duplicate
+    must wait past; ``taken_over`` is true when an expired lease was claimed
+    by a new attempt.
+    """
+
+    outcome: ClaimOutcome
+    job: Job | None = None
+    dispatch_id: uuid.UUID | None = None
+    owner_token: uuid.UUID | None = None
+    deferred_until: datetime | None = None
+    taken_over: bool = False
+
+
 def retry_policy() -> dict[str, Any]:
     """Return the standard Dramatiq actor options encoding the retry policy.
 
@@ -86,14 +176,21 @@ def retry_policy() -> dict[str, Any]:
     ``max_retries`` bounds the total attempts to ``MAX_ATTEMPTS``; ``throws``
     declares :class:`JobPermanentError` as never-retried; the exhausted
     message lands on the ``mark_job_failed_after_retries`` actor so the durable
-    row records the failure.
+    row records the failure; ``time_limit`` is the standard actor time limit
+    (plan P2), which the execution lease exceeds by at least 60 seconds.
     """
     return {
         "max_retries": MAX_ATTEMPTS - 1,
         "min_backoff": RETRY_MIN_BACKOFF_MS,
         "throws": (JobPermanentError,),
         "on_retry_exhausted": MARK_FAILED_AFTER_RETRIES_ACTOR,
+        "time_limit": get_settings().job_task_time_limit_ms,
     }
+
+
+def _execution_lease_seconds() -> int:
+    """Return the configured execution-lease duration in seconds."""
+    return get_settings().job_execution_lease_seconds
 
 
 def _not_found() -> NotFoundError:
@@ -120,6 +217,19 @@ async def _get_job(session: AsyncSession, *, job_id: uuid.UUID) -> Job:
     return job
 
 
+async def _get_job_locked(session: AsyncSession, *, job_id: uuid.UUID) -> Job:
+    """Return one job row locked for an ownership mutation.
+
+    ``FOR UPDATE`` serialises concurrent mutations of the same row: two
+    attempts racing to claim, settle or release the same job cannot interleave
+    their read-modify-write cycles (plan P2 atomicity).
+    """
+    job = await session.scalar(select(Job).where(Job.id == job_id).with_for_update())
+    if job is None:
+        raise _not_found()
+    return job
+
+
 async def get_job_for_task(session: AsyncSession, *, job_id: uuid.UUID) -> Job:
     """Return the durable row a worker task operates on (worker-side read).
 
@@ -133,6 +243,19 @@ async def get_job_for_task(session: AsyncSession, *, job_id: uuid.UUID) -> Job:
 def is_terminal(status: JobStatus) -> bool:
     """Return whether ``status`` is a terminal state that is never re-run."""
     return _terminal(status)
+
+
+def _verify_owner(job: Job, owner_token: uuid.UUID | None) -> None:
+    """Raise :class:`StaleDispatchError` when an attempt is not the current owner.
+
+    ``owner_token=None`` covers legacy settlement of a row that has never been
+    claimed (pre-claim permanent failures from old releases); once a row
+    carries an ownership credential, every mutation must name it.
+    """
+    if job.owner_token is None:
+        return
+    if job.owner_token != owner_token:
+        raise StaleDispatchError(job.id, job.owner_token, owner_token)
 
 
 async def get_job(
@@ -204,7 +327,8 @@ async def create_and_enqueue(
     ``queued`` row. The theoretical commit-after-enqueue window (the worker
     picks up the message before the commit lands) is a transient failure on
     the worker side — the job row is not visible yet — which the bounded
-    retry policy self-heals.
+    retry policy self-heals. The durable delivery plan (P3) replaces this
+    function with a transaction-owned outbox schedule.
 
     ``job_id`` optionally supplies a pre-generated id so a caller can add
     companion rows (e.g. a pre-enqueue ``ai_requests`` linkage row) to the
@@ -229,32 +353,111 @@ async def create_and_enqueue(
     return job
 
 
-async def mark_running(session: AsyncSession, *, job_id: uuid.UUID) -> Job:
-    """Transition a job to ``running`` at the start of a task attempt.
+async def claim_dispatch(session: AsyncSession, *, job_id: uuid.UUID) -> ClaimResult:
+    """Atomically claim the next execution attempt of ``job_id`` (plan P2).
 
-    Idempotent across retries: an already-``running`` row stays running, the
-    attempt counter increments (one per attempt) and ``started_at`` is only
-    set on the first attempt. A terminal job is never re-run (acceptance
-    §5.7): a message that arrives after the job already finished raises a 409,
-    which the task surfaces as a transient error.
+    ``FOR UPDATE`` makes the claim atomic under concurrency: a duplicate that
+    arrives while the first claim's transaction is still open blocks on the
+    row lock, then observes the fresh lease and returns ``DEFERRED``.
+
+    - ``queued`` -> ``running``: the attempt claims the dispatch, increments
+      ``attempt_count``, records ``started_at`` on the first attempt, rotates
+      the attempt-distinguishing ``owner_token`` and sets the execution lease.
+      A legacy row with no dispatch identity receives one atomically on this
+      first claim (old one-argument broker messages keep working).
+    - ``running`` with a non-expired lease: another live attempt owns the
+      dispatch; the result is ``DEFERRED`` with the lease bound.
+    - ``running`` with an expired lease: the dead attempt is taken over
+      (``taken_over=True``); the dispatch identity is unchanged, but the
+      ``owner_token`` is rotated so the dead attempt's captured credential is
+      superseded and cannot mutate over the new owner.
+    - terminal: the message is a ``STALE`` no-op; terminal states are never
+      re-run (acceptance §5.7).
     """
-    job = await _get_job(session, job_id=job_id)
+    job = await _get_job_locked(session, job_id=job_id)
     if _terminal(job.status):
-        raise ConflictError(
-            code="job_in_terminal_state",
-            message="A finished job cannot be run again.",
+        return ClaimResult(outcome=ClaimOutcome.STALE, job=job)
+    now = datetime.now(UTC)
+    if (
+        job.status == JobStatus.RUNNING
+        and job.execution_lease_expires_at is not None
+        and job.execution_lease_expires_at > now
+    ):
+        return ClaimResult(
+            outcome=ClaimOutcome.DEFERRED,
+            job=job,
+            deferred_until=job.execution_lease_expires_at,
         )
+    taken_over = job.status == JobStatus.RUNNING
+    if job.dispatch_id is None:
+        # Legacy row (published before the outbox cutover, or by an earlier
+        # release): assign a dispatch identity on the first claim so
+        # ownership checks apply from here on.
+        job.dispatch_id = uuid7()
+    # Rotate the attempt-distinguishing ownership token on every claim: an
+    # expired-lease takeover and a retry re-claim both supersede the previous
+    # attempt's credential, so a stale worker can never mutate over the new
+    # owner even though the dispatch identity is unchanged.
+    job.owner_token = uuid7()
     job.status = JobStatus.RUNNING
     job.attempt_count = job.attempt_count + 1
     if job.started_at is None:
-        job.started_at = datetime.now(UTC)
+        job.started_at = now
+    job.execution_lease_expires_at = now + timedelta(seconds=_execution_lease_seconds())
     await session.commit()
     await session.refresh(job)
-    return job
+    return ClaimResult(
+        outcome=ClaimOutcome.CLAIMED,
+        job=job,
+        dispatch_id=job.dispatch_id,
+        owner_token=job.owner_token,
+        taken_over=taken_over,
+    )
 
 
-async def update_progress(session: AsyncSession, *, job_id: uuid.UUID, progress: int) -> Job:
-    """Record a task's progress (0-100) on a running job."""
+async def release_dispatch(
+    session: AsyncSession,
+    *,
+    job_id: uuid.UUID,
+    owner_token: uuid.UUID,
+) -> bool:
+    """Release an owned attempt back to ``queued`` after a transient failure.
+
+    Owner-checked: only the attempt that currently owns the dispatch may
+    release it, and a terminal row is never un-terminaled. Returns ``True``
+    when the attempt was actually released, ``False`` when the row already
+    reached a terminal state under the same owner (nothing to release); a
+    superseded attempt raises :class:`StaleDispatchError` before any write,
+    even on a terminal row, so the wrapper logs the actual outcome. The
+    dispatch id and ``started_at`` are retained so a genuine retry of the same
+    dispatch re-claims the row with the same identity (and a fresh token).
+    """
+    job = await _get_job_locked(session, job_id=job_id)
+    _verify_owner(job, owner_token)
+    if _terminal(job.status):
+        return False
+    job.status = JobStatus.QUEUED
+    job.execution_lease_expires_at = None
+    await session.commit()
+    await session.refresh(job)
+    return True
+
+
+async def update_progress(
+    session: AsyncSession,
+    *,
+    job_id: uuid.UUID,
+    progress: int,
+    owner_token: uuid.UUID | None = None,
+) -> Job:
+    """Record a task's progress (0-100) on the owned job and renew the lease.
+
+    Renewing the lease on progress protects active document work: a worker
+    that keeps reporting progress keeps its ownership, while a worker that
+    stalls is eventually taken over. A terminal job whose owner matches is a
+    genuine conflict (409); a terminal or leased job owned by another dispatch
+    raises :class:`StaleDispatchError` instead.
+    """
     if not 0 <= progress <= 100:
         raise ValidationError(
             code="invalid_job_progress",
@@ -266,13 +469,18 @@ async def update_progress(session: AsyncSession, *, job_id: uuid.UUID, progress:
                 )
             ],
         )
-    job = await _get_job(session, job_id=job_id)
+    job = await _get_job_locked(session, job_id=job_id)
     if _terminal(job.status):
+        _verify_owner(job, owner_token)
         raise ConflictError(
             code="job_in_terminal_state",
             message="A finished job cannot be updated.",
         )
+    _verify_owner(job, owner_token)
     job.progress = progress
+    job.execution_lease_expires_at = datetime.now(UTC) + timedelta(
+        seconds=_execution_lease_seconds()
+    )
     await session.commit()
     await session.refresh(job)
     return job
@@ -283,17 +491,20 @@ async def succeed(
     *,
     job_id: uuid.UUID,
     result_reference: str | None = None,
+    owner_token: uuid.UUID | None = None,
 ) -> Job:
-    """Transition a job to ``succeeded`` with progress 100, and audit it.
+    """Transition the owned job to ``succeeded`` with progress 100, and audit it.
 
     Idempotent: calling it again on an already-``succeeded`` job is a no-op
     (a retried message that raced the original completion), so no second audit
-    row is written. A job that already failed or was cancelled is a 409 —
-    terminal states are never re-run.
+    row is written. Owner-checked: a stale attempt cannot succeed a job a
+    newer owner holds, and the execution lease is cleared on terminal
+    settlement.
     """
-    job = await _get_job(session, job_id=job_id)
+    job = await _get_job_locked(session, job_id=job_id)
     if job.status == JobStatus.SUCCEEDED:
         return job
+    _verify_owner(job, owner_token)
     if _terminal(job.status):
         raise ConflictError(
             code="job_in_terminal_state",
@@ -302,6 +513,7 @@ async def succeed(
     job.status = JobStatus.SUCCEEDED
     job.progress = 100
     job.completed_at = datetime.now(UTC)
+    job.execution_lease_expires_at = None
     if result_reference is not None:
         job.result_reference = result_reference
     await record_event(
@@ -330,17 +542,20 @@ async def fail(
     job_id: uuid.UUID,
     error_code: str,
     error_message: str,
+    owner_token: uuid.UUID | None = None,
 ) -> Job:
-    """Transition a job to ``failed`` with the error surface, and audit it.
+    """Transition the owned job to ``failed`` with the error surface, and audit it.
 
-    Called by tasks for permanent failures and by the retries-exhausted actor
-    when transient retries ran out. Idempotent on an already-``failed`` job
-    (so a re-delivered message cannot double-audit); a ``succeeded`` or
-    ``cancelled`` job is a 409.
+    Called by tasks for permanent failures and by the retries-exhausted
+    finalizer when transient retries ran out. Idempotent on an already-
+    ``failed`` job (so a re-delivered message cannot double-audit); owner-
+    checked so a stale attempt cannot fail a newer owner's dispatch; the
+    execution lease is cleared on terminal settlement.
     """
-    job = await _get_job(session, job_id=job_id)
+    job = await _get_job_locked(session, job_id=job_id)
     if job.status == JobStatus.FAILED:
         return job
+    _verify_owner(job, owner_token)
     if _terminal(job.status):
         raise ConflictError(
             code="job_in_terminal_state",
@@ -350,6 +565,7 @@ async def fail(
     job.error_code = error_code
     job.error_message = error_message
     job.completed_at = datetime.now(UTC)
+    job.execution_lease_expires_at = None
     await record_event(
         session,
         organisation_id=job.organisation_id,
@@ -369,3 +585,70 @@ async def fail(
     await session.refresh(job)
     JOBS_FAILED_TOTAL.labels(job_type=job.job_type).inc()
     return job
+
+
+async def settle_after_retries_exhausted(
+    session: AsyncSession,
+    *,
+    job_id: uuid.UUID,
+    exhausted_dispatch_id: uuid.UUID | None = None,
+    exhausted_owner_token: uuid.UUID | None = None,
+) -> Job | None:
+    """Settle the currently owned attempt failed, or ``None`` for a stale message.
+
+    Called by the retries-exhausted finalizer (``app.modules.jobs.tasks``).
+    The finalizer settles only the attempt the exhausted message actually
+    attempted and only when no live attempt owns it: a terminal job, or a row
+    whose current dispatch still carries a non-expired lease (a newer/live
+    attempt), means the exhausted message is a stale no-op that must not fail
+    the job.
+
+    ``exhausted_dispatch_id`` and ``exhausted_owner_token`` are the dispatch
+    and attempt credential the exhausted message actually claimed, stamped
+    into the message at claim time by the execution wrapper. Correlation is by
+    *attempt*, not dispatch alone: a retry re-claim or an expired-lease
+    takeover keeps the dispatch identity while rotating the owner token, so a
+    delayed exhausted message for an older attempt of the same dispatch must
+    not fail the newer queued/owned attempt (acceptance §5.5: a superseded
+    attempt cannot trigger an exhausted failure over a newer owner). When
+    either value differs from the row's current state, the message is
+    superseded and is acknowledged without settling the newer owner.
+
+    A stamp-less message (``None``/``None``) covers legacy releases sent
+    before the stamp existed. The explicit legacy behaviour is to settle the
+    current dispatch, but only while the row is still in the legacy state
+    (never claimed, so it carries no owner credential). Once the row carries
+    an owner token, a stamp-less message can only be a duplicate that
+    exhausted without ever claiming (deferral never stamps), so it is a stale
+    no-op and must not fail the row around the live owner's release.
+    """
+    job = await _get_job_locked(session, job_id=job_id)
+    if _terminal(job.status):
+        return None
+    if exhausted_dispatch_id is None and exhausted_owner_token is None:
+        # Stamp-less message: settle the current dispatch only for rows that
+        # are still in the legacy (never-claimed) state.
+        if job.owner_token is not None:
+            return None
+    else:
+        # Stamped message: the exhausted attempt must be the current owner.
+        # Either a different dispatch or a rotated owner token means the
+        # attempt was superseded; a partially-stamped message is treated as
+        # stale rather than risking the newer owner.
+        if exhausted_dispatch_id is None or exhausted_dispatch_id != job.dispatch_id:
+            return None
+        if exhausted_owner_token is None or exhausted_owner_token != job.owner_token:
+            return None
+    if (
+        job.status == JobStatus.RUNNING
+        and job.execution_lease_expires_at is not None
+        and job.execution_lease_expires_at > datetime.now(UTC)
+    ):
+        return None
+    return await fail(
+        session,
+        job_id=job_id,
+        error_code=ERROR_CODE_RETRIES_EXHAUSTED,
+        error_message=ERROR_MESSAGE_RETRIES_EXHAUSTED,
+        owner_token=job.owner_token,
+    )

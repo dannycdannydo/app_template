@@ -30,6 +30,7 @@ from dramatiq.brokers.stub import StubBroker
 from dramatiq.worker import Worker
 from sqlalchemy import Table
 
+from app.core.config import get_settings
 from app.db.base import Base
 from app.modules.jobs import service as jobs_service
 from app.modules.jobs import tasks as jobs_tasks
@@ -116,9 +117,11 @@ def test_job_table_shape_matches_blueprint_18() -> None:
         "created_at",
         "started_at",
         "completed_at",
-        # Durable delivery (plan P1) adds internal ownership fields; they are
-        # not part of the blueprint §18 shape and not exposed by API schemas.
+        # Durable delivery (plan P1/P2) adds internal ownership fields; they
+        # are not part of the blueprint §18 shape and not exposed by API
+        # schemas.
         "dispatch_id",
+        "owner_token",
         "execution_lease_expires_at",
     }
     assert "updated_at" not in columns
@@ -149,6 +152,12 @@ def test_retry_policy_contract() -> None:
         jobs_service.MARK_FAILED_AFTER_RETRIES_ACTOR
     )
     assert jobs_service.MAX_ATTEMPTS >= 2
+    # The standard task time limit is part of the shared policy (plan P2), so
+    # every durable actor is bounded and the execution lease exceeds it.
+    assert policy["time_limit"] == get_settings().job_task_time_limit_ms
+    assert get_settings().job_execution_lease_seconds * 1000 >= (
+        get_settings().job_task_time_limit_ms + 60_000
+    )
 
 
 def test_permanent_errors_are_never_retried(broker_and_worker: tuple[StubBroker, Worker]) -> None:
@@ -196,3 +205,39 @@ def test_job_id_from_message_extracts_enqueued_id() -> None:
     job_id = uuid.uuid4()
     message_dict = {"kwargs": {"job_id": str(job_id)}, "args": ()}
     assert jobs_tasks.job_id_from_message(message_dict) == job_id
+
+
+def test_attempt_stamp_from_message_reads_stamped_options() -> None:
+    """The exhausted-handler reads the stamped attempt correlation (P2).
+
+    The execution wrapper stamps the dispatch id and the rotated owner token
+    the message last claimed into the message options; the Retries middleware
+    forwards those options to the exhausted handler, which must correlate
+    against the current job row by attempt, not dispatch alone. A message
+    without the stamp (legacy release, or a duplicate that exhausted without
+    ever claiming) yields ``None`` and settles under the explicit legacy
+    rules.
+    """
+    dispatch_id = uuid.uuid4()
+    owner_token = uuid.uuid4()
+    stamped = {
+        "kwargs": {"job_id": str(uuid.uuid4())},
+        "options": {
+            "dispatch_id": str(dispatch_id),
+            "owner_token": str(owner_token),
+        },
+    }
+    stamp = jobs_tasks.attempt_stamp_from_message(stamped)
+    assert stamp is not None
+    assert stamp.dispatch_id == dispatch_id
+    assert stamp.owner_token == owner_token
+
+    legacy = {"kwargs": {"job_id": str(uuid.uuid4())}, "options": {}}
+    assert jobs_tasks.attempt_stamp_from_message(legacy) is None
+    # A partially-stamped message cannot be produced by one release of the
+    # wrapper; the legacy rules decide rather than risking a newer owner.
+    partial = {
+        "kwargs": {"job_id": str(uuid.uuid4())},
+        "options": {"dispatch_id": str(dispatch_id)},
+    }
+    assert jobs_tasks.attempt_stamp_from_message(partial) is None

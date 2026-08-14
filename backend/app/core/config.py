@@ -207,6 +207,30 @@ class Settings(BaseSettings):
             "`make worker` and the dev-docker worker service"
         ),
     )
+    job_task_time_limit_ms: int = Field(
+        default=600_000,
+        ge=60_000,
+        le=3_600_000,
+        description=(
+            "Dramatiq task time limit in milliseconds for durable job actors "
+            "(durable delivery plan P2): the TimeLimit middleware kills a "
+            "message that exceeds it, so the standard actor work budget is "
+            "bounded. The execution lease must exceed this by at least 60 "
+            "seconds (validated at startup)."
+        ),
+    )
+    job_execution_lease_seconds: int = Field(
+        default=900,
+        ge=120,
+        le=86_400,
+        description=(
+            "Execution lease in seconds for a claimed durable job attempt "
+            "(durable delivery plan P2): a worker owns a dispatch only until "
+            "this bound, progress updates renew it, and an expired lease lets "
+            "a duplicate or retry take the attempt over. Default 900 seconds "
+            "against the 600-second task time limit."
+        ),
+    )
     sentry_dsn: str = Field(
         default="",
         description=(
@@ -625,6 +649,15 @@ class Settings(BaseSettings):
     def _validate_config(self) -> Settings:
         if not self.database_url.startswith(("postgresql", "postgres")):
             raise ValueError("database_url must be a PostgreSQL URL")
+        # The execution lease must outlive the standard task time limit by at
+        # least 60 seconds (durable delivery plan P2): a lease that expires
+        # while the owning message is still within its time limit would let a
+        # duplicate take over a live attempt.
+        if self.job_execution_lease_seconds * 1000 < self.job_task_time_limit_ms + 60_000:
+            raise ValueError(
+                "job_execution_lease_seconds must exceed job_task_time_limit_ms "
+                "by at least 60 seconds"
+            )
         if self.app_env == "production" and self.debug:
             raise ValueError("debug must be False in the production environment")
         if self.app_env == "production" and not self.workos_api_key:

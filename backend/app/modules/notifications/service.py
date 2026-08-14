@@ -426,10 +426,11 @@ async def mark_delivery_running(
     """Transition a delivery to ``running`` at the start of a task attempt.
 
     Idempotent across retries: an already-``running`` row stays running and
-    the attempt counter increments (one per attempt), mirroring
-    ``jobs_service.mark_running``. A terminal delivery is never re-sent: a
-    message that arrives after the delivery already finished raises a 409,
-    which the task's terminal check avoids before sending.
+    the attempt counter increments (one per attempt), mirroring the durable
+    job's atomic dispatch claim (``jobs_service.claim_dispatch``). A terminal
+    delivery is never re-sent: a message that arrives after the delivery
+    already finished raises a 409, which the task's terminal check avoids
+    before sending.
     """
     delivery = await get_delivery_for_task(session, delivery_id=delivery_id)
     if is_delivery_terminal(delivery.status):
