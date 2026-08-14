@@ -734,6 +734,151 @@ async def test_orchestrator_request_scoped_expire_and_delete(migrated_database: 
         await engine.dispose()
 
 
+async def test_cleanup_continues_after_one_delete_failure(migrated_database: str) -> None:
+    """A failed provider deletion must not block the immediate best-effort
+    attempt of the remaining references of the same logical request (Scope §6.7
+    checkbox 1): the failed row keeps its safe failure marker, the later copy
+    is still deleted, and the feature-owned source object is untouched."""
+    engine, session_factory = _session_factory(migrated_database)
+    try:
+        async with session_factory() as session:
+            org = await _seed_organisation(session)
+
+        class _FlakyStore(FakeTransferStore):
+            """Fails the first provider delete this process sees, then succeeds."""
+
+            def __init__(self) -> None:
+                super().__init__()
+                self._delete_failures_left = 1
+                self.deleted_external_ids: list[str] = []
+
+            async def delete(self, reference: ExternalFileReference) -> None:
+                self.deleted_external_ids.append(reference.external_id)
+                if self._delete_failures_left > 0:
+                    self._delete_failures_left -= 1
+                    raise TransferExecutionUnavailableError("provider delete unavailable")
+                await super().delete(reference)
+
+        async with session_factory() as session:
+            flaky_store = _FlakyStore()
+            orchestrator, storage, store = await _orchestrator(session, store=flaky_store)
+            key = _source_key(org.id)
+            content = b"%PDF-1.7 continue" * 100
+            await storage.create_upload_url(
+                file_id=uuid.uuid4(),
+                object_key=key,
+                content_type="application/pdf",
+                size_bytes=len(content),
+            )
+            await storage.put(key, content, content_type="application/pdf")
+            # Two provider copies of one logical request (different digests).
+            first_key: str | None = None
+            for digest in ("1111" * 16, "2222" * 16):
+                reference = await orchestrator.create_or_reuse_reference(
+                    organisation_id=org.id,
+                    logical_request_id="req-continue",
+                    provider_id="fake",
+                    mode=TransferMode.PROVIDER_UPLOAD,
+                    source_reference=key,
+                    source_digest=digest,
+                    size_bytes=len(content),
+                    mime_type="application/pdf",
+                    source_lifecycle=SourceLifecycle.TRANSIENT,
+                    region="eu-west-1",
+                    expires_at=datetime.now(UTC) + timedelta(hours=1),
+                )
+                if first_key is None:
+                    first_key = reference.idempotency_key
+            # The flaky store fails the FIRST delete attempt (rows are iterated
+            # in creation order); the sweep must continue to the second copy.
+            assert first_key is not None
+            assert (
+                await orchestrator.delete_references_for_request(
+                    organisation_id=org.id, logical_request_id="req-continue"
+                )
+                == 1
+            )
+            # Both provider copies were attempted; the second was deleted.
+            assert len(flaky_store.deleted_external_ids) == 2
+            assert len(store.deleted) == 1
+            rows = await _all_rows(session, org.id, "req-continue")
+            by_key = {row.idempotency_key: row for row in rows}
+            failed_row = by_key[first_key]
+            assert failed_row.status == "live"
+            assert failed_row.error_code == "provider_reference_deletion_failed"
+            assert failed_row.deletion_attempted_at is not None
+            assert {row.status for row in rows if row is not failed_row} == {"deleted"}
+            # The feature-owned source object is untouched.
+            assert await storage.head_object(key) is not None
+    finally:
+        await engine.dispose()
+
+
+async def test_restart_after_crash_cleans_reference_from_durable_row(
+    migrated_database: str,
+) -> None:
+    """A worker crash between staging and terminal cleanup leaves a live
+    durable row; a restarted orchestrator with a fresh store resolves it from
+    the durable row alone and completes the terminal cleanup (Scope §2.5/§6.7
+    checkbox 1/4 crash recovery)."""
+    engine, session_factory = _session_factory(migrated_database)
+    try:
+        async with session_factory() as session:
+            org = await _seed_organisation(session)
+            orchestrator, storage, store = await _orchestrator(session)
+            key = _source_key(org.id)
+            content = b"%PDF-1.7 crash" * 100
+            await storage.create_upload_url(
+                file_id=uuid.uuid4(),
+                object_key=key,
+                content_type="application/pdf",
+                size_bytes=len(content),
+            )
+            await storage.put(key, content, content_type="application/pdf")
+            await orchestrator.create_or_reuse_reference(
+                organisation_id=org.id,
+                logical_request_id="req-crash",
+                provider_id="fake",
+                mode=TransferMode.PROVIDER_UPLOAD,
+                source_reference=key,
+                source_digest="cafe" * 16,
+                size_bytes=len(content),
+                mime_type="application/pdf",
+                source_lifecycle=SourceLifecycle.TRANSIENT,
+                region="eu-west-1",
+                expires_at=datetime.now(UTC) + timedelta(hours=1),
+            )
+            assert len(store.records) == 1
+        # Crash: no finalize ran; the durable row is still live after the
+        # session boundary (a fresh process would see exactly this).
+        async with session_factory() as session:
+            rows = await _all_rows(session, org.id, "req-crash")
+            assert len(rows) == 1
+            assert rows[0].status == "live"
+        # Restart: a fresh orchestrator with a fresh store (empty in-process
+        # cache) resolves the authoritative row from the durable record and
+        # completes the terminal cleanup.
+        async with session_factory() as session:
+            restarted, _, fresh_store = await _orchestrator(session)
+            result = await restarted.finalize_request_references(
+                organisation_id=org.id, logical_request_id="req-crash"
+            )
+            assert result.expired == 1
+            assert result.deleted == 1
+            # The fresh store deleted the copy purely from the durable row
+            # (FakeTransferStore.delete no-ops without a staged record, but
+            # the durable row — the proof of cleanup — is terminal; the real
+            # adapters issue the provider DELETE from the same durable row,
+            # covered by the reconcile fresh-adapter test).
+            rows = await _all_rows(session, org.id, "req-crash")
+            assert rows[0].status == "deleted"
+            assert rows[0].deletion_attempted_at is None
+            assert await storage.head_object(key) is not None  # source untouched
+            _ = fresh_store
+    finally:
+        await engine.dispose()
+
+
 async def test_concurrent_duplicate_creation_yields_one_live_row(migrated_database: str) -> None:
     engine, session_factory = _session_factory(migrated_database)
     try:

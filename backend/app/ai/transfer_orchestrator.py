@@ -32,16 +32,21 @@ produces no durable reference and is refused here.
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import UUID
 
 import structlog
 
-from app.ai.errors import TransferExecutionUnavailableError
+from app.ai.errors import AIError, TransferExecutionUnavailableError
 from app.ai.managed_url import mint_managed_download_url
-from app.ai.persistence.references import TransferReferenceStore
+from app.ai.persistence.references import (
+    ERROR_CODE_DELETION_FAILED,
+    TransferReferenceStore,
+)
 from app.ai.staging import ExternalFileReference, TransferStore
 from app.ai.transfer import (
     MANAGED_URL_DEFAULT_TTL_SECONDS,
@@ -49,6 +54,14 @@ from app.ai.transfer import (
     TransferMode,
     derive_idempotency_key,
 )
+from app.modules.audit.service import (
+    ACTION_AI_TRANSFER_DELETED,
+    ACTION_AI_TRANSFER_EXPIRED,
+    ACTION_AI_TRANSFER_FAILED,
+    ACTION_AI_TRANSFER_REUSED,
+    ACTION_AI_TRANSFER_STAGED,
+)
+from app.observability.metrics import observe_ai_transfer_outcome
 from app.storage.base import ObjectStorage
 from app.storage.types import SignedUrl
 
@@ -57,9 +70,45 @@ from app.storage.types import SignedUrl
 #: the URL is minted per dispatch and expires through its short TTL (Scope §2.3).
 _PROVIDER_COPY_MODES = frozenset({TransferMode.PROVIDER_UPLOAD, TransferMode.STORAGE_REFERENCE})
 
+#: Safe audit metadata keys. Never object keys, external ids, gs:// URIs,
+#: signed URLs or content (BP §28).
+_AUDIT_MODE_KEY = "transfer_mode"
+_AUDIT_PROVIDER_KEY = "provider"
+_AUDIT_COUNT_KEY = "count"
+_AUDIT_ERROR_CODE_KEY = "error_code"
+
+
+def _safe_error_code(exc: Exception) -> str:
+    """Extract the safe AI taxonomy error code from a transfer exception.
+
+    The AI taxonomy's ``error_code`` is the only exception surface allowed
+    into audit events and metric labels — never the exception message, a
+    provider response, a URL or content (BP §28). A non-taxonomy exception
+    (unexpected adapter crash) falls back to a generic safe code so the
+    failure outcome stays observable without leaking internals.
+    """
+    if isinstance(exc, AIError) and exc.error_code:
+        return exc.error_code
+    return "ai_transfer_error"
+
+
 #: Module logger. Mode/outcome metadata only — never object keys, gs:// URIs,
 #: signed URLs or content (BP §28).
 logger = structlog.get_logger()
+
+#: The audit-recording seam the orchestrator emits transfer-lifecycle events
+#: through. Wired by the caller with its session (the ``ai.execute`` job and
+#: the demonstration flow pass the caller-bound session; the reconciliation
+#: job passes its own). ``None`` disables audit recording for hermetic tests.
+AuditRecorder = Callable[[str, str, str, UUID, dict[str, Any] | None], Awaitable[None]]
+
+
+@dataclass(frozen=True)
+class RequestFinalizeResult:
+    """Outcome of the terminal reference sweep for one logical request."""
+
+    expired: int
+    deleted: int
 
 
 class ManagedUrlStager(Protocol):
@@ -103,11 +152,36 @@ class TransferOrchestrator:
         store: TransferStore | None = None,
         references: TransferReferenceStore,
         managed_url_stager: ManagedUrlStager | None = None,
+        audit_recorder: AuditRecorder | None = None,
     ) -> None:
         self._storage = storage
         self._store = store
         self._references = references
         self._managed_url_stager = managed_url_stager
+        self._audit_recorder = audit_recorder
+
+    async def _audit(
+        self,
+        action: str,
+        *,
+        resource_type: str,
+        resource_id: str,
+        organisation_id: UUID,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Record one low-cardinality transfer-lifecycle audit event, if wired.
+
+        Safe payloads only: mode/provider/count/error code, never object keys,
+        external ids, gs:// URIs, managed signed URLs or content (BP §28,
+        Scope §2.3/§2.5). Failures are suppressed — auditing must never mask
+        or block the transfer lifecycle itself.
+        """
+        if self._audit_recorder is None:
+            return
+        with contextlib.suppress(Exception):
+            await self._audit_recorder(
+                action, resource_type, resource_id, organisation_id, metadata
+            )
 
     async def create_or_reuse_reference(
         self,
@@ -156,30 +230,37 @@ class TransferOrchestrator:
                 raise TransferExecutionUnavailableError(
                     "the selected provider does not match the transfer store"
                 )
-            staged = await self._store.stage(
-                mode=mode,
-                organisation_id=organisation_id,
-                logical_request_id=logical_request_id,
-                source_reference=source_reference,
-                source_digest=source_digest,
-                mime_type=mime_type,
-                size_bytes=size_bytes,
-                source_lifecycle=source_lifecycle,
-                region=region,
-                expires_at=expires_at,
-                source_path=source_path,
-            )
             try:
-                return await self._references.create_or_adopt(staged)
-            except Exception:
-                # Compensation boundary: the provider copy is staged but the
-                # durable record failed, so the AI-owned copy must not be left
-                # untracked (no row for §6.7 reconciliation to find). Best-
-                # effort delete through the provider-neutral store; if that also
-                # fails the copy stays bounded by provider expiry and the
-                # reconciliation job's coverage of cleanup failures.
-                with contextlib.suppress(Exception):
-                    await self._store.delete(staged)
+                staged = await self._store.stage(
+                    mode=mode,
+                    organisation_id=organisation_id,
+                    logical_request_id=logical_request_id,
+                    source_reference=source_reference,
+                    source_digest=source_digest,
+                    mime_type=mime_type,
+                    size_bytes=size_bytes,
+                    source_lifecycle=source_lifecycle,
+                    region=region,
+                    expires_at=expires_at,
+                    source_path=source_path,
+                )
+            except Exception as exc:
+                # Safe failure outcome observability (Scope §6.7 checkbox 3):
+                # a staging/upload failure carries the safe AI taxonomy error
+                # code only — never exception text, provider responses, URLs,
+                # external ids, keys or content (BP §28).
+                await self._audit(
+                    ACTION_AI_TRANSFER_FAILED,
+                    resource_type="ai_attachment_reference",
+                    resource_id=logical_request_id,
+                    organisation_id=organisation_id,
+                    metadata={
+                        _AUDIT_MODE_KEY: mode.value,
+                        _AUDIT_PROVIDER_KEY: provider_id,
+                        _AUDIT_ERROR_CODE_KEY: _safe_error_code(exc),
+                    },
+                )
+                observe_ai_transfer_outcome(mode=mode.value, provider=provider_id, result="failed")
                 raise
         else:
             staged = ExternalFileReference(
@@ -207,7 +288,31 @@ class TransferOrchestrator:
                 ),
                 created_at=datetime.now(UTC),
             )
-        return await self._references.create_or_adopt(staged)
+        try:
+            reference = await self._references.create_or_adopt(staged)
+        except Exception:
+            # Compensation boundary: the provider copy is staged but the
+            # durable record failed, so the AI-owned copy must not be left
+            # untracked (no row for §6.7 reconciliation to find). Best-
+            # effort delete through the provider-neutral store; if that also
+            # fails the copy stays bounded by provider expiry and the
+            # reconciliation job's coverage of cleanup failures.
+            if mode in _PROVIDER_COPY_MODES and self._store is not None:
+                with contextlib.suppress(Exception):
+                    await self._store.delete(staged)
+            raise
+        await self._audit(
+            ACTION_AI_TRANSFER_STAGED,
+            resource_type="ai_attachment_reference",
+            resource_id=logical_request_id,
+            organisation_id=organisation_id,
+            metadata={
+                _AUDIT_MODE_KEY: mode.value,
+                _AUDIT_PROVIDER_KEY: provider_id,
+            },
+        )
+        observe_ai_transfer_outcome(mode=mode.value, provider=provider_id, result="staged")
+        return reference
 
     async def find_reusable_reference(
         self,
@@ -229,7 +334,7 @@ class TransferOrchestrator:
         digest/provider/region or an expired reference always yields a new
         idempotent transfer (Scope §5.4).
         """
-        return await self._references.find_live(
+        reference = await self._references.find_live(
             organisation_id=organisation_id,
             logical_request_id=logical_request_id,
             provider_id=provider_id,
@@ -237,6 +342,19 @@ class TransferOrchestrator:
             source_digest=source_digest,
             region=region,
         )
+        if reference is not None:
+            await self._audit(
+                ACTION_AI_TRANSFER_REUSED,
+                resource_type="ai_attachment_reference",
+                resource_id=logical_request_id,
+                organisation_id=organisation_id,
+                metadata={
+                    _AUDIT_MODE_KEY: mode.value,
+                    _AUDIT_PROVIDER_KEY: provider_id,
+                },
+            )
+            observe_ai_transfer_outcome(mode=mode.value, provider=provider_id, result="reused")
+        return reference
 
     async def expire_references_for_request(
         self, *, organisation_id: UUID, logical_request_id: str
@@ -261,21 +379,32 @@ class TransferOrchestrator:
 
         The caller's ``reference`` may be stale — it was captured before the
         provider copy was recreated — so the authoritative current row is
-        resolved from the durable record first (and its provider/mode validated
-        against the caller's) before any provider deletion. For
-        ``provider_upload`` and ``storage_reference`` the provider store removes
-        the provider-hosted file / GCS staging object named by the **resolved**
-        row, and only then is that row marked ``deleted``; a delayed cleanup can
+        resolved *and claimed atomically* from the durable record first
+        (:meth:`TransferReferenceStore.claim_for_deletion`: one transaction
+        resolves the row and stamps the deletion attempt with ``FOR UPDATE``,
+        serializing concurrent claims of the same key; duplicate provider
+        DELETEs from a later caller are absorbed by 404/410 idempotency), and
+        its provider/mode validated against the caller's. For a
+        ``provider_upload`` or ``storage_reference`` reference the owning
+        store removes the provider-hosted file named by the **resolved** row,
+        and only then is that row marked ``deleted``; a delayed cleanup can
         never delete an old copy and orphan the live one (Scope §6.3). The
         feature-owned source object is never touched — this method never calls
         ``ObjectStorage.delete_object`` (Scope §2.5). A provider deletion
-        failure propagates and leaves the row for the reconciliation job (Scope
-        §6.7). The managed-signed-url mode has no provider copy; the row is
-        marked deleted directly. Returns whether a durable row was marked
-        deleted (``False`` when nothing was left to delete, e.g. the row was
-        already terminal).
+        failure is stamped on the row (safe ``provider_reference_deletion_failed``
+        code plus the attempt timestamp) and propagates so the caller's
+        terminal handling and the §6.7 reconciliation sweep can re-claim it
+        after the bounded backoff window. The managed-signed-url mode has no
+        provider copy: its row is marked deleted directly (the URL is minted
+        per dispatch and expires through its short TTL, Scope §2.3). Vertex
+        GCS staging objects are deleted immediately through the store at
+        terminal cleanup (Scope §2.5 permits immediate best-effort deletion;
+        only the *scheduled* reconciliation job excludes them — the deployer's
+        ``age = 1`` lifecycle is the backstop). Returns whether a durable row
+        was marked deleted (``False`` when nothing was left to delete, e.g.
+        the row was already terminal).
         """
-        current = await self._references.resolve_for_deletion(
+        current = await self._references.claim_for_deletion(
             organisation_id=reference.organisation_id,
             idempotency_key=reference.idempotency_key,
         )
@@ -285,18 +414,94 @@ class TransferOrchestrator:
             raise TransferExecutionUnavailableError(
                 "the durable reference does not match the caller's transfer"
             )
-        if current.mode in _PROVIDER_COPY_MODES:
-            if self._store is None:
-                # Unreachable in normal wiring (creation requires the store);
-                # fail closed rather than deleting nothing silently.
-                raise TransferExecutionUnavailableError(
-                    "the selected transfer mode requires a provider transfer store"
+        if current.mode is TransferMode.MANAGED_SIGNED_URL:
+            # No provider-hosted copy (managed signed URL): the row is marked
+            # deleted directly, exactly as before.
+            deleted = await self._references.mark_deleted(
+                organisation_id=current.organisation_id,
+                idempotency_key=current.idempotency_key,
+            )
+            if deleted:
+                await self._audit(
+                    ACTION_AI_TRANSFER_DELETED,
+                    resource_type="ai_attachment_reference",
+                    resource_id=current.logical_request_id,
+                    organisation_id=current.organisation_id,
+                    metadata={
+                        _AUDIT_MODE_KEY: current.mode.value,
+                        _AUDIT_PROVIDER_KEY: current.provider,
+                    },
                 )
+                observe_ai_transfer_outcome(
+                    mode=current.mode.value,
+                    provider=current.provider,
+                    result="deleted",
+                )
+            return deleted
+        if self._store is None or self._store.provider_id != current.provider:
+            # Unreachable in normal wiring (creation requires the store of the
+            # owning provider); fail closed rather than deleting nothing
+            # silently. The claim stamp stays on the row so it backs off and
+            # the sweep re-claims it once the provider is deployed.
+            raise TransferExecutionUnavailableError(
+                "the selected transfer mode requires a provider transfer store"
+            )
+        try:
             await self._store.delete(current)
-        return await self._references.mark_deleted(
+        except Exception as exc:
+            # The provider copy survives; record the safe failure so the
+            # reconciliation sweep (not this path) retries after backoff, then
+            # re-raise for the caller's terminal handling. Never the exception
+            # internals — the durable error code is the safe surface (BP §28).
+            await self._references.mark_deletion_attempted(
+                organisation_id=current.organisation_id,
+                idempotency_key=current.idempotency_key,
+                error_code=ERROR_CODE_DELETION_FAILED,
+            )
+            # Safe failure outcome observability (Scope §6.7 checkbox 3): the
+            # audit payload carries mode/provider and the safe error code only
+            # — never exception text, provider responses, URLs, external ids,
+            # keys or content (BP §28).
+            await self._audit(
+                ACTION_AI_TRANSFER_FAILED,
+                resource_type="ai_attachment_reference",
+                resource_id=current.logical_request_id,
+                organisation_id=current.organisation_id,
+                metadata={
+                    _AUDIT_MODE_KEY: current.mode.value,
+                    _AUDIT_PROVIDER_KEY: current.provider,
+                    _AUDIT_ERROR_CODE_KEY: _safe_error_code(exc),
+                },
+            )
+            observe_ai_transfer_outcome(
+                mode=current.mode.value,
+                provider=current.provider,
+                result="failed",
+            )
+            raise TransferExecutionUnavailableError(
+                "the provider-side copy could not be deleted"
+            ) from exc
+        deleted = await self._references.mark_deleted(
             organisation_id=current.organisation_id,
             idempotency_key=current.idempotency_key,
         )
+        if deleted:
+            await self._audit(
+                ACTION_AI_TRANSFER_DELETED,
+                resource_type="ai_attachment_reference",
+                resource_id=current.logical_request_id,
+                organisation_id=current.organisation_id,
+                metadata={
+                    _AUDIT_MODE_KEY: current.mode.value,
+                    _AUDIT_PROVIDER_KEY: current.provider,
+                },
+            )
+            observe_ai_transfer_outcome(
+                mode=current.mode.value,
+                provider=current.provider,
+                result="deleted",
+            )
+        return deleted
 
     async def delete_references_for_request(
         self, *, organisation_id: UUID, logical_request_id: str
@@ -305,21 +510,70 @@ class TransferOrchestrator:
 
         Iterates the request's references (org-scoped) and deletes each
         remaining provider copy best-effort through :meth:`delete_reference`,
-        which resolves the authoritative current row per key — so this sweep
-        removes the copies of expired references too, and calling it after
-        :meth:`expire_references_for_request` composes safely instead of
-        stranding provider copies. A provider deletion failure stops the sweep
-        and leaves the remaining rows for the reconciliation job. Returns the
-        number of durable rows marked deleted.
+        which resolves and atomically claims the authoritative current row per
+        key — so this sweep removes the copies of expired references too, and
+        calling it after :meth:`expire_references_for_request` composes safely
+        instead of stranding provider copies. A provider deletion failure is
+        collected and suppressed per reference (the row is already stamped for
+        the §6.7 reconciliation sweep's bounded backoff, and for GCS staging
+        objects the deployer-owned ``age = 1`` lifecycle is the backstop) so a
+        failing copy never blocks the immediate best-effort attempt of the
+        remaining copies (Scope §6.7 checkbox 1). Returns the number of
+        durable rows marked deleted.
         """
         references = await self._references.list_for_request(
             organisation_id=organisation_id, logical_request_id=logical_request_id
         )
         deleted = 0
         for reference in references:
-            if await self.delete_reference(reference=reference):
-                deleted += 1
+            try:
+                if await self.delete_reference(reference=reference):
+                    deleted += 1
+            except Exception:
+                # The row was claimed (stamped) before the provider call, so
+                # the sweep re-claims it after the backoff window; continue so
+                # every later copy still receives an immediate attempt. Never
+                # logged with ids or URLs (BP §28).
+                continue
         return deleted
+
+    async def finalize_request_references(
+        self, *, organisation_id: UUID, logical_request_id: str
+    ) -> RequestFinalizeResult:
+        """Terminal reference sweep for one logical request (v0.8 Scope §2.5/§6.7).
+
+        Runs once at terminal execution — success, permanent failure or
+        exhausted retries — and composes the two terminal transitions safely:
+
+        1. every live reference is marked ``expired`` (no longer reusable,
+           rows never block a replacement), and
+        2. every remaining provider copy is deleted best-effort through
+           :meth:`delete_reference`, which resolves each authoritative row,
+           stamps the deletion attempt and records the safe failure code when
+           the provider delete fails — leaving the row for the §6.7
+           reconciliation sweep's bounded backoff instead of silently
+           stranding it.
+
+        The feature-owned source object is never touched by construction.
+        Returns the counts for the audit/observability surface; the audit
+        events themselves are emitted by :meth:`expire_references_for_request`
+        and :meth:`delete_reference`.
+        """
+        expired = await self.expire_references_for_request(
+            organisation_id=organisation_id, logical_request_id=logical_request_id
+        )
+        if expired:
+            await self._audit(
+                ACTION_AI_TRANSFER_EXPIRED,
+                resource_type="ai_attachment_reference",
+                resource_id=logical_request_id,
+                organisation_id=organisation_id,
+                metadata={_AUDIT_COUNT_KEY: expired},
+            )
+        deleted = await self.delete_references_for_request(
+            organisation_id=organisation_id, logical_request_id=logical_request_id
+        )
+        return RequestFinalizeResult(expired=expired, deleted=deleted)
 
     async def mint_managed_url(
         self,
@@ -364,4 +618,4 @@ class TransferOrchestrator:
         )
 
 
-__all__ = ["TransferOrchestrator"]
+__all__ = ["RequestFinalizeResult", "TransferOrchestrator"]

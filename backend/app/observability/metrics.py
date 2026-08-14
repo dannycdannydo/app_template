@@ -121,6 +121,32 @@ AI_BUDGET_DENIALS_TOTAL = Counter(
     ["task"],
 )
 
+# v0.8 large-file transfer observability (Scope §2.5/§6.7): low-cardinality
+# counters for mode selection, lifecycle outcomes and the reconciliation sweep
+# plus a cleanup backlog gauge. Labels are mode/provider ids and safe outcomes
+# only — never object keys, external file ids, gs:// URIs, managed signed
+# URLs, request ids or content (BP §28, Scope §2.3).
+AI_TRANSFER_SELECTIONS_TOTAL = Counter(
+    "ai_transfer_selections_total",
+    "Selected large-file transfer modes by mode and provider",
+    ["mode", "provider"],
+)
+AI_TRANSFER_RECONCILIATION_TOTAL = Counter(
+    "ai_transfer_reconciliation_total",
+    "Reconciliation sweep outcomes by provider and result",
+    ["provider", "result"],
+)
+AI_TRANSFER_OUTCOMES_TOTAL = Counter(
+    "ai_transfer_outcomes_total",
+    "Transfer lifecycle outcomes by mode, provider and result",
+    ["mode", "provider", "result"],
+)
+AI_TRANSFER_CLEANUP_BACKLOG = Gauge(
+    "ai_transfer_cleanup_backlog",
+    "Provider-file references currently waiting on the reconciliation sweep",
+    ["mode"],
+)
+
 # The template's Dramatiq queues (blueprint §18 example queues: default,
 # documents, integrations, ai, emails): ``default`` carries the job-infra
 # retries-exhausted finalizer, ``documents`` the file-processing job, ``emails``
@@ -252,6 +278,47 @@ def observe_ai_fallback(*, task: str, provider: str, model: str) -> None:
 def observe_ai_budget_denial(*, task: str) -> None:
     """Record one monthly organisation AI budget denial before dispatch."""
     AI_BUDGET_DENIALS_TOTAL.labels(task=task).inc()
+
+
+def observe_ai_transfer_selection(*, mode: str, provider: str) -> None:
+    """Record one deterministic non-inline transfer-mode selection (Scope §6.7).
+
+    ``mode`` and ``provider`` are low-cardinality registry ids; the durable
+    ``ai_attachment_references`` rows are the per-request source of truth.
+    """
+    AI_TRANSFER_SELECTIONS_TOTAL.labels(mode=mode, provider=provider).inc()
+
+
+def observe_ai_transfer_reconciliation(*, provider: str, result: str) -> None:
+    """Record one reconciliation outcome: ``deleted`` or ``failed``.
+
+    A ``failed`` outcome leaves the row stamped for the bounded backoff
+    window, so the same copy is never re-attempted every sweep run (Scope
+    §2.5/§6.7).
+    """
+    AI_TRANSFER_RECONCILIATION_TOTAL.labels(provider=provider, result=result).inc()
+
+
+def observe_ai_transfer_outcome(*, mode: str, provider: str, result: str) -> None:
+    """Record one transfer lifecycle outcome (Scope §6.7 checkbox 3).
+
+    ``result`` is one of ``staged``, ``reused``, ``deleted`` or ``failed``;
+    the labels are low-cardinality registry ids and a safe outcome — never
+    object keys, external file ids, cloud URIs, managed signed URLs, request
+    ids, exception text or content (BP §28). ``expired`` stays audit-only
+    (request-scoped count with no single mode/provider).
+    """
+    AI_TRANSFER_OUTCOMES_TOTAL.labels(mode=mode, provider=provider, result=result).inc()
+
+
+def set_ai_transfer_cleanup_backlog(*, count: int) -> None:
+    """Refresh the provider-file cleanup backlog gauge (Scope §6.7).
+
+    Counts only provider-hosted copies awaiting the reconciliation sweep;
+    managed signed URLs and Vertex GCS staging objects are never counted
+    (Scope §2.5). The gauge is process-local and refreshed per sweep run.
+    """
+    AI_TRANSFER_CLEANUP_BACKLOG.labels(mode="provider_upload").set(count)
 
 
 def update_queue_depths() -> None:

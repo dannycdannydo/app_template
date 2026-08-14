@@ -51,18 +51,26 @@ from app.ai.persistence.models import AIAttachmentReference, ExternalReferenceSt
 from app.ai.persistence.queries import (
     ai_attachment_reference_for_deletion_statement,
     ai_attachment_references_for_request_statement,
+    ai_attachment_references_needing_reconciliation_statement,
     ai_live_attachment_reference_by_key_statement,
 )
 from app.ai.staging import ExternalFileReference
 from app.ai.transfer import SourceLifecycle, TransferMode, derive_idempotency_key
 
+#: Safe error code recorded on a reference row when terminal cleanup or the
+#: reconciliation sweep could not delete the provider-hosted copy; the row
+#: stays cleanable and the sweep retries after the bounded backoff window
+#: (v0.8 Scope §2.5/§6.7). Never a stack trace, provider response or URL (BP §28).
+ERROR_CODE_DELETION_FAILED = "provider_reference_deletion_failed"
+
 
 def _row_to_reference(row: AIAttachmentReference) -> ExternalFileReference:
     """Map a durable row back to the provider-neutral reference contract.
 
-    The row is the source of truth for the durable fields; the error code and
-    bounded metadata are operational row columns that never leave the
-    database.
+    The row is the source of truth for the durable fields; the safe deletion
+    failure code travels on the contract (never a stack trace, provider
+    response, URL or content — BP §28) and the remaining bounded metadata is
+    operational row data that never leaves the database.
     """
     return ExternalFileReference(
         mode=TransferMode(row.transfer_mode),
@@ -82,6 +90,8 @@ def _row_to_reference(row: AIAttachmentReference) -> ExternalFileReference:
         expires_at=row.expires_at,
         last_used_at=row.last_used_at,
         deleted_at=row.deleted_at,
+        deletion_attempted_at=row.deletion_attempted_at,
+        error_code=row.error_code,
     )
 
 
@@ -108,7 +118,15 @@ class TransferReferenceStore(Protocol):
 
     async def mark_deleted(self, *, organisation_id: UUID, idempotency_key: str) -> bool: ...
 
-    async def resolve_for_deletion(
+    async def mark_deletion_attempted(
+        self, *, organisation_id: UUID, idempotency_key: str, error_code: str | None
+    ) -> bool: ...
+
+    async def claim_needing_reconciliation(
+        self, *, retry_after: datetime, batch_size: int
+    ) -> list[ExternalFileReference]: ...
+
+    async def claim_for_deletion(
         self, *, organisation_id: UUID, idempotency_key: str
     ) -> ExternalFileReference | None: ...
 
@@ -263,9 +281,10 @@ class SQLTransferReferenceStore:
         the deletion on the row that owned the deleted provider copy. Called
         only *after* the best-effort provider-side deletion succeeded or when
         there is no provider copy to delete; the reference row is the durable
-        proof that the provider copy was cleaned up (Scope §2.5). Returns
-        whether a row was marked (``False`` when every row for the key is
-        already terminal).
+        proof that the provider copy was cleaned up (Scope §2.5). A row that
+        reaches here is no longer reconcilable: the successful terminal state
+        clears any recorded deletion failure. Returns whether a row was marked
+        (``False`` when every row for the key is already terminal).
         """
         row = await self._session.scalar(
             ai_attachment_reference_for_deletion_statement(organisation_id, idempotency_key)
@@ -274,26 +293,103 @@ class SQLTransferReferenceStore:
             return False
         row.status = ExternalReferenceStatus.DELETED.value
         row.deleted_at = datetime.now(UTC)
+        row.error_code = None
+        row.deletion_attempted_at = None
         await self._session.commit()
         return True
 
-    async def resolve_for_deletion(
-        self, *, organisation_id: UUID, idempotency_key: str
-    ) -> ExternalFileReference | None:
-        """Resolve the authoritative row owning the current provider copy.
+    async def mark_deletion_attempted(
+        self, *, organisation_id: UUID, idempotency_key: str, error_code: str | None
+    ) -> bool:
+        """Record that terminal cleanup attempted this row's provider delete.
 
-        Terminal deletion must act on the row that owns the current provider
-        copy, not on a caller-supplied possibly stale reference: the live row is
-        preferred (it names the copy the last create/adopt left in place), and
-        when no row is live the newest remaining (expired) row is used so a
-        sweep after :meth:`expire_all_for_request` still deletes the copies.
-        Returns ``None`` when every row for the key is already terminal.
+        Stamped by the orchestrator *before* the best-effort provider-side
+        deletion (Scope §2.5): a successful deletion follows with
+        :meth:`mark_deleted` (which clears the attempt marker), a failed one
+        leaves the timestamp and the safe error code on the row so the §6.7
+        reconciliation sweep can re-claim it after the bounded backoff window
+        instead of deleting the same copy forever. Returns whether a
+        non-deleted row was found.
         """
         row = await self._session.scalar(
             ai_attachment_reference_for_deletion_statement(organisation_id, idempotency_key)
         )
         if row is None:
+            return False
+        row.deletion_attempted_at = datetime.now(UTC)
+        if error_code is None:
+            row.error_code = None
+        else:
+            row.error_code = error_code
+        await self._session.commit()
+        return True
+
+    async def claim_needing_reconciliation(
+        self, *, retry_after: datetime, batch_size: int
+    ) -> list[ExternalFileReference]:
+        """Atomically claim the bounded next batch of provider files to clean.
+
+        The candidate selection and the deletion-attempt stamp happen in one
+        transaction: the batch is selected with ``FOR UPDATE SKIP LOCKED``
+        (locked rows of a concurrent worker are skipped, never re-selected)
+        and every selected row is stamped ``deletion_attempted_at`` before the
+        transaction commits. A crashed worker therefore leaves a reconcilable
+        marker, two workers can never select the same row (the stamp excludes
+        it from every later predicate, and the row lock excludes it while the
+        claim is in flight), and a row whose provider has no deployed store is
+        still stamped — so even the fail-closed path backs off instead of
+        being re-claimed every sweep (Scope §2.5/§6.7). The caller deletes
+        through the owning provider's store afterwards; ``mark_deleted`` clears
+        the stamp on success.
+        """
+        rows = (
+            await self._session.scalars(
+                ai_attachment_references_needing_reconciliation_statement(
+                    retry_after=retry_after, batch_size=batch_size
+                ).with_for_update(
+                    of=AIAttachmentReference.__table__,
+                    skip_locked=True,
+                )
+            )
+        ).all()
+        claimed_at = datetime.now(UTC)
+        for row in rows:
+            row.deletion_attempted_at = claimed_at
+            row.error_code = None
+        await self._session.commit()
+        return [_row_to_reference(row) for row in rows]
+
+    async def claim_for_deletion(
+        self, *, organisation_id: UUID, idempotency_key: str
+    ) -> ExternalFileReference | None:
+        """Resolve the authoritative row and claim it for deletion atomically.
+
+        One transaction: the authoritative remaining row for the key is
+        selected with ``FOR UPDATE`` and immediately stamped
+        (``deletion_attempted_at``, safe error code cleared) before the commit.
+        The row lock serializes two concurrent claims of the same key, and the
+        stamp removes the row from the reconciliation sweep's candidates
+        within its bounded backoff window. Note the guarantee is a bounded
+        serialization, not an exclusive ownership: the lock is released when
+        the stamp commits (before the provider I/O), so a *later* terminal
+        caller can claim the same still-undeleted row again — duplicate
+        provider DELETEs are absorbed by the adapters' 404/410 idempotency,
+        which is what keeps this safe. The caller then deletes the provider
+        copy; a success clears the stamp via :meth:`mark_deleted`, a failure
+        stamps the safe error code via :meth:`mark_deletion_attempted` for the
+        reconciliation sweep. Returns ``None`` when every row for the key is
+        already terminal.
+        """
+        row = await self._session.scalar(
+            ai_attachment_reference_for_deletion_statement(
+                organisation_id, idempotency_key
+            ).with_for_update()
+        )
+        if row is None:
             return None
+        row.deletion_attempted_at = datetime.now(UTC)
+        row.error_code = None
+        await self._session.commit()
         return _row_to_reference(row)
 
     async def expire_all_for_request(

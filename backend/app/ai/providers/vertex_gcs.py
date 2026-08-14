@@ -593,20 +593,25 @@ class GcsTransferStore(TransferStore):
     async def delete(self, reference: ExternalFileReference) -> None:
         """Best-effort terminal deletion of the staged copy; never the source.
 
-        Resolves the authoritative record by idempotency key, parses the
-        ``gs://`` external id and deletes exactly that object — a reference
-        pointing at a foreign bucket fails closed (the adapter must never
-        delete from a bucket it does not stage into). A missing object is
-        tolerated (already deleted by the deployer-owned lifecycle rule or a
-        previous cleanup). A genuine failure propagates so the §6.7
-        reconciliation job can cover the orphan (Scope §2.5).
+        Deletes the GCS object named by the **passed** reference — the
+        authoritative durable row the orchestrator resolved — not a record
+        from this adapter's in-memory cache, so a fresh adapter (the §6.7
+        sweep or a restarted worker) deletes the same object the durable row
+        names. Parses the ``gs://`` external id and deletes exactly that
+        object — a reference pointing at a foreign bucket fails closed (the
+        adapter must never delete from a bucket it does not stage into). A
+        missing object is tolerated (already deleted by the deployer-owned
+        lifecycle rule or a previous cleanup). A genuine failure propagates so
+        the terminal path can record it and the deployer-owned ``age = 1``
+        lifecycle backstop covers the copy (Scope §2.5).
         """
         record = self._records.get(reference.idempotency_key)
-        if record is None or record.status is ExternalReferenceStatus.DELETED:
+        if record is not None and record.status is ExternalReferenceStatus.DELETED:
+            # This adapter already deleted this copy in-process: no-op.
             return
-        if record.mode is not TransferMode.STORAGE_REFERENCE:
+        if reference.mode is not TransferMode.STORAGE_REFERENCE:
             raise TransferStagingError("only storage_reference staging objects can be deleted here")
-        bucket, object_key = parse_gs_uri(record.external_id)
+        bucket, object_key = parse_gs_uri(reference.external_id)
         if bucket != self._bucket:
             raise TransferStagingError("the staged object belongs to a foreign GCS bucket")
         response = await self._delete(
@@ -617,8 +622,9 @@ class GcsTransferStore(TransferStore):
             if response.status_code >= 500:
                 raise ProviderUnavailableError("the staged GCS object could not be deleted")
             raise TransferStagingError("the staged GCS object could not be deleted")
-        record.status = ExternalReferenceStatus.DELETED
-        record.deleted_at = datetime.now(UTC)
+        if record is not None:
+            record.status = ExternalReferenceStatus.DELETED
+            record.deleted_at = datetime.now(UTC)
 
     async def aclose(self) -> None:
         """Release the adapter's HTTP client (mirrors the provider adapters)."""

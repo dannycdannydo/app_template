@@ -95,6 +95,15 @@ class ExternalFileReference(BaseModel):
     expires_at: datetime | None = None
     last_used_at: datetime | None = None
     deleted_at: datetime | None = None
+    # When terminal cleanup last attempted to delete the AI-owned provider
+    # copy (v0.8 Scope §2.5/§6.7); a failed deletion leaves this stamped so
+    # the reconciliation sweep can retry after the bounded backoff window.
+    deletion_attempted_at: datetime | None = None
+    # Safe error code from the AI taxonomy when the last deletion attempt
+    # failed (the reconciliation sweep's ``provider_reference_deletion_failed``
+    # marker). Never a stack trace, provider response, URL or content (BP §28);
+    # cleared on a successful deletion.
+    error_code: str | None = None
 
     @computed_field  # type: ignore[prop-decorator]
     @property

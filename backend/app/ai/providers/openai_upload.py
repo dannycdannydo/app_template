@@ -408,28 +408,33 @@ class OpenAITransferStore(TransferStore):
     async def delete(self, reference: ExternalFileReference) -> None:
         """Best-effort terminal deletion of the provider copy; never the source.
 
-        Resolves the authoritative record by idempotency key and deletes the
-        provider file named by the durable reference. A missing file (404/410,
-        e.g. already expired or deleted by a previous cleanup) is tolerated;
-        a genuine failure propagates so the §6.7 reconciliation job can cover
-        the orphan (Scope §2.5). The feature-owned source object is never
-        touched.
+        Deletes the provider file named by the **passed** reference — the
+        authoritative durable row the orchestrator resolved — not a record
+        from this adapter's in-memory cache. The §6.7 reconciliation sweep
+        builds a fresh adapter whose cache is empty, so a delete must work
+        purely from the durable reference (v0.8 Scope §2.5/§6.7). A missing
+        file (404/410, e.g. already expired or deleted by a previous cleanup)
+        is tolerated; a genuine failure propagates so the sweep can cover the
+        orphan after the bounded backoff. The feature-owned source object is
+        never touched.
         """
         record = self._records.get(reference.idempotency_key)
-        if record is None or record.status is ExternalReferenceStatus.DELETED:
+        if record is not None and record.status is ExternalReferenceStatus.DELETED:
+            # This adapter already deleted this copy in-process: no-op.
             return
-        if record.mode is not TransferMode.PROVIDER_UPLOAD:
+        if reference.mode is not TransferMode.PROVIDER_UPLOAD:
             raise TransferStagingError("only provider_upload files can be deleted here")
         try:
             response = await self._client.delete(
-                self._file_url(record.external_id), headers=self._auth_headers()
+                self._file_url(reference.external_id), headers=self._auth_headers()
             )
         except httpx.HTTPError as exc:
             raise translate_http_exception(exc) from exc
         if response.is_error and response.status_code not in (404, 410):
             self._raise_for_status(response)
-        record.status = ExternalReferenceStatus.DELETED
-        record.deleted_at = datetime.now(UTC)
+        if record is not None:
+            record.status = ExternalReferenceStatus.DELETED
+            record.deleted_at = datetime.now(UTC)
 
     async def aclose(self) -> None:
         """Release the adapter's HTTP client (mirrors the provider adapters)."""

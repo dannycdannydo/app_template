@@ -123,6 +123,31 @@ ACTION_AI_REQUEST_FAILED = "ai.request_failed"
 ACTION_AI_BUDGET_DENIED = "ai.budget_denied"
 ACTION_AI_RETENTION_DELETED = "ai.retention_deleted"
 
+# AI large-file transfer lifecycle (v0.8 Scope §2.5, §6.7, BP §29): written by
+# the transfer orchestration and the reconciliation sweep. Resource type is
+# ``ai_attachment_reference``; the resource id is the logical request id (the
+# reconciliation event uses the organisation id). Exact safe metadata payloads
+# (never object keys, external ids, gs:// URIs, managed signed URLs or their
+# query strings, exception text, request ids or content — BP §28; every event
+# also receives the request correlation id injected by ``record_event``):
+#
+# - ``ai.transfer_selected`` — ``{"transfer_mode"}`` (mode only; the selected
+#   provider is fixed by the execution routing and stays out of the payload).
+# - ``ai.transfer_staged`` / ``ai.transfer_reused`` / ``ai.transfer_deleted``
+#   — ``{"transfer_mode", "provider"}``.
+# - ``ai.transfer_failed`` — ``{"transfer_mode", "provider", "error_code"}``;
+#   ``error_code`` is the safe AI taxonomy code (or a generic fallback), never
+#   exception internals.
+# - ``ai.transfer_expired`` — ``{"count"}``.
+# - ``ai.transfer_reconciled`` — ``{"deleted"}`` (count only).
+ACTION_AI_TRANSFER_SELECTED = "ai.transfer_selected"
+ACTION_AI_TRANSFER_STAGED = "ai.transfer_staged"
+ACTION_AI_TRANSFER_REUSED = "ai.transfer_reused"
+ACTION_AI_TRANSFER_EXPIRED = "ai.transfer_expired"
+ACTION_AI_TRANSFER_DELETED = "ai.transfer_deleted"
+ACTION_AI_TRANSFER_FAILED = "ai.transfer_failed"
+ACTION_AI_TRANSFER_RECONCILED = "ai.transfer_reconciled"
+
 
 async def record_event(
     session: AsyncSession,
