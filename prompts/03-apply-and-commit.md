@@ -36,11 +36,16 @@ You are the **implementer**, picking up after a review.
 
 4. Apply the should-fix items unless there is a good reason not to. Address nits at your discretion. If you choose not to address a should-fix item, state why.
 
-5. Re-run the full validation gate to confirm everything is green:
-   - `make lint`
-   - `make typecheck`
-   - `make test`
-   - every additional command required by the active checkpoint/contract.
+5. Run the **single complete local validation gate** for the work unit, whether
+   the review was clean or changes were applied:
+   - `make check`
+   - every additional command required by the active checkpoint/contract that
+     is not included in `make check`.
+
+   Fix every failure and rerun the affected check, then rerun `make check` to
+   establish one clean final result. This is the only stage that runs the full
+   local gate by default; focused checks in prompts 01 and 02 provide earlier
+   feedback without repeating the whole suite.
 
    Then, if the work unit names a required human-review gate, verify the
    review/handoff or contract contains explicit recorded approval for every

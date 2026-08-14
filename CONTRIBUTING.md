@@ -13,13 +13,22 @@ This repository is a maintained template product. Changes go through a three-ste
    in the contract's reference map, plus existing repo patterns. Do not invent
    conventions that contradict the blueprint.
 3. **Implement** fully and end-to-end: real working files, configuration wired, tests where they naturally belong.
-4. Run the quality gate immediately after changes: `make lint`, `make typecheck`, `make test`, plus any other relevant check from the scope file §4. Fix anything that fails.
+4. Run focused tests and static checks immediately after changes, plus every
+   relevant checkpoint-specific command. Use the smallest commands that cover
+   the affected behaviour; do not defer known failures. The complete local gate
+   runs once after review unless the change is broad/high-risk or the contract
+   explicitly requires it earlier.
 5. Write a handoff summary for the reviewer (active contract path, work unit,
    files changed with one-line purposes, checklist items to check, governing
    sections followed, decisions/deviations, human-review gates, review focus and
    validation results).
 6. **Do not commit and do not check off boxes** until the reviewer has inspected the diff.
-7. The reviewer inspects the diff and the handoff, flags issues, and the implementer addresses them. Only then the work is applied and committed, and the §6 boxes are checked.
+7. The reviewer inspects the diff and validation evidence, runs focused checks
+   where they add value, and flags issues. The reviewer does not repeat the
+   complete gate by default.
+8. The implementer addresses the findings and runs `make check` once on the
+   final reviewed state, plus any additional contract commands. Only after that
+   gate is green is the work applied and committed and the §6 boxes checked.
 
 ## Branch workflow
 

@@ -61,13 +61,23 @@ You are the **implementer**.
 
 5. Implement the work **fully and end-to-end**: real working files (no stubs, placeholders, or TODOs), configuration wired correctly, tests written where they naturally belong, imports/types/formatting clean.
 
-6. Run validation immediately after your changes:
-   - `make lint`
-   - `make typecheck`
-   - `make test`
-   - every other relevant check from the contract's command/validation section.
+6. Run **focused validation** immediately after your changes. Choose the
+   smallest commands that exercise the changed behaviour and provide fast
+   feedback:
+   - the backend and/or frontend tests directly covering the changed code;
+   - relevant formatter, lint or type checks for the affected package/files;
+   - every checkpoint-specific command required by the contract; and
+   - generated-client or migration checks when those surfaces changed.
 
-7. Fix anything that fails before declaring the work ready.
+   Do not run the complete repository gate by default in this step; prompt 03
+   runs it once after review. Run `make check` here as well when the work is
+   unusually broad or high-risk (for example authentication, permissions,
+   tenant isolation, migrations, shared infrastructure, dependencies or
+   cross-cutting generated API changes), or when the contract explicitly
+   requires it before review.
+
+7. Fix anything that fails before declaring the work ready. Do not defer a
+   known focused-test, lint or type error to prompt 03.
 
 8. **Write the handoff summary to a file.** This is required — do not skip it. Write to `.handoff/implementation.md` (this directory is gitignored). The file is what the reviewer reads in their session — they will not see your chat output. Include:
    - active contract path and status;
@@ -81,10 +91,13 @@ You are the **implementer**.
    - an **interface-coverage check**: each completed checkbox mapped to its
      method/path, request and response schema, tests, and any known frontend
      consumer; explicitly list required operations that are still absent;
-   - validation commands run and their results.
+   - focused validation commands run and their results, plus whether the full
+     `make check` gate was run and why.
 
 9. **Do not commit. Do not check off boxes.** Leave the work uncommitted so the reviewer can inspect the diff cleanly. If the work unit names a human-review gate, call it out prominently; implementation may be reviewed, but prompt 03 cannot apply/commit it until the required approval is recorded. The handoff file `.handoff/implementation.md` must exist before you hand off.
 
 ## Done means
 
-Implementation is complete, validated, and `.handoff/implementation.md` has been written. The work is ready for `02-review`.
+Implementation is complete, focused validation is green, and
+`.handoff/implementation.md` has been written. The work is ready for
+`02-review`; the complete local gate runs in prompt 03.

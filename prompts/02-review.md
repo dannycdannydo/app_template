@@ -72,11 +72,17 @@ You are the **reviewer**. You did not write this code. Your job is to find probl
 
    **Scope discipline** — Stayed within the current release's scope (§2)? Avoided pulling in deferred work (§3)? Flag any scope creep.
 
-6. Run the validation commands yourself to confirm:
-   - `make lint`
-   - `make typecheck`
-   - `make test`
-   - every additional command required by the active checkpoint/contract.
+6. Review the implementer's validation evidence and run **focused checks**
+   where they add independent evidence: reproduce a suspected defect, exercise
+   a missing or high-risk path, or confirm a test meaningfully covers the
+   claimed behaviour. Do not rerun `make lint`, `make typecheck`, `make test`
+   or `make check` in full by default; prompt 03 owns the single complete local
+   gate after review feedback is applied.
+
+   Run a broader or complete gate only when the diff is unusually broad or
+   high-risk, the contract explicitly requires it at review time, or the
+   implementation handoff lacks credible validation for an affected surface.
+   Record every command actually run and its result in the review.
 
 7. **Write the review to `.handoff/review.md`.** This file is what the next step reads — they will not see your chat output. Use this format:
 
@@ -109,6 +115,9 @@ You are the **reviewer**. You did not write this code. Your job is to find probl
    Interface-coverage evidence:
    - (requirement → method/path → schema/test; list every missing operation,
      or "none")
+
+   Validation evidence:
+   - (focused commands run and results; state if no commands were needed)
    ```
 
 8. **Do not commit. Do not edit the active contract.** Your output is
