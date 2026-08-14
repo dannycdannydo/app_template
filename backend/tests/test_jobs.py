@@ -83,6 +83,10 @@ def test_job_has_org_and_creator_foreign_keys_and_composite_index() -> None:
         "ix_jobs_organisation_id",
         "ix_jobs_organisation_id_created_at",
         "ix_jobs_created_by_user_id",
+        # Durable delivery (plan P1): ownership settlement by dispatch id and
+        # queued-job reconciliation by status.
+        "ix_jobs_dispatch_id",
+        "ix_jobs_status_created_at",
     }
     composite = next(
         index for index in table.indexes if index.name == "ix_jobs_organisation_id_created_at"
@@ -112,6 +116,10 @@ def test_job_table_shape_matches_blueprint_18() -> None:
         "created_at",
         "started_at",
         "completed_at",
+        # Durable delivery (plan P1) adds internal ownership fields; they are
+        # not part of the blueprint §18 shape and not exposed by API schemas.
+        "dispatch_id",
+        "execution_lease_expires_at",
     }
     assert "updated_at" not in columns
 

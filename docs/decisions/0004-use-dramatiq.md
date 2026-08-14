@@ -1,6 +1,7 @@
 # ADR 0004: Use Dramatiq for Background Jobs
 
-Status: Accepted
+Status: Accepted (amended 2026-08-14: durable delivery is hardened by a
+PostgreSQL transactional outbox in front of the broker; see ADR-0019)
 
 ## Context
 
@@ -22,5 +23,10 @@ Use **Dramatiq** with Redis as the broker for background jobs. Long-running work
 - The API and the worker run the same backend image with different commands (blueprint §35.1).
 - Teams must follow the task-writing conventions (idempotency where possible, bounded retries, structured logging) defined in the blueprint §18.
 - Redis is a required local and production service.
+- Durable delivery is hardened by a PostgreSQL transactional outbox
+  (`outbox_events`) published by a dedicated `coordinator` process: PostgreSQL
+  is the scheduling source of truth, Redis is transient execution transport,
+  and delivery is at-least-once with database-enforced execution ownership.
+  See [ADR-0019](0019-harden-dramatiq-delivery-with-an-outbox.md).
 
 ---

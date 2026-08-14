@@ -31,6 +31,7 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    Uuid,
     func,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -70,6 +71,12 @@ class Job(Base):
     __tablename__ = "jobs"
     __table_args__ = (
         Index("ix_jobs_organisation_id_created_at", "organisation_id", "created_at"),
+        # Ownership lookups (plan P2) settle a job by its captured dispatch id.
+        Index("ix_jobs_dispatch_id", "dispatch_id"),
+        # Queued-job reconciliation (durable delivery plan P4) scans
+        # non-terminal rows by status; the composite index serves both the
+        # status filter and the age-ordered scan.
+        Index("ix_jobs_status_created_at", "status", "created_at"),
         CheckConstraint(
             "status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')",
             name="job_status",
@@ -131,5 +138,17 @@ class Job(Base):
         DateTime(timezone=True), nullable=True, default=None
     )
     completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+    # Internal delivery ownership fields (durable delivery plan P1/P2). They
+    # are deliberately not exposed by the JobDetail/list schemas and are not
+    # foreign keys: ``dispatch_id`` names the outbox event whose publication
+    # requested the current dispatch (outbox rows are cleaned up after the
+    # retention window, so a FK would block cleanup), and
+    # ``execution_lease_expires_at`` bounds how long a worker may own the
+    # attempt before a stale/duplicate may take it over. A non-terminal legacy
+    # row without a dispatch id receives one atomically on first claim.
+    dispatch_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True, default=None)
+    execution_lease_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
     )
