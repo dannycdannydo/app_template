@@ -52,6 +52,8 @@ variable mismatch, unreachable transfer mode, provider contract violation).
 | `AI_MAX_LARGE_ATTACHMENT_BYTES` | Large-file ceiling (max 50,000,000) | `50000000` |
 | `AI_UPLOAD_EXPIRY_SECONDS` | Provider-upload expiry bounds | `3600` |
 | `AI_MANAGED_URL_TTL_SECONDS` | Managed signed-URL TTL (max 1800) | `900` |
+| `AI_RECONCILE_BATCH_SIZE` | Bounded batch the §6.7 provider-file reconciliation sweep claims per run | `50` |
+| `AI_RECONCILE_RETRY_AFTER_SECONDS` | Minimum backoff before a reference whose terminal deletion failed is retried by the sweep | `3600` |
 
 Provider credentials:
 
@@ -102,10 +104,17 @@ explicit operator procedure.
   deliberately **no Gemini API key** and no AI Studio path.
 - The **staging bucket** (only needed for the `storage_reference` mode) is
   user-provisioned: private, single-region, in the same `AI_VERTEX_LOCATION`,
-  owned by `AI_VERTEX_PROJECT`. The service-account key needs
-  `storage.objectAdmin` (or `storage.objectUser`) on the bucket. Configure a
-  console Object Lifecycle rule (`age = 1` day → Delete) as the cleanup
-  backstop; the application never creates, configures or cleans the bucket.
+  owned by `AI_VERTEX_PROJECT`. The service-account key needs more than an
+  object role — before any upload the adapter verifies project ownership,
+  bucket metadata and the bucket IAM policy — so grant
+  `roles/storage.objectAdmin` (or `storage.objectUser`) plus `roles/viewer`,
+  or a custom role with `resourcemanager.projects.get`,
+  `storage.buckets.get`, `storage.buckets.getIamPolicy`,
+  `storage.objects.create`, `storage.objects.get`, `storage.objects.delete`.
+  Configure a console Object Lifecycle rule (`age = 1` day → Delete) as the
+  cleanup backstop. The application never creates, configures or manages the
+  bucket and runs no scheduled GCS cleanup; it deletes only the exact
+  AI-owned staging object it uploaded (best-effort terminal deletion).
 - Network: if a SOCKS proxy is exported, HTTPX rejects it
   (`Unknown scheme for proxy URL socks://...`). `make dev` unsets proxy
   variables when `DEV_DISABLE_PROXY=true`.
@@ -324,6 +333,16 @@ credentials.
 | Mode | Executable today | Notes |
 | --- | --- | --- |
 | `inline` | yes | default; ≤ 5,000,000 aggregate bytes |
-| `storage_reference` | yes (Vertex) | private GCS staging, `age = 1` lifecycle backstop |
-| `provider_upload` | yes (OpenAI) | Files API `user_data` upload, `expires_after`, best-effort delete |
-| `managed_signed_url` | yes | direct signed URL from public HTTPS storage; with a local (MinIO) storage seam in development the source is staged into the GCS temp bucket and a GCS v4-signed HTTPS URL is minted instead (Anthropic §6.6 pending) |
+| `storage_reference` | yes (Vertex) | private GCS staging, `age = 1` deployer-owned lifecycle backstop (asynchronous; not an exact 24-hour guarantee) |
+| `provider_upload` | yes (OpenAI, Anthropic) | OpenAI Files API `user_data` upload with configured `expires_after` + best-effort delete; Anthropic beta Files API (pinned header) with delete-only retention + best-effort delete |
+| `managed_signed_url` | yes | direct just-in-time signed URL for retained sources; with a local (MinIO) storage seam in development the source is staged into the GCS temp bucket and a GCS v4-signed HTTPS URL is minted instead — the same scratch-GCS seam serves the Anthropic local-transient path (v0.8 Scope §6.6) |
+
+Non-inline modes are default-deny at the deployment level
+(`AI_ENABLED_TRANSFER_MODES`, empty by default) and per organisation
+(`allowed_transfer_modes`, default `["inline"]`). Azure OpenAI, DeepSeek and
+local adapters declare no non-inline mode and reject large files before any
+transfer. The scheduled `reconcile_provider_file_references` sweep (ai queue,
+bounded batch `AI_RECONCILE_BATCH_SIZE`, backoff
+`AI_RECONCILE_RETRY_AFTER_SECONDS`) is the only job that touches
+provider-hosted files; it never processes managed URLs, GCS staging objects or
+feature sources (v0.8 Scope §2.5/§6.7).

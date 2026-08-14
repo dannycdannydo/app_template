@@ -209,17 +209,20 @@ deploying. An external WAF (e.g. Cloudflare) can sit in front instead; keep
 TLS termination and the security headers at Caddy and document the WAF rules
 in this runbook.
 
-## AI observability and runbooks (v0.7)
+## AI observability and runbooks (v0.7, v0.8 large-file transfer modes)
 
 The AI layer (v0.7 Scope §6.7, ADR-0017) emits its own metric families on
 `GET /metrics`, binds `ai_request_id` to every AI log line, and keeps Sentry
 free of prompts, provider responses and document content (the shared
 `before_send` redaction applies; AI errors are handled, so they never reach
-Sentry as unhandled exceptions). The durable `ai_requests` / `ai_outputs`
-rows are the per-request source of truth; the counters below are the
-aggregate signal, labelled only with low-cardinality registry ids
-(task/provider/model) — organisation ids, request ids and content never
-become labels.
+Sentry as unhandled exceptions). v0.8 adds the large-file transfer metrics
+(mode selection, lifecycle outcomes, reconciliation sweep and cleanup
+backlog) with the same redaction invariants. The durable `ai_requests` /
+`ai_outputs` rows and the v0.8 `ai_attachment_references` rows are the
+per-request source of truth; the counters below are the aggregate signal,
+labelled only with low-cardinality registry ids (task/provider/model/mode) —
+organisation ids, request ids, object keys, URLs and content never become
+labels.
 
 ### AI metrics families
 
@@ -234,6 +237,21 @@ become labels.
 | `ai_fallbacks_total` | counter | `task`, `provider`, `model` | reviewed provider/model fallbacks under the task's fallback policy |
 | `ai_budget_denials_total` | counter | `task` | monthly organisation budget denials before dispatch |
 | `dramatiq_queue_depth` | gauge | `queue` | undelivered messages waiting in a Dramatiq queue (`LLEN dramatiq:<queue>` on Redis); refreshed by the API process every 30 s, so the promised backlog alert is queryable from `GET /metrics` |
+
+#### v0.8 large-file transfer metrics
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `ai_transfer_selections_total` | counter | `mode`, `provider` | selected transfer mode by mode and provider (`inline`, `provider_upload`, `managed_signed_url`, `storage_reference`) |
+| `ai_transfer_outcomes_total` | counter | `mode`, `provider`, `result` | transfer lifecycle outcomes (upload/stage success, reuse, expiry, terminal deletion, deletion failure) |
+| `ai_transfer_reconciliation_total` | counter | `provider`, `result` | provider-file reconciliation sweep outcomes (`deleted`/`failed` per claimed reference) |
+| `ai_transfer_cleanup_backlog` | gauge | `mode` | provider-file references currently waiting on the reconciliation sweep (see the cleanup-backlog runbook below) |
+
+The durable `ai_attachment_references` rows are the per-request source of truth
+for transfer state; these counters are the aggregate signal. Labels are
+low-cardinality mode/provider ids and safe outcome names only — never object
+keys, external file ids, `gs://` URIs, managed signed URLs, request ids or
+content (BP §28, Scope §2.3).
 
 ### AI dashboard contract
 
@@ -251,15 +269,17 @@ families above, with a corresponding alert rule (aggregate table below).
 | Validation failures | `sum(rate(ai_validation_failures_total[10m]))` | gauge (events/s) | rising, or retry/repair ratio `> 0.2` of requests (warning) |
 | Retry/fallback ratio | `sum(rate(ai_retries_total[10m])) / clamp_min(sum(rate(ai_requests_total[10m])), 1e-9)` | gauge (ratio) | `> 0.2` (warning) |
 | Budget denials | `sum(rate(ai_budget_denials_total[10m]))` | gauge (events/s) | `> 0` (warning; info if deliberate) |
+| Transfer failure rate | `sum(rate(ai_transfer_outcomes_total{result="failed"}[10m])) / clamp_min(sum(rate(ai_transfer_outcomes_total[10m])), 1e-9)` | gauge (ratio) | `> 0.05` over 10 min (warning; upload/staging/deletion health) |
+| Cleanup backlog | `ai_transfer_cleanup_backlog` | gauge | `> 10` for `> 15 min` (warning; provider files persist until deleted) |
 | AI queue backlog | `dramatiq_queue_depth{queue="ai"}` | gauge (messages) | `> 10` for `> 5 min` (warning) |
 
 Queue-depth source: the API process reads the broker's queue lengths through
 `RedisBroker.get_queue_message_counts` (Dramatiq stores each queue as a Redis
-list `dramatiq:<queue>`; the `ai` queue carries the `ai.execute` and
-`ai.retention` jobs). The refresh loop runs inside the API process every 30 s,
-so no separate exporter is required — the same `/metrics` endpoint serves the
-gauge. A Redis outage leaves the gauge stale (logged once) rather than failing
-the scrape.
+list `dramatiq:<queue>`; the `ai` queue carries the `ai.execute`,
+`ai.retention` and the v0.8 provider-file reconciliation jobs). The refresh
+loop runs inside the API process every 30 s, so no separate exporter is
+required — the same `/metrics` endpoint serves the gauge. A Redis outage
+leaves the gauge stale (logged once) rather than failing the scrape.
 
 ### AI alerts to configure
 
@@ -270,6 +290,8 @@ the scrape.
 | Validation degradation | `ai_validation_failures_total` rising or repair/retry ratio above threshold (e.g. > 20% of requests) | warning |
 | Spend spike | `ai_cost_total` rate above the daily budget-normalised threshold | warning |
 | Budget denials | `ai_budget_denials_total` growth (users hitting the monthly cap) | warning (info if deliberate) |
+| Transfer failures | `ai_transfer_outcomes_total` deletion-failure / upload-failure rate above threshold (e.g. > 5% over 10 min) | warning |
+| Cleanup backlog | `ai_transfer_cleanup_backlog` above threshold (e.g. > 10) for > 15 min, or `ai_transfer_reconciliation_total` deletion failures rising | warning (provider files persist until deleted; see the cleanup-backlog runbook) |
 | Queue backlog | `dramatiq_queue_depth{queue="ai"}` above threshold (e.g. 10) for > 5 min (AI jobs are durable; see "Consequences of Redis loss") | warning |
 
 ### AI runbooks
@@ -362,6 +384,65 @@ audit event per purge. Keep-flow objects under
 3. **Verify**: spot-check that expired rows and scratch objects are gone and
    keep-flow objects remain; the audit event per purge is the evidence trail.
 
+#### Cleanup backlog (provider-file reconciliation, v0.8)
+
+Transient OpenAI/Anthropic uploads are deleted best-effort at the terminal
+outcome. When a deletion fails (provider outage, transient API error, worker
+crash between terminal outcome and delete), the provider-hosted file persists
+and the reference waits on the reconciliation sweep
+(`reconcile_provider_file_references`, `ai` queue, `AI_RECONCILE_BATCH_SIZE`
+per run, `AI_RECONCILE_RETRY_AFTER_SECONDS` minimum backoff). The sweep
+deletes only provider-hosted files whose owning request is terminal; it never
+processes managed signed URLs (no provider copy), Vertex GCS staging objects
+(deployer-owned lifecycle backstop) or feature-owned sources.
+
+The maintenance actors (`ai.retention` and the v0.8 provider-file
+reconciliation sweep) are infrastructure actors, not durable job rows: the
+deployer enqueues them on an operational schedule (host cron or any scheduler
+that can enqueue Dramatiq messages on the same Redis broker — e.g. a
+maintenance script that imports and sends
+`app.ai.persistence.tasks.enforce_ai_retention_actor` /
+`reconcile_provider_file_references_actor`). Start with hourly for the
+provider-file sweep and daily for retention, then adjust from the observed
+backlog so `ai_transfer_cleanup_backlog` stays near zero.
+
+1. **Confirm**: `ai_transfer_cleanup_backlog` is above the threshold for more
+   than a few sweep cycles, `ai_transfer_reconciliation_total{result="failed"}`
+   is rising, or `ai.transfer_reconciled`/`ai.transfer_failed` audit events
+   accumulate (deletion failure is the `ai.transfer_failed` event with
+   `error_code = "provider_reference_deletion_failed"`). The durable
+   `ai_attachment_references` rows are the source of truth: a failed deletion
+   is a row still in `live` state with `deletion_attempted_at` set and that
+   `error_code`; rows reach `deleted` only after a successful deletion
+   (reference states are `live`/`expired`/`deleted` — there is no separate
+   `deletion_failed` state).
+2. **Assess**: is the provider API reachable? A provider outage naturally
+   stalls deletion; the sweep's bounded backoff retries automatically. A
+   sustained backlog with the provider healthy suggests a systematic cause
+   (revoked credential, changed file id, provider-side retention).
+3. **Act**: for a provider outage, wait for recovery — the sweep resumes on
+   schedule with bounded backoff. For a revoked/broken credential, restore the
+   provider secret and redeploy. For provider-side retention changes, follow
+   the provider's manual deletion procedure for the affected file ids (from
+   the durable rows) once, then verify the sweep returns the backlog to zero.
+4. **Resolve**: `ai_transfer_cleanup_backlog` returns to 0 and the reference
+   rows reach `deleted`; the audit trail records each deletion attempt.
+
+#### Disabling a compromised transfer mode
+
+1. **Contain**: remove the mode from `AI_ENABLED_TRANSFER_MODES` (deployment
+   level) and from the organisation's `allowed_transfer_modes` (platform
+   AI-settings API, audited). The mode is then ineligible before any external
+   transfer: dispatch fails closed with a safe configuration/policy error and
+   no provider call or upload occurs. Production fails fast on restart if an
+   enabled mode loses its supporting configuration.
+2. **Clean up**: provider-hosted files from the disabled mode are drained by
+   the reconciliation sweep (see above); managed URLs expire through their
+   short TTL and never own/delete the retained feature source; Vertex staging
+   objects are cleaned by the deployer-configured `age = 1` lifecycle rule.
+3. **Verify**: `ai_transfer_selections_total{mode="<disabled mode>"}` stops
+   incrementing, the backlog drains, and the security/contract suites pass.
+
 ### AI configuration notes
 
 - **Provider regions / inference geography**: OpenAI `AI_OPENAI_REGION`
@@ -380,13 +461,50 @@ audit event per purge. Keep-flow objects under
   identity on Google Cloud) or a service-account key mounted through the
   deployment secret mechanism (`AI_VERTEX_CREDENTIALS_PATH`). There is no
   Gemini Developer API key setting anywhere in the template.
-- **Attachment limits and lifecycle**: one conservative template limit — 5 MB
-  per attachment, 10 MB combined, validated before dispatch; models lacking
-  the `documents` capability (e.g. DeepSeek) reject attachments before any
-  provider call. Bytes exist only in worker memory for one provider call,
-  are never persisted (records store references + digests), and are never
-  placed on the job broker. Large-file/provider-reference support is
-  explicitly deferred to v0.8 (`plans/AI_LARGE_ATTACHMENTS_V0_8_PLAN.md`).
+- **Attachment limits and lifecycle (v0.8)**: the v0.7 inline path keeps one
+  conservative template limit — 5 MB per attachment, 10 MB combined, validated
+  before dispatch — and models lacking the `documents` capability (e.g.
+  DeepSeek) reject attachments before any provider call. v0.8 adds the
+  policy-driven transfer modes for large files: inline is eligible only at or
+  below 5,000,000 aggregate raw bytes; above that threshold exactly one PDF up
+  to 50,000,000 bytes (or the provider/model ceiling, whichever is lower) uses
+  `provider_upload` (OpenAI/Anthropic transient sources), `managed_signed_url`
+  (retained private S3 sources; just-in-time signed URL, 900 s default / 1,800 s
+  max TTL, never returned/persisted/audited/logged) or `storage_reference`
+  (Vertex private GCS staging with the deployer-configured `age = 1` lifecycle
+  backstop). Bytes exist only in bounded worker memory/staging for one provider
+  call, are never persisted (records store references + digests), and are never
+  placed on the job broker. Azure OpenAI, DeepSeek and local providers declare
+  no non-inline mode and reject large files before any transfer. See
+  `backend/app/ai/README.md` and README → Large AI attachments for the full
+  contract.
+- **Vertex large-file staging (v0.8)**: `AI_VERTEX_TEMP_GCS_BUCKET` must be a
+  user-provisioned private, single-region bucket in the configured
+  `AI_VERTEX_LOCATION`, owned by `AI_VERTEX_PROJECT`. The workload
+  identity/service account needs more than an object role — the adapter
+  verifies project ownership, bucket metadata and the bucket IAM policy before
+  any upload — so grant `roles/storage.objectAdmin` (or `objectUser`) plus
+  `roles/viewer`, or a custom role with `resourcemanager.projects.get`,
+  `storage.buckets.get`, `storage.buckets.getIamPolicy`,
+  `storage.objects.create`, `storage.objects.get`, `storage.objects.delete`.
+  The application never creates, configures or manages the bucket and runs no
+  scheduled GCS cleanup or reconciliation; the only object it deletes is the
+  exact AI-owned staging object it uploaded, best-effort at the terminal
+  request outcome and during the provider-file sweep. The deployer configures
+  a console Object Lifecycle rule (`age = 1` day → Delete) as the cleanup
+  backstop. Lifecycle execution is asynchronous — it is a backstop, not an
+  exact 24-hour deletion guarantee — and soft-delete/versioning/conflicting
+  retention holds on the bucket extend object retention/recoverability rather
+  than guaranteeing that a live object persists. Deployers seeking
+  Files-API-like ephemeral storage must disable soft delete, versioning and
+  conflicting holds, or explicitly accept their longer retention semantics.
+- **Provider retention and deletion (v0.8)**: OpenAI uploads use
+  `purpose=user_data` with the shortest supported `expires_after` and
+  best-effort terminal deletion; Anthropic uses the pinned beta Files API with
+  delete-only retention, so provider-file reconciliation is mandatory (the
+  scheduled sweep is the only job that touches provider-hosted files). Managed
+  URLs expire through their TTL and never own/delete the retained feature
+  source. AI cleanup never deletes feature-owned source objects.
 - **Local-provider network controls**: the local OpenAI-compatible adapter
   targets loopback/private hosts only; production fails fast on publicly
   reachable endpoints, and the endpoint must never be exposed to browsers.

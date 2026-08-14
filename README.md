@@ -16,7 +16,7 @@ This repository is a **template**, not an application. New projects start from a
 - CI that runs the same gate on every push to `main` and on pull requests
 - Governance docs and architecture decision records (ADRs)
 
-The authoritative design standard is `Internal_Custom_Application_Starter_Architecture_v2.md`. The scoped contract and progress log for the current release is `TEMPLATE_V0_7_SCOPE.md`. Agents read the architecture documentation before structural changes (see `AGENTS.md`).
+The authoritative design standard is `Internal_Custom_Application_Starter_Architecture_v2.md`. The scoped contract and progress log for the current release is `TEMPLATE_V0_8_SCOPE.md`. Agents read the architecture documentation before structural changes (see `AGENTS.md`).
 
 ## Repository layout
 
@@ -123,7 +123,7 @@ To tear the test admin down again (e.g. to provision a different one and re-test
 | `make lint` | Ruff (backend) + ESLint (frontend) |
 | `make typecheck` | Pyright (backend) + vue-tsc (frontend) |
 | `make test` | pytest (backend) + Vitest (frontend) |
-| `make test-ai-contracts` | Opt-in live AI provider contract tests (fake provider by default; each real-provider test skips until its dedicated non-production credentials are configured) |
+| `make test-ai-contracts` | Opt-in live AI provider contract tests (fake provider by default; each real-provider test skips until its dedicated non-production credentials are configured). Covers the v0.8 large-file transfer contracts for OpenAI, Anthropic and Vertex; credentials use the `AI_CONTRACTS_*` namespace and are never the operational `AI_*` settings |
 | `make e2e` | Playwright journeys against the local stack (stubbed WorkOS + API, no backend needed; authenticated journeys need `VITE_WORKOS_CLIENT_ID` set) |
 | `make format` | Ruff format + Prettier |
 | `make generate-client` | Export OpenAPI from FastAPI and generate the TypeScript client |
@@ -161,6 +161,20 @@ To try it locally with the deterministic **fake provider** (the default), three 
 
 Enabling a real provider is configuration-only: set `AI_ENABLED_PROVIDERS` and the provider's secret/endpoint settings in `.env` (all documented in `.env.example`), restart, and re-route the model registry through reviewed configuration if needed. Regional/inference-geography settings are validated and never changed implicitly by fallback; Vertex requires a Google Cloud project, an explicit `AI_VERTEX_LOCATION` and ADC or a service-account key via the deployment secret mechanism. Organisation AI settings (default **off**) are managed by platform admins; monthly budgets are enforced in the service before dispatch. AI observability (metrics families, alerts, and the provider-outage / budget / prompt-rollback / model-rollback / retention-deletion runbooks): `docs/operations.md` → AI observability. AI security model: `SECURITY.md` → AI security.
 
+## Large AI attachments and transfer modes (v0.8)
+
+v0.8 extends the AI layer with **policy-driven transfer modes** for one PDF above the 5,000,000-byte aggregate inline threshold and at most 50,000,000 bytes, without changing the feature-facing `AIRequest` boundary: a caller still supplies only a task name and a private `storage_reference`, and `AIService` selects the mode from the intersection of source lifecycle, task, organisation policy, model/provider capability and deployment configuration. The modes are `inline` (default; the only mode eligible at or below the threshold), `provider_upload` (OpenAI/Anthropic transient sources), `managed_signed_url` (retained private S3 sources) and `storage_reference` (Vertex private GCS staging). Azure OpenAI, DeepSeek and local adapters declare no non-inline mode and fail closed before any transfer.
+
+Key properties:
+
+- **Bounded and safe**: non-inline sources are verified for ownership, size, MIME and SHA-256 through bounded streaming (never accumulated in memory); retries of one logical request reuse one live matching external reference (idempotency), and separate requests never share one.
+- **Managed URLs are ephemeral bearer capabilities**: a signed URL is minted just-in-time per dispatch (default TTL 900 s, max 1,800 s), exact-object and read-only, and is never returned to the caller, persisted, audited or logged. Caller-supplied HTTP(S) URLs remain prohibited.
+- **Provider retention**: OpenAI uploads use `user_data` with the shortest supported `expires_after` and best-effort terminal deletion; Anthropic uses the pinned beta Files API with delete-only retention; Vertex stages into the deployer-provisioned private same-region bucket and relies on a console-configured Object Lifecycle rule (`age = 1` day → Delete) as an asynchronous backstop. The application never creates, configures or manages a GCS bucket and runs no scheduled GCS cleanup or reconciliation, but it does delete the exact AI-owned staging object it uploaded (best-effort terminal deletion); AI cleanup never deletes the feature-owned source object.
+- **Durable cleanup**: terminal outcomes trigger immediate cleanup for provider uploads; a bounded scheduled Dramatiq reconciliation sweep (`reconcile_provider_file_references`, enqueued as `reconcile_provider_file_references_actor`) retries deletion of expired, orphaned or deletion-failed provider-file references. Managed URLs, GCS staging objects and feature sources are never processed by it.
+- **Operations**: transfer mode selection, outcomes, reuse, expiry and cleanup are exposed as low-cardinality metrics and append-only audit events; runbooks in `docs/operations.md` cover retention, IAM, disabling a compromised mode and recovering a cleanup backlog.
+
+Organisation policy is managed through the existing platform AI-settings API: `allowed_transfer_modes` (default `["inline"]`) and `max_large_attachment_bytes` (default 50,000,000) extend the typed `GET`/`PUT /api/v1/platform/organisations/{organisation_id}/ai-settings` schema with optimistic concurrency unchanged. Deployment-level enablement is configuration-only via `AI_ENABLED_TRANSFER_MODES` (default-deny) plus the threshold/ceiling/TTL/expiry and Vertex staging settings — see `.env.example` → AI layer and the Vertex section, `SECURITY.md` → AI security, and `docs/operations.md` → AI observability and runbooks.
+
 ## Platform Admin Centre
 
 v0.4 adds platform administration (see `plans/PLATFORM_ADMIN_WORKFLOW_PLAN.md` and ADR-0013): a dedicated platform authorisation plane — separate from organisation roles — gates the `/platform` section of the app, which is served only to users whose `GET /api/v1/me` reports `platform_roles`. From there a platform admin can:
@@ -181,6 +195,6 @@ Day-to-day operations, scaling, monitoring and alerts: `docs/operations.md`. Bac
 
 ## Releases
 
-The template is versioned and tagged. `make check` passing is the gate for a release. Current release: v0.7 (AI / LLM application service layer). See `TEMPLATE_V0_7_SCOPE.md` §6 for the progress log.
+The template is versioned and tagged. `make check` passing is the gate for a release. Current release: v0.8 (large AI attachments and reference transfer modes). See `TEMPLATE_V0_8_SCOPE.md` §6 for the progress log.
 
 Development follows the branch workflow in `CONTRIBUTING.md`: work units live on `feature/*` branches and reach `main` only through reviewed pull requests, so CI runs once per merged unit rather than on every push.
