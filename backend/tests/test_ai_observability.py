@@ -49,6 +49,11 @@ _ALL_AI_METRICS = (
     "ai_retries_total",
     "ai_fallbacks_total",
     "ai_budget_denials_total",
+    # v0.8 Scope §6.7 large-file transfer observability.
+    "ai_transfer_selections_total",
+    "ai_transfer_reconciliation_total",
+    "ai_transfer_outcomes_total",
+    "ai_transfer_cleanup_backlog",
 )
 
 

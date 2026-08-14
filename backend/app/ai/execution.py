@@ -143,13 +143,16 @@ async def execute_managed_ai(
     The caller-bound session backs both the AI request records and the v0.8
     durable transfer-reference store, so a non-inline transfer stages, records
     and (best-effort) deletes within the same organisation-scoped persistence
-    boundary (Scope §6.3) without any transaction spanning provider I/O.
+    boundary (Scope §6.3) without any transaction spanning provider I/O. The
+    same session carries the transfer-lifecycle audit events (mode selection,
+    staging, expiry, deletion — Scope §2.5/§6.7).
     """
     return await runtime.get_ai_service().execute(
         request,
         recorder=AIPersistencePortImpl(session),
         request_id=request_id,
         transfer_references=SQLTransferReferenceStore(session),
+        execution_session=session,
     )
 
 

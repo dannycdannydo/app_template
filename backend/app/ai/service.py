@@ -42,6 +42,7 @@ from uuid import UUID, uuid4
 
 import structlog
 from pydantic import BaseModel, ValidationError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.attachments import ALLOWED_ATTACHMENT_MIME_TYPES, Attachment, validate_attachment_set
 from app.ai.errors import (
@@ -101,10 +102,12 @@ from app.ai.transfer import (
     source_lifecycle_for_reference,
 )
 from app.ai.transfer_orchestrator import ManagedUrlStager, TransferOrchestrator
+from app.modules.audit.service import ACTION_AI_TRANSFER_SELECTED, record_event
 from app.observability.metrics import (
     observe_ai_attempt,
     observe_ai_fallback,
     observe_ai_retry,
+    observe_ai_transfer_selection,
     observe_ai_validation_failure,
 )
 from app.storage.base import ObjectStorage
@@ -417,6 +420,38 @@ class AIService:
         """
         return {provider_id: provider.region for provider_id, provider in self._providers.items()}
 
+    def _audit_recorder(self, session: AsyncSession | None):
+        """Build the transfer-lifecycle audit recorder bound to a session.
+
+        The orchestrator emits low-cardinality transfer events
+        (``ai.transfer_staged``/``ai.transfer_reused``/``ai.transfer_expired``/
+        ``ai.transfer_deleted``, Scope §2.5/§6.7) through this seam. With no
+        caller-bound session (hermetic service tests) auditing is disabled;
+        every executed path wires the caller's session exactly like the
+        durable transfer-reference store (v0.8 Scope §6.3).
+        """
+
+        if session is None:
+            return None
+
+        async def _record(
+            action: str,
+            resource_type: str,
+            resource_id: str,
+            organisation_id: UUID,
+            metadata: dict[str, Any] | None = None,
+        ) -> None:
+            await record_event(
+                session,
+                action=action,
+                resource_type=resource_type,
+                resource_id=resource_id,
+                organisation_id=organisation_id,
+                metadata=metadata,
+            )
+
+        return _record
+
     def _select_transfer_mode(
         self,
         *,
@@ -566,6 +601,7 @@ class AIService:
         attachments: Sequence[Attachment] | None = None,
         input_reference: str | None = None,
         transfer_references: TransferReferenceStore | None = None,
+        execution_session: AsyncSession | None = None,
     ) -> AIResult:
         """Execute one task request and return a validated result.
 
@@ -601,6 +637,14 @@ class AIService:
         configured adapter must declare document support — every incompatible
         modality, MIME type and size combination fails before provider
         dispatch.
+
+        ``execution_session`` (v0.8 Scope §6.7) is the caller's session-bound
+        persistence boundary used to record transfer-lifecycle audit events
+        (mode selection, staging, expiry, deletion) in the same transaction
+        family as the durable reference rows; ``None`` disables that audit
+        trail for hermetic service tests. The durable-job and demonstration
+        flows always pass the caller-bound session, exactly like the durable
+        transfer-reference store (Scope §6.3).
 
         v0.7 Scope §6.4 safety controls: transient provider failures
         (unavailable, rate limited, timeout) retry within the task's
@@ -820,6 +864,26 @@ class AIService:
                         organisation_id=request.organisation_id,
                         large_source=large_source,
                     )
+                if selected_transfer_mode is not TransferMode.INLINE:
+                    # v0.8 Scope §2.5/§6.7: record the deterministic non-inline
+                    # mode selection — low-cardinality metric plus the
+                    # ``ai.transfer_staged`` audit trail (written by the
+                    # orchestrator when the durable reference lands). Never
+                    # request ids, object keys, URLs or content (BP §28).
+                    observe_ai_transfer_selection(
+                        mode=selected_transfer_mode.value,
+                        provider=model.provider,
+                    )
+                    audit_recorder = self._audit_recorder(execution_session)
+                    if audit_recorder is not None:
+                        with contextlib.suppress(Exception):
+                            await audit_recorder(
+                                ACTION_AI_TRANSFER_SELECTED,
+                                "ai_attachment_reference",
+                                execution_request_id,
+                                request.organisation_id,
+                                {"transfer_mode": selected_transfer_mode.value},
+                            )
                 # v0.8 Scope §2.3/§2.4/§6.5: a selected non-inline mode stages
                 # the verified private source into the provider's staging form
                 # (Vertex private GCS bucket for storage_reference, the
@@ -857,6 +921,7 @@ class AIService:
                         store=store,
                         references=transfer_references,
                         managed_url_stager=self._managed_url_stager,
+                        audit_recorder=self._audit_recorder(execution_session),
                     )
                     source_lifecycle = source_lifecycle_for_reference(
                         large_source.reference, request.organisation_id
@@ -889,20 +954,36 @@ class AIService:
                                 source.path,
                                 max_pages=max_pdf_pages,
                             )
-                        staged_reference = await staged_orchestrator.create_or_reuse_reference(
+                        # v0.8 Scope §2.1/§2.3 retry-only reuse: a redelivered
+                        # execution first looks up the live matching durable
+                        # reference (same logical request, provider, mode,
+                        # digest and region) and reuses it — emitting the
+                        # ``ai.transfer_reused`` audit event — instead of
+                        # staging the copy again. Only when no live match
+                        # exists is the source staged anew (``ai.transfer_staged``).
+                        staged_reference = await staged_orchestrator.find_reusable_reference(
                             organisation_id=request.organisation_id,
                             logical_request_id=execution_request_id,
                             provider_id=model.provider,
                             mode=selected_transfer_mode,
-                            source_reference=large_source.reference,
                             source_digest=source.sha256_digest,
-                            size_bytes=source.size_bytes,
-                            mime_type=source.mime_type,
-                            source_lifecycle=source_lifecycle,
                             region=provider.region,
-                            expires_at=None,
-                            source_path=source.path,
                         )
+                        if staged_reference is None:
+                            staged_reference = await staged_orchestrator.create_or_reuse_reference(
+                                organisation_id=request.organisation_id,
+                                logical_request_id=execution_request_id,
+                                provider_id=model.provider,
+                                mode=selected_transfer_mode,
+                                source_reference=large_source.reference,
+                                source_digest=source.sha256_digest,
+                                size_bytes=source.size_bytes,
+                                mime_type=source.mime_type,
+                                source_lifecycle=source_lifecycle,
+                                region=provider.region,
+                                expires_at=None,
+                                source_path=source.path,
+                            )
                 # v0.8 Scope §2.3: a just-in-time managed download URL is
                 # minted per dispatch/retry for a selected managed-signed-url
                 # mode (never persisted, redacted at every log boundary). The
@@ -1215,15 +1296,21 @@ class AIService:
             failure = exc
 
         # v0.8 Scope §2.5 terminal cleanup: after success, permanent failure or
-        # exhausted retries the AI-owned staging copy is deleted best-effort
-        # through the orchestrator. A deletion failure is suppressed — the
-        # deployer-owned GCS lifecycle (age = 1) and the §6.7 reconciliation
-        # job are the backstop — and never masks the execution outcome. The
-        # orchestrator only ever deletes the provider-side copy, never the
-        # feature-owned source object.
-        if staged_orchestrator is not None and staged_reference is not None:
+        # exhausted retries every reference of this logical request is expired
+        # and its AI-owned provider copies are deleted best-effort through the
+        # orchestrator (``finalize_request_references`` composes the two
+        # terminal transitions; each deletion stamps the row and records the
+        # safe failure code when the provider delete fails). Failures are
+        # suppressed — the deployer-owned GCS lifecycle (age = 1) and the §6.7
+        # reconciliation job are the backstop — and never mask the execution
+        # outcome. The orchestrator only ever deletes the provider-side copy,
+        # never the feature-owned source object.
+        if staged_orchestrator is not None:
             with contextlib.suppress(Exception):
-                await staged_orchestrator.delete_reference(reference=staged_reference)
+                await staged_orchestrator.finalize_request_references(
+                    organisation_id=request.organisation_id,
+                    logical_request_id=execution_request_id,
+                )
 
         if failure is not None:
             if recorder is not None and pending_attempts:

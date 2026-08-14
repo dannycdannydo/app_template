@@ -119,6 +119,16 @@ def _transfer_stores() -> dict[str, TransferStore]:
     return stores
 
 
+def get_transfer_stores() -> dict[str, TransferStore]:
+    """Return the deployment's provider-neutral transfer stores (v0.8 Scope §2.4).
+
+    The public, cache-free accessor shared by the process-wide service wiring
+    and the §6.7 reconciliation sweep (which needs the provider store that
+    owns each row's provider-hosted copy).
+    """
+    return _transfer_stores()
+
+
 def _storage_is_local() -> bool:
     """Whether the storage seam presigns against a plain-HTTP local/private host.
 

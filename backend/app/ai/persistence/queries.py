@@ -280,3 +280,133 @@ def ai_attachment_references_for_request_statement(
         AIAttachmentReference.organisation_id == organisation_id,
         AIAttachmentReference.logical_request_id == logical_request_id,
     )
+
+
+def ai_attachment_references_needing_reconciliation_statement(
+    *,
+    retry_after: datetime,
+    batch_size: int,
+) -> Select[tuple[AIAttachmentReference]]:
+    """Return the bounded next batch of provider-file references to reconcile.
+
+    v0.8 Scope §2.5/§6.7: the reconciliation sweep covers exactly the
+    provider-hosted copies (``provider_upload`` mode) that terminal cleanup
+    did not remove: rows still owning a copy (``status <> 'deleted'``) whose
+    owning logical AI request is terminal — no further dispatch can reuse the
+    reference — or whose request row is missing entirely (an orphan). A row
+    whose last deletion attempt failed is re-claimed only after the bounded
+    backoff window (``deletion_attempted_at <= retry_after``), so a failing
+    provider is not hammered. Managed signed URLs (no provider copy), Vertex
+    GCS staging objects (deployer-owned lifecycle) and feature-owned source
+    objects never match this statement (BP §28, Scope §2.5).
+    """
+    latest_attempt = (
+        select(
+            AIRequestRecord.organisation_id.label("organisation_id"),
+            AIRequestRecord.request_id.label("request_id"),
+            func.max(AIRequestRecord.attempt_number).label("max_attempt"),
+        )
+        .group_by(AIRequestRecord.organisation_id, AIRequestRecord.request_id)
+        .subquery()
+    )
+    latest_status = (
+        select(
+            latest_attempt.c.organisation_id,
+            latest_attempt.c.request_id,
+            AIRequestRecord.status.label("status"),
+        )
+        .join(
+            AIRequestRecord,
+            (AIRequestRecord.organisation_id == latest_attempt.c.organisation_id)
+            & (AIRequestRecord.request_id == latest_attempt.c.request_id)
+            & (AIRequestRecord.attempt_number == latest_attempt.c.max_attempt),
+        )
+        .subquery()
+    )
+    return (
+        select(AIAttachmentReference)
+        .outerjoin(
+            latest_status,
+            (latest_status.c.organisation_id == AIAttachmentReference.organisation_id)
+            & (latest_status.c.request_id == AIAttachmentReference.logical_request_id),
+        )
+        .where(
+            AIAttachmentReference.transfer_mode == "provider_upload",
+            AIAttachmentReference.status != "deleted",
+            # A terminal owning request (succeeded/failed) or an orphan makes
+            # the copy AI-orphaned and cleanable; a still-running/queued
+            # request is never touched. The orphan side is explicit: the outer
+            # join extends every unmatched reference row with NULL columns, and
+            # ``status IN (...`` alone evaluates to UNKNOWN (not TRUE) for NULL,
+            # so an owning-request row that is missing entirely must be stated
+            # as its own predicate or it would never be selected.
+            (
+                latest_status.c.status.in_(("succeeded", "failed"))
+                | latest_status.c.request_id.is_(None)
+            ),
+            # Never claimed, or failed before and past the bounded backoff.
+            AIAttachmentReference.deletion_attempted_at.is_(None)
+            | (AIAttachmentReference.deletion_attempted_at <= retry_after),
+        )
+        .order_by(AIAttachmentReference.deletion_attempted_at.asc().nulls_first())
+        .limit(batch_size)
+    )
+
+
+def ai_attachment_reference_reconciliation_backlog_statement(
+    *,
+    retry_after: datetime,
+) -> Select[tuple[int]]:
+    """Count every currently eligible provider-file reference (the backlog).
+
+    The same predicate as :func:`ai_attachment_references_needing_reconciliation_statement`
+    without the batch limit; the count feeds the low-cardinality
+    ``ai_transfer_cleanup_backlog`` gauge the §6.7 runbook alerts on. Only
+    provider-hosted copies are counted — managed URLs and GCS staging objects
+    never are (Scope §2.5).
+    """
+    latest_attempt = (
+        select(
+            AIRequestRecord.organisation_id.label("organisation_id"),
+            AIRequestRecord.request_id.label("request_id"),
+            func.max(AIRequestRecord.attempt_number).label("max_attempt"),
+        )
+        .group_by(AIRequestRecord.organisation_id, AIRequestRecord.request_id)
+        .subquery()
+    )
+    latest_status = (
+        select(
+            latest_attempt.c.organisation_id,
+            latest_attempt.c.request_id,
+            AIRequestRecord.status.label("status"),
+        )
+        .join(
+            AIRequestRecord,
+            (AIRequestRecord.organisation_id == latest_attempt.c.organisation_id)
+            & (AIRequestRecord.request_id == latest_attempt.c.request_id)
+            & (AIRequestRecord.attempt_number == latest_attempt.c.max_attempt),
+        )
+        .subquery()
+    )
+    return (
+        select(func.count(AIAttachmentReference.id))
+        .select_from(AIAttachmentReference)
+        .outerjoin(
+            latest_status,
+            (latest_status.c.organisation_id == AIAttachmentReference.organisation_id)
+            & (latest_status.c.request_id == AIAttachmentReference.logical_request_id),
+        )
+        .where(
+            AIAttachmentReference.transfer_mode == "provider_upload",
+            AIAttachmentReference.status != "deleted",
+            # Same terminal-or-orphan predicate as the candidate statement:
+            # the outer join's NULL side must be stated explicitly (see
+            # :func:`ai_attachment_references_needing_reconciliation_statement`).
+            (
+                latest_status.c.status.in_(("succeeded", "failed"))
+                | latest_status.c.request_id.is_(None)
+            ),
+            AIAttachmentReference.deletion_attempted_at.is_(None)
+            | (AIAttachmentReference.deletion_attempted_at <= retry_after),
+        )
+    )

@@ -434,7 +434,15 @@ async def test_orchestrator_mint_managed_url_routes_through_stager() -> None:
         async def mark_deleted(self, **kwargs: object) -> bool:
             return True
 
-        async def resolve_for_deletion(self, **kwargs: object) -> ExternalFileReference | None:
+        async def mark_deletion_attempted(self, **kwargs: object) -> bool:
+            return True
+
+        async def claim_needing_reconciliation(
+            self, **kwargs: object
+        ) -> list[ExternalFileReference]:
+            return []
+
+        async def claim_for_deletion(self, **kwargs: object) -> ExternalFileReference | None:
             return None
 
         async def list_for_request(self, **kwargs: object) -> list[ExternalFileReference]:

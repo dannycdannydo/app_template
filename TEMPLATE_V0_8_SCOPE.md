@@ -512,10 +512,10 @@ data retention, inference geography and secret handling.
 
 Dependencies: Scope §6.4–§6.6.
 
-- [ ] Integrate transfer records into synchronous/queued AI execution so broker payloads remain reference-only, retries re-head/re-digest sources and terminal outcomes trigger cleanup without duplicate output/cost records
-- [ ] Add a bounded Dramatiq reconciliation job only for expired, orphaned and deletion-failed provider-file references with idempotent claims, bounded backoff and crash recovery; prove it never processes managed URLs, GCS staging objects or feature sources
-- [ ] Add safe audit events and low-cardinality metrics for mode selection, transfer outcome/reuse, expiry, deletion and cleanup backlog; redaction tests cover logs, Sentry, audit, rows and broker messages
-- [ ] End-to-end integration tests cover success, permanent failure, timeout, worker crash and cleanup-provider outage across all four modes and both transient/retained source lifecycles
+- [x] Integrate transfer records into synchronous/queued AI execution so broker payloads remain reference-only, retries re-head/re-digest sources and terminal outcomes trigger cleanup without duplicate output/cost records
+- [x] Add a bounded Dramatiq reconciliation job only for expired, orphaned and deletion-failed provider-file references with idempotent claims, bounded backoff and crash recovery; prove it never processes managed URLs, GCS staging objects or feature sources
+- [x] Add safe audit events and low-cardinality metrics for mode selection, transfer outcome/reuse, expiry, deletion and cleanup backlog; redaction tests cover logs, Sentry, audit, rows and broker messages
+- [x] End-to-end integration tests cover success, permanent failure, timeout, worker crash and cleanup-provider outage across all four modes and both transient/retained source lifecycles
 
 Human review required before application: background cleanup behavior and
 provider-data deletion guarantees.

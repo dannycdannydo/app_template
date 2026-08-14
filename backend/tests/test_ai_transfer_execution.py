@@ -20,20 +20,34 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 import pytest
+from prometheus_client import REGISTRY
+from tests.ai_test_helpers import InMemoryTaskRegistry
 
 from app.ai.anthropic_staging import FakeAnthropicUploadStore
 from app.ai.attachments import MAX_ATTACHMENT_BYTES
 from app.ai.errors import (
     AIInputValidationError,
+    ProviderResponseError,
+    ProviderTimeoutError,
     TransferExecutionUnavailableError,
     TransferModeUnavailableError,
+    TransferStagingError,
 )
 from app.ai.persistence.port import AIRequestReservation, OrganisationAIPolicy
 from app.ai.providers.fake import FakeLLMProvider
-from app.ai.registry import load_registry_bundle
+from app.ai.registry import (
+    Capability,
+    FallbackPolicy,
+    LatencyTier,
+    QualityTier,
+    RetryPolicy,
+    TaskDefinition,
+    load_registry_bundle,
+)
 from app.ai.schemas import AIRequest
 from app.ai.service import AIService
 from app.ai.staging import (
@@ -43,7 +57,13 @@ from app.ai.staging import (
     TransferStore,
 )
 from app.ai.storage_resolver import StorageAttachmentResolver
-from app.ai.transfer import SourceLifecycle, TransferDeploymentPolicy, TransferMode
+from app.ai.transfer import (
+    SourceLifecycle,
+    TransferDeploymentPolicy,
+    TransferMode,
+    derive_idempotency_key,
+)
+from app.ai.transfer_orchestrator import TransferOrchestrator
 from app.storage.fake import FakeObjectStorage
 from app.storage.types import SignedUrl
 
@@ -94,9 +114,17 @@ class _InMemoryReferenceStore:
         source_digest: str,
         region: str,
     ) -> ExternalFileReference | None:
-        candidate = self._by_key.get(
-            f"{provider_id}|{mode.value}|{organisation_id}|{logical_request_id}|{source_digest}|{region}"
+        # Mirrors the SQL store: the derived idempotency key is the exact
+        # reuse predicate (provider, mode, org, logical request, digest, region).
+        key = derive_idempotency_key(
+            provider=provider_id,
+            mode=mode,
+            organisation_id=organisation_id,
+            logical_request_id=logical_request_id,
+            source_digest=source_digest,
+            region=region,
         )
+        candidate = self._by_key.get(key)
         if candidate is not None and candidate.is_live:
             return candidate
         return None
@@ -131,10 +159,36 @@ class _InMemoryReferenceStore:
         )
         return True
 
-    async def resolve_for_deletion(
+    async def mark_deletion_attempted(
+        self, *, organisation_id: UUID, idempotency_key: str, error_code: str | None
+    ) -> bool:
+        reference = self._by_key.get(idempotency_key)
+        if reference is None or reference.status is ExternalReferenceStatus.DELETED:
+            return False
+        self._by_key[idempotency_key] = reference.model_copy(
+            update={
+                "deletion_attempted_at": datetime.now(UTC),
+                "error_code": error_code,
+            }
+        )
+        return True
+
+    async def claim_needing_reconciliation(
+        self, *, retry_after: datetime, batch_size: int
+    ) -> list[ExternalFileReference]:
+        return [
+            r for r in self._by_key.values() if r.status is not ExternalReferenceStatus.DELETED
+        ][:batch_size]
+
+    async def claim_for_deletion(
         self, *, organisation_id: UUID, idempotency_key: str
     ) -> ExternalFileReference | None:
-        return self._by_key.get(idempotency_key)
+        reference = self._by_key.get(idempotency_key)
+        if reference is None or reference.status is ExternalReferenceStatus.DELETED:
+            return None
+        claimed = reference.model_copy(update={"deletion_attempted_at": datetime.now(UTC)})
+        self._by_key[idempotency_key] = claimed
+        return claimed
 
     async def list_for_request(
         self, *, organisation_id: UUID, logical_request_id: str
@@ -300,11 +354,15 @@ async def test_large_pdf_routes_through_staging_seam() -> None:
     assert request.staged_file is not None
     assert request.staged_file.mime_type == "application/pdf"
     assert request.staged_file.external_id.startswith("fake-")
-    # The staged reference was recorded and its AI-owned copy deleted after
-    # terminal success; the source object still exists.
+    # The staged reference was recorded and its AI-owned copy deleted through
+    # the store immediately after terminal success (Scope §2.5 permits
+    # immediate best-effort terminal deletion of the GCS staging object; only
+    # the *scheduled* §6.7 reconciliation job excludes storage references —
+    # the deployer's age = 1 lifecycle is the backstop); the feature-owned
+    # source object still exists.
     assert len(store.records) == 1
     assert len(store.deleted) == 1
-    assert store.deleted[0].idempotency_key == store.records[0].idempotency_key
+    assert store.deleted[0].external_id == store.records[0].external_id
     staged = store.records[0]
     assert staged.source_reference == key
     assert staged.size_bytes == _BIG_PDF_BYTES
@@ -871,4 +929,224 @@ async def test_anthropic_transient_over_ceiling_pdf_rejected_before_scratch_stag
     assert provider.requests == []
     assert stager.mints == []
     assert references.records == []
+    assert await storage.head_object(key) is not None
+
+
+# --- §6.7 terminal failure/timeout outcomes and failure observability --------
+
+
+def _outcome_samples(mode: str, provider: str, result: str) -> float:
+    """Current process-wide ``ai_transfer_outcomes_total`` sample for labels."""
+    return (
+        REGISTRY.get_sample_value(
+            "ai_transfer_outcomes_total",
+            {"mode": mode, "provider": provider, "result": result},
+        )
+        or 0.0
+    )
+
+
+async def test_failed_staging_records_safe_failure_audit_and_outcome_metric() -> None:
+    """A provider upload/staging failure emits ``ai.transfer_failed`` carrying
+    the safe taxonomy error code only — never exception text, URLs, external
+    ids, keys or content — and increments the transfer-outcome metric (Scope
+    §6.7 checkbox 3)."""
+    recorded: list[dict[str, Any]] = []
+
+    async def _recorder(
+        action: str,
+        resource_type: str,
+        resource_id: str,
+        organisation_id: UUID,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        recorded.append({"action": action, "metadata": metadata or {}})
+
+    class _BrokenStore(FakeTransferStore):
+        async def stage(self, **kwargs: object) -> ExternalFileReference:
+            raise TransferStagingError("upload refused https://secret.example/file-abc123?X=Y")
+
+    orchestrator = TransferOrchestrator(
+        storage=FakeObjectStorage(bucket="seam-test"),
+        store=_BrokenStore(),
+        references=_InMemoryReferenceStore(),
+        audit_recorder=_recorder,
+    )
+    before = _outcome_samples("provider_upload", "fake", "failed")
+    with pytest.raises(TransferStagingError):
+        await orchestrator.create_or_reuse_reference(
+            organisation_id=_ORG_ID,
+            logical_request_id="req-stage-fail",
+            provider_id="fake",
+            mode=TransferMode.PROVIDER_UPLOAD,
+            source_reference=f"organisations/{_ORG_ID}/documents/doc-1/original",
+            source_digest="ab" * 32,
+            size_bytes=_BIG_PDF_BYTES,
+            mime_type="application/pdf",
+            source_lifecycle=SourceLifecycle.TRANSIENT,
+            region="eu-west-1",
+            expires_at=None,
+        )
+    assert _outcome_samples("provider_upload", "fake", "failed") == before + 1
+    assert len(recorded) == 1
+    assert recorded[0]["action"] == "ai.transfer_failed"
+    metadata = recorded[0]["metadata"]
+    assert set(metadata) == {"transfer_mode", "provider", "error_code"}
+    assert metadata["error_code"] == "transfer_staging_failed"
+    assert metadata["transfer_mode"] == "provider_upload"
+    # Redaction: the URL/external-id text in the exception never leaks.
+    assert "secret.example" not in str(metadata)
+    assert "file-abc123" not in str(metadata)
+
+
+async def test_failed_deletion_records_safe_failure_audit_and_outcome_metric() -> None:
+    """An immediate provider deletion failure emits ``ai.transfer_failed`` with
+    the safe error code only and increments the outcome metric (Scope §6.7
+    checkbox 3); the durable row keeps its safe failure marker."""
+    recorded: list[dict[str, Any]] = []
+
+    async def _recorder(
+        action: str,
+        resource_type: str,
+        resource_id: str,
+        organisation_id: UUID,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        recorded.append({"action": action, "metadata": metadata or {}})
+
+    class _BrokenDeleteStore(FakeTransferStore):
+        async def delete(self, reference: ExternalFileReference) -> None:
+            raise ProviderResponseError("delete refused file-abc123 at https://secret.example/x")
+
+    store = _BrokenDeleteStore()
+    references = _InMemoryReferenceStore()
+    orchestrator = TransferOrchestrator(
+        storage=FakeObjectStorage(bucket="seam-test"),
+        store=store,
+        references=references,
+        audit_recorder=_recorder,
+    )
+    staged = await orchestrator.create_or_reuse_reference(
+        organisation_id=_ORG_ID,
+        logical_request_id="req-delete-fail",
+        provider_id="fake",
+        mode=TransferMode.PROVIDER_UPLOAD,
+        source_reference=f"organisations/{_ORG_ID}/documents/doc-1/original",
+        source_digest="cd" * 32,
+        size_bytes=_BIG_PDF_BYTES,
+        mime_type="application/pdf",
+        source_lifecycle=SourceLifecycle.TRANSIENT,
+        region="eu-west-1",
+        expires_at=None,
+    )
+    before = _outcome_samples("provider_upload", "fake", "failed")
+    with pytest.raises(TransferExecutionUnavailableError):
+        await orchestrator.delete_reference(reference=staged)
+    assert _outcome_samples("provider_upload", "fake", "failed") == before + 1
+    assert recorded[-1]["action"] == "ai.transfer_failed"
+    metadata = recorded[-1]["metadata"]
+    assert set(metadata) == {"transfer_mode", "provider", "error_code"}
+    assert metadata["error_code"] == "provider_response_invalid"
+    assert "secret.example" not in str(metadata)
+    assert "file-abc123" not in str(metadata)
+    # The durable row was claimed and keeps the safe deletion-failure marker
+    # for the reconciliation sweep (Scope §2.5).
+    durable = references.records[0]
+    assert durable.status is ExternalReferenceStatus.LIVE
+    assert durable.error_code == "provider_reference_deletion_failed"
+    assert durable.deletion_attempted_at is not None
+
+
+async def test_provider_upload_permanent_failure_still_runs_terminal_cleanup() -> None:
+    """A permanent provider failure after staging still runs the terminal
+    cleanup: the AI-owned copy is deleted through the store, the durable
+    reference is expired then deleted, and the feature-owned source object is
+    untouched (Scope §6.7 checkbox 1/4)."""
+    storage = FakeObjectStorage(bucket="seam-test")
+    service, fake_provider, store, references = _service(
+        storage=storage, enabled_transfer_modes={TransferMode.PROVIDER_UPLOAD}
+    )
+    key = await _put_scratch_pdf(storage, size=_BIG_PDF_BYTES)
+    fake_provider.fail_next_call(error=ProviderResponseError)
+
+    with pytest.raises(ProviderResponseError):
+        await service.execute(
+            _ask_request(key),
+            recorder=_ProviderUploadRecorder(),
+            transfer_references=references,
+        )
+    # The staged copy was deleted after the failure and the durable reference
+    # is terminal; the feature source is untouched.
+    assert len(store.records) == 1
+    assert len(store.deleted) == 1
+    assert len(references.records) == 1
+    assert references.records[0].status is ExternalReferenceStatus.DELETED
+    assert await storage.head_object(key) is not None
+
+
+async def test_provider_upload_timeout_exhausts_retries_still_runs_terminal_cleanup() -> None:
+    """An exhausted bounded timeout retry budget after staging still runs the
+    terminal cleanup: the retry reuses the live reference (one copy staged),
+    the copy is then deleted, the durable reference is terminal, and the
+    feature-owned source object is untouched (Scope §6.7 checkbox 1/4)."""
+    bundle = load_registry_bundle()
+    tasks = InMemoryTaskRegistry(
+        {
+            "document.transfer-fail": TaskDefinition(
+                name="document.transfer-fail",
+                prompt_name="document.ask",
+                prompt_version=1,
+                input_variables=["storage_reference", "question"],
+                required_capabilities=[Capability.DOCUMENTS],
+                parameter_defaults={"max_tokens": 1024, "temperature": 0},
+                declares_text_result=True,
+                allowed_transfer_modes=[TransferMode.INLINE, TransferMode.PROVIDER_UPLOAD],
+                retry_policy=RetryPolicy(max_attempts=2, repair_attempts=0),
+                fallback_policy=FallbackPolicy(allowed=False),
+                quality_tier=QualityTier.ECONOMY,
+                latency_tier=LatencyTier.INTERACTIVE,
+                max_input_tokens=4096,
+            )
+        }
+    )
+    storage = FakeObjectStorage(bucket="seam-test")
+    fake_provider = FakeLLMProvider()
+    store = FakeTransferStore()
+    references = _InMemoryReferenceStore()
+    service = AIService(
+        task_registry=tasks,
+        prompt_registry=bundle.prompts,
+        model_registry=bundle.models,
+        providers={"fake": fake_provider},
+        attachment_resolver=StorageAttachmentResolver(storage),
+        transfer_deployment=TransferDeploymentPolicy(
+            inline_aggregate_threshold_bytes=_INLINE_THRESHOLD,
+            max_large_attachment_bytes=50_000_000,
+            enabled_transfer_modes=frozenset({TransferMode.PROVIDER_UPLOAD}),
+        ),
+        storage=storage,
+        transfer_stores={"fake": store},
+    )
+    key = await _put_scratch_pdf(storage, size=_BIG_PDF_BYTES)
+    fake_provider.fail_next_call(count=2, error=ProviderTimeoutError)
+
+    with pytest.raises(ProviderTimeoutError):
+        await service.execute(
+            AIRequest(
+                task="document.transfer-fail",
+                storage_reference=key,
+                organisation_id=_ORG_ID,
+                user_id=_USER_ID,
+                metadata={"question": "What is in this document?"},
+            ),
+            recorder=_ProviderUploadRecorder(),
+            transfer_references=references,
+        )
+    # Both bounded attempts dispatched, and the retry reused the live
+    # reference instead of staging a second copy (retry-only reuse).
+    assert len(fake_provider.requests) == 2
+    assert len(store.records) == 1
+    assert len(references.records) == 1
+    assert references.records[0].status is ExternalReferenceStatus.DELETED
+    assert len(store.deleted) == 1
     assert await storage.head_object(key) is not None

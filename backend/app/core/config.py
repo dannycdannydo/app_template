@@ -428,6 +428,25 @@ class Settings(BaseSettings):
             "(v0.8 Scope §2.4)"
         ),
     )
+    ai_reconcile_batch_size: int = Field(
+        default=50,
+        ge=1,
+        le=1_000,
+        description=(
+            "Bounded batch size of provider-file references the §6.7 "
+            "reconciliation sweep claims per run (v0.8 Scope §2.5/§6.7)"
+        ),
+    )
+    ai_reconcile_retry_after_seconds: int = Field(
+        default=3_600,
+        ge=60,
+        le=7 * 24 * 3_600,
+        description=(
+            "Minimum time a provider-file reference whose deletion attempt "
+            "failed must wait before the reconciliation sweep retries it "
+            "(bounded backoff, v0.8 Scope §2.5/§6.7)"
+        ),
+    )
 
     @field_validator("cors_allowed_origins")
     @classmethod

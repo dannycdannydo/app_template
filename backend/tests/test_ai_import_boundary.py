@@ -154,6 +154,14 @@ def test_feature_modules_do_not_name_transfer_mode_literals() -> None:
     are ignored.
     """
     forbidden = {"provider_upload", "managed_signed_url", "gs://"}
+    # The v0.8 §6.7 observability seam is the single sanctioned boundary
+    # outside ``app/ai/`` that may name a mode: the low-cardinality
+    # ``ai_transfer_cleanup_backlog{mode="provider_upload"}`` gauge label (the
+    # mode name is the label value, never a routing/selection input — Scope
+    # §2.2's caller boundary is untouched).
+    allowed_observability = {
+        ("app/observability/metrics.py", "provider_upload"),
+    }
     violations: list[tuple[str, int, str]] = []
     for path in sorted(APP_ROOT.rglob("*.py")):
         relative = path.relative_to(BACKEND_ROOT).as_posix()
@@ -163,8 +171,10 @@ def test_feature_modules_do_not_name_transfer_mode_literals() -> None:
             stripped = line.strip()
             if stripped.startswith("#"):
                 continue
-            if any(token in stripped for token in forbidden):
-                violations.append((relative, line_number, stripped))
+            for token in forbidden:
+                if token in stripped and (relative, token) not in allowed_observability:
+                    violations.append((relative, line_number, stripped))
+                    break
     assert violations == [], (
         "feature modules must not name transfer modes or provider references "
         f"(v0.8 Scope §2.2); found: {violations}"

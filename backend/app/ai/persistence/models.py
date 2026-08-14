@@ -426,6 +426,14 @@ class AIAttachmentReference(Base, TimestampMixin):
             "organisation_id",
             "created_at",
         ),
+        # The §6.7 reconciliation sweep's bounded candidate scan: the partial
+        # predicate keeps the index small (only cleanable provider-hosted
+        # copies) and matches the sweep's claim ordering.
+        Index(
+            "ix_ai_attachment_references_deletion_attempted_at",
+            "deletion_attempted_at",
+            postgresql_where=text("transfer_mode = 'provider_upload' AND status <> 'deleted'"),
+        ),
         CheckConstraint(
             f"transfer_mode IN ({', '.join(repr(mode) for mode in _transfer_mode_values())})",
             name="transfer_mode",
@@ -503,3 +511,11 @@ class AIAttachmentReference(Base, TimestampMixin):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # When terminal cleanup last attempted to delete the AI-owned provider
+    # copy (v0.8 Scope §2.5/§6.7). Set before the best-effort provider delete;
+    # a failed deletion leaves it stamped so the reconciliation sweep can
+    # retry after the bounded backoff window. Never a managed signed URL or
+    # its query string — a UTC timestamp only (BP §28).
+    deletion_attempted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
