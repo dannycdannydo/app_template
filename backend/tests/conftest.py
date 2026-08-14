@@ -9,7 +9,9 @@ developer's shell environment or a live database.
 import os
 from pathlib import Path
 
+import dramatiq
 import pytest
+from dramatiq.brokers.stub import StubBroker
 
 # The suite must always run in the test profile, whatever the surrounding shell
 # exports: with APP_ENV left as ``development`` the real Redis rate limiter is
@@ -88,6 +90,12 @@ for _var in (
     "no_proxy",
 ):
     os.environ.pop(_var, None)
+
+# Actor instances retain the broker that was global when their module was
+# imported. Install a network-free broker before pytest imports any application
+# modules; ``app.main.create_app`` keeps the test profile on a StubBroker too.
+# Real-broker integration tests opt into their own unique Redis namespaces.
+dramatiq.set_broker(StubBroker())
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 

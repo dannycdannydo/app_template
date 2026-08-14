@@ -313,7 +313,7 @@ Blueprint §28 is complete: structured JSON logging, Sentry, and basic metrics, 
 
 - **Logging context**: every JSON log line carries `request_id`; authenticated `/api/v1` requests additionally bind `user_id` and `organisation_id` (cleared per request), worker tasks bind `job_id` and `resource_id` for file/job/notification operations, and every line has a consistent `event` name. The BP §28 never-log list (passwords, tokens, authorisation headers, signed URLs, full connection strings) is enforced by test. See `API_CONVENTIONS.md` → Request IDs and logging.
 - **Sentry**: `sentry-sdk` is initialised in `create_app()` only when `SENTRY_DSN` is set (`SENTRY_ENVIRONMENT` defaults to `APP_ENV`, `SENTRY_TRACES_SAMPLE_RATE` configurable); unhandled request exceptions and unhandled worker exceptions are captured (worker capture mirrors the durable job failure record). With no DSN the app boots without the SDK.
-- **Metrics**: `GET /metrics` (public, like `/health` and `/ready`) returns Prometheus text format — request counter + latency histogram middleware plus job counters (enqueued/succeeded/failed), labelled with low-cardinality route/job-type identifiers. The edge (Caddy) and the metrics scrapers documented in `docs/operations.md` consume it.
+- **Metrics**: `GET /metrics` (public, like `/health` and `/ready`) returns Prometheus text format — request counter + latency histogram middleware plus job counters (enqueued/succeeded/failed and stale messages discarded after bounded retries), labelled with low-cardinality route/job-type identifiers. The edge (Caddy) and the metrics scrapers documented in `docs/operations.md` consume it.
 
 ## Email provider interface (v0.6)
 

@@ -121,12 +121,15 @@ allows 600 events/min. Metric families (blueprint §28,
 `app/observability/metrics.py`): `http_requests_total` (labels `method`,
 `path` normalised to `{id}`, `status_code`), `http_request_duration_seconds`
 (`method`, `path`) and the job counters `jobs_enqueued_total`,
-`jobs_succeeded_total`, `jobs_failed_total` (label `job_type`). Recommended
-alerts:
+`jobs_succeeded_total`, `jobs_failed_total` (label `job_type`) and
+`jobs_stale_messages_total` (messages discarded after bounded retries because
+their durable PostgreSQL row is absent). Recommended alerts:
 
 - `http_requests_total` error rate (`status_code` 5xx) above 1% over 10 min.
 - `http_requests_total` per `path` traffic collapse (silent API).
 - `jobs_failed_total` growth; alert on failed growth.
+- Any `jobs_stale_messages_total` growth; investigate broker/database state
+  drift, retention or an unsupported partial reset.
 - `http_request_duration_seconds` `p95` above the SLO threshold (default 1 s).
 
 The AI layer adds its own families (`ai_requests_total`,
@@ -141,6 +144,7 @@ The AI layer adds its own families (`ai_requests_total`,
 | --- | --- | --- |
 | Readiness / API failure | `/ready` non-200 from the uptime monitor or scraper | critical |
 | Worker / job failures | `jobs_failed_total` rising; delivery rows `failed` | critical |
+| Stale worker messages | `jobs_stale_messages_total` rising | warning |
 | Disk pressure | host disk or Caddy/Redis log volumes ≥ 80% | warning (90% critical) |
 | Certificate expiry | Let's Encrypt renewal failures in Caddy logs; cert expiry within 14 days | critical |
 | Backup failure | failed backup job / missing backup marker (docs/backup-and-recovery.md) | critical |

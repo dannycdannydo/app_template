@@ -1,4 +1,4 @@
-"""Shared Dramatiq Redis broker configuration (BP §18, v0.5 Scope §6.4).
+"""Shared Dramatiq broker configuration (BP §18, v0.5 Scope §6.4).
 
 Both the API process and the Dramatiq worker install a broker from this module.
 Keeping the factory separate from ``app.workers`` lets API startup publish jobs
@@ -8,7 +8,9 @@ registration side effects.
 
 from __future__ import annotations
 
+from dramatiq.broker import Broker
 from dramatiq.brokers.redis import RedisBroker
+from dramatiq.brokers.stub import StubBroker
 from dramatiq.middleware import AsyncIO, Middleware, default_middleware
 
 from app.core.config import get_settings
@@ -32,6 +34,17 @@ def worker_middleware() -> MiddlewareStack:
     ]
 
 
-def build_broker() -> RedisBroker:
-    """Return the Redis broker shared by API and worker processes."""
-    return RedisBroker(url=get_settings().redis_url, middleware=worker_middleware())
+def build_broker() -> Broker:
+    """Return the broker shared by API and worker processes.
+
+    The test profile is deliberately network-free: actors imported during
+    pytest collection bind permanently to an in-memory broker, so a unit or
+    database test can never publish an orphaned message into a developer's
+    Redis queues. Tests that exercise Redis construct their own uniquely
+    namespaced ``RedisBroker`` explicitly.
+    """
+    settings = get_settings()
+    middleware = worker_middleware()
+    if settings.app_env == "test":
+        return StubBroker(middleware=middleware)
+    return RedisBroker(url=settings.redis_url, middleware=middleware)
