@@ -427,9 +427,7 @@ async def test_anthropic_managed_url_alone_dispatches_document_url_source() -> N
 
     adapter = AnthropicAdapter(api_key="ant-test", client=_client(handler))
     managed_url = "https://minio.example.test/lease.pdf?X-Amz-Signature=x"
-    await adapter.complete(
-        _anthropic_staged_request(staged_file=None, managed_url=managed_url)
-    )
+    await adapter.complete(_anthropic_staged_request(staged_file=None, managed_url=managed_url))
     body = json.loads(captured[0].content)
     blocks = _anthropic_content_blocks(body)
     assert blocks[1] == {"type": "document", "source": {"type": "url", "url": managed_url}}

@@ -102,8 +102,7 @@ def _anthropic_staged_document_block(request: ProviderRequest) -> dict[str, Any]
         raise AIInputValidationError("a staged file reference is required for document input")
     if staged.mime_type not in ANTHROPIC_INLINE_ATTACHMENT_MIME_TYPES:
         raise AIInputValidationError(
-            "provider 'anthropic' does not support staged file MIME type "
-            f"{staged.mime_type!r}"
+            f"provider 'anthropic' does not support staged file MIME type {staged.mime_type!r}"
         )
     external_id = staged.external_id
     if "://" in external_id or external_id.startswith("gs:"):

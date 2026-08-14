@@ -204,7 +204,9 @@ def test_checked_in_fixture_covers_every_provider_and_required_storage_fact() ->
         assert pdf_pages.max_pages_under_context_window == 100
         assert pdf_pages.context_window_threshold == 1_000_000
     # Providers whose documentation records no page ceiling declare none.
-    assert contracts.providers["openai"].transfer_modes[TransferMode.PROVIDER_UPLOAD].pdf_pages is None
+    assert (
+        contracts.providers["openai"].transfer_modes[TransferMode.PROVIDER_UPLOAD].pdf_pages is None
+    )
     # Every provider records a regional caveat backed by a cited source.
     for provider_id, contract in contracts.providers.items():
         assert contract.regional_notes, provider_id
