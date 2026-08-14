@@ -727,6 +727,9 @@ class Settings(BaseSettings):
                 upload_expiry_seconds=self.ai_upload_expiry_seconds,
                 managed_url_ttl_seconds=self.ai_managed_url_ttl_seconds,
                 vertex_temp_gcs_bucket=self.ai_vertex_temp_gcs_bucket,
+                vertex_project=self.ai_vertex_project,
+                vertex_location=self.ai_vertex_location,
+                storage_presign_endpoint=self.storage_public_endpoint_url,
             )
         return self
 

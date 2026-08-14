@@ -18,11 +18,13 @@ real OpenAI upload store and the durable SQL store are covered by
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import UUID
 
 import pytest
 
+from app.ai.anthropic_staging import FakeAnthropicUploadStore
 from app.ai.attachments import MAX_ATTACHMENT_BYTES
 from app.ai.errors import (
     AIInputValidationError,
@@ -34,10 +36,16 @@ from app.ai.providers.fake import FakeLLMProvider
 from app.ai.registry import load_registry_bundle
 from app.ai.schemas import AIRequest
 from app.ai.service import AIService
-from app.ai.staging import ExternalFileReference, ExternalReferenceStatus, FakeTransferStore
+from app.ai.staging import (
+    ExternalFileReference,
+    ExternalReferenceStatus,
+    FakeTransferStore,
+    TransferStore,
+)
 from app.ai.storage_resolver import StorageAttachmentResolver
 from app.ai.transfer import SourceLifecycle, TransferDeploymentPolicy, TransferMode
 from app.storage.fake import FakeObjectStorage
+from app.storage.types import SignedUrl
 
 _ORG_ID = uuid.uuid4()
 _USER_ID = uuid.uuid4()
@@ -503,3 +511,364 @@ async def test_transient_large_pdf_never_rides_managed_url() -> None:
         )
     assert store.records == [] and store.deleted == []
     assert fake_provider.requests == []
+
+
+class _NoCopyTransferStore(TransferStore):
+    """A provider_upload store that yields no-copy references (external id =
+    source identity), mirroring the Anthropic store's local-transient
+    scratch-GCS behavior (Scope §6.6 lesson learned)."""
+
+    provider_id = "fake"
+
+    def __init__(self) -> None:
+        self.staged: list[ExternalFileReference] = []
+        self.deleted_keys: list[str] = []
+
+    async def stage(
+        self,
+        *,
+        mode: TransferMode,
+        organisation_id: UUID,
+        logical_request_id: str,
+        source_reference: str,
+        source_digest: str,
+        mime_type: str,
+        size_bytes: int,
+        source_lifecycle: SourceLifecycle,
+        region: str,
+        expires_at: datetime | None,
+        source_path: Path | None = None,
+    ) -> ExternalFileReference:
+        reference = ExternalFileReference(
+            mode=mode,
+            provider=self.provider_id,
+            external_id=source_reference,
+            source_reference=source_reference,
+            source_digest=source_digest,
+            size_bytes=size_bytes,
+            mime_type=mime_type,
+            source_lifecycle=source_lifecycle,
+            region=region,
+            organisation_id=organisation_id,
+            logical_request_id=logical_request_id,
+            idempotency_key="idem-no-copy",
+            created_at=datetime.now(UTC),
+        )
+        self.staged.append(reference)
+        return reference
+
+    async def find_reusable(
+        self,
+        *,
+        mode: TransferMode,
+        organisation_id: UUID,
+        logical_request_id: str,
+        source_digest: str,
+        region: str,
+    ) -> ExternalFileReference | None:
+        return None
+
+    async def delete(self, reference: ExternalFileReference) -> None:
+        self.deleted_keys.append(reference.external_id)
+
+
+class _FakeManagedUrlStager:
+    """Deterministic :class:`ManagedUrlStager` standing in for the dev GCS
+    staging seam (local storage)."""
+
+    region = "europe-west1"
+
+    async def mint(
+        self,
+        *,
+        reference: ExternalFileReference,
+        ttl_seconds: int,
+        source_storage: object,
+    ) -> SignedUrl:
+        assert reference.source_lifecycle is SourceLifecycle.TRANSIENT
+        return SignedUrl(
+            url="https://storage.googleapis.com/scratch/lease.pdf?X-Goog-Signature=secret",
+            method="GET",
+            expires_at=datetime.now(UTC) + timedelta(seconds=ttl_seconds),
+        )
+
+
+async def test_local_transient_provider_upload_served_by_managed_url_seam() -> None:
+    """With a local storage seam a transient provider_upload dispatch is served
+    by a just-in-time signed URL to the scratch-GCS copy instead of a provider
+    file id (Scope §6.6 lesson learned): the no-copy reference travels as a
+    staged_file plus a dispatch-time managed_url, and terminal cleanup marks
+    the no-copy reference deleted without touching the source."""
+    bundle = load_registry_bundle()
+    storage = FakeObjectStorage(bucket="seam-test")
+    references = _InMemoryReferenceStore()
+    no_copy_store = _NoCopyTransferStore()
+    stager = _FakeManagedUrlStager()
+    fake_provider = FakeLLMProvider()
+    service = AIService(
+        task_registry=bundle.tasks,
+        prompt_registry=bundle.prompts,
+        model_registry=bundle.models,
+        providers={"fake": fake_provider},
+        attachment_resolver=StorageAttachmentResolver(storage),
+        transfer_deployment=TransferDeploymentPolicy(
+            inline_aggregate_threshold_bytes=_INLINE_THRESHOLD,
+            max_large_attachment_bytes=50_000_000,
+            enabled_transfer_modes=frozenset({TransferMode.PROVIDER_UPLOAD}),
+        ),
+        storage=storage,
+        transfer_stores={"fake": no_copy_store},
+        managed_url_stager=stager,
+    )
+    key = await _put_scratch_pdf(storage, size=_BIG_PDF_BYTES)  # transient scratch path
+
+    result = await service.execute(
+        _ask_request(key),
+        recorder=_ProviderUploadRecorder(),
+        transfer_references=references,
+    )
+
+    assert isinstance(result.output, str) and result.output
+    assert len(fake_provider.requests) == 1
+    request = fake_provider.requests[0]
+    # The dispatch carries the no-copy reference and the dispatch-time managed
+    # URL; the managed URL wins as the document source.
+    assert request.staged_file is not None
+    assert request.staged_file.external_id == key
+    assert request.managed_url is not None
+    assert request.managed_url.startswith("https://storage.googleapis.com/")
+    # The durable reference records the provider_upload mode with the no-copy
+    # shape; the feature-owned source object is untouched.
+    assert len(references.records) == 1
+    durable = references.records[0]
+    assert durable.mode is TransferMode.PROVIDER_UPLOAD
+    assert durable.source_lifecycle is SourceLifecycle.TRANSIENT
+    assert durable.external_id == key
+    assert await storage.head_object(key) is not None
+    # Terminal cleanup marks the no-copy reference deleted through the store
+    # (no provider file call); the feature-owned source object is untouched.
+    assert no_copy_store.deleted_keys == [key]
+    assert len(references.records) == 1
+    assert references.records[0].status is ExternalReferenceStatus.DELETED
+
+
+# --- Scope §6.6: page/context ceiling on both Anthropic non-inline modes ----
+#
+# The routed Anthropic model's reviewed PDF page ceiling (providers.yaml
+# `pdf_pages` + the model's context window -> 100 pages for
+# claude-sonnet-4-6) must close over *both* non-inline operations: the
+# provider-upload store rejects pre-upload, and the managed-signed-url
+# branch rejects pre-mint/pre-dispatch. These service-level tests prove no
+# provider call, no signed-URL mint and no scratch-GCS stage happens for an
+# over-ceiling source.
+
+
+def _classic_pdf(objects: list[tuple[int, bytes]], *, padding: bytes = b"") -> bytes:
+    """A minimal classic xref-table PDF (see test_ai_anthropic_upload.py).
+
+    ``padding`` is appended between the last object and the cross-reference
+    table (e.g. a long ``%`` comment) so a fixture can be grown to any size
+    while the trailer, xref table and ``startxref`` stay at the end where a
+    real PDF keeps them.
+    """
+    body = bytearray(b"%PDF-1.7\n")
+    offsets: dict[int, int] = {}
+    for number, obj in objects:
+        offsets[number] = len(body)
+        body += obj
+    body += padding
+    xref_offset = len(body)
+    max_number = max(number for number, _ in objects)
+    body += b"xref\n0 %d\n" % (max_number + 1)
+    body += b"0000000000 65535 f \n"
+    for number in range(1, max_number + 1):
+        offset = offsets.get(number)
+        if offset is None:
+            body += b"0000000000 65535 f \n"
+        else:
+            body += b"%010d 00000 n \n" % offset
+    body += b"trailer\n<< /Size %d /Root 1 0 R >>\n" % (max_number + 1)
+    body += f"startxref\n{xref_offset}\n%%EOF\n".encode()
+    return bytes(body)
+
+
+def _multi_page_pdf(page_count: int, *, pad_to: int | None = None) -> bytes:
+    """A minimal classic PDF with ``page_count`` page-tree leaves.
+
+    With ``pad_to`` the fixture is grown to at least that many bytes via a
+    ``%`` comment before the cross-reference table (never after ``%%EOF``,
+    which would push the trailer out of the inspector's bounded tail read).
+    """
+    objects: list[tuple[int, bytes]] = [
+        (1, b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"),
+        (
+            2,
+            (
+                b"2 0 obj\n<< /Type /Pages /Count %d /Kids [%s] >>\nendobj\n"
+                % (page_count, b" ".join(b"%d 0 R" % i for i in range(3, 3 + page_count)))
+            ),
+        ),
+    ]
+    objects.extend(
+        (i, b"%d 0 obj\n<< /Type /Page /Parent 2 0 R >>\nendobj\n" % i)
+        for i in range(3, 3 + page_count)
+    )
+    padding = b""
+    if pad_to is not None:
+        padding = b"% " + b" " * pad_to + b"\n"
+    return _classic_pdf(objects, padding=padding)
+
+
+async def _put_pdf_with_pages(storage: FakeObjectStorage, *, page_count: int, size: int) -> str:
+    """A retained (documents) multi-page PDF above the inline threshold."""
+    key = f"organisations/{_ORG_ID}/documents/doc-{uuid.uuid4().hex[:8]}/original"
+    await storage.put(key, _multi_page_pdf(page_count, pad_to=size), content_type="application/pdf")
+    return key
+
+
+async def _put_scratch_pdf_with_pages(
+    storage: FakeObjectStorage, *, page_count: int, size: int
+) -> str:
+    """A transient (scratch) multi-page PDF above the inline threshold."""
+    key = f"organisations/{_ORG_ID}/ai/scratch/doc-{uuid.uuid4().hex[:8]}.pdf"
+    await storage.put(key, _multi_page_pdf(page_count, pad_to=size), content_type="application/pdf")
+    return key
+
+
+class _RecordingManagedUrlStager:
+    """A :class:`ManagedUrlStager` that records every mint (or its absence)."""
+
+    region = "europe-west1"
+
+    def __init__(self) -> None:
+        self.mints: list[ExternalFileReference] = []
+
+    async def mint(
+        self,
+        *,
+        reference: ExternalFileReference,
+        ttl_seconds: int,
+        source_storage: object,
+    ) -> SignedUrl:
+        self.mints.append(reference)
+        return SignedUrl(
+            url="https://storage.googleapis.com/scratch/lease.pdf?X-Goog-Signature=secret",
+            method="GET",
+            expires_at=datetime.now(UTC) + timedelta(seconds=ttl_seconds),
+        )
+
+
+def _anthropic_service(
+    *,
+    storage: FakeObjectStorage,
+    enabled_transfer_modes: set[TransferMode],
+    store: TransferStore | None = None,
+    stager: _RecordingManagedUrlStager | None = None,
+) -> tuple[AIService, FakeLLMProvider, _InMemoryReferenceStore]:
+    """A service configured with the Anthropic provider (routing to
+    ``anthropic.claude-sonnet-4-6``, whose 200k context window selects the
+    reviewed 100-page ceiling)."""
+    bundle = load_registry_bundle()
+    provider = FakeLLMProvider()
+    references = _InMemoryReferenceStore()
+    service = AIService(
+        task_registry=bundle.tasks,
+        prompt_registry=bundle.prompts,
+        model_registry=bundle.models,
+        providers={"anthropic": provider},
+        attachment_resolver=StorageAttachmentResolver(storage),
+        transfer_deployment=TransferDeploymentPolicy(
+            inline_aggregate_threshold_bytes=_INLINE_THRESHOLD,
+            max_large_attachment_bytes=50_000_000,
+            enabled_transfer_modes=frozenset(enabled_transfer_modes),
+        ),
+        storage=storage,
+        transfer_stores={"anthropic": store} if store is not None else {},
+        managed_url_stager=stager,
+    )
+    return service, provider, references
+
+
+async def test_anthropic_retained_over_ceiling_pdf_rejected_before_url_mint() -> None:
+    """A retained 101+-page PDF for the small-context Anthropic model never
+    reaches the managed-URL path: the common source boundary rejects it before
+    the durable reference exists or any signed URL is minted/dispatched
+    (Scope §6.6 checkbox 2)."""
+    storage = FakeObjectStorage(bucket="seam-test")
+    stager = _RecordingManagedUrlStager()
+    service, provider, references = _anthropic_service(
+        storage=storage,
+        enabled_transfer_modes={TransferMode.MANAGED_SIGNED_URL},
+        stager=stager,
+    )
+    key = await _put_pdf_with_pages(storage, page_count=101, size=_BIG_PDF_BYTES)
+
+    with pytest.raises(AIInputValidationError, match="exceeds the reviewed 100-page ceiling"):
+        await service.execute(
+            _ask_request(key),
+            recorder=_ManagedUrlRecorder(),
+            transfer_references=references,
+        )
+    # No provider call, no signed URL minted, no durable reference created,
+    # and the retained source object is untouched.
+    assert provider.requests == []
+    assert stager.mints == []
+    assert references.records == []
+    assert await storage.head_object(key) is not None
+
+
+async def test_anthropic_retained_boundary_pdf_dispatches_managed_url() -> None:
+    """The boundary (100 pages = the reviewed ceiling) is accepted and the
+    retained source dispatches through a just-in-time managed URL."""
+    storage = FakeObjectStorage(bucket="seam-test")
+    stager = _RecordingManagedUrlStager()
+    service, provider, references = _anthropic_service(
+        storage=storage,
+        enabled_transfer_modes={TransferMode.MANAGED_SIGNED_URL},
+        stager=stager,
+    )
+    key = await _put_pdf_with_pages(storage, page_count=100, size=_BIG_PDF_BYTES)
+
+    result = await service.execute(
+        _ask_request(key),
+        recorder=_ManagedUrlRecorder(),
+        transfer_references=references,
+    )
+    assert isinstance(result.output, str) and result.output
+    assert len(provider.requests) == 1
+    request = provider.requests[0]
+    assert request.managed_url is not None
+    assert len(references.records) == 1
+    durable = references.records[0]
+    assert durable.mode is TransferMode.MANAGED_SIGNED_URL
+    assert durable.source_lifecycle is SourceLifecycle.RETAINED
+    assert await storage.head_object(key) is not None
+
+
+async def test_anthropic_transient_over_ceiling_pdf_rejected_before_scratch_stage() -> None:
+    """A transient 101+-page PDF is rejected at the common source boundary
+    before any upload or scratch-GCS staging: no no-copy reference, no signed-
+    URL mint and no provider call (Scope §6.6 checkbox 2)."""
+    storage = FakeObjectStorage(bucket="seam-test")
+    stager = _RecordingManagedUrlStager()
+    store = FakeAnthropicUploadStore(region="")
+    service, provider, references = _anthropic_service(
+        storage=storage,
+        enabled_transfer_modes={TransferMode.PROVIDER_UPLOAD},
+        store=store,
+        stager=stager,
+    )
+    key = await _put_scratch_pdf_with_pages(storage, page_count=101, size=_BIG_PDF_BYTES)
+
+    with pytest.raises(AIInputValidationError, match="exceeds the reviewed 100-page ceiling"):
+        await service.execute(
+            _ask_request(key),
+            recorder=_ProviderUploadRecorder(),
+            transfer_references=references,
+        )
+    assert store.uploads == []
+    assert store.records == []
+    assert provider.requests == []
+    assert stager.mints == []
+    assert references.records == []
+    assert await storage.head_object(key) is not None

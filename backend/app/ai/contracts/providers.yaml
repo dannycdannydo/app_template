@@ -106,9 +106,12 @@ providers:
       per file, 500 GB per organisation. PDF inference: maximum request payload
       32 MB (the whole request, not just the PDF) and 600 pages per request
       (100 pages when the context window is under 1M tokens); all active models
-      support PDF processing. Files are scoped to the workspace of the API key
-      that uploaded them; file ids from untrusted sources must never be
-      accepted.
+      support PDF processing. The structured `pdf_pages` ceiling below records
+      the same reviewed numbers (`max_pages` at/above the context-window
+      threshold, `max_pages_under_context_window` below it); the template
+      enforces the effective per-model ceiling before any upload. Files are
+      scoped to the workspace of the API key that uploaded them; file ids from
+      untrusted sources must never be accepted.
     regional_notes: >-
       Inference geography is explicit per-request configuration (the
       inference_geo field on Messages: global or us) per the official data
@@ -130,6 +133,14 @@ providers:
         # delete-only retention kind and no expiry bounds (Scope §6.1
         # checkbox 1); terminal deletion/reconciliation is the only removal.
         upload_lifecycle: until_deleted
+        # Reviewed PDF page ceilings (see `retention_notes`): 600 pages per
+        # request, 100 pages when the model's context window is under 1M
+        # tokens. The template derives the effective per-model ceiling from
+        # the model registry's `context_window` and enforces it before upload.
+        pdf_pages:
+          max_pages: 600
+          max_pages_under_context_window: 100
+          context_window_threshold: 1000000
       managed_signed_url:
         mime_types: [application/pdf]
         # 32 MB request-payload ceiling applies to URL document sources too.
@@ -138,6 +149,13 @@ providers:
         managed_url_ttl:
           default_seconds: 900
           max_seconds: 1800
+        # The same reviewed PDF page ceiling applies to URL document sources
+        # (inference-time ceiling; there is no pre-upload copy to count for a
+        # retained source served by a just-in-time URL).
+        pdf_pages:
+          max_pages: 600
+          max_pages_under_context_window: 100
+          context_window_threshold: 1000000
 
   - provider: vertex
     verified_at: 2026-08-11

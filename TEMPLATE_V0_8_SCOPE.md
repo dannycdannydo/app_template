@@ -474,12 +474,39 @@ regional configuration and secret handling.
 
 Dependencies: Scope §6.3.
 
-- [ ] Implement streamed Anthropic beta Files API upload, file-id document source and delete for transient sources; implement managed URL document source for retained private S3 sources behind the adapter; pin the reviewed beta header/version in one place
-- [ ] Enforce the PDF/50,000,000-byte/model/context/inference-geography policy before upload and normalize file-not-found, size, context and deletion failures safely
-- [ ] Fake-backed tests cover source-lifecycle selection, upload/use/delete, managed-URL fetch, URL non-persistence/redaction/expiry, retry reuse and persistent-file cleanup; opt-in non-production Anthropic contract tests verify current behavior and skip cleanly without credentials
+- [x] Implement streamed Anthropic beta Files API upload, file-id document source and delete for transient sources; implement managed URL document source for retained private S3 sources behind the adapter; pin the reviewed beta header/version in one place
+- [x] Enforce the PDF/50,000,000-byte/model/context/inference-geography policy before upload and normalize file-not-found, size, context and deletion failures safely
+- [x] Fake-backed tests cover source-lifecycle selection, upload/use/delete, managed-URL fetch, URL non-persistence/redaction/expiry, retry reuse and persistent-file cleanup; opt-in non-production Anthropic contract tests verify current behavior and skip cleanly without credentials
+
+> **Lessons learned from the OpenAI build (Scope §6.5) that apply here.** OpenAI
+> and Anthropic have similar shapes, so the OpenAI work is the reference for the
+> general methodology of this work unit: streamed provider upload, file-id or
+> URL document source, just-in-time managed URL, retry reuse and terminal
+> cleanup all follow the Scope §6.5 approach. One OpenAI finding changes the
+> local transient path: a managed signed URL minted from our private
+> S3-compatible storage cannot serve transient files in a local environment —
+> local S3 storage is not reachable from the provider's network, so the URL
+> never resolves for Anthropic. When a transient source runs locally, the
+> adapter uploads the object to the scratch GCS staging directory and provides a
+> signed URL to that GCS object as the document source instead. The Anthropic
+> managed-URL path must therefore support this local-transient scratch-GCS
+> behavior alongside the beta Files API upload, and the fake-backed and opt-in
+> contract tests must cover the local transient path.
 
 Human review required before enabling the mode: beta-provider contract, provider
 data retention, inference geography and secret handling.
+
+> **Recorded human review and application authorisation (AGENTS.md — §6.6
+> beta-provider-contract, provider-data-retention, inference-geography and
+> secret-handling categories).**
+> On 2026-08-14, after review of the complete §6.6 implementation and its
+> provider-neutral PDF-inspection correction, the human reviewer explicitly
+> approved the work for commit, push and merge. The reviewed surface covers
+> the pinned Anthropic Files beta contract, delete-only provider retention,
+> configured inference geography, API-key handling behind the adapter, and
+> the documented `pypdf` runtime dependency. No authentication,
+> permission-model, tenant-isolation, destructive-migration or public-API
+> change is introduced by this work unit.
 
 ## 6.7 Durable Jobs, Cleanup Reconciliation and Observability
 

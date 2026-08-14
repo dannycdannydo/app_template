@@ -19,11 +19,13 @@ import hashlib
 import os
 import tempfile
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from app.ai.providers.anthropic import AnthropicAdapter
+from app.ai.providers.anthropic_upload import AnthropicTransferStore
 from app.ai.providers.azure_openai import AzureOpenAIAdapter
 from app.ai.providers.base import LLMProvider, ProviderRequest
 from app.ai.providers.deepseek import DeepSeekAdapter
@@ -32,7 +34,7 @@ from app.ai.providers.openai import OpenAIAdapter
 from app.ai.providers.openai_upload import OpenAITransferStore
 from app.ai.providers.vertex import VertexAIAdapter
 from app.ai.providers.vertex_gcs import GcsTransferStore
-from app.ai.staging import StagedFile
+from app.ai.staging import ExternalFileReference, StagedFile
 from app.ai.transfer import SourceLifecycle, TransferMode
 
 
@@ -145,6 +147,155 @@ async def test_anthropic_live_contract() -> None:
         )
     model = os.environ.get("AI_CONTRACTS_ANTHROPIC_MODEL", "claude-sonnet-4-6")
     await _probe(AnthropicAdapter(api_key=api_key), model)
+
+
+@pytest.mark.ai_contracts
+async def test_anthropic_files_upload_dispatch_delete_live_contract() -> None:
+    """Upload, dispatch with, and delete one fixture PDF through the Anthropic
+    beta Files API (v0.8 Scope §2.4, §6.6 checkbox 3).
+
+    The opt-in contract test uses a dedicated non-production Anthropic API key
+    (``AI_CONTRACTS_*`` namespace), verifies the reviewed upload contract
+    (exactly one PDF, delete-only retention — no automatic expiry), dispatches
+    the file id through the Messages API as a ``document`` ``file`` source
+    with the pinned beta header and performs the best-effort terminal delete.
+    It skips cleanly when the key is absent, so the target is a no-op in CI
+    until deliberately configured.
+    """
+    api_key = os.environ.get("AI_CONTRACTS_ANTHROPIC_API_KEY")
+    if not api_key:
+        pytest.skip(
+            "AI_CONTRACTS_ANTHROPIC_API_KEY not configured; skipping live Anthropic Files "
+            "contract test"
+        )
+    model = os.environ.get("AI_CONTRACTS_ANTHROPIC_MODEL", "claude-sonnet-4-6")
+    content = _fixture_pdf_bytes()
+    digest = hashlib.sha256(content).hexdigest()
+    organisation_id = uuid.uuid4()
+    store = AnthropicTransferStore(api_key=api_key)
+    reference = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix="ai-anthropic-contract-", suffix=".pdf") as handle:
+            handle.write(content)
+            handle.flush()
+            reference = await store.stage(
+                mode=TransferMode.PROVIDER_UPLOAD,
+                organisation_id=organisation_id,
+                logical_request_id=f"contract-{organisation_id.hex[:8]}",
+                source_reference=(f"organisations/{organisation_id}/ai/scratch/lease.pdf"),
+                source_digest=digest,
+                mime_type="application/pdf",
+                size_bytes=len(content),
+                source_lifecycle=SourceLifecycle.TRANSIENT,
+                region="",
+                expires_at=None,
+                source_path=Path(handle.name),
+            )
+        assert reference.external_id.startswith("file_")
+        assert reference.provider == "anthropic"
+        # Delete-only retention kind: no provider-reported expiry is recorded.
+        assert reference.expires_at is None
+        # Dispatch the uploaded file id through the Messages API as a document
+        # file source.
+        adapter = AnthropicAdapter(api_key=api_key)
+        response = await adapter.complete(
+            ProviderRequest(
+                task="document.classify",
+                model=model,
+                prompt="Reply with the single word OK and nothing else.",
+                max_tokens=8,
+                temperature=0,
+                staged_file=StagedFile(
+                    external_id=reference.external_id, mime_type="application/pdf"
+                ),
+            )
+        )
+        assert isinstance(response.content, str)
+        # Best-effort terminal delete of the AI-owned provider copy.
+        await store.delete(reference)
+    finally:
+        await store.aclose()
+
+
+@pytest.mark.ai_contracts
+async def test_anthropic_local_transient_scratch_gcs_live_contract() -> None:
+    """Stage a transient source into the scratch GCS staging directory and
+    dispatch it through the Anthropic URL document source (v0.8 Scope §6.6
+    lesson learned).
+
+    With a local storage seam, a managed signed URL minted from that storage
+    can never resolve from the provider's network, so a transient source is
+    served by staging the verified object into the user-provisioned GCS temp
+    bucket and providing a signed URL to that GCS object as the document
+    source instead. This opt-in contract test exercises exactly that local
+    transient path against live GCS and live Anthropic (both dedicated
+    non-production resources), then cleans up the no-copy reference. It skips
+    cleanly when either credential set is absent.
+    """
+    api_key = os.environ.get("AI_CONTRACTS_ANTHROPIC_API_KEY")
+    project = os.environ.get("AI_CONTRACTS_VERTEX_PROJECT")
+    location = os.environ.get("AI_CONTRACTS_VERTEX_LOCATION")
+    bucket = os.environ.get("AI_CONTRACTS_VERTEX_TEMP_GCS_BUCKET")
+    if not api_key or not project or not location or not bucket:
+        pytest.skip(
+            "AI_CONTRACTS_ANTHROPIC_API_KEY or AI_CONTRACTS_VERTEX_PROJECT/"
+            "AI_CONTRACTS_VERTEX_LOCATION/AI_CONTRACTS_VERTEX_TEMP_GCS_BUCKET not "
+            "configured; skipping live Anthropic local-transient contract test"
+        )
+    model = os.environ.get("AI_CONTRACTS_ANTHROPIC_MODEL", "claude-sonnet-4-6")
+    from app.ai.providers.gcs_managed_url import GcsManagedUrlStager
+    from app.storage.fake import FakeObjectStorage
+
+    content = _fixture_pdf_bytes()
+    digest = hashlib.sha256(content).hexdigest()
+    organisation_id = uuid.uuid4()
+    source_key = f"organisations/{organisation_id}/ai/scratch/lease.pdf"
+    source_storage = FakeObjectStorage(bucket="local-source")
+    await source_storage.put(source_key, content, content_type="application/pdf")
+    reference = ExternalFileReference(
+        mode=TransferMode.PROVIDER_UPLOAD,
+        provider="anthropic",
+        external_id=source_key,
+        source_reference=source_key,
+        source_digest=digest,
+        size_bytes=len(content),
+        mime_type="application/pdf",
+        source_lifecycle=SourceLifecycle.TRANSIENT,
+        region="",
+        organisation_id=organisation_id,
+        logical_request_id=f"contract-{organisation_id.hex[:8]}",
+        idempotency_key=f"idem-{organisation_id.hex}",
+        created_at=datetime.now(UTC),
+    )
+    stager = GcsManagedUrlStager(
+        project=project,
+        location=location,
+        bucket=bucket,
+        credentials_path=os.environ.get("AI_CONTRACTS_VERTEX_CREDENTIALS_PATH", ""),
+    )
+    try:
+        signed = await stager.mint(
+            reference=reference, ttl_seconds=900, source_storage=source_storage
+        )
+        assert signed.method == "GET"
+        assert signed.url.startswith("https://storage.googleapis.com/")
+        # Dispatch the signed URL to the scratch-GCS copy as a URL document
+        # source (no beta Files API upload, no beta header on this dispatch).
+        adapter = AnthropicAdapter(api_key=api_key)
+        response = await adapter.complete(
+            ProviderRequest(
+                task="document.classify",
+                model=model,
+                prompt="Reply with the single word OK and nothing else.",
+                max_tokens=8,
+                temperature=0,
+                staged_file=StagedFile(external_id=source_key, mime_type="application/pdf"),
+                managed_url=signed.url,
+            )
+        )
+        assert isinstance(response.content, str)
+    finally:
+        await stager.aclose()
 
 
 @pytest.mark.ai_contracts

@@ -49,6 +49,7 @@ from app.ai.transfer import (
     ManagedUrlTtlContract,
     ModelInlineCeiling,
     ModelModeCeiling,
+    PdfPagesContract,
     ProviderTransferContract,
     ProviderUploadLifecycle,
     SourceLifecycle,
@@ -87,6 +88,14 @@ def _upload_expiry() -> UploadExpiryContract:
 def _url_ttl() -> ManagedUrlTtlContract:
     return ManagedUrlTtlContract(
         default_seconds=MANAGED_URL_DEFAULT_TTL_SECONDS, max_seconds=MANAGED_URL_MAX_TTL_SECONDS
+    )
+
+
+def _pdf_pages() -> PdfPagesContract:
+    return PdfPagesContract(
+        max_pages=600,
+        max_pages_under_context_window=100,
+        context_window_threshold=1_000_000,
     )
 
 
@@ -185,6 +194,19 @@ def test_checked_in_fixture_covers_every_provider_and_required_storage_fact() ->
     openai = contracts.providers["openai"].transfer_modes[TransferMode.PROVIDER_UPLOAD]
     assert openai.upload_lifecycle is ProviderUploadLifecycle.EXPIRES_AFTER
     assert openai.upload_expiry is not None
+    # The reviewed Anthropic PDF page ceiling (Scope §6.6 checkbox 2) is
+    # recorded structurally on both PDF non-inline modes: 600 pages per
+    # request, 100 when the context window is under 1M tokens.
+    for mode in (TransferMode.PROVIDER_UPLOAD, TransferMode.MANAGED_SIGNED_URL):
+        pdf_pages = contracts.providers["anthropic"].transfer_modes[mode].pdf_pages
+        assert pdf_pages is not None
+        assert pdf_pages.max_pages == 600
+        assert pdf_pages.max_pages_under_context_window == 100
+        assert pdf_pages.context_window_threshold == 1_000_000
+    # Providers whose documentation records no page ceiling declare none.
+    assert (
+        contracts.providers["openai"].transfer_modes[TransferMode.PROVIDER_UPLOAD].pdf_pages is None
+    )
     # Every provider records a regional caveat backed by a cited source.
     for provider_id, contract in contracts.providers.items():
         assert contract.regional_notes, provider_id
@@ -997,6 +1019,55 @@ def test_non_inline_ceiling_must_be_above_threshold_and_at_most_50mb() -> None:
                     source_lifecycles=[SourceLifecycle.TRANSIENT, SourceLifecycle.RETAINED],
                 ),
                 TransferMode.PROVIDER_UPLOAD: too_large,
+            }
+        )
+
+
+def test_anthropic_pdf_non_inline_modes_require_the_reviewed_page_ceiling() -> None:
+    """The loader rejects an Anthropic PDF non-inline mode without a recorded
+    `pdf_pages` ceiling, so the structured fixture and the retention_notes can
+    never drift (Scope §6.6 checkbox 2)."""
+    missing = TransferModeContract(
+        mime_types=sorted(NON_INLINE_MIME_TYPES),
+        max_bytes=32_000_000,
+        source_lifecycles=[SourceLifecycle.TRANSIENT],
+        upload_lifecycle=ProviderUploadLifecycle.UNTIL_DELETED,
+    )
+    with pytest.raises(ValidationError, match="must declare pdf_pages"):
+        _provider_contract(
+            provider="anthropic",
+            modes={
+                TransferMode.INLINE: TransferModeContract(
+                    mime_types=_INLINE_MIME,
+                    max_bytes=INLINE_AGGREGATE_THRESHOLD_BYTES,
+                    source_lifecycles=[SourceLifecycle.TRANSIENT, SourceLifecycle.RETAINED],
+                ),
+                TransferMode.PROVIDER_UPLOAD: missing,
+            },
+        )
+
+
+def test_non_anthropic_providers_must_not_declare_a_page_ceiling() -> None:
+    """`pdf_pages` is recorded only for providers whose documentation declares
+    a page ceiling (currently Anthropic); declaring one elsewhere is an
+    unsupported contract assertion."""
+    unexpected = TransferModeContract(
+        mime_types=sorted(NON_INLINE_MIME_TYPES),
+        max_bytes=MAX_LARGE_ATTACHMENT_BYTES,
+        source_lifecycles=[SourceLifecycle.TRANSIENT],
+        upload_lifecycle=ProviderUploadLifecycle.EXPIRES_AFTER,
+        upload_expiry=_upload_expiry(),
+        pdf_pages=_pdf_pages(),
+    )
+    with pytest.raises(ValidationError, match="page ceiling"):
+        _provider_contract(
+            modes={
+                TransferMode.INLINE: TransferModeContract(
+                    mime_types=_INLINE_MIME,
+                    max_bytes=INLINE_AGGREGATE_THRESHOLD_BYTES,
+                    source_lifecycles=[SourceLifecycle.TRANSIENT, SourceLifecycle.RETAINED],
+                ),
+                TransferMode.PROVIDER_UPLOAD: unexpected,
             }
         )
 

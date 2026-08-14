@@ -303,6 +303,190 @@ async def test_anthropic_overloaded_529_is_retryable() -> None:
     assert excinfo.value.retryable is True
 
 
+# --- v0.8 §6.6 Anthropic staged-file Messages-API dispatch ---------------------
+#
+# A non-inline transfer hands the Anthropic adapter a StagedFile; Anthropic's
+# native file-input contract is a ``document`` content block with a
+# ``source.type = "file"`` (provider file id from the beta Files API) or
+# ``source.type = "url"`` (a just-in-time managed download URL for a retained
+# private S3 source or a local-transient scratch-GCS object). The ``file``
+# source requires the pinned ``anthropic-beta`` header on the Messages request;
+# the ``url`` source does not. The managed URL is a one-dispatch bearer
+# capability that is never returned, persisted, audited or logged (BP §28).
+
+
+def _canned_anthropic_response(
+    *, content: str, usage: dict[str, int] | None = None, **overrides: object
+) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "content": [{"type": "text", "text": content}],
+        "stop_reason": "end_turn",
+        "usage": usage or {"input_tokens": 10, "output_tokens": 5},
+        "model": "claude-sonnet-4-6-20260219",
+    }
+    data.update(overrides)
+    return data
+
+
+def _anthropic_staged_request(**overrides: object) -> ProviderRequest:
+    payload: dict[str, object] = {
+        "task": "document.classify",
+        "model": "claude-sonnet-4-6",
+        "prompt": "Classify the supplied non-sensitive sample document.",
+        "max_tokens": 256,
+        "temperature": 0.0,
+        "staged_file": StagedFile(
+            external_id="file_011CNha8iCJcU1wXNR6q4V8w",
+            mime_type="application/pdf",
+        ),
+    }
+    payload.update(overrides)
+    return ProviderRequest.model_validate(payload)
+
+
+def _anthropic_content_blocks(body: dict[str, Any]) -> list[dict[str, Any]]:
+    message = body["messages"][0]
+    content = message["content"]
+    assert isinstance(content, list)
+    return cast(list[dict[str, Any]], content)
+
+
+async def test_anthropic_staged_file_id_dispatches_document_file_source() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return _json_response(_canned_anthropic_response(content='{"category": "lease"}'))
+
+    adapter = AnthropicAdapter(api_key="ant-test", client=_client(handler))
+    response = await adapter.complete(
+        _anthropic_staged_request(output_schema="demo.ClassificationResult")
+    )
+
+    assert len(captured) == 1
+    sent = captured[0]
+    assert sent.url == "https://api.anthropic.com/v1/messages"
+    assert sent.headers["x-api-key"] == "ant-test"
+    # The reviewed beta header/version is pinned in one place and required on
+    # the Messages dispatch that references a provider file id (Scope §6.6).
+    assert sent.headers["anthropic-beta"] == "files-api-2025-04-14"
+    body = json.loads(sent.content)
+    assert body["model"] == "claude-sonnet-4-6"
+    assert body["max_tokens"] == 256
+    blocks = _anthropic_content_blocks(body)
+    assert blocks[0]["type"] == "text"
+    assert blocks[0]["text"].endswith("Respond with a single JSON object.")
+    assert blocks[1] == {
+        "type": "document",
+        "source": {"type": "file", "file_id": "file_011CNha8iCJcU1wXNR6q4V8w"},
+    }
+
+    assert response.structured == {"category": "lease"}
+    assert response.finish_reason == "stop"
+
+
+async def test_anthropic_staged_file_managed_url_dispatches_document_url_source() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return _json_response(_canned_anthropic_response(content='{"category": "lease"}'))
+
+    adapter = AnthropicAdapter(api_key="ant-test", client=_client(handler))
+    managed_url = (
+        "https://storage.googleapis.com/org-bucket/lease.pdf?"
+        "X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Signature=secret-bearer-material"
+    )
+    response = await adapter.complete(
+        _anthropic_staged_request(
+            staged_file=StagedFile(
+                external_id="organisations/00000000-0000-0000-0000-000000000000/lease.pdf",
+                mime_type="application/pdf",
+            ),
+            managed_url=managed_url,
+        )
+    )
+    body = json.loads(captured[0].content)
+    blocks = _anthropic_content_blocks(body)
+    # The managed URL wins: a URL document source never carries a file id, and
+    # the immutable source identity is never sent to the provider.
+    assert blocks[1] == {"type": "document", "source": {"type": "url", "url": managed_url}}
+    # A URL document source needs no beta header (official contract).
+    assert "anthropic-beta" not in captured[0].headers
+    assert response.finish_reason == "stop"
+
+
+async def test_anthropic_managed_url_alone_dispatches_document_url_source() -> None:
+    """A managed URL without a staged file (managed-signed-url source) carries
+    ``source.type = "url"`` (Scope §2.3/§6.6)."""
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return _json_response(_canned_anthropic_response(content='{"category": "lease"}'))
+
+    adapter = AnthropicAdapter(api_key="ant-test", client=_client(handler))
+    managed_url = "https://minio.example.test/lease.pdf?X-Amz-Signature=x"
+    await adapter.complete(_anthropic_staged_request(staged_file=None, managed_url=managed_url))
+    body = json.loads(captured[0].content)
+    blocks = _anthropic_content_blocks(body)
+    assert blocks[1] == {"type": "document", "source": {"type": "url", "url": managed_url}}
+    assert "anthropic-beta" not in captured[0].headers
+
+
+async def test_anthropic_staged_file_and_attachments_are_mutually_exclusive() -> None:
+    attachment = _attachment(display_name="lease.pdf", mime_type="application/pdf")
+    adapter = AnthropicAdapter(api_key="ant-test", client=_client(_empty_response_handler))
+    with pytest.raises(AIInputValidationError, match="mutually exclusive"):
+        await adapter.complete(
+            _anthropic_staged_request(attachments=[attachment], managed_url=None)
+        )
+
+
+async def test_anthropic_staged_file_with_url_shaped_external_id_is_rejected() -> None:
+    for external_id in ("https://evil.example/lease.pdf", "gs://bucket/lease.pdf"):
+        adapter = AnthropicAdapter(api_key="ant-test", client=_client(_empty_response_handler))
+        with pytest.raises(AIInputValidationError, match="invalid shape"):
+            await adapter.complete(
+                _anthropic_staged_request(
+                    staged_file=StagedFile(external_id=external_id, mime_type="application/pdf")
+                )
+            )
+
+
+async def test_anthropic_staged_file_rejects_unsupported_mime_before_dispatch() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no provider call may be made for an unsupported staged file")
+
+    adapter = AnthropicAdapter(api_key="ant-test", client=_client(handler))
+    with pytest.raises(AIInputValidationError, match="staged file MIME type"):
+        await adapter.complete(
+            _anthropic_staged_request(
+                staged_file=StagedFile(external_id="file_1", mime_type="text/plain")
+            )
+        )
+
+
+async def test_anthropic_staged_file_error_mapping_is_safe() -> None:
+    """A provider refusal while dispatching a staged file never embeds the
+    managed URL, file id or provider body (BP §28)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _json_response({"error": {"message": "x"}}, status=400)
+
+    managed_url = "https://storage.googleapis.com/lease.pdf?X-Goog-Signature=secret"
+    adapter = AnthropicAdapter(api_key="ant-test", client=_client(handler))
+    with pytest.raises(ProviderResponseError) as excinfo:
+        await adapter.complete(
+            _anthropic_staged_request(
+                staged_file=None,
+                managed_url=managed_url,
+            )
+        )
+    assert "secret" not in str(excinfo.value)
+    assert "storage.googleapis.com" not in str(excinfo.value)
+
+
 # --- Vertex AI ---
 
 

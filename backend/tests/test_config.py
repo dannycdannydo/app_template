@@ -1194,7 +1194,10 @@ def test_ai_transfer_deployment_rejects_expiry_below_openai_contract_minimum() -
 
 def test_ai_transfer_deployment_ignores_expiry_for_delete_only_provider() -> None:
     """A delete-only provider (Anthropic, no automatic expiry) imposes no
-    expiry bound, so the setting is irrelevant to it and validates."""
+    expiry bound, so the setting is irrelevant to it and validates. The
+    storage endpoint is explicitly provider-reachable (public HTTPS) so this
+    test isolates the expiry behavior from the storage-local scratch-GCS
+    configuration closure (Scope §6.6)."""
     settings = Settings(
         app_env="test",
         database_url="postgresql+asyncpg://x",
@@ -1202,8 +1205,72 @@ def test_ai_transfer_deployment_ignores_expiry_for_delete_only_provider() -> Non
         ai_anthropic_api_key="sk-ant-test",
         ai_enabled_transfer_modes=["provider_upload"],
         ai_upload_expiry_seconds=1,
+        storage_endpoint_url="https://s3.example.test",
     )
     assert settings.ai_upload_expiry_seconds == 1
+
+
+def test_ai_transfer_deployment_rejects_storage_local_anthropic_upload_without_gcs() -> None:
+    """A storage-local Anthropic provider_upload deployment must declare the
+    scratch-GCS project/location/bucket the local-transient path stages
+    through (Scope §6.6 lesson learned); accepting it would construct an
+    unbuildable stager at wiring time, violating BP §27 fail-fast closure."""
+    with pytest.raises(ValidationError, match="scratch GCS staging directory"):
+        Settings(
+            app_env="test",
+            database_url="postgresql+asyncpg://x",
+            ai_enabled_providers=["anthropic"],
+            ai_anthropic_api_key="sk-ant-test",
+            ai_enabled_transfer_modes=["provider_upload"],
+            storage_endpoint_url="http://localhost:9000",
+        )
+
+
+def test_ai_transfer_deployment_accepts_storage_local_anthropic_upload_with_gcs() -> None:
+    """The same storage-local Anthropic provider_upload deployment is valid
+    once the user-provisioned Vertex GCS staging configuration is declared —
+    the runtime then builds the scratch-GCS stager successfully."""
+    settings = Settings(
+        app_env="test",
+        database_url="postgresql+asyncpg://x",
+        ai_enabled_providers=["anthropic"],
+        ai_anthropic_api_key="sk-ant-test",
+        ai_enabled_transfer_modes=["provider_upload"],
+        storage_endpoint_url="http://localhost:9000",
+        ai_vertex_project="template-project",
+        ai_vertex_location="europe-west1",
+        ai_vertex_temp_gcs_bucket="app-template-staging",
+    )
+    assert settings.ai_vertex_temp_gcs_bucket == "app-template-staging"
+
+
+def test_ai_transfer_deployment_storage_local_anthropic_inline_needs_no_gcs() -> None:
+    """An Anthropic deployment with a local storage seam but no provider_upload
+    mode never builds the scratch-GCS stager, so no GCS configuration is
+    required (default-deny mode closure)."""
+    settings = Settings(
+        app_env="test",
+        database_url="postgresql+asyncpg://x",
+        ai_enabled_providers=["anthropic"],
+        ai_anthropic_api_key="sk-ant-test",
+        storage_endpoint_url="http://localhost:9000",
+    )
+    assert settings.ai_enabled_transfer_modes == []
+
+
+def test_ai_transfer_deployment_anthropic_upload_public_storage_needs_no_gcs() -> None:
+    """A provider-reachable (public HTTPS) storage endpoint never builds the
+    scratch-GCS stager, so the Anthropic provider_upload path stays valid
+    without GCS configuration (the reviewer's exact original case)."""
+    settings = Settings(
+        app_env="test",
+        database_url="postgresql+asyncpg://x",
+        ai_enabled_providers=["anthropic"],
+        ai_anthropic_api_key="sk-ant-test",
+        ai_enabled_transfer_modes=["provider_upload"],
+        storage_endpoint_url="https://s3.example.test",
+    )
+    assert "anthropic" in settings.ai_enabled_providers
 
 
 def test_ai_transfer_deployment_rejects_ttl_outside_provider_contract_bounds() -> None:

@@ -31,6 +31,7 @@ from app.ai.providers import gcs_managed_url
 from app.ai.providers.gcs_managed_url import GcsManagedUrlStager, mint_gcs_v4_signed_url
 from app.ai.staging import ExternalFileReference
 from app.ai.transfer import SourceLifecycle, TransferMode
+from app.core.config import Settings
 from app.storage.fake import FakeObjectStorage
 
 _ORGANISATION_ID = uuid.uuid4()
@@ -217,6 +218,64 @@ async def test_stager_mints_gcs_https_url_for_a_retained_source(
     assert await storage.head_object(_SOURCE_KEY) is not None
 
 
+async def test_stager_mints_gcs_https_url_for_a_local_transient_source(
+    gcs_setup: tuple[Path, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Anthropic local-transient scratch-GCS path (Scope §6.6 lesson from
+    the OpenAI build): a transient no-copy ``provider_upload`` reference is
+    staged into the GCS temp bucket and served by a signed URL document source
+    instead of a beta Files API upload, so the provider can fetch it even when
+    the source storage is local and unreachable from the provider's network."""
+    key_path, _ = gcs_setup
+    pdf = _pdf_content()
+    storage = FakeObjectStorage(bucket="local-source")
+    await storage.put(_SOURCE_KEY, pdf, content_type="application/pdf")
+    reference = _reference(digest=hashlib.sha256(pdf).hexdigest(), size_bytes=len(pdf)).model_copy(
+        update={
+            "mode": TransferMode.PROVIDER_UPLOAD,
+            "provider": "anthropic",
+            "source_lifecycle": SourceLifecycle.TRANSIENT,
+            "external_id": _SOURCE_KEY,
+        }
+    )
+
+    stager = _stager(key_path, _GcsTransport(pdf=pdf))
+    signed = await stager.mint(
+        reference=reference, ttl_seconds=_TTL_SECONDS, source_storage=storage
+    )
+
+    assert signed.method == "GET"
+    assert signed.url.startswith("https://storage.googleapis.com/")
+    parsed = urlparse(signed.url)
+    # The staged copy is an AI-owned derivative under the approved org-scoped
+    # staging prefix; the source object is untouched.
+    assert f"/{_BUCKET}/organisations/{_ORGANISATION_ID}/ai/vertex-staging/" in parsed.path
+    assert await storage.head_object(_SOURCE_KEY) is not None
+
+
+async def test_stager_rejects_a_provider_upload_reference_with_a_provider_copy(
+    gcs_setup: tuple[Path, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``provider_upload`` reference carrying a real provider file id is
+    never URL-minted: only the no-copy local-transient shape qualifies."""
+    key_path, _ = gcs_setup
+    pdf = _pdf_content()
+    storage = FakeObjectStorage(bucket="local-source")
+    await storage.put(_SOURCE_KEY, pdf, content_type="application/pdf")
+    reference = _reference(digest=hashlib.sha256(pdf).hexdigest(), size_bytes=len(pdf)).model_copy(
+        update={
+            "mode": TransferMode.PROVIDER_UPLOAD,
+            "provider": "anthropic",
+            "source_lifecycle": SourceLifecycle.TRANSIENT,
+            "external_id": "file_011CNha8iCJcU1wXNR6q4V8w",
+        }
+    )
+
+    stager = _stager(key_path, _GcsTransport(pdf=pdf))
+    with pytest.raises(TransferSourceError, match="local-transient scratch-GCS path"):
+        await stager.mint(reference=reference, ttl_seconds=_TTL_SECONDS, source_storage=storage)
+
+
 async def test_stager_rejects_a_changed_source(
     gcs_setup: tuple[Path, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -324,9 +383,9 @@ def test_gcs_v4_signed_url_structure_and_tll_bounds(
 def test_endpoint_is_local_detection(endpoint: str, expected: bool) -> None:
     """The dev managed-URL staging decision: only plain-HTTP loopback/private
     storage endpoints are treated as local."""
-    from app.ai.runtime import _endpoint_is_local  # pyright: ignore[reportPrivateUsage]
+    from app.ai.deployment import storage_is_local
 
-    assert _endpoint_is_local(endpoint) is expected
+    assert storage_is_local(endpoint) is expected
 
 
 async def test_orchestrator_mint_managed_url_routes_through_stager() -> None:
@@ -395,3 +454,55 @@ async def test_orchestrator_mint_managed_url_routes_through_stager() -> None:
     assert len(stager.calls) == 1
     assert stager.calls[0][1] == 900
     assert stager.calls[0][2] is storage
+
+
+async def test_runtime_builds_scratch_gcs_stager_for_storage_local_anthropic_path(
+    gcs_setup: tuple[Path, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A storage-local Anthropic provider_upload deployment with the declared
+    scratch-GCS configuration constructs the stager at wiring time (the valid
+    half of the reviewer's configuration-closure regression); the typed
+    validator rejects the same deployment without the GCS fields."""
+    from app.ai import runtime as runtime_module
+
+    key_path, _ = gcs_setup
+    settings = Settings(
+        app_env="test",
+        database_url="postgresql+asyncpg://x",
+        ai_enabled_providers=["anthropic"],
+        ai_anthropic_api_key="sk-ant-test",
+        ai_enabled_transfer_modes=["provider_upload"],
+        storage_endpoint_url="http://localhost:9000",
+        ai_vertex_project=_PROJECT,
+        ai_vertex_location=_LOCATION,
+        ai_vertex_temp_gcs_bucket=_BUCKET,
+        ai_vertex_credentials_path=str(key_path),
+    )
+    monkeypatch.setattr(runtime_module, "get_settings", lambda: settings)
+
+    stager = runtime_module._managed_url_stager()  # pyright: ignore[reportPrivateUsage]
+
+    assert stager is not None
+    assert isinstance(stager, GcsManagedUrlStager)
+    assert stager.region == _LOCATION
+    await stager.aclose()
+
+
+async def test_runtime_builds_no_stager_for_storage_local_anthropic_without_upload_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An Anthropic deployment with a local storage seam but no provider_upload
+    mode never builds the scratch-GCS stager, so the wiring stays valid without
+    GCS configuration (default-deny mode closure, Scope §2.2)."""
+    from app.ai import runtime as runtime_module
+
+    settings = Settings(
+        app_env="test",
+        database_url="postgresql+asyncpg://x",
+        ai_enabled_providers=["anthropic"],
+        ai_anthropic_api_key="sk-ant-test",
+        storage_endpoint_url="http://localhost:9000",
+    )
+    monkeypatch.setattr(runtime_module, "get_settings", lambda: settings)
+
+    assert runtime_module._managed_url_stager() is None  # pyright: ignore[reportPrivateUsage]

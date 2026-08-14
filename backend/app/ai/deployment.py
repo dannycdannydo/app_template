@@ -17,6 +17,8 @@ the ``app.core.config`` ↔ ``app.ai.transfer`` import boundary stays intact
 
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 from app.ai.transfer import (
     INLINE_AGGREGATE_THRESHOLD_BYTES,
     MANAGED_URL_MAX_TTL_SECONDS,
@@ -26,6 +28,7 @@ from app.ai.transfer import (
     TransferMode,
     load_transfer_contracts,
 )
+from app.core.endpoint_safety import is_private_http_host
 
 #: The non-inline transfer modes a deployment may enable (Scope §2.2).
 NON_INLINE_TRANSFER_MODES = frozenset(
@@ -37,6 +40,22 @@ NON_INLINE_TRANSFER_MODES = frozenset(
 )
 
 
+def storage_is_local(presign_endpoint: str) -> bool:
+    """Whether the storage seam presigns against a plain-HTTP local/private host.
+
+    Mirrors the runtime's ``_storage_is_local`` (``app/ai/runtime.py``) so the
+    typed validator and the service wiring can never disagree about which
+    deployments need the scratch-GCS staging seam: a scheme of ``http`` on a
+    loopback/private host means the minted URL would be rejected by the
+    HTTPS-only minter and unreachable by any cloud provider (v0.8 Scope §2.3,
+    §6.4/§6.5).
+    """
+    if not presign_endpoint:
+        return False
+    parsed = urlsplit(presign_endpoint)
+    return parsed.scheme == "http" and is_private_http_host(parsed.hostname or "")
+
+
 def validate_transfer_deployment(
     *,
     enabled_transfer_modes: list[str],
@@ -46,6 +65,9 @@ def validate_transfer_deployment(
     upload_expiry_seconds: int,
     managed_url_ttl_seconds: int,
     vertex_temp_gcs_bucket: str,
+    vertex_project: str = "",
+    vertex_location: str = "",
+    storage_presign_endpoint: str = "",
 ) -> None:
     """Fail fast on incomplete or incompatible transfer-mode configuration.
 
@@ -66,6 +88,20 @@ def validate_transfer_deployment(
     only providers (``until_deleted``, e.g. Anthropic) impose no automatic
     expiry bound, so the expiry setting is irrelevant to them. Nothing here
     creates, configures or touches cloud infrastructure.
+
+    The storage-local Anthropic local-transient path closes configuration
+    differently (Scope §6.6 lesson learned): with a local storage seam the
+    Anthropic ``provider_upload`` path stages a transient source into the
+    scratch GCS staging directory and serves it by a signed URL document
+    source, so the deployment must declare the same user-provisioned Vertex
+    GCS project/location/bucket the ``storage_reference`` mode uses — the
+    typed validator fails fast at startup on a storage-local Anthropic
+    ``provider_upload`` deployment that omits them, instead of constructing an
+    unbuildable stager at service wiring time (BP §27). A provider-reachable
+    storage endpoint (public HTTPS presigning) never needs them: no stager is
+    built and URLs are minted directly. The signer-key prerequisite (a
+    service-account key that can sign v4 URLs) is enforced at stager
+    construction, which is still fail-fast wiring-time validation.
     """
     if len(set(enabled_transfer_modes)) != len(enabled_transfer_modes):
         raise ValueError("ai_enabled_transfer_modes must not contain duplicates")
@@ -159,6 +195,40 @@ def validate_transfer_deployment(
             "storage_reference requires the user-provisioned "
             "ai_vertex_temp_gcs_bucket staging bucket"
         )
+    # The storage-local Anthropic local-transient path (Scope §6.6 lesson from
+    # the OpenAI build): with a local storage seam a transient
+    # ``provider_upload`` source is staged into the scratch GCS staging
+    # directory and served by a signed URL to that GCS object as the document
+    # source instead of a beta Files API upload, because the provider can
+    # never fetch a URL minted from local storage. The runtime builds the
+    # scratch-GCS stager whenever that path is enabled, so the same
+    # user-provisioned Vertex GCS configuration the ``storage_reference`` mode
+    # requires must be declared here — a storage-local Anthropic
+    # ``provider_upload`` deployment without it would pass typed startup
+    # validation and then fail constructing the stager at wiring time, which
+    # violates BP §27 fail-fast configuration closure. A provider-reachable
+    # storage endpoint (public HTTPS presigning) never needs the staging
+    # configuration: no stager is built and URLs are minted directly.
+    if (
+        TransferMode.PROVIDER_UPLOAD.value in enabled_transfer_modes
+        and "anthropic" in enabled_providers
+        and storage_is_local(storage_presign_endpoint)
+    ):
+        missing = [
+            name
+            for name, value in (
+                ("ai_vertex_project", vertex_project),
+                ("ai_vertex_location", vertex_location),
+                ("ai_vertex_temp_gcs_bucket", vertex_temp_gcs_bucket),
+            )
+            if not value
+        ]
+        if missing:
+            raise ValueError(
+                "the storage-local Anthropic provider_upload path stages transient "
+                "sources through the scratch GCS staging directory (Scope §6.6) and "
+                f"requires: {', '.join(missing)}"
+            )
 
 
 __all__ = ["NON_INLINE_TRANSFER_MODES", "validate_transfer_deployment"]

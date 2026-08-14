@@ -16,6 +16,7 @@ from typing import Any, cast
 
 import httpx
 
+from app.ai.anthropic_staging import ANTHROPIC_FILES_BETA_VERSION
 from app.ai.attachments import ANTHROPIC_INLINE_ATTACHMENT_MIME_TYPES, Attachment
 from app.ai.errors import AIInputValidationError, ProviderResponseError
 from app.ai.providers.base import LLMProvider, ProviderRequest, ProviderResponse
@@ -82,6 +83,35 @@ def _anthropic_attachment_blocks(attachments: list[Attachment]) -> list[dict[str
     return blocks
 
 
+def _anthropic_staged_document_block(request: ProviderRequest) -> dict[str, Any]:
+    """Native ``document`` block for a staged file (v0.8 Scope §2.4, §6.6).
+
+    A staged ``provider_upload`` reference maps to a ``source.type = "file"``
+    document source carrying the provider file id; a retained private S3
+    source (or a local-transient scratch-GCS object) maps to a
+    ``source.type = "url"`` document source carrying the just-in-time minted
+    managed URL (never a caller-supplied URL — the URL is service-minted from
+    an authorised immutable object, Scope §2.1/§2.2). The managed URL exists
+    only in this in-memory request for one dispatch.
+    """
+    if request.managed_url:
+        # The managed URL wins: a URL document source never carries a file id.
+        return {"type": "document", "source": {"type": "url", "url": request.managed_url}}
+    staged = request.staged_file
+    if staged is None:
+        raise AIInputValidationError("a staged file reference is required for document input")
+    if staged.mime_type not in ANTHROPIC_INLINE_ATTACHMENT_MIME_TYPES:
+        raise AIInputValidationError(
+            f"provider 'anthropic' does not support staged file MIME type {staged.mime_type!r}"
+        )
+    external_id = staged.external_id
+    if "://" in external_id or external_id.startswith("gs:"):
+        # A staged file carrying a URL or cloud URI as its external id is
+        # never dispatched as a file id (Scope §2.2 caller-URL prohibition).
+        raise AIInputValidationError("the staged file reference has an invalid shape")
+    return {"type": "document", "source": {"type": "file", "file_id": external_id}}
+
+
 class AnthropicAdapter(LLMProvider):
     """Anthropic Messages API adapter."""
 
@@ -118,6 +148,13 @@ class AnthropicAdapter(LLMProvider):
         }
 
     def _build_payload(self, request: ProviderRequest) -> dict[str, Any]:
+        has_staged_file = request.staged_file is not None or request.managed_url is not None
+        if request.attachments and has_staged_file:
+            # A dispatch carries either the inline set or exactly one staged
+            # file, never both (ProviderRequest contract, Scope §2.4).
+            raise AIInputValidationError(
+                "a staged file and inline attachments are mutually exclusive"
+            )
         if request.attachments:
             # Pre-dispatch MIME guard (v0.7 Scope §6.3 attachment amendment):
             # Anthropic's base64 document source carries PDF only, so a text
@@ -140,6 +177,14 @@ class AnthropicAdapter(LLMProvider):
             content: Any = [
                 {"type": "text", "text": text},
                 *_anthropic_attachment_blocks(list(request.attachments)),
+            ]
+        elif has_staged_file:
+            # v0.8 Scope §2.4/§6.6: the staged file (provider file id via the
+            # beta Files API, or a just-in-time managed download URL) rides as
+            # a native ``document`` block; the text prompt stays first.
+            content = [
+                {"type": "text", "text": text},
+                _anthropic_staged_document_block(request),
             ]
         else:
             content = text
@@ -211,10 +256,16 @@ class AnthropicAdapter(LLMProvider):
         )
 
     async def complete(self, request: ProviderRequest) -> ProviderResponse:
+        headers = self._auth_headers()
+        # A dispatch that references a provider file id (``source.type = "file"``)
+        # must carry the reviewed beta header; a URL document source does not.
+        # The value is pinned in one place (Scope §6.6 checkbox 1).
+        if request.staged_file is not None and request.managed_url is None:
+            headers["anthropic-beta"] = ANTHROPIC_FILES_BETA_VERSION
         data, latency_ms = await post_json(
             self._client,
             f"{self._base_url}/v1/messages",
-            headers=self._auth_headers(),
+            headers=headers,
             payload=self._build_payload(request),
             unavailable_statuses=_UNAVAILABLE_STATUSES,
         )

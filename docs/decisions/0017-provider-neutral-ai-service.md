@@ -216,6 +216,17 @@ provider references (Scope §6.1 checkbox 3).
   migrations and provider data handling; every checkpoint names its review
   gate and prompt 03 cannot apply it until the review is recorded
   (BP §33, Scope §6).
+- **Provider-neutral PDF inspection (v0.8 Scope §6.6)**: any page ceiling in
+  the selected mode contract is enforced once in `AIService`, immediately
+  after bounded source verification and before every upload, storage staging,
+  managed-URL mint or provider dispatch. Transfer adapters do not accept a
+  page-limit argument and do not parse PDFs. The runtime depends on `pypdf`
+  rather than a partial in-house parser: incremental updates, cross-reference
+  streams and compressed object streams are ordinary supported PDF features,
+  not rejection signals. Inspection uses the verified file handle, traverses
+  only the effective page tree with explicit depth/node/page bounds, and never
+  extracts document content. This dependency addition requires human review
+  under BP §33 before apply-and-commit.
 
 ## Consequences
 

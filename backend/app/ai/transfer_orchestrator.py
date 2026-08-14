@@ -138,7 +138,9 @@ class TransferOrchestrator:
         durable row is created or adopted
         (:meth:`TransferReferenceStore.create_or_adopt`), so a retry of one
         logical request keeps exactly one live reference. ``inline`` is refused
-        — it produces no durable reference.
+        — it produces no durable reference. Any contract-declared PDF page
+        ceiling has already been enforced by ``AIService`` at the shared
+        verified-source boundary before this method is called.
         """
         if mode not in _PROVIDER_COPY_MODES | {TransferMode.MANAGED_SIGNED_URL}:
             raise TransferExecutionUnavailableError("inline transfers produce no durable reference")

@@ -463,7 +463,8 @@ class GcsTransferStore(TransferStore):
         reference instead of uploading again (Scope §2.1). ``source_path`` is
         the verified secure temporary file from
         :class:`~app.ai.streamed_source.StreamedSource` — required for this
-        adapter, since it must stream the bytes bounded.
+        adapter, since it must stream the bytes bounded. Any contract-declared
+        PDF page limit is enforced before the adapter is called.
         """
         if mode is not TransferMode.STORAGE_REFERENCE:
             raise TransferStagingError(
