@@ -26,6 +26,11 @@ dependencies = [
     "google-auth[urllib3]>=2.35.0",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.14.2",
+    # v0.8 provider-neutral PDF policy inspection (Scope §6.6, ADR-0017):
+    # use a maintained parser for incremental updates, xref streams and
+    # compressed object streams instead of rejecting normal modern PDFs or
+    # maintaining a partial security-sensitive parser in the template.
+    "pypdf>=6.16.0",
     # v0.7 prompt/task/model registries are reviewed YAML assets. PyYAML's
     # safe loader is used (never the object-constructing loader); it was
     # already present transitively and is now an explicit runtime contract.

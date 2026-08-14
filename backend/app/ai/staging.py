@@ -141,8 +141,10 @@ class TransferStore(ABC):
         (v0.8 Scope §2.3); a concrete adapter that needs the source bytes
         (provider uploads, GCS staging) streams it bounded and computes the
         digest incrementally, while the deterministic fake stores no bytes and
-        ignores it. Raises a safe AI error on failure; never returns bytes, a
-        signed URL or credentials.
+        ignores it. PDF structure and any contract-declared page ceiling are
+        validated once at the provider-neutral source boundary before an
+        adapter is called. Raises a safe AI error on failure; never returns
+        bytes, a signed URL or credentials.
         """
 
     @abstractmethod

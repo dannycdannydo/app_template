@@ -62,6 +62,7 @@ from app.ai.errors import (
     TransferExecutionUnavailableError,
     TransferModeUnavailableError,
 )
+from app.ai.pdf_inspection import validate_pdf_page_limit
 from app.ai.persistence.port import AIPersistencePort, OrganisationAIPolicy
 from app.ai.persistence.references import TransferReferenceStore
 from app.ai.providers.base import LLMProvider, ProviderRequest
@@ -857,6 +858,25 @@ class AIService:
                         references=transfer_references,
                         managed_url_stager=self._managed_url_stager,
                     )
+                    source_lifecycle = source_lifecycle_for_reference(
+                        large_source.reference, request.organisation_id
+                    )
+                    # The routed model's reviewed PDF page ceiling is derived
+                    # provider-neutrally from the checked-in mode contract and
+                    # context window. Inspection belongs at this common source
+                    # boundary: every adapter receives the same verified,
+                    # already-authorised PDF and never needs to parse it.
+                    max_pdf_pages: int | None = None
+                    contract = _transfer_contracts().providers.get(model.provider)
+                    mode_contract = (
+                        contract.transfer_modes.get(selected_transfer_mode)
+                        if contract is not None
+                        else None
+                    )
+                    if mode_contract is not None and mode_contract.pdf_pages is not None:
+                        max_pdf_pages = mode_contract.pdf_pages.effective_ceiling(
+                            model.context_window
+                        )
                     async with StreamedSource(
                         storage=self._storage,
                         reference=large_source.reference,
@@ -864,6 +884,11 @@ class AIService:
                         max_bytes=self._transfer_deployment.max_large_attachment_bytes,
                         allowed_mime_types=NON_INLINE_MIME_TYPES,
                     ) as source:
+                        if max_pdf_pages is not None:
+                            validate_pdf_page_limit(
+                                source.path,
+                                max_pages=max_pdf_pages,
+                            )
                         staged_reference = await staged_orchestrator.create_or_reuse_reference(
                             organisation_id=request.organisation_id,
                             logical_request_id=execution_request_id,
@@ -873,9 +898,7 @@ class AIService:
                             source_digest=source.sha256_digest,
                             size_bytes=source.size_bytes,
                             mime_type=source.mime_type,
-                            source_lifecycle=source_lifecycle_for_reference(
-                                large_source.reference, request.organisation_id
-                            ),
+                            source_lifecycle=source_lifecycle,
                             region=provider.region,
                             expires_at=None,
                             source_path=source.path,
@@ -885,9 +908,27 @@ class AIService:
                 # mode (never persisted, redacted at every log boundary). The
                 # URL is the temporary bearer capability one attempt sends as
                 # the provider's URL file input.
+                #
+                # Local-transient path (Scope §6.6 lesson from the OpenAI
+                # build): with a local storage seam a transient ``provider_upload``
+                # reference has no provider copy (the Anthropic store yields a
+                # no-copy reference — external id = source identity) and is
+                # served by staging the verified object into the scratch GCS
+                # staging directory and minting a signed URL to that GCS object
+                # as the URL document source instead.
                 managed_url: str | None = None
+                local_transient_dispatch = (
+                    selected_transfer_mode is TransferMode.PROVIDER_UPLOAD
+                    and staged_reference is not None
+                    and staged_reference.source_lifecycle is SourceLifecycle.TRANSIENT
+                    and staged_reference.external_id == staged_reference.source_reference
+                    and self._managed_url_stager is not None
+                )
                 if (
-                    selected_transfer_mode is TransferMode.MANAGED_SIGNED_URL
+                    (
+                        selected_transfer_mode is TransferMode.MANAGED_SIGNED_URL
+                        or local_transient_dispatch
+                    )
                     and staged_reference is not None
                     and staged_orchestrator is not None
                 ):

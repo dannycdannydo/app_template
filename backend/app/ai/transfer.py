@@ -255,6 +255,48 @@ class ManagedUrlTtlContract(BaseModel):
         return self
 
 
+class PdfPagesContract(BaseModel):
+    """The reviewed PDF page ceiling for one non-inline transfer mode.
+
+    Recorded from the official provider contract (Scope §6.1 checkbox 1) for
+    providers that document a per-request page ceiling — currently Anthropic:
+    600 pages per request, lowered to 100 pages when the model's context window
+    is under 1,000,000 tokens (providers.yaml ``retention_notes``). The
+    template derives the *effective* per-model ceiling from the model
+    registry's ``context_window`` and enforces it before any upload, so a
+    101+-page PDF for a small-context model is rejected pre-upload instead of
+    only failing at inference.
+    """
+
+    #: The ceiling for models whose context window is at/above the threshold.
+    max_pages: int = Field(ge=1)
+    #: The tighter ceiling for models below the threshold.
+    max_pages_under_context_window: int = Field(ge=1)
+    #: The context-window size (tokens) that selects the tighter ceiling.
+    context_window_threshold: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def _ceiling_is_reviewed(self) -> PdfPagesContract:
+        if self.max_pages_under_context_window > self.max_pages:
+            raise ValueError("max_pages_under_context_window must not exceed max_pages")
+        if self.context_window_threshold < 1_000:
+            raise ValueError("context_window_threshold must be at least 1,000 tokens")
+        return self
+
+    def effective_ceiling(self, context_window: int | None) -> int:
+        """The ceiling that applies to one routed model's context window.
+
+        Below the reviewed threshold — or when the model declares no context
+        window, the conservative choice — the tighter ceiling applies.
+        Provider-neutral: the service derives the per-model ceiling from the
+        checked-in mode contract instead of coupling to any provider module
+        (BP §23).
+        """
+        if context_window is None or context_window < self.context_window_threshold:
+            return self.max_pages_under_context_window
+        return self.max_pages
+
+
 class TransferModeContract(BaseModel):
     """One provider's reviewed capability for one transfer mode.
 
@@ -270,7 +312,10 @@ class TransferModeContract(BaseModel):
     §6.1 checkbox 1), and ``upload_expiry`` carries the reviewed bounds only
     for ``expires_after`` providers. ``same_region_required`` is mandatory
     for ``storage_reference``: staging must stay in the configured Vertex
-    location (Scope §2.4, §5.7).
+    location (Scope §2.4, §5.7). ``pdf_pages`` records a provider-documented
+    per-request PDF page ceiling for a non-inline mode (Anthropic), used to
+    derive the effective pre-upload ceiling from the routed model's context
+    window.
     """
 
     mime_types: list[str] = Field(min_length=1)
@@ -280,6 +325,7 @@ class TransferModeContract(BaseModel):
     upload_expiry: UploadExpiryContract | None = None
     managed_url_ttl: ManagedUrlTtlContract | None = None
     same_region_required: bool = False
+    pdf_pages: PdfPagesContract | None = None
 
     @field_validator("mime_types")
     @classmethod
@@ -390,6 +436,22 @@ class ProviderTransferContract(BaseModel):
                 if contract.upload_lifecycle is not None or contract.upload_expiry is not None:
                     raise ValueError(
                         "upload_lifecycle and upload_expiry belong to provider_upload only"
+                    )
+            if mode in (TransferMode.PROVIDER_UPLOAD, TransferMode.MANAGED_SIGNED_URL):
+                # The reviewed page ceiling is recorded only by providers that
+                # document one (currently Anthropic, whose PDF limit is 600
+                # pages per request and 100 under a 1M-token context window).
+                # Requiring it for Anthropic and forbidding it elsewhere keeps
+                # the structured fixture and the retention_notes from drifting.
+                if contract.pdf_pages is None and self.provider == "anthropic":
+                    raise ValueError(
+                        "the reviewed Anthropic PDF contract must declare pdf_pages "
+                        "for every PDF non-inline mode"
+                    )
+                if contract.pdf_pages is not None and self.provider != "anthropic":
+                    raise ValueError(
+                        "pdf_pages is recorded only for providers whose documentation "
+                        "declares a page ceiling"
                     )
             if mode is TransferMode.MANAGED_SIGNED_URL:
                 if contract.managed_url_ttl is None:

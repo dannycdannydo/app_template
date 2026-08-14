@@ -1,37 +1,54 @@
-"""OpenAI Files API upload transfer store (v0.8 Scope §2.3, §2.4, §6.5).
+"""Anthropic Files API upload transfer store (v0.8 Scope §2.3, §2.4, §6.6).
 
-The OpenAI large-file path uploads a verified **transient** private source to
-the OpenAI Files API with ``purpose=user_data`` and the shortest configured
-``expires_after``, records the provider file id and its enforced expiry as the
-durable reference, and passes that id through the Responses API ``input_file``
-item at dispatch (the adapter maps it — ``app/ai/providers/openai.py``). This
-module is the real :class:`~app.ai.staging.TransferStore` adapter for the
-``openai`` provider, implemented over the OpenAI Files REST API with the same
-thin pinned HTTP client the inference adapter uses (BP §23, ADR-0017).
+The Anthropic large-file path uploads a verified **transient** private source
+to the beta Files API (``POST /v1/files``), records the provider file id as
+the durable reference and passes that id through the Messages API as a
+``document`` source with ``source.type = "file"`` at dispatch (the adapter
+maps it — ``app/ai/providers/anthropic.py``). This module is the real
+:class:`~app.ai.staging.TransferStore` adapter for the ``anthropic`` provider,
+implemented over the Anthropic Files REST API with the same thin pinned HTTP
+client the inference adapter uses (BP §23, ADR-0017); the reviewed beta header
+and version are pinned in exactly one place
+(``app/ai/anthropic_staging.py``, Scope §6.6 checkbox 1).
 
-OpenAI behavior stays behind this adapter: the AI layer never constructs
+Anthropic behavior stays behind this adapter: the AI layer never constructs
 provider requests. The adapter:
 
-- enforces the reviewed upload contract (exactly one PDF, at most
-  50,000,000 bytes, a **transient** source, the configured region and an
-  ``expires_after`` inside the reviewed 1 hour..30 day bounds — Scope §2.4,
+- enforces the reviewed upload contract (exactly one PDF, at most 32,000,000
+  bytes — the provider's request-payload ceiling — a **transient** source and
+  a reference region equal to the configured inference geography, Scope §2.4,
   §5.3) *before any upload*;
 - streams the verified secure temporary file bounded (never accumulated in
   Python memory) through a multipart upload whose incremental SHA-256 must
   equal the verified source digest — the provider copy is byte-identical to
   the object the transfer verified;
-- derives the durable ``expires_at`` from the provider-reported file expiry
-  (``expires_after`` is anchored at the file's ``created_at``);
+- records the **delete-only** retention kind (providers.yaml
+  ``upload_lifecycle: until_deleted``): Anthropic has no automatic expiry, so
+  the durable reference carries no ``expires_at`` and terminal
+  deletion/reconciliation is the only removal (Scope §6.1 checkbox 1, §6.7);
 - is **idempotent** on the derived idempotency key (retry-only reuse within
   one logical request, Scope §2.1) and deletes **best-effort** on terminal
   cleanup, removing only the AI-owned provider copy — never the feature-owned
   source object (Scope §2.5). Deletion failures propagate so the §6.7
-  reconciliation job can cover them; the provider's enforced ``expires_after``
-  is the automatic-expiry backstop. A failure *after* the upload succeeded
+  reconciliation job can cover them. A failure *after* the upload succeeded
   (source mutation, malformed response) best-effort deletes the just-uploaded
   file by the id the successful response names; a transport timeout after
-  provider acceptance leaves no id to act on, so that window is bounded by the
-  provider-enforced expiry only.
+  provider acceptance leaves no id to act on, so that window stays bounded by
+  the delete-only contract and the mandatory reconciliation job.
+
+Local-transient path (Scope §6.6 lesson from the OpenAI build): with a local
+storage seam (offline MinIO), a managed signed URL minted from that storage
+can never resolve from the provider's network, so a **transient** source is
+served by staging the verified object into the scratch GCS staging directory
+and providing a signed URL to that GCS object as the URL document source
+instead of uploading to the beta Files API. When constructed with
+``stage_transient_locally=True`` (the runtime wires it only when the storage
+seam is local), a transient source yields a **no-copy reference** — no
+provider file is uploaded, the external id is the immutable source reference
+itself — and the dispatch-time managed-URL minting stages it into GCS and
+mints the URL. ``delete`` on such a reference marks it deleted without a
+provider call (no provider copy exists; the staged GCS copy at dispatch is
+cleaned by the deployer's ``age = 1`` lifecycle backstop, Scope §2.5).
 
 Transport failures (timeouts, unreachable, 5xx, 429) surface as the existing
 retryable provider errors; permanent validation/refusal failures surface as
@@ -44,12 +61,18 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote
 from uuid import UUID
 
 import httpx
 import structlog
 
+from app.ai.anthropic_staging import (
+    ANTHROPIC_FILES_BETA_VERSION,
+    ANTHROPIC_UPLOAD_CHUNK_BYTES,
+    ANTHROPIC_UPLOAD_FILENAME,
+    validate_anthropic_upload,
+)
 from app.ai.errors import (
     AIInputValidationError,
     ProviderRateLimitError,
@@ -57,64 +80,30 @@ from app.ai.errors import (
     ProviderUnavailableError,
     TransferStagingError,
 )
-from app.ai.openai_staging import (
-    OPENAI_EXPIRES_AFTER_MAX_SECONDS,
-    OPENAI_EXPIRES_AFTER_MIN_SECONDS,
-    OPENAI_FILES_PURPOSE,
-    OPENAI_UPLOAD_CHUNK_BYTES,
-    OPENAI_UPLOAD_FILENAME,
-    validate_openai_upload,
-)
-from app.ai.providers.http_transport import (
-    translate_http_exception,
-)
-from app.ai.providers.openai import REGIONAL_API_HOSTS
+from app.ai.providers.http_transport import translate_http_exception
 from app.ai.staging import ExternalFileReference, ExternalReferenceStatus, TransferStore
 from app.ai.transfer import SourceLifecycle, TransferMode, derive_idempotency_key
 from app.ai.upload_stream import DigestUploadFile
 
-#: The OpenAI Files API root. ``expires_after`` is carried as flattened
-#: multipart form fields (``expires_after[anchor]``/``expires_after[seconds]``)
-#: matching the documented curl form and the SDK's own multipart serialization
-#: (a single JSON-string field is refused by the API); the file's ``expires_at``
-#: (unix seconds) is echoed on the FileObject. Both verified against the
-#: official reference on 2026-08-11 (``app/ai/contracts/providers.yaml``).
-_DEFAULT_API_ROOT = "https://api.openai.com/v1"
+#: The Anthropic API root; ``/v1/files`` is the beta Files API surface. The
+#: default mirrors the inference adapter's default base URL.
+_DEFAULT_API_ROOT = "https://api.anthropic.com"
 
-#: The FileObject fields the upload/delete seams need.
+#: The Messages API version pinned by the inference adapter.
+_ANTHROPIC_VERSION = "2023-06-01"
+
+#: The FileObject field the upload/delete seams need.
 _FILE_ID_KEY = "id"
-_EXPIRES_AT_KEY = "expires_at"
 
 #: Module logger. Failure log lines carry the exception category only — never
 #: URLs, credentials, file ids, object keys or content (BP §28).
 logger = structlog.get_logger()
 
 
-def _file_expiry_timestamp(data: dict[str, Any], *, fallback_seconds: int) -> int:
-    """The provider-enforced file expiry as a unix timestamp.
+class AnthropicTransferStore(TransferStore):
+    """Anthropic ``provider_upload`` staging over the beta Files REST API."""
 
-    ``expires_after`` is anchored at the file's ``created_at``, and the
-    FileObject echoes the absolute ``expires_at``; when the provider omits it,
-    the same anchor is reconstructed from ``created_at`` plus the configured
-    duration so the durable reference never records a weaker expiry than the
-    provider enforces.
-    """
-    expires_raw = data.get(_EXPIRES_AT_KEY)
-    try:
-        return int(expires_raw)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        created_raw = data.get("created_at")
-        try:
-            created = int(created_raw)  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            created = int(datetime.now(UTC).timestamp())
-        return created + fallback_seconds
-
-
-class OpenAITransferStore(TransferStore):
-    """OpenAI ``provider_upload`` staging over the Files REST API."""
-
-    provider_id = "openai"
+    provider_id = "anthropic"
 
     def __init__(
         self,
@@ -122,56 +111,42 @@ class OpenAITransferStore(TransferStore):
         api_key: str = "",
         base_url: str = "",
         region: str = "",
-        upload_expiry_seconds: int = 3_600,
         timeout_seconds: float = 60.0,
         client: httpx.AsyncClient | None = None,
+        stage_transient_locally: bool = False,
     ) -> None:
         if not api_key:
-            raise AIInputValidationError("an OpenAI API key is required for the upload store")
-        if not (
-            OPENAI_EXPIRES_AFTER_MIN_SECONDS
-            <= upload_expiry_seconds
-            <= OPENAI_EXPIRES_AFTER_MAX_SECONDS
-        ):
-            raise AIInputValidationError(
-                "upload_expiry_seconds must be within the reviewed OpenAI "
-                f"expires_after bounds ({OPENAI_EXPIRES_AFTER_MIN_SECONDS}.."
-                f"{OPENAI_EXPIRES_AFTER_MAX_SECONDS} seconds)"
-            )
-        # Defense in depth with the inference adapter (v0.7 Scope §6.3): a
-        # region derives the regional endpoint and an explicit base URL must
-        # name that region's domain, so a directly constructed store can never
-        # upload through the global endpoint while the reference is labelled
-        # regional (Scope §5.7 never-mislabel rule). The settings validator
-        # enforces the same relationship; this constructor re-checks it.
-        if region and not base_url:
-            base_url = f"https://{REGIONAL_API_HOSTS[region]}/v1"
-        elif region and base_url:
-            host = urlsplit(base_url).hostname or ""
-            if host != REGIONAL_API_HOSTS[region]:
-                raise AIInputValidationError(
-                    f"AI_OPENAI_BASE_URL host {host!r} conflicts with region {region!r}; "
-                    f"regional requests must use https://{REGIONAL_API_HOSTS[region]}/v1"
-                )
+            raise AIInputValidationError("an Anthropic API key is required for the upload store")
         self._base_url = (base_url or _DEFAULT_API_ROOT).rstrip("/")
         self._api_key = api_key
-        # The configured deployment region (``ai_openai_region``: '' default or
-        # 'us'/'eu'); a reference can never silently move to another region
-        # (Scope §5.7). The regional domain itself comes from the inference
-        # adapter's base URL validation (v0.7 Scope §6.3).
+        # The configured inference geography (``ai_anthropic_inference_geography``:
+        # '' default or 'us'); a reference can never silently move to another
+        # geography (Scope §5.7).
         self.region = region
-        self._upload_expiry_seconds = upload_expiry_seconds
         self._client = client or httpx.AsyncClient(timeout=timeout_seconds)
+        #: Local-transient scratch-GCS path (Scope §6.6 lesson): when the
+        #: storage seam cannot serve a provider-reachable HTTPS URL, a
+        #: transient source is served by a GCS-staged signed URL document
+        #: source instead of a beta Files API upload. ``True`` means stage()
+        #: yields a no-copy reference for transient sources.
+        self.stage_transient_locally = stage_transient_locally
         #: In-process live reference cache keyed by the derived idempotency
         #: key (retry-only reuse within one logical request, Scope §2.1). The
         #: durable row remains the authoritative dedup across processes.
         self._records: dict[str, ExternalFileReference] = {}
 
     def _auth_headers(self) -> dict[str, str]:
-        return {"Authorization": f"Bearer {self._api_key}"}
+        return {
+            "x-api-key": self._api_key,
+            "anthropic-version": _ANTHROPIC_VERSION,
+            # The reviewed beta header/version, pinned in one place (Scope
+            # §6.6 checkbox 1): upload, delete and the Messages file-id
+            # dispatch all use it.
+            "anthropic-beta": ANTHROPIC_FILES_BETA_VERSION,
+        }
 
     def _files_url(self) -> str:
-        return f"{self._base_url}/files"
+        return f"{self._base_url}/v1/files"
 
     def _file_url(self, file_id: str) -> str:
         return f"{self._files_url()}/{quote(file_id, safe='')}"
@@ -187,14 +162,14 @@ class OpenAITransferStore(TransferStore):
             return
         status = response.status_code
         if status == 429:
-            raise ProviderRateLimitError("the OpenAI Files API rate limited the request")
+            raise ProviderRateLimitError("the Anthropic Files API rate limited the request")
         if status >= 500:
-            raise ProviderUnavailableError("the OpenAI Files API returned a server error")
+            raise ProviderUnavailableError("the Anthropic Files API returned a server error")
         # The status code is safe (low-cardinality) and is the fastest way to
-        # diagnose an upload refusal (e.g. a rejected field format) without
-        # logging the response body (BP §28).
-        logger.warning("ai.openai.upload.refused", status=status)
-        raise TransferStagingError("the OpenAI Files API refused the request")
+        # diagnose an upload refusal without logging the response body
+        # (BP §28).
+        logger.warning("ai.anthropic.upload.refused", status=status)
+        raise TransferStagingError("the Anthropic Files API refused the request")
 
     async def _best_effort_delete_uploaded(self, response: httpx.Response) -> None:
         """Best-effort delete of a just-uploaded provider file after a staging failure.
@@ -204,24 +179,23 @@ class OpenAITransferStore(TransferStore):
         the successful response when it parses — source-mutation failures are
         covered because the body still names the file — while an unparseable
         or id-less body leaves nothing addressable to delete. A failed delete
-        is suppressed and logged by category only: the provider-enforced
-        ``expires_after`` still bounds the copy. A transport failure during the
-        upload itself never reaches here: the provider may have accepted the
-        file, but no id exists to act on, so that window stays bounded solely
-        by the same provider-enforced expiry. File ids and URLs are never
-        logged (BP §28).
+        is suppressed and logged by category only: the delete-only contract
+        leaves the copy for the §6.7 reconciliation job. A transport failure
+        during the upload itself never reaches here: the provider may have
+        accepted the file, but no id exists to act on. File ids and URLs are
+        never logged (BP §28).
         """
         try:
             body = response.json()
         except ValueError:
             body = None
         if not isinstance(body, dict):
-            logger.warning("ai.openai.upload.cleanup", outcome="no_file_id")
+            logger.warning("ai.anthropic.upload.cleanup", outcome="no_file_id")
             return
         body_data = cast(dict[str, Any], body)
         file_id = str(body_data.get(_FILE_ID_KEY) or "")
         if not file_id:
-            logger.warning("ai.openai.upload.cleanup", outcome="no_file_id")
+            logger.warning("ai.anthropic.upload.cleanup", outcome="no_file_id")
             return
         try:
             response = await self._client.delete(
@@ -229,19 +203,19 @@ class OpenAITransferStore(TransferStore):
             )
         except httpx.HTTPError as exc:
             logger.warning(
-                "ai.openai.upload.cleanup",
+                "ai.anthropic.upload.cleanup",
                 outcome="delete_failed",
                 category=type(exc).__name__,
             )
         else:
             if response.is_error:
                 logger.warning(
-                    "ai.openai.upload.cleanup",
+                    "ai.anthropic.upload.cleanup",
                     outcome="delete_refused",
                     status=response.status_code,
                 )
             else:
-                logger.warning("ai.openai.upload.cleanup", outcome="deleted")
+                logger.warning("ai.anthropic.upload.cleanup", outcome="deleted")
 
     async def stage(
         self,
@@ -261,26 +235,28 @@ class OpenAITransferStore(TransferStore):
         """Upload one verified transient source to the Files API (Scope §2.4).
 
         Enforces the reviewed contract (mode, MIME, size, transient lifecycle,
-        region, expiry bounds) before any upload; a retry of one logical
-        request reuses the live reference instead of uploading again (Scope
-        §2.1). ``source_path`` is the verified secure temporary file from
-        :class:`~app.ai.streamed_source.StreamedSource` — required, since the
-        adapter must stream the bytes bounded. Any contract-declared PDF page
-        limit is enforced before the adapter is called.
+        region) before any upload; a retry of one logical request reuses the
+        live reference instead of uploading again (Scope §2.1). ``source_path``
+        is the verified secure temporary file from
+        :class:`~app.ai.streamed_source.StreamedSource` — required for the
+        beta upload, since the adapter must stream the bytes bounded.
+
+        With ``stage_transient_locally`` (local storage seam, Scope §6.6) a
+        transient source yields a **no-copy reference** instead: the external
+        id is the immutable source reference itself, no provider file is
+        uploaded, and the dispatch-time managed-URL minting stages the object
+        into the scratch GCS staging directory and provides a signed URL to
+        that GCS object as the URL document source. PDF structure and page
+        ceilings have already been checked at the common service boundary.
         """
-        validate_openai_upload(
+        validate_anthropic_upload(
             mode=mode,
             mime_type=mime_type,
             size_bytes=size_bytes,
             source_lifecycle=source_lifecycle,
             region=region,
             configured_region=self.region,
-            upload_expiry_seconds=self._upload_expiry_seconds,
         )
-        if source_path is None:
-            raise TransferStagingError(
-                "the OpenAI upload store requires the verified source temporary file"
-            )
         key = derive_idempotency_key(
             provider=self.provider_id,
             mode=mode,
@@ -294,28 +270,47 @@ class OpenAITransferStore(TransferStore):
             existing.last_used_at = datetime.now(UTC)
             return existing
 
+        if self.stage_transient_locally and source_lifecycle is SourceLifecycle.TRANSIENT:
+            # Local-transient scratch-GCS path (Scope §6.6 lesson): no provider
+            # copy is uploaded here; the durable reference mirrors the
+            # managed-signed-url shape (external id = immutable source
+            # identity) so the dispatch-time managed-URL minting can stage the
+            # verified source into the scratch GCS staging directory and hand
+            # Anthropic a signed URL to that GCS object as the document source.
+            reference = ExternalFileReference(
+                mode=mode,
+                provider=self.provider_id,
+                external_id=source_reference,
+                source_reference=source_reference,
+                source_digest=source_digest,
+                size_bytes=size_bytes,
+                mime_type=mime_type,
+                source_lifecycle=source_lifecycle,
+                region=region,
+                organisation_id=organisation_id,
+                logical_request_id=logical_request_id,
+                idempotency_key=key,
+                created_at=datetime.now(UTC),
+                expires_at=None,
+            )
+            self._records[key] = reference
+            return reference
+
+        if source_path is None:
+            raise TransferStagingError(
+                "the Anthropic upload store requires the verified source temporary file"
+            )
         file_wrapper = DigestUploadFile(
-            source_path, size_bytes=size_bytes, chunk_size=OPENAI_UPLOAD_CHUNK_BYTES
+            source_path, size_bytes=size_bytes, chunk_size=ANTHROPIC_UPLOAD_CHUNK_BYTES
         )
         try:
-            # The expiration policy travels as flattened multipart form fields
-            # (``expires_after[anchor]`` + ``expires_after[seconds]``) — the
-            # documented curl form and the SDK's multipart serialization; the
-            # API refuses a single JSON-string field. ``seconds`` is within the
-            # reviewed 1 hour..30 day bounds (Scope §2.4).
-            data: dict[str, str] = {
-                "purpose": OPENAI_FILES_PURPOSE,
-                "expires_after[anchor]": "created_at",
-                "expires_after[seconds]": str(self._upload_expiry_seconds),
-            }
             files: dict[str, Any] = {
-                "file": (OPENAI_UPLOAD_FILENAME, file_wrapper, mime_type),
+                "file": (ANTHROPIC_UPLOAD_FILENAME, file_wrapper, mime_type),
             }
             try:
                 response = await self._client.post(
                     self._files_url(),
                     headers=self._auth_headers(),
-                    data=data,
                     files=files,
                 )
             except httpx.HTTPError as exc:
@@ -340,19 +335,16 @@ class OpenAITransferStore(TransferStore):
                 body = response.json()
             except ValueError as exc:
                 raise ProviderResponseError(
-                    "the OpenAI Files API returned an unparseable response"
+                    "the Anthropic Files API returned an unparseable response"
                 ) from exc
             if not isinstance(body, dict):
                 raise ProviderResponseError(
-                    "the OpenAI Files API returned a malformed response body"
+                    "the Anthropic Files API returned a malformed response body"
                 )
             body_data = cast(dict[str, Any], body)
             file_id = str(body_data.get(_FILE_ID_KEY) or "")
             if not file_id:
-                raise ProviderResponseError("the OpenAI Files API returned no file id")
-            expiry_timestamp = _file_expiry_timestamp(
-                body_data, fallback_seconds=self._upload_expiry_seconds
-            )
+                raise ProviderResponseError("the Anthropic Files API returned no file id")
         except Exception:
             await self._best_effort_delete_uploaded(response)
             raise
@@ -370,7 +362,10 @@ class OpenAITransferStore(TransferStore):
             logical_request_id=logical_request_id,
             idempotency_key=key,
             created_at=datetime.now(UTC),
-            expires_at=datetime.fromtimestamp(expiry_timestamp, tz=UTC),
+            # Delete-only retention kind (``until_deleted``): the provider
+            # imposes no automatic expiry, so the durable reference carries
+            # none — terminal deletion/reconciliation is the only removal.
+            expires_at=None,
         )
         self._records[key] = reference
         return reference
@@ -409,17 +404,26 @@ class OpenAITransferStore(TransferStore):
         """Best-effort terminal deletion of the provider copy; never the source.
 
         Resolves the authoritative record by idempotency key and deletes the
-        provider file named by the durable reference. A missing file (404/410,
-        e.g. already expired or deleted by a previous cleanup) is tolerated;
-        a genuine failure propagates so the §6.7 reconciliation job can cover
-        the orphan (Scope §2.5). The feature-owned source object is never
-        touched.
+        provider file named by the durable reference. A missing file (404/410)
+        is tolerated — the provider already removed it, e.g. by a previous
+        cleanup — while any other failure propagates so the §6.7
+        reconciliation job can cover the orphan (Scope §2.5). The feature-owned
+        source object is never touched. A no-copy reference (local-transient
+        scratch-GCS path) has no provider file to delete and is marked deleted
+        directly.
         """
         record = self._records.get(reference.idempotency_key)
         if record is None or record.status is ExternalReferenceStatus.DELETED:
             return
         if record.mode is not TransferMode.PROVIDER_UPLOAD:
             raise TransferStagingError("only provider_upload files can be deleted here")
+        if record.external_id == record.source_reference:
+            # No-copy reference (local-transient scratch-GCS path): no provider
+            # file exists; the dispatch-time GCS staged copy is cleaned by the
+            # deployer's age = 1 lifecycle backstop (Scope §2.5).
+            record.status = ExternalReferenceStatus.DELETED
+            record.deleted_at = datetime.now(UTC)
+            return
         try:
             response = await self._client.delete(
                 self._file_url(record.external_id), headers=self._auth_headers()
@@ -436,4 +440,4 @@ class OpenAITransferStore(TransferStore):
         await self._client.aclose()
 
 
-__all__ = ["OpenAITransferStore"]
+__all__ = ["AnthropicTransferStore"]

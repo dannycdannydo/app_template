@@ -133,13 +133,16 @@ def mint_gcs_v4_signed_url(
 
 
 class GcsManagedUrlStager:
-    """Re-verify a retained source, stage it into the GCS temp bucket and mint a URL.
+    """Re-verify a private source, stage it into the GCS temp bucket and mint a URL.
 
     Used only when the source storage cannot produce a provider-reachable
-    HTTPS signed URL (local MinIO in development). The staged GCS copy is an
-    AI-owned derivative under the approved org-scoped staging prefix; its
-    cleanup is the deployer-owned Object Lifecycle rule (``age = 1``), the same
-    backstop as the Vertex ``storage_reference`` path (Scope §2.4).
+    HTTPS signed URL (local MinIO in development). It serves retained sources
+    (``managed_signed_url`` mode) and the Anthropic local-transient path
+    (Scope §6.6: a transient source gets a signed URL to its scratch-GCS copy
+    instead of a beta Files API upload). The staged GCS copy is an AI-owned
+    derivative under the approved org-scoped staging prefix; its cleanup is
+    the deployer-owned Object Lifecycle rule (``age = 1``), the same backstop
+    as the Vertex ``storage_reference`` path (Scope §2.4).
     """
 
     def __init__(
@@ -174,6 +177,10 @@ class GcsManagedUrlStager:
         """The staging region (the configured Vertex location)."""
         return self._store.region
 
+    async def aclose(self) -> None:
+        """Release the underlying staging store's HTTP client."""
+        await self._store.aclose()
+
     async def mint(
         self,
         *,
@@ -181,7 +188,7 @@ class GcsManagedUrlStager:
         ttl_seconds: int,
         source_storage: ObjectStorage,
     ) -> SignedUrl:
-        """Stage one verified retained source into GCS and mint its signed URL.
+        """Stage one verified private source into GCS and mint its signed URL.
 
         The source is re-verified bounded from the source storage (ownership,
         size, MIME and the exact SHA-256 digest recorded in the durable
@@ -190,14 +197,31 @@ class GcsManagedUrlStager:
         exact immutable identity). The GCS staging store then re-validates the
         bucket and verifies the staged object's size/MIME/MD5 before the URL
         is minted.
+
+        Both **retained** sources (the ``managed_signed_url`` mode) and
+        **transient** sources (the Anthropic local-transient scratch-GCS path,
+        Scope §6.6 lesson learned: with a local storage seam a transient
+        source is served by a signed URL to its scratch-GCS copy instead of a
+        provider upload) are staged here; the staged copy is AI-owned either
+        way and its cleanup is the deployer's ``age = 1`` lifecycle backstop.
         """
-        if reference.mode is not TransferMode.MANAGED_SIGNED_URL:
+        if reference.mode is not TransferMode.MANAGED_SIGNED_URL and not (
+            reference.mode is TransferMode.PROVIDER_UPLOAD
+            and reference.source_lifecycle is SourceLifecycle.TRANSIENT
+            and reference.external_id == reference.source_reference
+        ):
+            # The Anthropic local-transient scratch-GCS path (Scope §6.6)
+            # yields a no-copy ``provider_upload`` reference (external id =
+            # source identity) that is staged here and served by a signed URL
+            # instead of a beta Files API upload. Any other provider_upload
+            # reference carries a provider file id and is never URL-minted.
             raise TransferSourceError(
-                "a managed download URL can only be minted for the managed-signed-url mode"
+                "a managed download URL can only be minted for the managed-signed-url "
+                "mode or the Anthropic local-transient scratch-GCS path"
             )
-        if reference.source_lifecycle is not SourceLifecycle.RETAINED:
+        if reference.source_lifecycle not in (SourceLifecycle.RETAINED, SourceLifecycle.TRANSIENT):
             raise TransferSourceError(
-                "a managed download URL can only be minted for a retained private source"
+                "a managed download URL can only be minted for a private source"
             )
         logger.info(
             "ai.managed_url.gcs_staging.started",

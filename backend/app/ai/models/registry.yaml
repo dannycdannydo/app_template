@@ -152,9 +152,25 @@ models:
     priority: 1000
     max_attachment_bytes: 5242880
     max_total_attachment_bytes: 10485760
-    # v0.8 Scope §2.2: inline only until the §6.6 adapter checkpoint lands.
+    # v0.8 Scope §2.2/§6.6: the Anthropic adapter checkpoint adds the two
+    # reviewed non-inline modes — provider_upload for transient sources (beta
+    # Files API, delete-only retention) and managed_signed_url for retained
+    # private S3 sources (URL document source) — with per-mode PDF ceilings
+    # mirroring the provider's 32 MB request-payload ceiling, which always
+    # wins over the template's 50 MB ceiling (Scope §2.1 decision 3).
     allowed_transfer_modes:
       - inline
+      - provider_upload
+      - managed_signed_url
+    transfer_mode_limits:
+      provider_upload:
+        mime_types:
+          - application/pdf
+        max_bytes: 32000000
+      managed_signed_url:
+        mime_types:
+          - application/pdf
+        max_bytes: 32000000
     attachment_mime_types:
       - application/pdf
       - image/jpeg

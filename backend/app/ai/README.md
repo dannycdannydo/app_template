@@ -135,19 +135,34 @@ explicit operator procedure.
    - `storage_reference` (Vertex): exactly one PDF above the threshold, staged
      into the GCS bucket, referenced as `fileData`, deleted best-effort after
      the terminal outcome.
-   - `provider_upload` (OpenAI): exactly one transient PDF above the
-     threshold, streamed bounded into the Files API (`purpose=user_data`,
-     configured `expires_after`), dispatched as `input_file.file_id`, deleted
-     best-effort after the terminal outcome (v0.8 Scope §6.5).
-   - `managed_signed_url`: exactly one retained PDF above the threshold gets
-     a short-lived read-only HTTPS URL (default TTL 900 s, max 1,800 s) minted
-     just-in-time per dispatch from the source storage and sent as
-     `input_file.file_url` — no provider copy is ever made. A local storage
-     seam (MinIO over plain HTTP, which the minter refuses and a provider
-     could not reach anyway) is served in development by staging the verified
-     source into the user-provisioned GCS temp bucket and minting a GCS v4
-     RSA-signed HTTPS URL from the staged copy (`app/ai/runtime.py` wires the
-     seam only when the deployment enables the mode). Anthropic §6.6 pending.
+   - `provider_upload` (OpenAI/Anthropic): exactly one transient PDF above the
+    threshold, streamed bounded into the provider's upload API (OpenAI Files
+    API `purpose=user_data` with configured `expires_after`; Anthropic beta
+    Files API with delete-only retention, pinned `files-api-2025-04-14` beta
+    header), dispatched as a native file-input (Responses `input_file.file_id`
+    / Anthropic `document` `file` source), deleted best-effort after the
+    terminal outcome (v0.8 Scope §6.5/§6.6).
+  - `managed_signed_url`: exactly one retained PDF above the threshold gets
+    a short-lived read-only HTTPS URL (default TTL 900 s, max 1,800 s) minted
+    just-in-time per dispatch from the source storage and sent as a native
+    file-URL input (`input_file.file_url` / Anthropic `document` `url`
+    source) — no provider copy is ever made. A local storage seam (MinIO over
+    plain HTTP, which the minter refuses and a provider could not reach
+    anyway) is served in development by staging the verified source into the
+    user-provisioned GCS temp bucket and minting a GCS v4 RSA-signed HTTPS
+    URL from the staged copy (`app/ai/runtime.py` wires the seam when the
+    deployment enables the mode). The same seam serves the Anthropic
+    local-transient path: with a local storage seam a transient source is
+    staged into the scratch GCS staging directory and given a signed URL as
+    its document source instead of a beta Files API upload (v0.8 Scope §6.6).
+  - **PDF policy inspection is common to every adapter.** After the source is
+    streamed into its bounded verified temporary file, `AIService` applies any
+    `pdf_pages` ceiling declared by the selected provider/mode contract before
+    upload, cloud staging, URL minting or dispatch. `pypdf` resolves normal
+    modern structures (including incremental updates, xref streams and object
+    streams); adapters receive an already-inspected source and do not parse
+    PDFs themselves. Invalid or over-ceiling input is a safe input-validation
+    failure, not a provider-availability failure.
 6. **Dispatch + validation**: the provider adapter runs; the output must
    validate against the task's declared contract (structured schema or
    explicit text result) or it fails — unvalidated data is never returned.
