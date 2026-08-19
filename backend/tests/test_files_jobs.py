@@ -85,20 +85,11 @@ async def test_file_worker_rejects_wrong_durable_job_type(
         async with session_factory() as session:
             organisation = await _create_org(session, "File Wrong Type Ltd")
 
-            def _noop(**kwargs: str) -> None:
-                return None
-
-            # A uniquely named task so the durable row can be written without
-            # colliding with other actors declared on the shared stub broker.
-            task = dramatiq.actor(
-                actor_name=f"wrong_type_file_{uuid.uuid4().hex[:8]}", queue_name=_QUEUE
-            )(_noop)
-            job = await jobs_service.create_and_enqueue(
+            job = await jobs_service.schedule_job(
                 session,
                 organisation_id=organisation.id,
                 job_type=notifications_tasks.JOB_TYPE_NOTIFICATION_EMAIL,
                 input_reference="file-1",
-                task=task,
             )
             # P3 populates the dispatch id on every durable job at creation.
             job.dispatch_id = uuid.uuid4()
@@ -231,9 +222,13 @@ async def _upload_round_trip(
     *,
     content: bytes = b"the bytes that were uploaded",
     actor_user_id: uuid.UUID | None = None,
-    process_task: Any = None,
 ) -> tuple[File, uuid.UUID]:
-    """Run intent -> direct PUT -> complete, returning the file and job id."""
+    """Run intent -> direct PUT -> complete, returning the file and job id.
+
+    ``complete_upload`` only schedules the durable job (plan P3: the outbox
+    event commits with the row); the caller publishes the reference-only
+    message on its own broker when it wants the worker to run.
+    """
     file, signed_url = await files_service.create_upload_intent(
         session,
         organisation_id=organisation_id,
@@ -248,7 +243,6 @@ async def _upload_round_trip(
         session,
         organisation_id=organisation_id,
         file_id=file.id,
-        process_task=process_task,
     )
     assert completed.status == FileStatus.UPLOADED
     assert job_id is not None
@@ -264,10 +258,10 @@ async def test_complete_enqueues_job_and_worker_drives_file_to_ready(
     async with session_factory() as session:
         organisation = await _create_org(session, "File Jobs Ltd")
 
-        file, job_id = await _upload_round_trip(session, organisation.id, process_task=process_task)
-        # The durable row was written before the worker picked it up. The
-        # worker may have already transitioned it to ``running`` (a race between
-        # the in-process StubBroker worker and this assertion), so either
+        file, job_id = await _upload_round_trip(session, organisation.id)
+        # The durable row commits before the coordinator publishes; the worker
+        # may have already transitioned it to ``running`` (a race between the
+        # in-process StubBroker worker and this assertion), so either
         # non-terminal state is valid here — the terminal assertion below is
         # what proves the job ran to completion.
         queued = await session.get(Job, job_id)
@@ -277,6 +271,7 @@ async def test_complete_enqueues_job_and_worker_drives_file_to_ready(
         assert queued.input_reference == str(file.id)
         assert queued.organisation_id == organisation.id
 
+    process_task.send(job_id=str(job_id))  # the coordinator publishes
     broker.join(_QUEUE, timeout=10000)
     finished = await _wait_for_status(session_factory, job_id, JobStatus.SUCCEEDED)
     assert finished.progress == 100
@@ -310,10 +305,9 @@ async def test_processing_failure_fails_file_and_job_with_error_code(
     session_factory = _session_factory(migrated_database)
     async with session_factory() as session:
         organisation = await _create_org(session, "File Jobs Failure Ltd")
-        # process_task=None enqueues on the module-level actor (default broker,
-        # inert here), so the durable row is written without a message this
-        # worker can consume before the object is tampered with.
-        file, job_id = await _upload_round_trip(session, organisation.id, process_task=None)
+        # complete_upload only schedules the durable job (plan P3); the
+        # message is published below after the object is tampered with.
+        file, job_id = await _upload_round_trip(session, organisation.id)
         await _fake_storage().delete_object(file.object_key)  # bytes vanished
 
     process_task.send(job_id=str(job_id))  # enqueue the attempt on this broker
@@ -351,9 +345,7 @@ async def test_processing_size_mismatch_fails_file(
     async with session_factory() as session:
         organisation = await _create_org(session, "File Jobs Mismatch Ltd")
         content = b"original bytes"
-        file, job_id = await _upload_round_trip(
-            session, organisation.id, content=content, process_task=None
-        )
+        file, job_id = await _upload_round_trip(session, organisation.id, content=content)
         # Replace the object with content of a different size, simulating a
         # race or tampering between completion and processing. The fake enforces
         # the declared size at put time, so re-declare the key first (the same
@@ -403,8 +395,9 @@ async def test_redelivered_message_of_finished_job_is_a_noop(
     session_factory = _session_factory(migrated_database)
     async with session_factory() as session:
         organisation = await _create_org(session, "File Jobs Idempotent Ltd")
-        file, job_id = await _upload_round_trip(session, organisation.id, process_task=process_task)
+        file, job_id = await _upload_round_trip(session, organisation.id)
 
+    process_task.send(job_id=str(job_id))  # the coordinator publishes
     broker.join(_QUEUE, timeout=10000)
     await _wait_for_status(session_factory, job_id, JobStatus.SUCCEEDED)
 
@@ -425,48 +418,35 @@ async def test_redelivered_message_of_finished_job_is_a_noop(
     assert await _audit_count(session_factory, action="job.succeeded", resource_id=str(job_id)) == 1
 
 
-def _make_noop_task() -> Any:
-    """A task that writes nothing; used to create durable rows without work."""
-
-    def _noop(job_id: str) -> None:
-        return None
-
-    return dramatiq.actor(queue_name=_QUEUE, **jobs_service.retry_policy())(_noop)
-
-
 async def test_job_list_and_detail_are_org_scoped(
     migrated_database: str, broker_and_worker: tuple[StubBroker, Worker, Any]
 ) -> None:
     """Acceptance §5.7: org-scoping, status/job_type filters and the 404 rule."""
     _broker, _worker, _process_task = broker_and_worker
     session_factory = _session_factory(migrated_database)
-    noop = _make_noop_task()
     async with session_factory() as session:
         org_a = await _create_org(session, "Jobs Scoping A Ltd")
         org_b = await _create_org(session, "Jobs Scoping B Ltd")
-        job_a_1 = await jobs_service.create_and_enqueue(
+        job_a_1 = await jobs_service.schedule_job(
             session,
             organisation_id=org_a.id,
             job_type="file.processing",
             input_reference="file-a-1",
-            task=noop,
         )
-        job_a_2 = await jobs_service.create_and_enqueue(
+        job_a_2 = await jobs_service.schedule_job(
             session,
             organisation_id=org_a.id,
             job_type="file.processing",
             input_reference="file-a-2",
-            task=noop,
         )
-        job_b = await jobs_service.create_and_enqueue(
+        job_b = await jobs_service.schedule_job(
             session,
             organisation_id=org_b.id,
             job_type="file.processing",
             input_reference="file-b-1",
-            task=noop,
         )
         # Move one of org A's jobs out of the default queued state so the
-        # status filter has something to select (the no-op task never runs).
+        # status filter has something to select (nothing ever runs the rows).
         await session.execute(
             update(Job).where(Job.id == job_a_2.id).values(status=JobStatus.RUNNING)
         )
@@ -563,12 +543,12 @@ async def test_file_ready_loop_creates_notification_and_delivers_email(
                 session,
                 organisation.id,
                 actor_user_id=uploader.id,
-                process_task=process_task,
             )
             file_id = file.id
             uploader_id = uploader.id
             org_id = organisation.id
 
+        process_task.send(job_id=str(job_id))  # the coordinator publishes
         broker.join(_QUEUE, timeout=10000)
         finished = await _wait_for_status(session_factory, job_id, JobStatus.SUCCEEDED)
         assert finished.progress == 100
@@ -656,10 +636,8 @@ async def test_failed_file_loop_creates_notification_and_delivery_failure_is_aud
         async with session_factory() as session:
             organisation = await _create_org(session, "File Loop Failed Ltd")
             uploader = await _seed_uploader(session, email="failed@example.com")
-            # process_task=None enqueues on the module-level actor (inert), so
-            # the object can be tampered with before the worker sees the job.
             file, job_id = await _upload_round_trip(
-                session, organisation.id, actor_user_id=uploader.id, process_task=None
+                session, organisation.id, actor_user_id=uploader.id
             )
             await _fake_storage().delete_object(file.object_key)
             file_id = file.id
@@ -749,12 +727,12 @@ async def test_file_loop_no_double_send_on_retry(
                 session,
                 organisation.id,
                 actor_user_id=uploader.id,
-                process_task=process_task,
             )
             file_id = file.id
             uploader_id = uploader.id
             org_id = organisation.id
 
+        process_task.send(job_id=str(job_id))  # the coordinator publishes
         broker.join(_QUEUE, timeout=10000)
         await _wait_for_status(session_factory, job_id, JobStatus.SUCCEEDED)
 

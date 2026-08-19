@@ -246,9 +246,7 @@ async def test_worker_tasks_emit_context_bound_log_lines(
     with _capture_logs() as logs:
         await jobs_tasks.mark_job_failed_after_retries(message_dict, {})
 
-    stale_skips = [
-        entry for entry in logs if entry["event"] == "job.retries_exhausted.skipped"
-    ]
+    stale_skips = [entry for entry in logs if entry["event"] == "job.retries_exhausted.skipped"]
     assert stale_skips and stale_skips[0]["reason"] == "stale_dispatch"
 
 

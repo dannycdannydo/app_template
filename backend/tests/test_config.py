@@ -283,9 +283,7 @@ def test_job_delivery_defaults_are_600s_time_limit_and_900s_lease() -> None:
     settings = Settings(app_env="test", database_url="postgresql+asyncpg://x")
     assert settings.job_task_time_limit_ms == 600_000
     assert settings.job_execution_lease_seconds == 900
-    assert settings.job_execution_lease_seconds * 1000 >= (
-        settings.job_task_time_limit_ms + 60_000
-    )
+    assert settings.job_execution_lease_seconds * 1000 >= (settings.job_task_time_limit_ms + 60_000)
 
 
 def test_execution_lease_must_exceed_task_time_limit_by_60_seconds() -> None:
@@ -314,6 +312,57 @@ def test_storage_public_endpoint_defaults_to_endpoint() -> None:
         storage_endpoint_url="http://localhost:9000",
     )
     assert settings.storage_public_endpoint_url == "http://localhost:9000"
+
+
+def test_coordinator_settings_have_the_plan_defaults() -> None:
+    """Plan P3: bounded publication batch, poll, lease and backoff defaults."""
+    settings = Settings(app_env="test", database_url="postgresql+asyncpg://x")
+    assert settings.coordinator_publication_batch_size == 50
+    assert settings.coordinator_idle_poll_seconds == 0.5
+    assert settings.coordinator_publication_lease_seconds == 60
+    assert settings.coordinator_publication_backoff_initial_seconds == 1.0
+    assert settings.coordinator_publication_backoff_max_seconds == 300.0
+    # Plan P4/P5 typed surfaces are settled with the coordinator.
+    assert settings.job_reconcile_threshold_seconds == 900
+    assert settings.job_reconcile_cooldown_seconds == 900
+    assert settings.maintenance_transfer_reconcile_interval_hours == 1
+    assert settings.maintenance_ai_retention_interval_hours == 24
+    assert settings.outbox_retention_days == 30
+    assert settings.outbox_cleanup_batch_size == 500
+    assert settings.outbox_cleanup_interval_hours == 24
+
+
+def test_coordinator_backoff_max_must_exceed_initial() -> None:
+    """A max below the initial backoff is a configuration error (plan P3)."""
+    with pytest.raises(ValidationError, match="backoff"):
+        Settings(
+            app_env="development",
+            database_url="postgresql+asyncpg://x",
+            coordinator_publication_backoff_initial_seconds=60.0,
+            coordinator_publication_backoff_max_seconds=1.0,
+        )
+
+
+def test_coordinator_settings_have_safe_bounds() -> None:
+    """Extreme values fail fast at startup instead of at runtime."""
+    with pytest.raises(ValidationError, match="coordinator_publication_batch_size"):
+        Settings(
+            app_env="development",
+            database_url="postgresql+asyncpg://x",
+            coordinator_publication_batch_size=0,
+        )
+    with pytest.raises(ValidationError, match="job_reconcile_threshold_seconds"):
+        Settings(
+            app_env="development",
+            database_url="postgresql+asyncpg://x",
+            job_reconcile_threshold_seconds=1,
+        )
+    with pytest.raises(ValidationError, match="outbox_cleanup_interval_hours"):
+        Settings(
+            app_env="development",
+            database_url="postgresql+asyncpg://x",
+            outbox_cleanup_interval_hours=0,
+        )
 
 
 def test_sentry_settings_defaults_and_validation() -> None:

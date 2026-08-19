@@ -2,7 +2,7 @@
 
 The service lifecycle is proven against the real database in
 ``test_jobs_db.py``, but its broker is an in-memory stub, so the wiring
-between ``create_and_enqueue``, a real Redis broker and a real worker thread
+between durable job scheduling, a real Redis broker and a real worker thread
 could silently break. These tests run the whole pipeline against a real Redis
 broker (unique namespace so they cannot touch a developer's worker) and a
 reachable PostgreSQL, and skip when either is missing — the CI backend-test
@@ -205,9 +205,7 @@ def _make_round_trip_task(session_factory: Any) -> Any:
     async def _run(job_id: str) -> None:
         job_id_uuid = uuid.UUID(job_id)
 
-        async def _drive(
-            context: Any, session: Any
-        ) -> None:
+        async def _drive(context: Any, session: Any) -> None:
             await jobs_service.update_progress(
                 session,
                 job_id=job_id_uuid,
@@ -259,10 +257,10 @@ def _make_transient_failure_task(session_factory: Any) -> Any:
 def _make_process_file_task() -> Any:
     """The real ``process_file`` handler re-declared bound to this broker.
 
-    ``files_service.complete_upload`` enqueues whatever actor it is passed
-    (defaulting to the module-level one, which is bound to the default broker
-    from import time); passing the re-declared actor makes the journey test's
-    enqueue land on the namespaced Redis broker this worker consumes.
+    ``complete_upload`` only schedules the durable job (plan P3); the tests
+    publish the reference-only message through this re-declared actor so the
+    enqueue lands on the namespaced Redis broker this worker consumes — the
+    same seam the coordinator's registry uses in production.
     """
     return dramatiq.actor(queue_name=_QUEUE, **jobs_service.retry_policy())(
         files_tasks.process_file
@@ -299,14 +297,14 @@ async def test_worker_completes_job_lifecycle_with_progress(
     organisation = await _create_org(session_factory)
     task = _make_round_trip_task(session_factory)
     async with session_factory() as session:
-        job = await jobs_service.create_and_enqueue(
+        job = await jobs_service.schedule_job(
             session,
             organisation_id=organisation.id,
             job_type="file.processing",
             input_reference="file-1",
             actor_user_id=None,
-            task=task,
         )
+    task.send(job_id=str(job.id))  # the coordinator publishes
 
     finished = await _wait_for_status(session_factory, job.id, JobStatus.SUCCEEDED)
     assert finished.progress == 100
@@ -325,13 +323,13 @@ async def test_transient_exhaustion_records_failed_status(
     organisation = await _create_org(session_factory)
     task = _make_transient_failure_task(session_factory)
     async with session_factory() as session:
-        job = await jobs_service.create_and_enqueue(
+        job = await jobs_service.schedule_job(
             session,
             organisation_id=organisation.id,
             job_type="file.processing",
             input_reference="file-1",
-            task=task,
         )
+    task.send(job_id=str(job.id))  # the coordinator publishes
 
     failed = await _wait_for_status(session_factory, job.id, JobStatus.FAILED)
     assert failed.error_code == jobs_service.ERROR_CODE_RETRIES_EXHAUSTED
@@ -351,9 +349,7 @@ async def test_transient_exhaustion_records_failed_status(
 # no-op, including the two races the dispatch-only correlation left open.
 
 
-async def _create_queued_job(
-    session_factory: Any, organisation_id: uuid.UUID
-) -> uuid.UUID:
+async def _create_queued_job(session_factory: Any, organisation_id: uuid.UUID) -> uuid.UUID:
     """Create a durable ``queued`` job row directly (no task enqueued)."""
     async with session_factory() as session:
         job = Job(
@@ -453,9 +449,7 @@ async def test_exhausted_handler_receives_claim_stamp_after_retries(
 
         await jobs_execution.run_claimed(job_id=job_id_uuid, handler=_fail_transient)
 
-    async def _capture_exhausted(
-        message_dict: dict[str, Any], retry_info: dict[str, Any]
-    ) -> None:
+    async def _capture_exhausted(message_dict: dict[str, Any], retry_info: dict[str, Any]) -> None:
         captured["message_dict"] = message_dict
         captured["retry_info"] = retry_info
 
@@ -474,14 +468,14 @@ async def test_exhausted_handler_receives_claim_stamp_after_retries(
     )(_capture_exhausted)
 
     async with session_factory() as session:
-        job = await jobs_service.create_and_enqueue(
+        job = await jobs_service.schedule_job(
             session,
             organisation_id=organisation.id,
             job_type="file.processing",
             input_reference="file-1",
-            task=task,
         )
         job_id = job.id
+    task.send(job_id=str(job_id))  # the coordinator publishes
 
     deadline = time.monotonic() + 20.0
     while "message_dict" not in captured and time.monotonic() < deadline:
@@ -518,24 +512,18 @@ async def test_exhausted_message_with_superseded_token_is_stale(
         claim_a = await jobs_service.claim_dispatch(session, job_id=job_id)
         assert claim_a.dispatch_id is not None
         assert claim_a.owner_token is not None
-        await jobs_service.release_dispatch(
-            session, job_id=job_id, owner_token=claim_a.owner_token
-        )
+        await jobs_service.release_dispatch(session, job_id=job_id, owner_token=claim_a.owner_token)
         claim_b = await jobs_service.claim_dispatch(session, job_id=job_id)
         assert claim_b.dispatch_id == claim_a.dispatch_id
         assert claim_b.owner_token != claim_a.owner_token
         assert claim_b.owner_token is not None
-        await jobs_service.release_dispatch(
-            session, job_id=job_id, owner_token=claim_b.owner_token
-        )
+        await jobs_service.release_dispatch(session, job_id=job_id, owner_token=claim_b.owner_token)
         a_dispatch = claim_a.dispatch_id
         a_token = claim_a.owner_token
         assert a_dispatch is not None and a_token is not None
 
     baseline_stale = _stale_messages_count()
-    _enqueue_exhausted_message(
-        broker, job_id, dispatch_id=a_dispatch, owner_token=a_token
-    )
+    _enqueue_exhausted_message(broker, job_id, dispatch_id=a_dispatch, owner_token=a_token)
     await _wait_for_stale_count(baseline_stale)
 
     async with session_factory() as session:
@@ -565,9 +553,7 @@ async def test_exhausted_message_without_stamp_is_stale_for_claimed_row(
     async with session_factory() as session:
         claim = await jobs_service.claim_dispatch(session, job_id=job_id)
         assert claim.owner_token is not None
-        await jobs_service.release_dispatch(
-            session, job_id=job_id, owner_token=claim.owner_token
-        )
+        await jobs_service.release_dispatch(session, job_id=job_id, owner_token=claim.owner_token)
 
     baseline_stale = _stale_messages_count()
     _enqueue_exhausted_message(broker, job_id, dispatch_id=None, owner_token=None)
@@ -632,7 +618,6 @@ async def test_upload_complete_process_job_runs_on_real_broker(
             session,
             organisation_id=organisation.id,
             file_id=file.id,
-            process_task=process_task,
         )
         assert completed.status == FileStatus.UPLOADED
         assert job_id is not None
@@ -641,6 +626,7 @@ async def test_upload_complete_process_job_runs_on_real_broker(
         assert queued.status == JobStatus.QUEUED
         assert queued.job_type == files_tasks.JOB_TYPE_FILE_PROCESSING
 
+    process_task.send(job_id=str(job_id))  # the coordinator publishes
     finished = await _wait_for_status(session_factory, job_id, JobStatus.SUCCEEDED)
     assert finished.progress == 100
     assert finished.result_reference == str(file.id)
@@ -712,12 +698,12 @@ async def test_file_ready_loop_runs_on_real_broker(
             session,
             organisation_id=organisation.id,
             file_id=file.id,
-            process_task=process_task,
         )
         assert completed.status == FileStatus.UPLOADED
         assert job_id is not None
         file_id = file.id
 
+    process_task.send(job_id=str(job_id))  # the coordinator publishes
     finished = await _wait_for_status(session_factory, job_id, JobStatus.SUCCEEDED)
     assert finished.progress == 100
 

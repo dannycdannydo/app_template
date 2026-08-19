@@ -231,6 +231,134 @@ class Settings(BaseSettings):
             "against the 600-second task time limit."
         ),
     )
+    # Durable outbox coordinator (durable delivery plan P3). These settings
+    # bound the coordinator's publication loop: batch size per cycle, the idle
+    # poll between cycles, the claim lease after which a crashed coordinator's
+    # ``publishing`` row may be reclaimed, and the capped exponential backoff
+    # applied after a cycle with transient broker/database failures.
+    coordinator_publication_batch_size: int = Field(
+        default=50,
+        ge=1,
+        le=1000,
+        description=(
+            "Maximum outbox rows one coordinator claims and publishes per "
+            "cycle (durable delivery plan P3). Bounded so a backlog drains "
+            "incrementally without one long transaction."
+        ),
+    )
+    coordinator_idle_poll_seconds: float = Field(
+        default=0.5,
+        ge=0.05,
+        le=60.0,
+        description=(
+            "Seconds a coordinator sleeps between cycles when there is "
+            "nothing to publish or retry (durable delivery plan P3)."
+        ),
+    )
+    coordinator_publication_lease_seconds: int = Field(
+        default=60,
+        ge=5,
+        le=3600,
+        description=(
+            "Publication claim lease in seconds (durable delivery plan P3): a "
+            "row left ``publishing`` past this bound (crashed coordinator) may "
+            "be reclaimed and republished by another coordinator. The "
+            "crash-window duplicate this can produce is made safe by the P2 "
+            "execution ownership."
+        ),
+    )
+    coordinator_publication_backoff_initial_seconds: float = Field(
+        default=1.0,
+        ge=0.05,
+        le=60.0,
+        description=(
+            "Initial capped exponential backoff after a transient coordinator "
+            "publication failure (durable delivery plan P3)."
+        ),
+    )
+    coordinator_publication_backoff_max_seconds: float = Field(
+        default=300.0,
+        ge=1.0,
+        le=3600.0,
+        description=(
+            "Maximum capped exponential backoff after repeated transient "
+            "coordinator publication failures (durable delivery plan P3)."
+        ),
+    )
+    # Queued-job reconciliation and maintenance scheduling (durable delivery
+    # plan P4): the thresholds the coordinator uses to re-dispatch a job still
+    # queued long after its last published dispatch, and the UTC-bucket
+    # schedule intervals for the AI retention and provider-file reconciliation
+    # sweeps. Defined here so the typed surface and bounds are settled with the
+    # coordinator (plan P3) even though the scheduler lands in P4.
+    job_reconcile_threshold_seconds: int = Field(
+        default=900,
+        ge=60,
+        le=604_800,
+        description=(
+            "Seconds a job may stay ``queued`` after its last published "
+            "dispatch before the coordinator gives it a new dispatch (durable "
+            "delivery plan P4)."
+        ),
+    )
+    job_reconcile_cooldown_seconds: int = Field(
+        default=900,
+        ge=60,
+        le=604_800,
+        description=(
+            "Minimum seconds between new dispatches for one reconciled job, "
+            "enforced under concurrent coordinators (durable delivery plan "
+            "P4)."
+        ),
+    )
+    maintenance_transfer_reconcile_interval_hours: int = Field(
+        default=1,
+        ge=1,
+        le=168,
+        description=(
+            "UTC-bucket interval in hours for the provider-file reconciliation "
+            "sweep outbox event (durable delivery plan P4)."
+        ),
+    )
+    maintenance_ai_retention_interval_hours: int = Field(
+        default=24,
+        ge=1,
+        le=720,
+        description=(
+            "UTC-bucket interval in hours for the AI retention sweep outbox "
+            "event (durable delivery plan P4)."
+        ),
+    )
+    # Published outbox retention (durable delivery plan P5): published rows
+    # older than the retention horizon are deleted in bounded batches.
+    # Pending, publishing and dead rows are never deleted automatically.
+    outbox_retention_days: int = Field(
+        default=30,
+        ge=1,
+        le=365,
+        description=(
+            "Days published outbox rows are retained for diagnosis before the "
+            "cleanup sweep deletes them in bounded batches (durable delivery "
+            "plan P5)."
+        ),
+    )
+    outbox_cleanup_batch_size: int = Field(
+        default=500,
+        ge=1,
+        le=5000,
+        description=(
+            "Maximum published outbox rows deleted per cleanup batch (durable delivery plan P5)."
+        ),
+    )
+    outbox_cleanup_interval_hours: int = Field(
+        default=24,
+        ge=1,
+        le=720,
+        description=(
+            "UTC-bucket interval in hours for the published outbox cleanup "
+            "sweep (durable delivery plan P5)."
+        ),
+    )
     sentry_dsn: str = Field(
         default="",
         description=(
@@ -657,6 +785,17 @@ class Settings(BaseSettings):
             raise ValueError(
                 "job_execution_lease_seconds must exceed job_task_time_limit_ms "
                 "by at least 60 seconds"
+            )
+        # The publication backoff must never exceed its configured cap
+        # (durable delivery plan P3): a misordered initial/max pair would make
+        # the capped exponential backoff meaningless.
+        if (
+            self.coordinator_publication_backoff_max_seconds
+            < self.coordinator_publication_backoff_initial_seconds
+        ):
+            raise ValueError(
+                "coordinator_publication_backoff_max_seconds must be >= "
+                "coordinator_publication_backoff_initial_seconds"
             )
         if self.app_env == "production" and self.debug:
             raise ValueError("debug must be False in the production environment")

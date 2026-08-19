@@ -165,9 +165,7 @@ async def _send_notification_email_attempt(
             owner_token=context.owner_token,
         )
         logger.warning("notification.email.failed", error_code=ERROR_CODE_EMAIL_DELIVERY_FAILED)
-        raise jobs_service.JobPermanentError(
-            "the notification email could not be sent"
-        ) from exc
+        raise jobs_service.JobPermanentError("the notification email could not be sent") from exc
 
     await notifications_service.mark_delivery_succeeded(
         session,

@@ -2,11 +2,12 @@
 
 The job service is the single owner of the durable ``jobs`` table:
 
-- :func:`create_and_enqueue` is the only way a job is created: it writes the
-  durable ``queued`` row first, then enqueues the Dramatiq task, in one
-  transaction (BP §18 flow, BP §11 — record-then-enqueue). The durable
-  delivery plan replaces this with a transaction-owned outbox schedule (P3);
-  until then this function remains the producer path.
+- :func:`schedule_job` is the only way a durable job is created (plan P3): it
+  writes the ``queued`` row and its ``job.dispatch_requested`` outbox event in
+  one transaction, sets the event id as the job's dispatch identity and
+  commits once. No producer publishes to the broker: the coordinator (plan P3)
+  turns the durable event into the reference-only Dramatiq message (blueprint
+  §19 — Redis executes, PostgreSQL provides durability).
 - :func:`claim_dispatch` is the atomic worker-side claim (durable delivery
   plan P2): it transitions ``queued`` -> ``running`` (or takes over an expired
   lease), assigns a dispatch identity to a legacy row on first claim,
@@ -43,7 +44,6 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
-from dramatiq import Actor
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -57,6 +57,7 @@ from app.modules.audit.service import (
 )
 from app.modules.jobs.models import Job, JobStatus
 from app.modules.jobs.queries import org_jobs_count_statement, org_scoped_jobs_statement
+from app.modules.outbox.service import create_dispatch_event
 from app.observability.metrics import JOBS_ENQUEUED_TOTAL, JOBS_FAILED_TOTAL, JOBS_SUCCEEDED_TOTAL
 
 # The pagination envelope contract shared with the files module (BP §12):
@@ -308,33 +309,35 @@ async def list_jobs(
     return list(rows.all()), total or 0
 
 
-async def create_and_enqueue(
+async def schedule_job(
     session: AsyncSession,
     *,
     organisation_id: uuid.UUID,
     job_type: str,
     input_reference: str,
     actor_user_id: uuid.UUID | None = None,
-    task: Actor[Any, Any],
     job_id: uuid.UUID | None = None,
 ) -> Job:
-    """Write the durable ``queued`` row, then enqueue the task (BP §18 flow).
+    """Write the durable ``queued`` row and its dispatch event in one transaction.
 
-    One transaction (BP §11): the durable row is flushed (so the job id exists
-    and the row is part of the transaction), then the task is enqueued with
-    that id, then the transaction commits. If enqueuing fails the whole
-    transaction rolls back, so a failed enqueue never leaves an orphaned
-    ``queued`` row. The theoretical commit-after-enqueue window (the worker
-    picks up the message before the commit lands) is a transient failure on
-    the worker side — the job row is not visible yet — which the bounded
-    retry policy self-heals. The durable delivery plan (P3) replaces this
-    function with a transaction-owned outbox schedule.
+    The transactional scheduling boundary (durable delivery plan P3, blueprint
+    §19): the job row and its ``job.dispatch_requested`` outbox event are
+    added to ``session`` and committed together, so a rollback leaves neither
+    row and an unavailable Redis never prevents the API from committing and
+    returning the durable queued job. The outbox event id becomes the job's
+    dispatch identity, and the event carries only the job id (reference-only
+    message boundary). The coordinator (plan P3) is the only production
+    component that turns that event into a Dramatiq message; no producer calls
+    an actor's ``send()``.
 
     ``job_id`` optionally supplies a pre-generated id so a caller can add
-    companion rows (e.g. a pre-enqueue ``ai_requests`` linkage row) to the
+    companion rows (e.g. a pre-schedule ``ai_requests`` linkage row) to the
     same session before this call; the single commit then makes both rows
     atomic (v0.7 Scope §5.8).
     """
+    # The dispatch event id is the job's delivery identity: it is generated
+    # first so both the job row and the outbox row agree on the dispatch.
+    dispatch_event_id = uuid7()
     job = Job(
         id=job_id or uuid7(),
         organisation_id=organisation_id,
@@ -343,10 +346,16 @@ async def create_and_enqueue(
         progress=0,
         input_reference=input_reference,
         created_by_user_id=actor_user_id,
+        dispatch_id=dispatch_event_id,
     )
     session.add(job)
     await session.flush()
-    task.send(job_id=str(job.id))
+    await create_dispatch_event(
+        session,
+        organisation_id=organisation_id,
+        job_id=job.id,
+        event_id=dispatch_event_id,
+    )
     await session.commit()
     await session.refresh(job)
     JOBS_ENQUEUED_TOTAL.labels(job_type=job.job_type).inc()
