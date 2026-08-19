@@ -361,35 +361,39 @@ Human review required before application: none.
 
 Dependencies: P1, P2
 
-- [ ] Add a typed, allow-listed dispatch registry for the three durable job
+- [x] Add a typed, allow-listed dispatch registry for the three durable job
   types and two maintenance events. Validate completeness at startup and in
   tests; registry handlers build only the existing actor message shapes and
   never resolve code from persisted strings.
-- [ ] Replace `create_and_enqueue` with a transaction-owned scheduling service
+- [x] Replace `create_and_enqueue` with a transaction-owned scheduling service
   that writes the job and `job.dispatch_requested` event together, sets the
   event id as the job dispatch id and commits once. Migrate every file,
   notification and async-AI producer and remove durable `Actor.send()` calls
   from API/service paths.
-- [ ] Implement `app.job_coordinator`: bounded due-row claims using
+- [x] Implement `app.job_coordinator`: bounded due-row claims using
   `FOR UPDATE SKIP LOCKED`, claim-token guarded settlement, expired-claim
   recovery, capped exponential retry with jitter, permanent dead-event
   handling, graceful shutdown and structured logging. Publishing happens
   outside the row-lock transaction; crash-window duplicates are expected and
   handled by P2 ownership.
-- [ ] Add all typed coordinator/reconciliation/schedule/retention settings and
+- [x] Add all typed coordinator/reconciliation/schedule/retention settings and
   validators to `app.core.config.Settings` and `.env.example` using the settled
   defaults in this plan; tests cover bounds and the task-time/lease
   relationship.
-- [ ] Add `make coordinator`, run it alongside API/worker/frontend in
+- [x] Add `make coordinator`, run it alongside API/worker/frontend in
   `scripts/dev.sh`, and add the same-backend-image `coordinator` service with
   liveness check, resource/log limits, dependency ordering and graceful stop to
   both Compose profiles and deployment validation.
-- [ ] Add structural, unit, PostgreSQL and real-Redis tests proving no producer
+- [x] Add structural, unit, PostgreSQL and real-Redis tests proving no producer
   publishes directly, registry coverage, two-coordinator claim safety,
   broker-down retry, recovery publication, invalid-event death, crash-after-
   send duplication and graceful restart without lost pending intent.
 
 Human review required before application: infrastructure changes (new always-on coordinator process and deployment wiring).
+
+Human infrastructure approval recorded: Daniel approved the coordinator
+command, resource/log limits, liveness probe, dependency ordering, graceful
+stop and rollout order on 2026-08-19.
 
 ### P4 — Reconciliation, Maintenance Scheduling and Email Retries
 

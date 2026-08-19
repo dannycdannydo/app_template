@@ -12,8 +12,9 @@ producers in this release: the former is the test-send endpoint's fixed copy,
 the latter is what the ``process_file`` task calls when a file finishes
 processing (``file.ready`` / ``file.failed``, Scope §6.4). Each creates the
 in-app notification, its email delivery row and the durable ``notification.email``
-job in a single transaction, then enqueues the worker task (record-then-enqueue,
-BP §18 — the same flow ``files_service.complete_upload`` uses). The delivery
+job in a single transaction, then durably schedules the job (plan P3: the
+``job.dispatch_requested`` outbox event commits with the job row; the
+coordinator publishes the reference-only broker message). The delivery
 row helpers (``get_delivery_for_task``, ``mark_delivery_*``) are the worker-side
 surface the ``send_notification_email`` task calls, mirroring the
 ``jobs_service`` helpers for durable jobs: a terminal delivery is never re-sent.
@@ -25,7 +26,6 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any, cast
 
-from dramatiq import Actor
 from sqlalchemy import select
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -230,22 +230,17 @@ async def send_test_notification(
     user_id: uuid.UUID,
     recipient_email: str,
     actor_user_id: uuid.UUID | None = None,
-    delivery_task: Actor[Any, Any] | None = None,
 ) -> tuple[Notification, NotificationDelivery, Job]:
     """Create a test in-app notification, its email delivery and the job.
 
     One transaction (BP §11): the notification row, its ``email`` delivery row
-    (status ``queued``) and the ``notification.test_sent`` audit event are
-    written, then the durable ``notification.email`` job is created and the
-    worker task enqueued with the delivery id as its ``input_reference``
-    (record-then-enqueue, BP §18) — the same flow ``complete_upload`` uses for
-    file processing. If enqueuing fails the whole transaction rolls back, so
-    a failed enqueue never leaves an orphaned ``queued`` delivery.
-
-    ``delivery_task`` is the actor to enqueue; it defaults to the module-level
-    ``send_notification_email`` actor. Tests pass a copy re-declared on their
-    own broker (the same seam ``jobs_service.create_and_enqueue`` exposes for
-    its task).
+    (status ``queued``), the ``notification.test_sent`` audit event and the
+    durable ``notification.email`` job are written, and the job's
+    ``job.dispatch_requested`` outbox event commits with it (plan P3,
+    blueprint §19 — a broker outage never prevents the API from committing
+    the durable queued job). The coordinator publishes the reference-only
+    message with the delivery id as the job's ``input_reference`` — the same
+    flow ``complete_upload`` uses for file processing.
     """
     notification = Notification(
         organisation_id=organisation_id,
@@ -276,17 +271,15 @@ async def send_test_notification(
     # Imported lazily: the task module imports this service, so a module-level
     # import would be circular. By the time the test-send flow runs the module
     # is cached, so the import is a dict lookup. The task module is the single
-    # source of truth for the actor and its ``job_type`` identity.
+    # source of truth for the ``job_type`` identity.
     from app.modules.notifications import tasks as notifications_tasks
 
-    task = delivery_task or notifications_tasks.send_notification_email_actor
-    job = await jobs_service.create_and_enqueue(
+    job = await jobs_service.schedule_job(
         session,
         organisation_id=organisation_id,
         job_type=notifications_tasks.JOB_TYPE_NOTIFICATION_EMAIL,
         input_reference=str(delivery.id),
         actor_user_id=actor_user_id,
-        task=task,
     )
     await session.refresh(notification)
     await session.refresh(delivery)
@@ -304,16 +297,15 @@ async def create_file_notification(
     resource_id: str,
     recipient_email: str,
     actor_user_id: uuid.UUID | None = None,
-    delivery_task: Actor[Any, Any] | None = None,
 ) -> Notification:
     """Create a file-status notification, its email delivery and the job.
 
     Called by the ``process_file`` task (Scope §6.4) when a file finishes
     processing (``file.ready``) or fails (``file.failed``): the in-app
     notification for the uploader, its ``email`` delivery row and the durable
-    ``notification.email`` job are written in one transaction and the worker
-    task enqueued with the delivery id as its ``input_reference`` — the same
-    record-then-enqueue flow ``send_test_notification`` uses.
+    ``notification.email`` job are written in one transaction and durably
+    scheduled (plan P3) with the delivery id as its ``input_reference`` — the
+    same scheduling flow ``send_test_notification`` uses.
 
     Idempotent on retry (Scope §6.4): a notification of the same type for the
     same resource and user already existing means this file's outcome was
@@ -357,14 +349,12 @@ async def create_file_notification(
     # import would be circular (the same pattern as ``send_test_notification``).
     from app.modules.notifications import tasks as notifications_tasks
 
-    task = delivery_task or notifications_tasks.send_notification_email_actor
-    await jobs_service.create_and_enqueue(
+    await jobs_service.schedule_job(
         session,
         organisation_id=organisation_id,
         job_type=notifications_tasks.JOB_TYPE_NOTIFICATION_EMAIL,
         input_reference=str(delivery.id),
         actor_user_id=actor_user_id,
-        task=task,
     )
     await session.refresh(notification)
     return notification

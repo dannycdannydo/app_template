@@ -28,7 +28,6 @@ import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -101,15 +100,6 @@ async def _seed_org_and_user(
     session.add_all([organisation, user])
     await session.commit()
     return organisation, user
-
-
-def _stub_send(**kwargs: Any) -> None:
-    """No-op stand-in for an Actor's ``send`` during enqueue-proof tests."""
-
-
-def _stub_task() -> Any:
-    """Return an object shaped like a Dramatiq actor whose send does nothing."""
-    return SimpleNamespace(send=_stub_send)
 
 
 # --- Migration shape (acceptance §5.4) ---
@@ -390,7 +380,6 @@ async def test_send_test_notification_writes_rows_job_and_audit(
 ) -> None:
     engine = create_async_engine(migrated_database, poolclass=NullPool)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    stub_task = _stub_task()
     try:
         async with session_factory() as session:
             org, user = await _seed_org_and_user(session)
@@ -401,7 +390,6 @@ async def test_send_test_notification_writes_rows_job_and_audit(
                 user_id=user.id,
                 recipient_email=user.email,
                 actor_user_id=user.id,
-                delivery_task=stub_task,
             )
 
             assert notification.organisation_id == org.id
@@ -482,7 +470,6 @@ async def test_create_file_notification_is_idempotent_on_retry(
     """
     engine = create_async_engine(migrated_database, poolclass=NullPool)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    stub_task = _stub_task()
     try:
         async with session_factory() as session:
             org, user = await _seed_org_and_user(session)
@@ -496,7 +483,6 @@ async def test_create_file_notification_is_idempotent_on_retry(
                 resource_id="file-1",
                 recipient_email=user.email,
                 actor_user_id=user.id,
-                delivery_task=stub_task,
             )
             assert first.resource_type == "file"
             assert first.resource_id == "file-1"
@@ -511,7 +497,6 @@ async def test_create_file_notification_is_idempotent_on_retry(
                 resource_id="file-1",
                 recipient_email=user.email,
                 actor_user_id=user.id,
-                delivery_task=stub_task,
             )
             assert second.id == first.id  # never double-notified
 
@@ -545,7 +530,6 @@ async def test_create_file_notification_is_idempotent_on_retry(
                 body=notifications_service.FILE_READY_BODY.format(filename="other.pdf"),
                 resource_id="file-2",
                 recipient_email=user.email,
-                delivery_task=stub_task,
             )
             assert other.id != first.id
     finally:
@@ -630,7 +614,6 @@ async def test_send_notification_email_task_success(
 ) -> None:
     engine = create_async_engine(migrated_database, poolclass=NullPool)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    stub_task = _stub_task()
     try:
         async with session_factory() as session:
             org, user = await _seed_org_and_user(session)
@@ -640,7 +623,6 @@ async def test_send_notification_email_task_success(
                 user_id=user.id,
                 recipient_email=user.email,
                 actor_user_id=user.id,
-                delivery_task=stub_task,
             )
             job_id = job.id
             delivery_id = delivery.id
@@ -675,7 +657,6 @@ async def test_send_notification_email_task_failure_is_permanent(
 ) -> None:
     engine = create_async_engine(migrated_database, poolclass=NullPool)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    stub_task = _stub_task()
 
     class _FailingProvider:
         async def send_email(self, **kwargs: Any) -> Any:
@@ -691,7 +672,6 @@ async def test_send_notification_email_task_failure_is_permanent(
                 user_id=user.id,
                 recipient_email=user.email,
                 actor_user_id=user.id,
-                delivery_task=stub_task,
             )
             job_id = job.id
             delivery_id = delivery.id
@@ -729,7 +709,6 @@ async def test_send_notification_email_task_is_idempotent_on_redelivery(
     """A re-delivered message for a succeeded delivery never sends twice."""
     engine = create_async_engine(migrated_database, poolclass=NullPool)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    stub_task = _stub_task()
     try:
         async with session_factory() as session:
             org, user = await _seed_org_and_user(session)
@@ -739,7 +718,6 @@ async def test_send_notification_email_task_is_idempotent_on_redelivery(
                 user_id=user.id,
                 recipient_email=user.email,
                 actor_user_id=user.id,
-                delivery_task=stub_task,
             )
             job_id = job.id
             delivery_id = delivery.id
@@ -769,7 +747,6 @@ async def test_send_notification_email_rejects_cross_org_durable_context(
     """A job cannot use a notification whose tenant differs from the job."""
     engine = create_async_engine(migrated_database, poolclass=NullPool)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    stub_task = _stub_task()
     provider_called = False
 
     class _ProviderMustNotRun:
@@ -791,7 +768,6 @@ async def test_send_notification_email_rejects_cross_org_durable_context(
                 user_id=user.id,
                 recipient_email=user.email,
                 actor_user_id=user.id,
-                delivery_task=stub_task,
             )
             notification.organisation_id = foreign_org.id
             await session.commit()
@@ -829,7 +805,6 @@ async def test_send_notification_email_rejects_wrong_job_type(
     """
     engine = create_async_engine(migrated_database, poolclass=NullPool)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    stub_task = _stub_task()
     try:
         async with session_factory() as session:
             org, user = await _seed_org_and_user(session)
@@ -839,7 +814,6 @@ async def test_send_notification_email_rejects_wrong_job_type(
                 user_id=user.id,
                 recipient_email=user.email,
                 actor_user_id=user.id,
-                delivery_task=stub_task,
             )
             job.job_type = "file.processing"
             # P3 populates the dispatch id on every durable job at creation.
