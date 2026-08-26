@@ -361,58 +361,62 @@ Human review required before application: none.
 
 Dependencies: P1, P2
 
-- [ ] Add a typed, allow-listed dispatch registry for the three durable job
+- [x] Add a typed, allow-listed dispatch registry for the three durable job
   types and two maintenance events. Validate completeness at startup and in
   tests; registry handlers build only the existing actor message shapes and
   never resolve code from persisted strings.
-- [ ] Replace `create_and_enqueue` with a transaction-owned scheduling service
+- [x] Replace `create_and_enqueue` with a transaction-owned scheduling service
   that writes the job and `job.dispatch_requested` event together, sets the
   event id as the job dispatch id and commits once. Migrate every file,
   notification and async-AI producer and remove durable `Actor.send()` calls
   from API/service paths.
-- [ ] Implement `app.job_coordinator`: bounded due-row claims using
+- [x] Implement `app.job_coordinator`: bounded due-row claims using
   `FOR UPDATE SKIP LOCKED`, claim-token guarded settlement, expired-claim
   recovery, capped exponential retry with jitter, permanent dead-event
   handling, graceful shutdown and structured logging. Publishing happens
   outside the row-lock transaction; crash-window duplicates are expected and
   handled by P2 ownership.
-- [ ] Add all typed coordinator/reconciliation/schedule/retention settings and
+- [x] Add all typed coordinator/reconciliation/schedule/retention settings and
   validators to `app.core.config.Settings` and `.env.example` using the settled
   defaults in this plan; tests cover bounds and the task-time/lease
   relationship.
-- [ ] Add `make coordinator`, run it alongside API/worker/frontend in
+- [x] Add `make coordinator`, run it alongside API/worker/frontend in
   `scripts/dev.sh`, and add the same-backend-image `coordinator` service with
   liveness check, resource/log limits, dependency ordering and graceful stop to
   both Compose profiles and deployment validation.
-- [ ] Add structural, unit, PostgreSQL and real-Redis tests proving no producer
+- [x] Add structural, unit, PostgreSQL and real-Redis tests proving no producer
   publishes directly, registry coverage, two-coordinator claim safety,
   broker-down retry, recovery publication, invalid-event death, crash-after-
   send duplication and graceful restart without lost pending intent.
 
 Human review required before application: infrastructure changes (new always-on coordinator process and deployment wiring).
 
+Human infrastructure approval recorded: Daniel approved the coordinator
+command, resource/log limits, liveness probe, dependency ordering, graceful
+stop and rollout order on 2026-08-19.
+
 ### P4 — Reconciliation, Maintenance Scheduling and Email Retries
 
 Dependencies: P3
 
-- [ ] Implement bounded queued-job reconciliation queries and service logic:
+- [x] Implement bounded queued-job reconciliation queries and service logic:
   select only jobs beyond the 900-second threshold, exclude terminal/running
   jobs and those with pending/publishing dispatches, create a new deduplicated
   dispatch event and job dispatch id atomically, and enforce the 900-second
   cooldown under concurrent coordinators.
-- [ ] Add coordinator UTC-bucket scheduling for daily AI retention and hourly
+- [x] Add coordinator UTC-bucket scheduling for daily AI retention and hourly
   provider-file reconciliation through outbox events; use unique schedule keys
   plus handler-side PostgreSQL advisory locks, and prove duplicate ticks or
   messages cannot run the same maintenance sweep concurrently.
-- [ ] Replace the single email exception with provider-neutral transient and
+- [x] Replace the single email exception with provider-neutral transient and
   permanent subclasses while preserving `EmailSendError` as their common API;
   classify SMTP network/timeouts/disconnects and 4xx responses as transient,
   and authentication, recipient-only 5xx and other 5xx responses as permanent.
-- [ ] Update the notification actor/delivery service so transient failures
+- [x] Update the notification actor/delivery service so transient failures
   return the delivery to `queued` before Dramatiq retry, permanent failures
   settle immediately, and retry exhaustion marks both job and delivery failed
   exactly once through an allow-listed job-type exhaustion hook.
-- [ ] Add deterministic fake/SMTP exception tests, delivery/audit database
+- [x] Add deterministic fake/SMTP exception tests, delivery/audit database
   tests, coordinator scheduling/reconciliation concurrency tests and real-
   broker eventual-success/exhaustion journeys. Assert safe error strings do not
   expose SMTP responses, credentials, recipients or provider internals.

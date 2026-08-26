@@ -42,10 +42,11 @@ logger = structlog.get_logger()
 def job_id_from_message(message_dict: dict[str, Any]) -> uuid.UUID:
     """Extract the durable job id from the message dict a task was sent with.
 
-    Tasks are enqueued with ``job_id`` as their only keyword argument (see
-    ``jobs_service.create_and_enqueue``), and the Retries middleware forwards
-    the whole message dict to the exhausted-handler, so the job id travels in
-    ``kwargs``. Raising ``KeyError`` here fails the handler message loudly.
+    Tasks are enqueued with ``job_id`` as their only keyword argument (the
+    coordinator publishes exactly ``job_id``, plan P3), and the Retries
+    middleware forwards the whole message dict to the exhausted-handler, so
+    the job id travels in ``kwargs``. Raising ``KeyError`` here fails the
+    handler message loudly.
     """
     return uuid.UUID(message_dict["kwargs"]["job_id"])
 
@@ -135,6 +136,9 @@ async def mark_job_failed_after_retries(
             logger.warning("job.retries_exhausted.skipped", reason="stale_dispatch")
             return
         logger.info("job.retries_exhausted.recorded")
+        hook = jobs_service.get_exhaustion_hook(settled.job_type)
+        if hook is not None:
+            await hook(session, job_id=job_id)
 
 
 mark_job_failed_after_retries_actor = dramatiq.actor(

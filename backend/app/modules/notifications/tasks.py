@@ -43,9 +43,10 @@ from app.core.config import get_settings
 from app.core.logging import bind_worker_context
 from app.db.session import async_session_factory
 from app.email import get_email_provider
-from app.email.base import EmailSendError
+from app.email.base import EmailSendError, PermanentEmailSendError, TransientEmailSendError
 from app.modules.jobs import service as jobs_service
 from app.modules.jobs.execution import DurableJobContext, run_claimed
+from app.modules.jobs.models import Job
 from app.modules.notifications import service as notifications_service
 
 # The durable ``job_type`` this task produces (Scope §6.3). ``send_test_notification``
@@ -150,7 +151,11 @@ async def _send_notification_email_attempt(
             subject=notification.title,
             text_body=notification.body,
         )
-    except EmailSendError as exc:
+    except TransientEmailSendError:
+        await notifications_service.return_delivery_to_queue(session, delivery_id=delivery.id)
+        logger.warning("notification.email.retrying", error_code="email_delivery_transient")
+        raise
+    except (PermanentEmailSendError, EmailSendError) as exc:
         await notifications_service.mark_delivery_failed(
             session,
             delivery_id=delivery.id,
@@ -165,9 +170,7 @@ async def _send_notification_email_attempt(
             owner_token=context.owner_token,
         )
         logger.warning("notification.email.failed", error_code=ERROR_CODE_EMAIL_DELIVERY_FAILED)
-        raise jobs_service.JobPermanentError(
-            "the notification email could not be sent"
-        ) from exc
+        raise jobs_service.JobPermanentError("the notification email could not be sent") from exc
 
     await notifications_service.mark_delivery_succeeded(
         session,
@@ -207,6 +210,32 @@ async def _fail_invalid_context(
         reason=reason,
     )
     raise jobs_service.JobPermanentError("the notification job context is invalid")
+
+
+async def _on_notification_email_exhausted(session: AsyncSession, *, job_id: uuid.UUID) -> None:
+    """Mark the notification delivery failed when email retries are exhausted.
+
+    The transient path returns the delivery to ``queued`` before each Dramatiq
+    retry (P4), so on exhaustion the delivery is still ``queued`` while the
+    durable job is now ``failed``. This hook finalizes the delivery row in the
+    same session the finalizer uses, so both rows fail exactly once.
+    """
+    job = await session.get(Job, job_id)
+    if job is None:
+        return
+    try:
+        delivery_id = uuid.UUID(job.input_reference)
+    except ValueError:
+        return
+    await notifications_service.mark_delivery_failed(
+        session,
+        delivery_id=delivery_id,
+        organisation_id=job.organisation_id,
+        error_message="The notification email could not be sent after all retries.",
+    )
+
+
+jobs_service.register_exhaustion_hook(JOB_TYPE_NOTIFICATION_EMAIL, _on_notification_email_exhausted)
 
 
 send_notification_email_actor = dramatiq.actor(

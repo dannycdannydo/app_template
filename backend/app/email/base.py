@@ -25,6 +25,14 @@ class EmailSendError(RuntimeError):
     """
 
 
+class TransientEmailSendError(EmailSendError):
+    """An email failure that may succeed when the worker retries it."""
+
+
+class PermanentEmailSendError(EmailSendError):
+    """An email failure that cannot be corrected by retrying it."""
+
+
 class EmailProvider(ABC):
     """Minimal contract every email provider adapter implements.
 

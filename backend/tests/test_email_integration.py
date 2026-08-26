@@ -26,7 +26,7 @@ import httpx
 import pytest
 
 from app.email import SmtpEmailProvider
-from app.email.base import EmailSendError
+from app.email.base import TransientEmailSendError
 from app.email.types import EMAIL_DELIVERY_STATUS_SENT, EmailDeliveryResult
 
 pytestmark = pytest.mark.email_integration
@@ -108,9 +108,15 @@ async def test_smtp_round_trip_delivers_to_mailhog(provider: SmtpEmailProvider) 
 
 
 async def test_smtp_unreachable_relay_raises_email_send_error() -> None:
-    """Failure path: an unreachable relay surfaces as EmailSendError."""
+    """Failure path: an unreachable relay surfaces as a transient EmailSendError.
+
+    P4 classifies network-level transport failures (connection refused, an
+    ``OSError``) as transient, so the unreachable-relay path surfaces
+    ``TransientEmailSendError`` — the provider-neutral supertype — and stays
+    retryable for the notification task.
+    """
     unreachable = SmtpEmailProvider(host="127.0.0.1", port=1, timeout=2.0)
-    with pytest.raises(EmailSendError, match="SMTP delivery failed"):
+    with pytest.raises(TransientEmailSendError, match="SMTP transport is temporarily unavailable"):
         await unreachable.send_email(
             from_address="sender@example.com",
             to_address="recipient@example.com",

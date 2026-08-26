@@ -1,7 +1,7 @@
 """Job API schemas (Scope §6.4/§6.5, blueprint §12, §18).
 
 ORM models are never API request models. Jobs have no request body at all —
-the durable row is written by the service (``create_and_enqueue``), never by
+the durable row is written by the service (``schedule_job``), never by
 a client — so this module is response shapes only. They are consumed by the
 job endpoints added in Scope §6.5 (``GET /api/v1/jobs`` and
 ``GET /api/v1/jobs/{job_id}``); they ship here with the job foundation so the

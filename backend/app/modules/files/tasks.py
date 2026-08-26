@@ -52,9 +52,9 @@ from app.modules.notifications import service as notifications_service
 from app.modules.users.models import User
 from app.storage import get_storage
 
-# The durable ``job_type`` this task produces (Scope §6.5). ``create_and_enqueue``
-# in the files service names it when it writes the row, so the constant lives
-# with the task that owns the identity.
+# The durable ``job_type`` this task produces (Scope §6.5). The files service
+# names it when it schedules the job row (plan P3), so the constant lives with
+# the task that owns the identity.
 JOB_TYPE_FILE_PROCESSING = "file.processing"
 
 # The queue document workloads run on (blueprint §18 example queues: default,
@@ -185,9 +185,7 @@ async def _process_file_attempt(context: DurableJobContext, session: AsyncSessio
             error_code=ERROR_CODE_VERIFICATION_FAILED,
             reason=reason,
         )
-        raise jobs_service.JobPermanentError(
-            f"the stored object could not be verified ({reason})"
-        )
+        raise jobs_service.JobPermanentError(f"the stored object could not be verified ({reason})")
 
     await jobs_service.update_progress(
         session,

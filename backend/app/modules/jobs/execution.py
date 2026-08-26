@@ -192,9 +192,7 @@ async def run_claimed(*, job_id: uuid.UUID, handler: Handler) -> None:
                         owner_token=result_owner_token,
                     )
                 if released:
-                    _log_event(
-                        "released", job_id=job_id, dispatch_id=str(result_dispatch_id)
-                    )
+                    _log_event("released", job_id=job_id, dispatch_id=str(result_dispatch_id))
                 else:
                     _log_event(
                         "settled_stale",

@@ -15,8 +15,9 @@ issued. Storage SDK calls go through the :class:`ObjectStorage` interface only
 ``app.storage.factory.get_storage``.
 
 Scope §6.5 adds the worker-side half of the lifecycle: after the browser's PUT
-is verified at completion, :func:`complete_upload` writes the durable job row
-and enqueues the ``process_file`` task (BP §18 record-then-enqueue), and the
+is verified at completion, :func:`complete_upload` durably schedules the
+processing job (plan P3: job row + outbox dispatch event in one transaction;
+the coordinator publishes the reference-only message), and the
 ``mark_file_*`` helpers are the transitions the worker calls — each idempotent,
 so a retried message re-running the job converges instead of erroring.
 """
@@ -25,9 +26,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import Any
 
-from dramatiq import Actor
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -231,9 +230,8 @@ async def complete_upload(
     file_id: uuid.UUID,
     checksum: str | None = None,
     actor_user_id: uuid.UUID | None = None,
-    process_task: Actor[Any, Any] | None = None,
 ) -> tuple[File, uuid.UUID | None]:
-    """Verify the stored object, mark the file ``uploaded`` and enqueue the job.
+    """Verify the stored object, mark the file ``uploaded`` and schedule the job.
 
     The browser's direct PUT is verified, never trusted (BP §17 security): the
     object must exist, its size must match the declared ``size_bytes``, and
@@ -242,16 +240,12 @@ async def complete_upload(
     file and raises a 422 so the client knows the upload was rejected.
 
     Once verified, the file is marked ``uploaded`` and the durable processing
-    job is created and enqueued (BP §18 record-then-enqueue, Scope §6.5): the
-    job row is written with ``job_type="file.processing"`` and
-    ``input_reference`` set to the file id, then the ``process_file`` task is
-    sent with that job id. The returned job id is what the client polls via
-    ``GET /api/v1/jobs/{job_id}`` (the response schema carries it as
-    ``processing_job_id``).
-
-    ``process_task`` is the actor to enqueue; it defaults to the module-level
-    ``process_file`` actor. Tests pass a copy re-declared on their own broker
-    (the same seam ``jobs_service.create_and_enqueue`` exposes for its task).
+    job is durably scheduled (plan P3, blueprint §19): the job row is written
+    with ``job_type="file.processing"``, ``input_reference`` set to the file
+    id, and its ``job.dispatch_requested`` outbox event in the same
+    transaction; the coordinator publishes the reference-only broker message.
+    The returned job id is what the client polls via ``GET /api/v1/jobs/
+    {job_id}`` (the response schema carries it as ``processing_job_id``).
     """
     file = await get_file(session, organisation_id=organisation_id, file_id=file_id)
     if file.status != FileStatus.PENDING:
@@ -311,17 +305,15 @@ async def complete_upload(
     # Imported lazily: the task module imports this service, so a module-level
     # import would be circular. By the time the completion flow runs the module
     # is cached, so the import is a dict lookup. The task module is the single
-    # source of truth for the actor and its ``job_type`` identity.
+    # source of truth for the ``job_type`` identity.
     from app.modules.files import tasks as files_tasks
 
-    task = process_task or files_tasks.process_file_actor
-    job = await jobs_service.create_and_enqueue(
+    job = await jobs_service.schedule_job(
         session,
         organisation_id=organisation_id,
         job_type=files_tasks.JOB_TYPE_FILE_PROCESSING,
         input_reference=str(file.id),
         actor_user_id=actor_user_id,
-        task=task,
     )
     return file, job.id
 

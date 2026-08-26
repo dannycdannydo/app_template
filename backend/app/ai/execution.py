@@ -2,11 +2,13 @@
 
 Document-scale AI work runs as a durable job, not in an HTTP handler (BP §18):
 the platform execution boundary persists a ``queued`` job and AI request row
-whose ``input_reference`` is the private storage reference, then enqueues this
-actor on the ``ai`` queue. The broker message carries only the job id — never
-file bytes (v0.7 Scope §2) — and the worker passes the storage reference through
-``AIService.execute`` on every idempotent attempt so the service resolves it
-to a bounded provider-neutral attachment (v0.7 Scope §2/§6.6).
+whose ``input_reference`` is the private storage reference, then durably
+schedules the job (plan P3: the ``job.dispatch_requested`` outbox event commits
+with the row; the coordinator publishes this actor's message). The broker
+message carries only the job id — never file bytes (v0.7 Scope §2) — and the
+worker passes the storage reference through ``AIService.execute`` on every
+idempotent attempt so the service resolves it to a bounded provider-neutral
+attachment (v0.7 Scope §2/§6.6).
 
 One execution maps to exactly one AI request id, derived deterministically from
 the durable job id (``job_id.hex``). That makes the §6.5 idempotency key
@@ -164,7 +166,13 @@ async def enqueue_document_classification(
     user_id: uuid.UUID,
     storage_reference: str,
 ) -> QueuedAIExecution:
-    """Persist a queued AI request and durable job before broker publication."""
+    """Durably schedule a queued AI request and its job in one transaction.
+
+    Plan P3 boundary: the ``ai_requests`` linkage row and the durable job are
+    written together with the job's ``job.dispatch_requested`` outbox event
+    (blueprint §19). The coordinator publishes the reference-only broker
+    message; this function never calls an actor's ``send()``.
+    """
     job_id = uuid7()
     request_id = request_id_for_job(job_id)
     session.add(
@@ -178,13 +186,12 @@ async def enqueue_document_classification(
             input_reference=storage_reference,
         )
     )
-    job = await jobs_service.create_and_enqueue(
+    job = await jobs_service.schedule_job(
         session,
         organisation_id=organisation_id,
         job_type=JOB_TYPE_AI_EXECUTE,
         input_reference=storage_reference,
         actor_user_id=user_id,
-        task=execute_ai_task_actor,
         job_id=job_id,
     )
     return QueuedAIExecution(job_id=job.id, request_id=request_id_for_job(job.id))
@@ -297,18 +304,14 @@ async def _execute_ai_attempt(context: DurableJobContext, session: AsyncSession)
             ERROR_CODE_INVALID_JOB_CONTEXT,
             "The AI job has no initiating user.",
         )
-        await _fail_permanent(
-            session, job_uuid, failure, owner_token=context.owner_token
-        )
+        await _fail_permanent(session, job_uuid, failure, owner_token=context.owner_token)
         raise jobs_service.JobPermanentError(failure.message)
     if not job.input_reference:
         failure = _PermanentJobFailure(
             ERROR_CODE_INVALID_JOB_CONTEXT,
             "The AI job has no storage reference to process.",
         )
-        await _fail_permanent(
-            session, job_uuid, failure, owner_token=context.owner_token
-        )
+        await _fail_permanent(session, job_uuid, failure, owner_token=context.owner_token)
         raise jobs_service.JobPermanentError(failure.message)
 
     try:
@@ -344,9 +347,7 @@ async def _execute_ai_attempt(context: DurableJobContext, session: AsyncSession)
             owner_token=context.owner_token,
         )
         logger.warning("ai.execute.failed", error_code=exc.error_code)
-        raise jobs_service.JobPermanentError(
-            f"the AI execution failed ({exc.error_code})"
-        ) from exc
+        raise jobs_service.JobPermanentError(f"the AI execution failed ({exc.error_code})") from exc
 
     await jobs_service.succeed(
         session,

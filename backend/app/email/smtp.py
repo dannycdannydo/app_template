@@ -23,7 +23,11 @@ import ssl
 from email.message import EmailMessage
 from email.utils import make_msgid
 
-from app.email.base import EmailProvider, EmailSendError
+from app.email.base import (
+    EmailProvider,
+    PermanentEmailSendError,
+    TransientEmailSendError,
+)
 from app.email.types import EMAIL_DELIVERY_STATUS_SENT, EmailDeliveryResult
 
 
@@ -77,8 +81,27 @@ class SmtpEmailProvider(EmailProvider):
                 if self._username:
                     client.login(self._username, self._password)
                 client.send_message(message)
-        except (OSError, smtplib.SMTPException) as exc:
-            raise EmailSendError(f"SMTP delivery failed: {exc}") from exc
+        except smtplib.SMTPAuthenticationError as exc:
+            raise PermanentEmailSendError("SMTP authentication was rejected.") from exc
+        except smtplib.SMTPRecipientsRefused as exc:
+            codes = [code for code, _message in exc.recipients.values()]
+            error_type = (
+                PermanentEmailSendError
+                if codes and all(500 <= code < 600 for code in codes)
+                else TransientEmailSendError
+            )
+            raise error_type("SMTP recipients were rejected.") from exc
+        except smtplib.SMTPResponseException as exc:
+            error_type = (
+                TransientEmailSendError if 400 <= exc.smtp_code < 500 else PermanentEmailSendError
+            )
+            raise error_type("SMTP rejected the message.") from exc
+        except smtplib.SMTPServerDisconnected as exc:
+            raise TransientEmailSendError("SMTP transport is temporarily unavailable.") from exc
+        except smtplib.SMTPException as exc:
+            raise PermanentEmailSendError("SMTP delivery was rejected.") from exc
+        except (OSError, TimeoutError) as exc:
+            raise TransientEmailSendError("SMTP transport is temporarily unavailable.") from exc
         return EmailDeliveryResult(
             provider_message_id=message["Message-ID"],
             status=EMAIL_DELIVERY_STATUS_SENT,

@@ -28,7 +28,7 @@ define load_env
 	set -a; [ -f .env ] && . ./.env; set +a;
 endef
 
-.PHONY: dev dev-docker dev-infra-check dev-down dev-reset worker migrate provision-admin provision-admin-delete lint typecheck test test-ai-contracts e2e format generate-client validate-ai-registries validate-execution-contracts check
+.PHONY: dev dev-docker dev-infra-check dev-down dev-reset worker coordinator migrate provision-admin provision-admin-delete lint typecheck test test-ai-contracts e2e format generate-client validate-ai-registries validate-execution-contracts check
 
 ## Start PostgreSQL + Redis + MinIO + Mailhog in Docker, then run the API, the
 ## Dramatiq worker and the frontend natively with live reload (ADR-0008).
@@ -81,6 +81,14 @@ migrate:
 ## ten-second shutdown timeout keeps Ctrl-C responsive during development.
 worker:
 	@$(load_env) cd backend && uv run dramatiq app.workers --processes 1 --threads $${WORKER_CONCURRENCY:-8} --worker-shutdown-timeout 10000
+
+## Run the durable outbox coordinator natively (durable delivery plan P3):
+## the process that turns PostgreSQL outbox rows into reference-only Dramatiq
+## messages. `make dev` starts it alongside the API, worker and frontend;
+## run it standalone here for isolated debugging. Multiple coordinators may
+## run safely (FOR UPDATE SKIP LOCKED claims).
+coordinator:
+	@$(load_env) cd backend && uv run python -m app.job_coordinator
 
 ## Create the bootstrap platform admin in WorkOS (email + password; idempotent).
 ## Reads BOOTSTRAP_PLATFORM_ADMIN_EMAIL / BOOTSTRAP_PLATFORM_ADMIN_PASSWORD from

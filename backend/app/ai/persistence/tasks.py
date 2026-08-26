@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import dramatiq
 import structlog
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from app.db.session import async_session_factory
 from app.storage import get_storage
@@ -39,14 +41,39 @@ HANDLER_QUEUE = "ai"
 logger = structlog.get_logger()
 
 
+def _advisory_key(name: str) -> int:
+    """Return a stable signed 64-bit PostgreSQL advisory-lock key."""
+    import hashlib
+
+    return int.from_bytes(hashlib.sha256(name.encode()).digest()[:8], "big", signed=True)
+
+
+async def _try_maintenance_lock(connection: AsyncConnection, name: str) -> bool:
+    """Try a session-level lock so duplicate broker messages do no work."""
+    return bool(await connection.scalar(select(func.pg_try_advisory_lock(_advisory_key(name)))))
+
+
+async def _release_maintenance_lock(connection: AsyncConnection, name: str) -> None:
+    await connection.execute(select(func.pg_advisory_unlock(_advisory_key(name))))
+    await connection.commit()
+
+
 async def enforce_ai_retention() -> None:
     """Run the §6.5 retention sweep across every organisation with a policy."""
     from app.ai.persistence import service as ai_persistence
 
     logger.info("ai.retention.started")
-    async with async_session_factory() as session:
-        summary = await ai_persistence.enforce_ai_retention(session, get_storage())
-        logger.info("ai.retention.completed", **summary)
+    async with async_session_factory() as lock_session:
+        connection = await lock_session.connection()
+        if not await _try_maintenance_lock(connection, "ai.retention"):
+            logger.info("ai.retention.skipped", reason="duplicate_sweep")
+            return
+        try:
+            async with AsyncSession(bind=connection, expire_on_commit=False) as session:
+                summary = await ai_persistence.enforce_ai_retention(session, get_storage())
+                logger.info("ai.retention.completed", **summary)
+        finally:
+            await _release_maintenance_lock(connection, "ai.retention")
 
 
 async def reconcile_provider_file_references() -> None:
@@ -61,16 +88,24 @@ async def reconcile_provider_file_references() -> None:
         "ai.transfer_reconcile.started",
         batch_size=settings.ai_reconcile_batch_size,
     )
-    async with async_session_factory() as session:
-        summary = await ai_reconciliation.reconcile_provider_file_references(
-            session,
-            storage=get_storage(),
-            stores=get_transfer_stores(),
-            references=SQLTransferReferenceStore(session),
-            batch_size=settings.ai_reconcile_batch_size,
-            retry_after_seconds=settings.ai_reconcile_retry_after_seconds,
-        )
-        logger.info("ai.transfer_reconcile.completed", **summary)
+    async with async_session_factory() as lock_session:
+        connection = await lock_session.connection()
+        if not await _try_maintenance_lock(connection, "ai.transfer_reconcile"):
+            logger.info("ai.transfer_reconcile.skipped", reason="duplicate_sweep")
+            return
+        try:
+            async with AsyncSession(bind=connection, expire_on_commit=False) as session:
+                summary = await ai_reconciliation.reconcile_provider_file_references(
+                    session,
+                    storage=get_storage(),
+                    stores=get_transfer_stores(),
+                    references=SQLTransferReferenceStore(session),
+                    batch_size=settings.ai_reconcile_batch_size,
+                    retry_after_seconds=settings.ai_reconcile_retry_after_seconds,
+                )
+                logger.info("ai.transfer_reconcile.completed", **summary)
+        finally:
+            await _release_maintenance_lock(connection, "ai.transfer_reconcile")
 
 
 enforce_ai_retention_actor = dramatiq.actor(

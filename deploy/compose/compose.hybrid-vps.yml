@@ -177,6 +177,51 @@ services:
         max-size: "20m"
         max-file: "5"
 
+  # Durable outbox coordinator (durable delivery plan P3): the same backend
+  # image with the coordinator command. It claims PostgreSQL outbox rows and
+  # publishes reference-only Dramatiq messages; multiple instances may run
+  # safely, and rolling deployments can run old and new versions together.
+  # It never depends on the API, so a release can start it before rolling out
+  # outbox-producing API code (rollout: migrate -> workers -> coordinator ->
+  # outbox-producing API).
+  coordinator:
+    image: ${BACKEND_IMAGE:-ghcr.io/example/app-template-backend:local}
+    command: ["python", "-m", "app.job_coordinator"]
+    restart: unless-stopped
+    env_file:
+      - ${ENV_FILE:-.env.production}
+    depends_on:
+      redis:
+        condition: service_healthy
+    stop_grace_period: 30s
+    # The coordinator has no HTTP endpoint; the health check verifies the
+    # process is alive via /proc (same pattern as the worker). PostgreSQL is
+    # managed/external in this profile, exactly like the API's depends_on.
+    # The probe never matches itself: it skips its own PID and requires the
+    # `python -m app.job_coordinator` argv shape.
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "from app.job_coordinator.probe import main; main()",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   # Private Redis: broker for Dramatiq and backing store for the distributed
   # API rate limit. Not published — only the compose network can reach it.
   # Password, persistence (append-only file) and the memory/eviction policy

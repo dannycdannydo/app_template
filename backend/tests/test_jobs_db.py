@@ -4,9 +4,11 @@ The retry-mechanics tests in ``test_jobs.py`` never execute SQL, so the job
 lifecycle could silently regress at the query and constraint level. These
 tests run the real migration and the real service against a reachable
 PostgreSQL (same skip pattern as ``test_records_db.py``: migrated to head up
-front, reverted to base afterwards). The broker is an in-process StubBroker
-with a sync recording task, so enqueueing is proven without Redis; the full
-worker round trip against a real Redis broker is ``test_jobs_broker.py``.
+front, reverted to base afterwards). Jobs are created through the durable
+scheduling service (plan P3: the job row and its ``job.dispatch_requested``
+outbox event commit together); broker publication itself is the coordinator's
+job and is proven against a real Redis broker in ``test_job_coordinator.py``
+and ``test_jobs_broker.py``.
 
 Acceptance §5.6/§5.7 and the durable delivery plan's P2 ownership contract are
 proven here: the durable row moves queued -> running -> succeeded (or ->
@@ -28,18 +30,20 @@ import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
 
-import dramatiq
 import pytest
 from alembic import command
 from alembic.config import Config
-from dramatiq.brokers.stub import StubBroker
-from dramatiq.worker import Worker
-from sqlalchemy import text, update
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
+# Load the complete model registry before importing ``audit.models`` directly.
+# Without this base-first ordering, isolated collection enters the existing
+# audit -> db.base -> AI -> audit circular chain with a partially initialized
+# audit module. The full suite happens to establish this order in conftest;
+# this explicit import keeps the focused P3 selector independently runnable.
+import app.db.base  # noqa: F401  # pyright: ignore[reportUnusedImport]
 from app.core.exceptions import ConflictError, ValidationError
 from app.modules.audit.models import AuditEvent
 from app.modules.audit.queries import audit_events_statement
@@ -48,9 +52,9 @@ from app.modules.jobs import execution as jobs_execution
 from app.modules.jobs import service as jobs_service
 from app.modules.jobs.models import Job, JobStatus
 from app.modules.organisations.models import Organisation
+from app.modules.outbox.models import OutboxEvent, OutboxEventStatus
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
-_QUEUE = "test-jobs-db"
 
 
 def _database_reachable(database_url: str) -> bool:
@@ -84,39 +88,6 @@ def migrated_database() -> Iterator[str]:
     command.downgrade(config, "base")
 
 
-@pytest.fixture
-def stub_broker_and_worker() -> Iterator[tuple[StubBroker, Worker]]:
-    """A process-wide StubBroker and an in-process Worker consuming it.
-
-    Test actors and the job service agree on the broker; the worker runs the
-    sync recording tasks that prove the enqueue side of
-    ``create_and_enqueue``. Sync tasks need no AsyncIO middleware.
-    """
-    broker = StubBroker()
-    dramatiq.set_broker(broker)
-    worker = Worker(broker, worker_timeout=100, worker_threads=2)
-    worker.start()
-    yield broker, worker
-    worker.stop()
-    broker.flush_all()
-
-
-def _make_recording_task(received: list[tuple[str, str]]) -> Any:
-    """Declare a fresh sync task that records ``(job_id, arg_count)``.
-
-    Declared per call (after the stub broker is set) so every test gets an
-    actor registered on its own broker; the actor name is unique per call
-    because a broker refuses to re-declare a name. The task just records that
-    it was enqueued — proving the durable-row-then-enqueue ordering — and
-    never touches the database.
-    """
-
-    def _record(*args: str, job_id: str) -> None:
-        received.append((job_id, str(args)))
-
-    return dramatiq.actor(actor_name=f"record_{uuid.uuid4().hex[:8]}", queue_name=_QUEUE)(_record)
-
-
 async def _create_org(session: AsyncSession) -> Organisation:
     organisation = Organisation(name=f"Jobs DB {uuid.uuid4().hex[:8]} Ltd")
     session.add(organisation)
@@ -137,42 +108,45 @@ async def _job_audit_events(
     )
 
 
-async def test_create_and_enqueue_writes_row_then_enqueues(
-    migrated_database: str, stub_broker_and_worker: tuple[StubBroker, Worker]
+async def test_schedule_job_writes_row_and_dispatch_event(
+    migrated_database: str,
 ) -> None:
-    """Acceptance §5.6: the durable queued row exists before the task enqueues."""
+    """Plan P3: the durable queued row and its dispatch event commit together."""
     engine = create_async_engine(migrated_database, poolclass=NullPool)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    received: list[tuple[str, str]] = []
     try:
         async with session_factory() as session:
             organisation = await _create_org(session)
-            task = _make_recording_task(received)
-            job = await jobs_service.create_and_enqueue(
+            job = await jobs_service.schedule_job(
                 session,
                 organisation_id=organisation.id,
                 job_type="file.processing",
                 input_reference="file-1",
                 actor_user_id=None,
-                task=task,
             )
             assert job.status == JobStatus.QUEUED
             assert job.progress == 0
             assert job.attempt_count == 0
             assert job.job_type == "file.processing"
             assert job.input_reference == "file-1"
-
-        # The row committed before the message ran: the recording task already
-        # holds the job id that only the flushed row could have produced.
-        stub_broker_and_worker[0].join(_QUEUE, timeout=10000)
-        assert received == [(str(job.id), "()")]
+            # The dispatch event id is the job's dispatch identity, and the
+            # event carries only the job id (reference-only boundary, P3).
+            assert job.dispatch_id is not None
+            event = await session.scalar(
+                select(OutboxEvent).where(
+                    OutboxEvent.id == job.dispatch_id,
+                    OutboxEvent.aggregate_id == job.id,
+                )
+            )
+            assert event is not None
+            assert event.status == OutboxEventStatus.PENDING
+            assert event.organisation_id == organisation.id
+            assert event.payload == {"job_id": str(job.id)}
     finally:
         await engine.dispose()
 
 
-async def test_claim_dispatch_transitions_and_counts_attempts(
-    migrated_database: str, stub_broker_and_worker: tuple[StubBroker, Worker]
-) -> None:
+async def test_claim_dispatch_transitions_and_counts_attempts(migrated_database: str) -> None:
     """queued -> running: claim increments attempts, sets lease and dispatch.
 
     The first claim assigns a dispatch identity to the durable row and sets
@@ -185,15 +159,12 @@ async def test_claim_dispatch_transitions_and_counts_attempts(
     try:
         async with session_factory() as session:
             organisation = await _create_org(session)
-            task = _make_recording_task([])
-            job = await jobs_service.create_and_enqueue(
+            job = await jobs_service.schedule_job(
                 session,
                 organisation_id=organisation.id,
                 job_type="file.processing",
                 input_reference="file-1",
-                task=task,
             )
-            stub_broker_and_worker[0].join(_QUEUE, timeout=10000)
 
             claim = await jobs_service.claim_dispatch(session, job_id=job.id)
             assert claim.outcome == jobs_service.ClaimOutcome.CLAIMED
@@ -235,9 +206,7 @@ async def test_claim_dispatch_transitions_and_counts_attempts(
         await engine.dispose()
 
 
-async def test_duplicate_claim_is_deferred_while_lease_live(
-    migrated_database: str, stub_broker_and_worker: tuple[StubBroker, Worker]
-) -> None:
+async def test_duplicate_claim_is_deferred_while_lease_live(migrated_database: str) -> None:
     """A concurrent duplicate is deferred, never executed concurrently (P2).
 
     The second claim sees the first attempt's live lease and returns
@@ -249,15 +218,12 @@ async def test_duplicate_claim_is_deferred_while_lease_live(
     try:
         async with session_factory() as session:
             organisation = await _create_org(session)
-            task = _make_recording_task([])
-            job = await jobs_service.create_and_enqueue(
+            job = await jobs_service.schedule_job(
                 session,
                 organisation_id=organisation.id,
                 job_type="file.processing",
                 input_reference="file-1",
-                task=task,
             )
-            stub_broker_and_worker[0].join(_QUEUE, timeout=10000)
 
             first = await jobs_service.claim_dispatch(session, job_id=job.id)
             assert first.outcome == jobs_service.ClaimOutcome.CLAIMED
@@ -277,9 +243,7 @@ async def test_duplicate_claim_is_deferred_while_lease_live(
         await engine.dispose()
 
 
-async def test_expired_lease_can_be_taken_over(
-    migrated_database: str, stub_broker_and_worker: tuple[StubBroker, Worker]
-) -> None:
+async def test_expired_lease_can_be_taken_over(migrated_database: str) -> None:
     """An expired lease lets a retry/duplicate take the dead attempt over (P2).
 
     The takeover keeps the dispatch identity (the delivery did not change),
@@ -291,15 +255,12 @@ async def test_expired_lease_can_be_taken_over(
     try:
         async with session_factory() as session:
             organisation = await _create_org(session)
-            task = _make_recording_task([])
-            job = await jobs_service.create_and_enqueue(
+            job = await jobs_service.schedule_job(
                 session,
                 organisation_id=organisation.id,
                 job_type="file.processing",
                 input_reference="file-1",
-                task=task,
             )
-            stub_broker_and_worker[0].join(_QUEUE, timeout=10000)
 
             first = await jobs_service.claim_dispatch(session, job_id=job.id)
             assert first.outcome == jobs_service.ClaimOutcome.CLAIMED
@@ -327,9 +288,7 @@ async def test_expired_lease_can_be_taken_over(
         await engine.dispose()
 
 
-async def test_takeover_supersedes_old_attempt_owner(
-    migrated_database: str, stub_broker_and_worker: tuple[StubBroker, Worker]
-) -> None:
+async def test_takeover_supersedes_old_attempt_owner(migrated_database: str) -> None:
     """A dead worker cannot mutate the row after a real takeover (plan P2, AC5).
 
     The takeover rotates the owner token while keeping the dispatch identity,
@@ -343,15 +302,12 @@ async def test_takeover_supersedes_old_attempt_owner(
     try:
         async with session_factory() as session:
             organisation = await _create_org(session)
-            task = _make_recording_task([])
-            job = await jobs_service.create_and_enqueue(
+            job = await jobs_service.schedule_job(
                 session,
                 organisation_id=organisation.id,
                 job_type="file.processing",
                 input_reference="file-1",
-                task=task,
             )
-            stub_broker_and_worker[0].join(_QUEUE, timeout=10000)
 
             first = await jobs_service.claim_dispatch(session, job_id=job.id)
             assert first.outcome == jobs_service.ClaimOutcome.CLAIMED
@@ -373,9 +329,7 @@ async def test_takeover_supersedes_old_attempt_owner(
                     session, job_id=job.id, progress=42, owner_token=stale_token
                 )
             with pytest.raises(jobs_service.StaleDispatchError):
-                await jobs_service.succeed(
-                    session, job_id=job.id, owner_token=stale_token
-                )
+                await jobs_service.succeed(session, job_id=job.id, owner_token=stale_token)
             with pytest.raises(jobs_service.StaleDispatchError):
                 await jobs_service.fail(
                     session,
@@ -385,9 +339,7 @@ async def test_takeover_supersedes_old_attempt_owner(
                     owner_token=stale_token,
                 )
             with pytest.raises(jobs_service.StaleDispatchError):
-                await jobs_service.release_dispatch(
-                    session, job_id=job.id, owner_token=stale_token
-                )
+                await jobs_service.release_dispatch(session, job_id=job.id, owner_token=stale_token)
 
             row = await session.get(Job, job.id)
             assert row is not None
@@ -401,9 +353,7 @@ async def test_takeover_supersedes_old_attempt_owner(
         await engine.dispose()
 
 
-async def test_claim_assigns_dispatch_id_to_legacy_row(
-    migrated_database: str, stub_broker_and_worker: tuple[StubBroker, Worker]
-) -> None:
+async def test_claim_assigns_dispatch_id_to_legacy_row(migrated_database: str) -> None:
     """A legacy row without a dispatch id receives one atomically (P2).
 
     Old one-argument broker messages still work: the first claim names the
@@ -434,23 +384,18 @@ async def test_claim_assigns_dispatch_id_to_legacy_row(
         await engine.dispose()
 
 
-async def test_update_progress_and_reject_out_of_range(
-    migrated_database: str, stub_broker_and_worker: tuple[StubBroker, Worker]
-) -> None:
+async def test_update_progress_and_reject_out_of_range(migrated_database: str) -> None:
     engine = create_async_engine(migrated_database, poolclass=NullPool)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         async with session_factory() as session:
             organisation = await _create_org(session)
-            task = _make_recording_task([])
-            job = await jobs_service.create_and_enqueue(
+            job = await jobs_service.schedule_job(
                 session,
                 organisation_id=organisation.id,
                 job_type="file.processing",
                 input_reference="file-1",
-                task=task,
             )
-            stub_broker_and_worker[0].join(_QUEUE, timeout=10000)
 
             claim = await jobs_service.claim_dispatch(session, job_id=job.id)
             owner = claim.owner_token
@@ -476,25 +421,20 @@ async def test_update_progress_and_reject_out_of_range(
         await engine.dispose()
 
 
-async def test_succeed_marks_terminal_and_audits(
-    migrated_database: str, stub_broker_and_worker: tuple[StubBroker, Worker]
-) -> None:
+async def test_succeed_marks_terminal_and_audits(migrated_database: str) -> None:
     """running -> succeeded: progress 100, completed_at, result, audit row."""
     engine = create_async_engine(migrated_database, poolclass=NullPool)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         async with session_factory() as session:
             organisation = await _create_org(session)
-            task = _make_recording_task([])
-            job = await jobs_service.create_and_enqueue(
+            job = await jobs_service.schedule_job(
                 session,
                 organisation_id=organisation.id,
                 job_type="file.processing",
                 input_reference="file-1",
                 actor_user_id=None,
-                task=task,
             )
-            stub_broker_and_worker[0].join(_QUEUE, timeout=10000)
             claim = await jobs_service.claim_dispatch(session, job_id=job.id)
             owner = claim.owner_token
 
@@ -519,33 +459,24 @@ async def test_succeed_marks_terminal_and_audits(
         await engine.dispose()
 
 
-async def test_succeed_is_idempotent_and_single_audit(
-    migrated_database: str, stub_broker_and_worker: tuple[StubBroker, Worker]
-) -> None:
+async def test_succeed_is_idempotent_and_single_audit(migrated_database: str) -> None:
     """A re-delivered completion does not double-transition or double-audit."""
     engine = create_async_engine(migrated_database, poolclass=NullPool)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         async with session_factory() as session:
             organisation = await _create_org(session)
-            task = _make_recording_task([])
-            job = await jobs_service.create_and_enqueue(
+            job = await jobs_service.schedule_job(
                 session,
                 organisation_id=organisation.id,
                 job_type="file.processing",
                 input_reference="file-1",
-                task=task,
             )
-            stub_broker_and_worker[0].join(_QUEUE, timeout=10000)
             claim = await jobs_service.claim_dispatch(session, job_id=job.id)
             owner = claim.owner_token
 
-            first = await jobs_service.succeed(
-                session, job_id=job.id, owner_token=owner
-            )
-            again = await jobs_service.succeed(
-                session, job_id=job.id, owner_token=owner
-            )
+            first = await jobs_service.succeed(session, job_id=job.id, owner_token=owner)
+            again = await jobs_service.succeed(session, job_id=job.id, owner_token=owner)
             assert again.status == JobStatus.SUCCEEDED
             assert again.completed_at == first.completed_at
             assert (
@@ -556,24 +487,19 @@ async def test_succeed_is_idempotent_and_single_audit(
         await engine.dispose()
 
 
-async def test_fail_records_error_and_audits(
-    migrated_database: str, stub_broker_and_worker: tuple[StubBroker, Worker]
-) -> None:
+async def test_fail_records_error_and_audits(migrated_database: str) -> None:
     """running -> failed: error_code/error_message recorded, audit row written."""
     engine = create_async_engine(migrated_database, poolclass=NullPool)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         async with session_factory() as session:
             organisation = await _create_org(session)
-            task = _make_recording_task([])
-            job = await jobs_service.create_and_enqueue(
+            job = await jobs_service.schedule_job(
                 session,
                 organisation_id=organisation.id,
                 job_type="file.processing",
                 input_reference="file-1",
-                task=task,
             )
-            stub_broker_and_worker[0].join(_QUEUE, timeout=10000)
             claim = await jobs_service.claim_dispatch(session, job_id=job.id)
             owner = claim.owner_token
 
@@ -612,9 +538,7 @@ async def test_fail_records_error_and_audits(
         await engine.dispose()
 
 
-async def test_stale_owner_mutations_are_rejected(
-    migrated_database: str, stub_broker_and_worker: tuple[StubBroker, Worker]
-) -> None:
+async def test_stale_owner_mutations_are_rejected(migrated_database: str) -> None:
     """A superseded attempt cannot mutate over a newer owner (plan P2, AC5).
 
     Once a newer owner replaces the one the attempt captured (a real claim
@@ -627,15 +551,12 @@ async def test_stale_owner_mutations_are_rejected(
     try:
         async with session_factory() as session:
             organisation = await _create_org(session)
-            task = _make_recording_task([])
-            job = await jobs_service.create_and_enqueue(
+            job = await jobs_service.schedule_job(
                 session,
                 organisation_id=organisation.id,
                 job_type="file.processing",
                 input_reference="file-1",
-                task=task,
             )
-            stub_broker_and_worker[0].join(_QUEUE, timeout=10000)
             claim = await jobs_service.claim_dispatch(session, job_id=job.id)
             stale_token = claim.owner_token
             assert stale_token is not None
@@ -657,9 +578,7 @@ async def test_stale_owner_mutations_are_rejected(
                     session, job_id=job.id, progress=50, owner_token=stale_token
                 )
             with pytest.raises(jobs_service.StaleDispatchError):
-                await jobs_service.succeed(
-                    session, job_id=job.id, owner_token=stale_token
-                )
+                await jobs_service.succeed(session, job_id=job.id, owner_token=stale_token)
             with pytest.raises(jobs_service.StaleDispatchError):
                 await jobs_service.fail(
                     session,
@@ -669,9 +588,7 @@ async def test_stale_owner_mutations_are_rejected(
                     owner_token=stale_token,
                 )
             with pytest.raises(jobs_service.StaleDispatchError):
-                await jobs_service.release_dispatch(
-                    session, job_id=job.id, owner_token=stale_token
-                )
+                await jobs_service.release_dispatch(session, job_id=job.id, owner_token=stale_token)
 
             row = await session.get(Job, job.id)
             assert row is not None
@@ -682,9 +599,7 @@ async def test_stale_owner_mutations_are_rejected(
         await engine.dispose()
 
 
-async def test_terminal_states_are_never_rerun(
-    migrated_database: str, stub_broker_and_worker: tuple[StubBroker, Worker]
-) -> None:
+async def test_terminal_states_are_never_rerun(migrated_database: str) -> None:
     """Acceptance §5.7: no helper moves a job out of a terminal state."""
     engine = create_async_engine(migrated_database, poolclass=NullPool)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -693,15 +608,12 @@ async def test_terminal_states_are_never_rerun(
             organisation = await _create_org(session)
 
             # A succeeded job cannot run, progress-update, or fail.
-            task = _make_recording_task([])
-            succeeded = await jobs_service.create_and_enqueue(
+            succeeded = await jobs_service.schedule_job(
                 session,
                 organisation_id=organisation.id,
                 job_type="file.processing",
                 input_reference="file-1",
-                task=task,
             )
-            stub_broker_and_worker[0].join(_QUEUE, timeout=10000)
             claim = await jobs_service.claim_dispatch(session, job_id=succeeded.id)
             owner = claim.owner_token
             await jobs_service.succeed(session, job_id=succeeded.id, owner_token=owner)
@@ -722,15 +634,12 @@ async def test_terminal_states_are_never_rerun(
                 )
 
             # A failed job cannot run again or succeed.
-            task = _make_recording_task([])
-            failed = await jobs_service.create_and_enqueue(
+            failed = await jobs_service.schedule_job(
                 session,
                 organisation_id=organisation.id,
                 job_type="file.processing",
                 input_reference="file-1",
-                task=task,
             )
-            stub_broker_and_worker[0].join(_QUEUE, timeout=10000)
             claim = await jobs_service.claim_dispatch(session, job_id=failed.id)
             owner = claim.owner_token
             await jobs_service.fail(
@@ -739,16 +648,12 @@ async def test_terminal_states_are_never_rerun(
             stale = await jobs_service.claim_dispatch(session, job_id=failed.id)
             assert stale.outcome == jobs_service.ClaimOutcome.STALE
             with pytest.raises(ConflictError):
-                await jobs_service.succeed(
-                    session, job_id=failed.id, owner_token=owner
-                )
+                await jobs_service.succeed(session, job_id=failed.id, owner_token=owner)
     finally:
         await engine.dispose()
 
 
-async def test_retries_exhausted_settles_owned_queued_job(
-    migrated_database: str, stub_broker_and_worker: tuple[StubBroker, Worker]
-) -> None:
+async def test_retries_exhausted_settles_owned_queued_job(migrated_database: str) -> None:
     """The finalizer settles the owned attempt once retries run out (P2).
 
     A transient failure releases the owned attempt back to ``queued``; the
@@ -762,15 +667,12 @@ async def test_retries_exhausted_settles_owned_queued_job(
     try:
         async with session_factory() as session:
             organisation = await _create_org(session)
-            task = _make_recording_task([])
-            job = await jobs_service.create_and_enqueue(
+            job = await jobs_service.schedule_job(
                 session,
                 organisation_id=organisation.id,
                 job_type="file.processing",
                 input_reference="file-1",
-                task=task,
             )
-            stub_broker_and_worker[0].join(_QUEUE, timeout=10000)
             claim = await jobs_service.claim_dispatch(session, job_id=job.id)
             assert claim.dispatch_id is not None
             assert claim.owner_token is not None
@@ -791,20 +693,13 @@ async def test_retries_exhausted_settles_owned_queued_job(
             assert settled.completed_at is not None
             assert settled.execution_lease_expires_at is None
             assert (
-                len(
-                    await _job_audit_events(
-                        session, job_id=job.id, action=ACTION_JOB_FAILED
-                    )
-                )
-                == 1
+                len(await _job_audit_events(session, job_id=job.id, action=ACTION_JOB_FAILED)) == 1
             )
     finally:
         await engine.dispose()
 
 
-async def test_retries_exhausted_is_stale_for_terminal_and_leased(
-    migrated_database: str, stub_broker_and_worker: tuple[StubBroker, Worker]
-) -> None:
+async def test_retries_exhausted_is_stale_for_terminal_and_leased(migrated_database: str) -> None:
     """The finalizer never fails a terminal or actively leased job (P2).
 
     A deferred duplicate that exhausts its retries while the winning attempt
@@ -822,23 +717,16 @@ async def test_retries_exhausted_is_stale_for_terminal_and_leased(
             # The duplicate never claimed, so its message carries no stamp;
             # both guards (terminal state, and no matching owner credential)
             # make it a no-op.
-            task = _make_recording_task([])
-            finished = await jobs_service.create_and_enqueue(
+            finished = await jobs_service.schedule_job(
                 session,
                 organisation_id=organisation.id,
                 job_type="file.processing",
                 input_reference="file-1",
-                task=task,
             )
-            stub_broker_and_worker[0].join(_QUEUE, timeout=10000)
             claim = await jobs_service.claim_dispatch(session, job_id=finished.id)
-            await jobs_service.succeed(
-                session, job_id=finished.id, owner_token=claim.owner_token
-            )
+            await jobs_service.succeed(session, job_id=finished.id, owner_token=claim.owner_token)
             assert (
-                await jobs_service.settle_after_retries_exhausted(
-                    session, job_id=finished.id
-                )
+                await jobs_service.settle_after_retries_exhausted(session, job_id=finished.id)
                 is None
             )
             finished_row = await session.get(Job, finished.id)
@@ -847,22 +735,16 @@ async def test_retries_exhausted_is_stale_for_terminal_and_leased(
 
             # Case 2: a live attempt still owns the lease; the exhausted
             # duplicate must not fail it.
-            task = _make_recording_task([])
-            leased = await jobs_service.create_and_enqueue(
+            leased = await jobs_service.schedule_job(
                 session,
                 organisation_id=organisation.id,
                 job_type="file.processing",
                 input_reference="file-1",
-                task=task,
             )
-            stub_broker_and_worker[0].join(_QUEUE, timeout=10000)
             claim = await jobs_service.claim_dispatch(session, job_id=leased.id)
             assert claim.outcome == jobs_service.ClaimOutcome.CLAIMED
             assert (
-                await jobs_service.settle_after_retries_exhausted(
-                    session, job_id=leased.id
-                )
-                is None
+                await jobs_service.settle_after_retries_exhausted(session, job_id=leased.id) is None
             )
             leased_row = await session.get(Job, leased.id)
             assert leased_row is not None
@@ -872,9 +754,7 @@ async def test_retries_exhausted_is_stale_for_terminal_and_leased(
         await engine.dispose()
 
 
-async def test_retries_exhausted_superseded_dispatch_is_stale(
-    migrated_database: str, stub_broker_and_worker: tuple[StubBroker, Worker]
-) -> None:
+async def test_retries_exhausted_superseded_dispatch_is_stale(migrated_database: str) -> None:
     """A superseded exhausted message cannot fail a newer queued dispatch (P2).
 
     A delayed exhausted message for dispatch A arrives after dispatch B became
@@ -888,15 +768,12 @@ async def test_retries_exhausted_superseded_dispatch_is_stale(
     try:
         async with session_factory() as session:
             organisation = await _create_org(session)
-            task = _make_recording_task([])
-            job = await jobs_service.create_and_enqueue(
+            job = await jobs_service.schedule_job(
                 session,
                 organisation_id=organisation.id,
                 job_type="file.processing",
                 input_reference="file-1",
-                task=task,
             )
-            stub_broker_and_worker[0].join(_QUEUE, timeout=10000)
 
             # Dispatch A claims and then releases (transient), so its retries
             # exhaust while the row is queued under dispatch A.
@@ -954,7 +831,7 @@ async def test_retries_exhausted_superseded_dispatch_is_stale(
 
 
 async def test_retries_exhausted_rotated_token_same_dispatch_is_stale(
-    migrated_database: str, stub_broker_and_worker: tuple[StubBroker, Worker]
+    migrated_database: str,
 ) -> None:
     """A retry that rotated the token protects the newer queued attempt (P2).
 
@@ -971,15 +848,12 @@ async def test_retries_exhausted_rotated_token_same_dispatch_is_stale(
     try:
         async with session_factory() as session:
             organisation = await _create_org(session)
-            task = _make_recording_task([])
-            job = await jobs_service.create_and_enqueue(
+            job = await jobs_service.schedule_job(
                 session,
                 organisation_id=organisation.id,
                 job_type="file.processing",
                 input_reference="file-1",
-                task=task,
             )
-            stub_broker_and_worker[0].join(_QUEUE, timeout=10000)
 
             # Attempt A claims dispatch D (token T1) and releases (transient).
             claim_a = await jobs_service.claim_dispatch(session, job_id=job.id)
@@ -1029,9 +903,7 @@ async def test_retries_exhausted_rotated_token_same_dispatch_is_stale(
         await engine.dispose()
 
 
-async def test_retries_exhausted_never_claimed_duplicate_is_stale(
-    migrated_database: str, stub_broker_and_worker: tuple[StubBroker, Worker]
-) -> None:
+async def test_retries_exhausted_never_claimed_duplicate_is_stale(migrated_database: str) -> None:
     """A duplicate that exhausted without claiming cannot fail the owner (P2).
 
     A duplicate deferred on every attempt never claims, so its exhausted
@@ -1047,15 +919,12 @@ async def test_retries_exhausted_never_claimed_duplicate_is_stale(
     try:
         async with session_factory() as session:
             organisation = await _create_org(session)
-            task = _make_recording_task([])
-            job = await jobs_service.create_and_enqueue(
+            job = await jobs_service.schedule_job(
                 session,
                 organisation_id=organisation.id,
                 job_type="file.processing",
                 input_reference="file-1",
-                task=task,
             )
-            stub_broker_and_worker[0].join(_QUEUE, timeout=10000)
 
             # The live owner claims, then releases back to queued (transient)
             # just before the never-claimed duplicate's finalizer runs.
@@ -1066,12 +935,7 @@ async def test_retries_exhausted_never_claimed_duplicate_is_stale(
             )
 
             # The never-claimed duplicate's exhausted message has no stamp.
-            assert (
-                await jobs_service.settle_after_retries_exhausted(
-                    session, job_id=job.id
-                )
-                is None
-            )
+            assert await jobs_service.settle_after_retries_exhausted(session, job_id=job.id) is None
             row = await session.get(Job, job.id)
             assert row is not None
             assert row.status == JobStatus.QUEUED
@@ -1080,9 +944,7 @@ async def test_retries_exhausted_never_claimed_duplicate_is_stale(
         await engine.dispose()
 
 
-async def test_retries_exhausted_legacy_unclaimed_row_settles(
-    migrated_database: str, stub_broker_and_worker: tuple[StubBroker, Worker]
-) -> None:
+async def test_retries_exhausted_legacy_unclaimed_row_settles(migrated_database: str) -> None:
     """Explicit legacy behaviour: a stamp-less message settles a legacy row (P2).
 
     A pre-ownership row (never claimed, so it carries no dispatch id or owner
@@ -1096,26 +958,28 @@ async def test_retries_exhausted_legacy_unclaimed_row_settles(
     try:
         async with session_factory() as session:
             organisation = await _create_org(session)
-            task = _make_recording_task([])
-            job = await jobs_service.create_and_enqueue(
-                session,
+            # A pre-ownership row: never scheduled through the outbox and never
+            # claimed, exactly like rows written before the durable delivery
+            # plan landed.
+            legacy = Job(
                 organisation_id=organisation.id,
                 job_type="file.processing",
+                status=JobStatus.QUEUED,
+                progress=0,
                 input_reference="file-1",
-                task=task,
+                dispatch_id=None,
             )
-            stub_broker_and_worker[0].join(_QUEUE, timeout=10000)
+            session.add(legacy)
+            await session.commit()
 
             # The row has never been claimed: no dispatch id, no owner token.
-            row = await session.get(Job, job.id)
+            row = await session.get(Job, legacy.id)
             assert row is not None
             assert row.dispatch_id is None
             assert row.owner_token is None
             assert row.status == JobStatus.QUEUED
 
-            settled = await jobs_service.settle_after_retries_exhausted(
-                session, job_id=job.id
-            )
+            settled = await jobs_service.settle_after_retries_exhausted(session, job_id=legacy.id)
             assert settled is not None
             assert settled.status == JobStatus.FAILED
             assert settled.error_code == jobs_service.ERROR_CODE_RETRIES_EXHAUSTED
@@ -1129,7 +993,6 @@ async def test_retries_exhausted_legacy_unclaimed_row_settles(
 
 async def test_wrapper_releases_owned_attempt_on_transient_failure(
     migrated_database: str,
-    stub_broker_and_worker: tuple[StubBroker, Worker],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A transient failure releases the owned attempt back to queued (P2).
@@ -1144,20 +1007,15 @@ async def test_wrapper_releases_owned_attempt_on_transient_failure(
     try:
         async with session_factory() as session:
             organisation = await _create_org(session)
-            task = _make_recording_task([])
-            job = await jobs_service.create_and_enqueue(
+            job = await jobs_service.schedule_job(
                 session,
                 organisation_id=organisation.id,
                 job_type="file.processing",
                 input_reference="file-1",
-                task=task,
             )
-            stub_broker_and_worker[0].join(_QUEUE, timeout=10000)
             job_id = job.id
 
-        async def _boom(
-            context: jobs_execution.DurableJobContext, session: AsyncSession
-        ) -> None:
+        async def _boom(context: jobs_execution.DurableJobContext, session: AsyncSession) -> None:
             raise RuntimeError("storage temporarily unreachable")
 
         with pytest.raises(RuntimeError, match="storage temporarily unreachable"):
@@ -1176,7 +1034,6 @@ async def test_wrapper_releases_owned_attempt_on_transient_failure(
 
 async def test_wrapper_defers_duplicate_until_winner_completes(
     migrated_database: str,
-    stub_broker_and_worker: tuple[StubBroker, Worker],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A duplicate waits for a live lease and then no-ops (plan P2, AC4).
@@ -1190,23 +1047,18 @@ async def test_wrapper_defers_duplicate_until_winner_completes(
     try:
         async with session_factory() as session:
             organisation = await _create_org(session)
-            task = _make_recording_task([])
-            job = await jobs_service.create_and_enqueue(
+            job = await jobs_service.schedule_job(
                 session,
                 organisation_id=organisation.id,
                 job_type="file.processing",
                 input_reference="file-1",
-                task=task,
             )
-            stub_broker_and_worker[0].join(_QUEUE, timeout=10000)
             # The winner claims and holds a lease ~2 seconds into the future.
             winner = await jobs_service.claim_dispatch(session, job_id=job.id)
             await session.execute(
                 update(Job)
                 .where(Job.id == job.id)
-                .values(
-                    execution_lease_expires_at=datetime.now(UTC) + timedelta(seconds=2)
-                )
+                .values(execution_lease_expires_at=datetime.now(UTC) + timedelta(seconds=2))
             )
             await session.commit()
             job_id = job.id
@@ -1216,9 +1068,7 @@ async def test_wrapper_defers_duplicate_until_winner_completes(
         async def _winner_completes() -> None:
             await asyncio.sleep(0.5)
             async with session_factory() as session:
-                await jobs_service.succeed(
-                    session, job_id=job_id, owner_token=winner_owner
-                )
+                await jobs_service.succeed(session, job_id=job_id, owner_token=winner_owner)
 
         duplicate_ran: list[str] = []
 
@@ -1243,7 +1093,6 @@ async def test_wrapper_defers_duplicate_until_winner_completes(
 
 async def test_wrapper_treats_stale_settlement_as_noop(
     migrated_database: str,
-    stub_broker_and_worker: tuple[StubBroker, Worker],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A stale attempt settling a newer owner is a no-op, never an overwrite (P2).
@@ -1257,23 +1106,18 @@ async def test_wrapper_treats_stale_settlement_as_noop(
     try:
         async with session_factory() as session:
             organisation = await _create_org(session)
-            task = _make_recording_task([])
-            job = await jobs_service.create_and_enqueue(
+            job = await jobs_service.schedule_job(
                 session,
                 organisation_id=organisation.id,
                 job_type="file.processing",
                 input_reference="file-1",
-                task=task,
             )
-            stub_broker_and_worker[0].join(_QUEUE, timeout=10000)
             job_id = job.id
 
         async def _stale_settlement(
             context: jobs_execution.DurableJobContext, session: AsyncSession
         ) -> None:
-            raise jobs_service.StaleDispatchError(
-                job_id, uuid.uuid4(), context.owner_token
-            )
+            raise jobs_service.StaleDispatchError(job_id, uuid.uuid4(), context.owner_token)
 
         await jobs_execution.run_claimed(job_id=job_id, handler=_stale_settlement)
 
@@ -1288,7 +1132,6 @@ async def test_wrapper_treats_stale_settlement_as_noop(
 
 async def test_wrapper_raises_deferred_error_beyond_wait_budget(
     migrated_database: str,
-    stub_broker_and_worker: tuple[StubBroker, Worker],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A lease far beyond the in-process budget defers via the broker (P2).
@@ -1303,23 +1146,18 @@ async def test_wrapper_raises_deferred_error_beyond_wait_budget(
     try:
         async with session_factory() as session:
             organisation = await _create_org(session)
-            task = _make_recording_task([])
-            job = await jobs_service.create_and_enqueue(
+            job = await jobs_service.schedule_job(
                 session,
                 organisation_id=organisation.id,
                 job_type="file.processing",
                 input_reference="file-1",
-                task=task,
             )
-            stub_broker_and_worker[0].join(_QUEUE, timeout=10000)
             await jobs_service.claim_dispatch(session, job_id=job.id)
             # A lease that cannot be waited out in-process.
             await session.execute(
                 update(Job)
                 .where(Job.id == job.id)
-                .values(
-                    execution_lease_expires_at=datetime.now(UTC) + timedelta(hours=1)
-                )
+                .values(execution_lease_expires_at=datetime.now(UTC) + timedelta(hours=1))
             )
             await session.commit()
             job_id = job.id
@@ -1341,9 +1179,7 @@ async def test_wrapper_raises_deferred_error_beyond_wait_budget(
         await engine.dispose()
 
 
-async def test_simultaneous_claims_serialize_to_one_owner(
-    migrated_database: str, stub_broker_and_worker: tuple[StubBroker, Worker]
-) -> None:
+async def test_simultaneous_claims_serialize_to_one_owner(migrated_database: str) -> None:
     """Two concurrent claims cannot both own the dispatch (plan P2, AC4).
 
     ``FOR UPDATE`` serialises the racing claims: exactly one wins the dispatch
@@ -1354,22 +1190,16 @@ async def test_simultaneous_claims_serialize_to_one_owner(
     try:
         async with session_factory() as session:
             organisation = await _create_org(session)
-            task = _make_recording_task([])
-            job = await jobs_service.create_and_enqueue(
+            job = await jobs_service.schedule_job(
                 session,
                 organisation_id=organisation.id,
                 job_type="file.processing",
                 input_reference="file-1",
-                task=task,
             )
-            stub_broker_and_worker[0].join(_QUEUE, timeout=10000)
             job_id = job.id
 
         outcomes = await asyncio.gather(
-            *[
-                _claim_in_own_session(session_factory, job_id)
-                for _ in range(2)
-            ]
+            *[_claim_in_own_session(session_factory, job_id) for _ in range(2)]
         )
         claimed = [result for result in outcomes if result is not None]
         assert len(claimed) == 1
@@ -1377,7 +1207,9 @@ async def test_simultaneous_claims_serialize_to_one_owner(
         await engine.dispose()
 
 
-async def _claim_in_own_session(session_factory: Any, job_id: uuid.UUID) -> uuid.UUID | None:
+async def _claim_in_own_session(
+    session_factory: async_sessionmaker[AsyncSession], job_id: uuid.UUID
+) -> uuid.UUID | None:
     """Claim ``job_id`` in a private session; return the dispatch id when owned."""
     async with session_factory() as session:
         result = await jobs_service.claim_dispatch(session, job_id=job_id)

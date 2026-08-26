@@ -158,16 +158,22 @@ async def _enqueue(
     storage_key: str,
     ai_task: Any,
 ) -> Job:
-    """Write the durable row and enqueue the test-bound actor on its broker."""
+    """Durably schedule the job, then publish the reference-only message.
+
+    The scheduling boundary is plan P3 (job row + outbox event commit
+    together; the coordinator publishes). This helper plays the coordinator
+    against the test-bound actor so the broker journey tests keep their shape.
+    """
     async with session_factory() as session:
-        return await jobs_service.create_and_enqueue(
+        job = await jobs_service.schedule_job(
             session,
             organisation_id=organisation_id,
             job_type=JOB_TYPE_AI_EXECUTE,
             input_reference=storage_key,
             actor_user_id=user_id,
-            task=ai_task,
         )
+    ai_task.send(job_id=str(job.id))
+    return job
 
 
 async def _wait_for_status(
@@ -220,23 +226,16 @@ async def test_ai_worker_rejects_wrong_durable_job_type(
     engine = create_async_engine(migrated_database, poolclass=NullPool)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
-    def _noop(**kwargs: str) -> None:
-        return None
-
-    task = dramatiq.actor(
-        actor_name=f"wrong_type_ai_{uuid.uuid4().hex[:8]}", queue_name=_QUEUE
-    )(_noop)
     try:
         async with session_factory() as session:
             organisation = await _seed_organisation(session)
             user = await _seed_user(session)
-            job = await jobs_service.create_and_enqueue(
+            job = await jobs_service.schedule_job(
                 session,
                 organisation_id=organisation.id,
                 job_type="file.processing",
                 input_reference="organisations/x/ai/scratch/doc.txt",
                 actor_user_id=user.id,
-                task=task,
             )
             # P3 populates the dispatch id on every durable job at creation.
             job.dispatch_id = uuid.uuid4()
@@ -297,18 +296,21 @@ async def test_worker_classifies_text_document_and_records_request(
 
 
 async def test_broker_message_carries_job_id_only_no_bytes(migrated_database: str) -> None:
-    """The broker message carries only the job id — never file bytes (Scope §6.6)."""
+    """The broker message carries only the job id — never file bytes (Scope §6.6).
+
+    The registry's publication path (plan P3) is the only broker sender; this
+    proves the reference-only message shape it builds: one ``job_id`` keyword
+    and nothing else, so file bytes, storage references and prompts can never
+    cross the broker boundary.
+    """
     from app.broker import worker_middleware
+    from app.job_coordinator.registry import DispatchRegistry
 
     broker = StubBroker(middleware=worker_middleware())
     dramatiq.set_broker(broker)
     ai_task = dramatiq.actor(queue_name=_QUEUE, **jobs_service.retry_policy())(execute_ai_task)
-    session_factory = _session_factory(migrated_database)
-    async with session_factory() as session:
-        organisation = await _seed_organisation(session)
-        await _enable_ai(session, organisation.id)
-        user = await _seed_user(session)
-        storage_key = await _put_text_document(organisation.id, content="sensitive lease content")
+    registry = DispatchRegistry(job_actors={JOB_TYPE_AI_EXECUTE: ai_task}, maintenance_actors={})
+    job_id = uuid.uuid4()
 
     captured: list[dict[str, Any]] = []
     original_send = ai_task.send
@@ -319,13 +321,7 @@ async def test_broker_message_carries_job_id_only_no_bytes(migrated_database: st
 
     ai_task.send = _capture_send  # type: ignore[method-assign]
     try:
-        await _enqueue(
-            session_factory,
-            organisation_id=organisation.id,
-            user_id=user.id,
-            storage_key=storage_key,
-            ai_task=ai_task,
-        )
+        registry.publish_job_dispatch(JOB_TYPE_AI_EXECUTE, str(job_id))
     finally:
         ai_task.send = original_send  # type: ignore[method-assign]
     assert len(captured) == 1

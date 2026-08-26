@@ -192,6 +192,81 @@ services:
     command: >
       sh -c "dramatiq app.workers --processes 1 --threads $${WORKER_CONCURRENCY:-8} --worker-shutdown-timeout 10000"
 
+  # Durable outbox coordinator (durable delivery plan P3): the same backend
+  # image with the coordinator command. It claims PostgreSQL outbox rows and
+  # publishes reference-only Dramatiq messages; multiple instances may run
+  # safely. Depends on the database and broker (healthy) but never on the API,
+  # so a release can start it before rolling out outbox-producing API code.
+  coordinator:
+    profiles: ["fullstack"]
+    build:
+      context: ../../backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      APP_ENV: development
+      DEBUG: "true"
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/${POSTGRES_DB:-app}
+      REDIS_URL: redis://redis:6379/0
+      COORDINATOR_PUBLICATION_BATCH_SIZE: ${COORDINATOR_PUBLICATION_BATCH_SIZE:-50}
+      COORDINATOR_IDLE_POLL_SECONDS: ${COORDINATOR_IDLE_POLL_SECONDS:-0.5}
+      COORDINATOR_PUBLICATION_LEASE_SECONDS: ${COORDINATOR_PUBLICATION_LEASE_SECONDS:-60}
+      COORDINATOR_PUBLICATION_BACKOFF_INITIAL_SECONDS: ${COORDINATOR_PUBLICATION_BACKOFF_INITIAL_SECONDS:-1}
+      COORDINATOR_PUBLICATION_BACKOFF_MAX_SECONDS: ${COORDINATOR_PUBLICATION_BACKOFF_MAX_SECONDS:-300}
+      JOB_RECONCILE_THRESHOLD_SECONDS: ${JOB_RECONCILE_THRESHOLD_SECONDS:-900}
+      JOB_RECONCILE_COOLDOWN_SECONDS: ${JOB_RECONCILE_COOLDOWN_SECONDS:-900}
+      MAINTENANCE_TRANSFER_RECONCILE_INTERVAL_HOURS: ${MAINTENANCE_TRANSFER_RECONCILE_INTERVAL_HOURS:-1}
+      MAINTENANCE_AI_RETENTION_INTERVAL_HOURS: ${MAINTENANCE_AI_RETENTION_INTERVAL_HOURS:-24}
+      OUTBOX_RETENTION_DAYS: ${OUTBOX_RETENTION_DAYS:-30}
+      OUTBOX_CLEANUP_BATCH_SIZE: ${OUTBOX_CLEANUP_BATCH_SIZE:-500}
+      OUTBOX_CLEANUP_INTERVAL_HOURS: ${OUTBOX_CLEANUP_INTERVAL_HOURS:-24}
+      STORAGE_PROVIDER: ${STORAGE_PROVIDER:-s3}
+      STORAGE_BUCKET: ${STORAGE_BUCKET:-app-files}
+      STORAGE_ENDPOINT_URL: ${STORAGE_ENDPOINT_URL:-http://minio:9000}
+      STORAGE_PUBLIC_ENDPOINT_URL: ${STORAGE_PUBLIC_ENDPOINT_URL:-http://localhost:9000}
+      STORAGE_REGION: ${STORAGE_REGION:-us-east-1}
+      STORAGE_ACCESS_KEY_ID: ${STORAGE_ACCESS_KEY_ID:-minioadmin}
+      STORAGE_SECRET_ACCESS_KEY: ${STORAGE_SECRET_ACCESS_KEY:-minioadmin}
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-smtp}
+      EMAIL_FROM: ${EMAIL_FROM:-no-reply@example.com}
+      SMTP_HOST: ${SMTP_HOST:-mailhog}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-false}
+      AI_ENABLED_PROVIDERS: ${AI_ENABLED_PROVIDERS:-["fake"]}
+    # No HTTP endpoint: the liveness check verifies the coordinator process is
+    # alive via /proc (the slim base image has neither pgrep nor ps). The
+    # probe module never matches itself: it skips its own PID and requires the
+    # `python -m app.job_coordinator` argv shape.
+    command: ["python", "-m", "app.job_coordinator"]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "from app.job_coordinator.probe import main; main()",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    stop_grace_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   frontend:
     profiles: ["fullstack"]
     build:

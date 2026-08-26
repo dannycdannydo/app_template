@@ -137,20 +137,19 @@ async def test_job_counters_increment_through_the_durable_job_service() -> None:
     """Enqueue/succeed/fail drive the counters via the real service functions."""
     dramatiq.set_broker(StubBroker())
     organisation_id = uuid.uuid4()
-    task = dramatiq.actor(lambda: None)
     labels = {"job_type": "file.processing"}
 
     before = await _fetch_metrics()
 
-    # Enqueue: the durable row is written and the task enqueued.
+    # Enqueue: the durable row and its outbox dispatch event are scheduled
+    # through the transaction-owned service (plan P3).
     enqueue_state = ContextState()
-    await jobs_service.create_and_enqueue(
+    await jobs_service.schedule_job(
         cast(AsyncSession, FakeSession(enqueue_state)),
         organisation_id=organisation_id,
         job_type="file.processing",
         input_reference="file-1",
         actor_user_id=None,
-        task=task,
     )
 
     # Succeed: the staged queued row transitions to succeeded.

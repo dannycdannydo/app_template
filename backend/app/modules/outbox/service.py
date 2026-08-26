@@ -50,6 +50,17 @@ def _deduplication_key_for_dispatch(job_id: uuid.UUID) -> str:
     return f"{EVENT_TYPE_JOB_DISPATCH}:{job_id}"
 
 
+def reconciliation_dispatch_key(job_id: uuid.UUID, *, cooldown_bucket: int) -> str:
+    """Return the idempotency key for one reconciled dispatch cooldown.
+
+    The initial dispatch retains its stable per-job key.  A reconciliation
+    event must be distinct so it can republish a lost Redis message, while the
+    UTC-style cooldown bucket makes concurrent coordinator replicas converge
+    on exactly one replacement request for that job and window.
+    """
+    return f"{EVENT_TYPE_JOB_DISPATCH}:{job_id}:reconcile:{cooldown_bucket}"
+
+
 def _check_payload_size(payload: dict[str, Any], event_type: str) -> None:
     """Fail fast when a payload would exceed the database bound.
 
@@ -69,6 +80,7 @@ async def create_dispatch_event(
     organisation_id: uuid.UUID,
     job_id: uuid.UUID,
     event_id: uuid.UUID | None = None,
+    deduplication_key: str | None = None,
 ) -> OutboxEvent:
     """Create a pending ``job.dispatch_requested`` outbox row for a durable job.
 
@@ -91,7 +103,7 @@ async def create_dispatch_event(
         aggregate_type=AGGREGATE_TYPE_JOB,
         aggregate_id=job_id,
         payload=payload,
-        deduplication_key=_deduplication_key_for_dispatch(job_id),
+        deduplication_key=deduplication_key or _deduplication_key_for_dispatch(job_id),
         status=OutboxEventStatus.PENDING,
     )
     session.add(event)

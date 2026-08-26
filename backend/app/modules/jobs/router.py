@@ -4,7 +4,7 @@ The router stays thin: it parses query parameters, resolves the caller's
 organisation membership through the shared dependency, gates every route with
 ``require_permission`` (default deny), and delegates to the service. Jobs have
 no request body at all — the durable row is written by the service
-(``create_and_enqueue``), never by a client.
+(``schedule_job``), never by a client.
 
 Permission map: list and detail need ``documents.read`` (the files module is
 the only job producer in v0.5, so the job endpoints reuse its gate; a generic
