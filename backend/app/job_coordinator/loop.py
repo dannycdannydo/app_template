@@ -46,6 +46,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.job_coordinator.reconciliation import run_maintenance_pass
 from app.job_coordinator.registry import (
     DispatchRegistry,
     RegistryCompletenessError,
@@ -97,6 +98,8 @@ class CycleStats:
     dead: int = 0
     released: int = 0
     settled_stale: int = 0
+    reconciled_jobs: int = 0
+    scheduled_events: int = 0
 
     @property
     def transient(self) -> bool:
@@ -468,6 +471,10 @@ async def run_cycle(
     backoff_initial_seconds: float = 1.0,
     backoff_max_seconds: float = 300.0,
     shutdown_event: asyncio.Event | None = None,
+    reconciliation_threshold_seconds: int | None = None,
+    reconciliation_cooldown_seconds: int | None = None,
+    ai_retention_interval_hours: int | None = None,
+    transfer_reconcile_interval_hours: int | None = None,
 ) -> CycleStats:
     """Run one claim -> publish -> settle cycle and return its counts.
 
@@ -529,6 +536,30 @@ async def run_cycle(
                 backoff_initial_seconds=backoff_initial_seconds,
                 backoff_max_seconds=backoff_max_seconds,
             )
+    if (shutdown_event is None or not shutdown_event.is_set()) and all(
+        value is not None
+        for value in (
+            reconciliation_threshold_seconds,
+            reconciliation_cooldown_seconds,
+            ai_retention_interval_hours,
+            transfer_reconcile_interval_hours,
+        )
+    ):
+        assert reconciliation_threshold_seconds is not None
+        assert reconciliation_cooldown_seconds is not None
+        assert ai_retention_interval_hours is not None
+        assert transfer_reconcile_interval_hours is not None
+        maintenance = await run_maintenance_pass(
+            session_factory,
+            now=now,
+            reconciliation_threshold_seconds=reconciliation_threshold_seconds,
+            reconciliation_cooldown_seconds=reconciliation_cooldown_seconds,
+            reconciliation_limit=batch_size,
+            ai_retention_interval_hours=ai_retention_interval_hours,
+            transfer_reconcile_interval_hours=transfer_reconcile_interval_hours,
+        )
+        stats.reconciled_jobs = maintenance.reconciled_jobs
+        stats.scheduled_events = maintenance.scheduled_events
     return stats
 
 
@@ -564,6 +595,10 @@ async def run_coordinator(
     backoff_initial_seconds: float,
     backoff_max_seconds: float,
     shutdown_event: asyncio.Event,
+    reconciliation_threshold_seconds: int | None = None,
+    reconciliation_cooldown_seconds: int | None = None,
+    ai_retention_interval_hours: int | None = None,
+    transfer_reconcile_interval_hours: int | None = None,
 ) -> None:
     """Run the coordinator until ``shutdown_event`` is set.
 
@@ -597,6 +632,10 @@ async def run_coordinator(
                 backoff_initial_seconds=backoff_initial_seconds,
                 backoff_max_seconds=backoff_max_seconds,
                 shutdown_event=shutdown_event,
+                reconciliation_threshold_seconds=reconciliation_threshold_seconds,
+                reconciliation_cooldown_seconds=reconciliation_cooldown_seconds,
+                ai_retention_interval_hours=ai_retention_interval_hours,
+                transfer_reconcile_interval_hours=transfer_reconcile_interval_hours,
             )
             transient = stats.transient
             logger.info(
@@ -607,6 +646,8 @@ async def run_coordinator(
                 dead=stats.dead,
                 released=stats.released,
                 settled_stale=stats.settled_stale,
+                reconciled_jobs=stats.reconciled_jobs,
+                scheduled_events=stats.scheduled_events,
             )
         except Exception as exc:
             # A database-level failure (unreachable PostgreSQL, broken pool)
@@ -691,6 +732,10 @@ async def _async_main() -> None:
             backoff_initial_seconds=settings.coordinator_publication_backoff_initial_seconds,
             backoff_max_seconds=settings.coordinator_publication_backoff_max_seconds,
             shutdown_event=shutdown_event,
+            reconciliation_threshold_seconds=settings.job_reconcile_threshold_seconds,
+            reconciliation_cooldown_seconds=settings.job_reconcile_cooldown_seconds,
+            ai_retention_interval_hours=settings.maintenance_ai_retention_interval_hours,
+            transfer_reconcile_interval_hours=settings.maintenance_transfer_reconcile_interval_hours,
         )
     except RegistryCompletenessError as exc:
         raise SystemExit(f"coordinator registry incomplete: {exc}") from exc

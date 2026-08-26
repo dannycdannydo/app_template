@@ -399,24 +399,24 @@ stop and rollout order on 2026-08-19.
 
 Dependencies: P3
 
-- [ ] Implement bounded queued-job reconciliation queries and service logic:
+- [x] Implement bounded queued-job reconciliation queries and service logic:
   select only jobs beyond the 900-second threshold, exclude terminal/running
   jobs and those with pending/publishing dispatches, create a new deduplicated
   dispatch event and job dispatch id atomically, and enforce the 900-second
   cooldown under concurrent coordinators.
-- [ ] Add coordinator UTC-bucket scheduling for daily AI retention and hourly
+- [x] Add coordinator UTC-bucket scheduling for daily AI retention and hourly
   provider-file reconciliation through outbox events; use unique schedule keys
   plus handler-side PostgreSQL advisory locks, and prove duplicate ticks or
   messages cannot run the same maintenance sweep concurrently.
-- [ ] Replace the single email exception with provider-neutral transient and
+- [x] Replace the single email exception with provider-neutral transient and
   permanent subclasses while preserving `EmailSendError` as their common API;
   classify SMTP network/timeouts/disconnects and 4xx responses as transient,
   and authentication, recipient-only 5xx and other 5xx responses as permanent.
-- [ ] Update the notification actor/delivery service so transient failures
+- [x] Update the notification actor/delivery service so transient failures
   return the delivery to `queued` before Dramatiq retry, permanent failures
   settle immediately, and retry exhaustion marks both job and delivery failed
   exactly once through an allow-listed job-type exhaustion hook.
-- [ ] Add deterministic fake/SMTP exception tests, delivery/audit database
+- [x] Add deterministic fake/SMTP exception tests, delivery/audit database
   tests, coordinator scheduling/reconciliation concurrency tests and real-
   broker eventual-success/exhaustion journeys. Assert safe error strings do not
   expose SMTP responses, credentials, recipients or provider internals.

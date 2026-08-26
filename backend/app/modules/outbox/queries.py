@@ -14,8 +14,10 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, exists, select
+from sqlalchemy.orm import aliased
 
+from app.modules.jobs.models import Job, JobStatus
 from app.modules.outbox.models import OutboxEvent, OutboxEventStatus
 
 
@@ -117,5 +119,54 @@ def published_events_retention_statement(
             OutboxEvent.created_at < created_before,
         )
         .order_by(OutboxEvent.created_at.asc())
+        .limit(limit)
+    )
+
+
+def queued_jobs_for_reconciliation_statement(
+    *,
+    published_before: datetime,
+    limit: int,
+) -> Select[tuple[Job]]:
+    """Select queued jobs whose latest published dispatch is stale.
+
+    Only a job with a previously *published* dispatch qualifies.  The
+    correlated predicates exclude jobs with a newer published dispatch and
+    jobs that already have pending/publishing replacement work, leaving the
+    coordinator service to lock each selected job and create its replacement
+    event atomically.
+    """
+    latest = aliased(OutboxEvent)
+    newer_published = aliased(OutboxEvent)
+    active = aliased(OutboxEvent)
+    return (
+        select(Job)
+        .join(
+            latest,
+            (latest.aggregate_type == "job")
+            & (latest.aggregate_id == Job.id)
+            & (latest.status == OutboxEventStatus.PUBLISHED),
+        )
+        .where(
+            Job.status == JobStatus.QUEUED,
+            latest.processed_at.is_not(None),
+            latest.processed_at <= published_before,
+            ~exists(
+                select(1).where(
+                    newer_published.aggregate_type == "job",
+                    newer_published.aggregate_id == Job.id,
+                    newer_published.status == OutboxEventStatus.PUBLISHED,
+                    newer_published.processed_at > latest.processed_at,
+                )
+            ),
+            ~exists(
+                select(1).where(
+                    active.aggregate_type == "job",
+                    active.aggregate_id == Job.id,
+                    active.status.in_((OutboxEventStatus.PENDING, OutboxEventStatus.PUBLISHING)),
+                )
+            ),
+        )
+        .order_by(latest.processed_at.asc(), Job.id.asc())
         .limit(limit)
     )

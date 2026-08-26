@@ -50,6 +50,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from app.modules.audit.models import AuditEvent
 from app.modules.files import service as files_service
 from app.modules.files import tasks as files_tasks
 from app.modules.files.models import FileStatus
@@ -57,6 +58,7 @@ from app.modules.jobs import execution as jobs_execution
 from app.modules.jobs import service as jobs_service
 from app.modules.jobs import tasks as jobs_tasks
 from app.modules.jobs.models import Job, JobStatus
+from app.modules.notifications import service as notifications_service
 from app.modules.notifications import tasks as notifications_tasks
 from app.modules.notifications.models import (
     Notification,
@@ -758,5 +760,163 @@ async def test_file_ready_loop_runs_on_real_broker(
             email_job = await session.get(Job, email_job_id)
             assert email_job is not None
             assert email_job.status == JobStatus.SUCCEEDED
+    finally:
+        await engine.dispose()
+
+
+# --- P4: real-broker notification.email eventual-success and exhaustion journeys ---
+
+
+async def test_notification_email_eventual_success_on_real_broker(
+    migrated_database: str,
+    broker_and_worker: tuple[RedisBroker, Worker],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P4: a transiently failing notification email eventually succeeds on real Redis.
+
+    The notification email task is declared on the test broker with its full
+    retry policy. The provider fails once then succeeds; the delivery advances
+    from ``queued`` through ``running``/``queued`` (retry release) to
+    ``succeeded``, and the job reaches ``succeeded`` with the provider message
+    id. The real broker and real exhausted handler are exercised end to end.
+    """
+    from app.modules.jobs import execution as jobs_execution
+
+    session_factory = _session_factory(migrated_database)
+    engine = create_async_engine(migrated_database, poolclass=NullPool)
+    task_factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(notifications_tasks, "async_session_factory", task_factory)
+    monkeypatch.setattr(jobs_execution, "async_session_factory", task_factory)
+
+    call_count = 0
+
+    class _EventuallySucceedsProvider:
+        async def send_email(self, **kwargs: Any) -> Any:
+            nonlocal call_count
+            call_count += 1
+            from app.email import EMAIL_DELIVERY_STATUS_SENT
+            from app.email.base import TransientEmailSendError
+            from app.email.types import EmailDeliveryResult
+
+            if call_count == 1:
+                raise TransientEmailSendError("temporary relay outage")
+
+            return EmailDeliveryResult(
+                provider_message_id="provider-123",
+                status=EMAIL_DELIVERY_STATUS_SENT,
+            )
+
+    monkeypatch.setattr(notifications_tasks, "get_email_provider", _EventuallySucceedsProvider)
+
+    try:
+        organisation = await _create_org(session_factory)
+        async with session_factory() as session:
+            user = User(
+                workos_user_id=f"user_{uuid.uuid4().hex}",
+                email="ada@example.com",
+                name="Ada Lovelace",
+            )
+            session.add(user)
+            await session.commit()
+            _notification, delivery, job = await notifications_service.send_test_notification(
+                session,
+                organisation_id=organisation.id,
+                user_id=user.id,
+                recipient_email=user.email,
+                actor_user_id=user.id,
+            )
+            job_id = job.id
+            delivery_id = delivery.id
+
+        # Re-declare the notification actor on this broker so the message lands
+        # in the test namespace.
+        email_task = dramatiq.actor(
+            queue_name=_QUEUE,
+            **jobs_service.retry_policy(),
+        )(notifications_tasks.send_notification_email)
+        email_task.send(job_id=str(job_id))
+
+        finished = await _wait_for_status(session_factory, job_id, JobStatus.SUCCEEDED)
+        assert finished.result_reference == "provider-123"
+
+        async with session_factory() as session:
+            delivery = await session.get(NotificationDelivery, delivery_id)
+            assert delivery is not None
+            assert delivery.status == NotificationDeliveryStatus.SUCCEEDED
+            assert delivery.provider_message_id == "provider-123"
+    finally:
+        await engine.dispose()
+
+
+async def test_notification_email_exhaustion_fails_delivery_on_real_broker(
+    migrated_database: str,
+    broker_and_worker: tuple[RedisBroker, Worker],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P4: exhausted notification retries leave both job and delivery failed.
+
+    The notification email task always fails transiently on the real broker.
+    After ``MAX_ATTEMPTS`` the exhausted handler runs the registered
+    ``notification.email`` hook, which marks the delivery ``failed`` with an
+    audit row. Both the job and delivery are consistently terminal.
+    """
+    from app.email.base import TransientEmailSendError
+    from app.modules.jobs import execution as jobs_execution
+
+    session_factory = _session_factory(migrated_database)
+    engine = create_async_engine(migrated_database, poolclass=NullPool)
+    task_factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(notifications_tasks, "async_session_factory", task_factory)
+    monkeypatch.setattr(jobs_execution, "async_session_factory", task_factory)
+
+    class _AlwaysTransientProvider:
+        async def send_email(self, **kwargs: Any) -> Any:
+            raise TransientEmailSendError("relay permanently down")
+
+    monkeypatch.setattr(notifications_tasks, "get_email_provider", _AlwaysTransientProvider)
+
+    try:
+        organisation = await _create_org(session_factory)
+        async with session_factory() as session:
+            user = User(
+                workos_user_id=f"user_{uuid.uuid4().hex}",
+                email="ada@example.com",
+                name="Ada Lovelace",
+            )
+            session.add(user)
+            await session.commit()
+            _notification, delivery, job = await notifications_service.send_test_notification(
+                session,
+                organisation_id=organisation.id,
+                user_id=user.id,
+                recipient_email=user.email,
+                actor_user_id=user.id,
+            )
+            job_id = job.id
+            delivery_id = delivery.id
+            notification_id = _notification.id
+
+        email_task = dramatiq.actor(
+            queue_name=_QUEUE,
+            **jobs_service.retry_policy(),
+        )(notifications_tasks.send_notification_email)
+        email_task.send(job_id=str(job_id))
+
+        failed_job = await _wait_for_status(session_factory, job_id, JobStatus.FAILED)
+        assert failed_job.error_code == jobs_service.ERROR_CODE_RETRIES_EXHAUSTED
+
+        async with session_factory() as session:
+            delivery = await session.get(NotificationDelivery, delivery_id)
+            assert delivery is not None
+            assert delivery.status == NotificationDeliveryStatus.FAILED
+
+            audit = await session.scalar(
+                select(AuditEvent).where(
+                    AuditEvent.action == "notification.delivery_failed",
+                    AuditEvent.resource_id == str(notification_id),
+                )
+            )
+            assert audit is not None
+            assert audit.organisation_id == organisation.id
     finally:
         await engine.dispose()

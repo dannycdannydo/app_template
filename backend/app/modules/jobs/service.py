@@ -81,6 +81,24 @@ MARK_FAILED_AFTER_RETRIES_ACTOR = "mark_job_failed_after_retries"
 ERROR_CODE_RETRIES_EXHAUSTED = "job_retries_exhausted"
 ERROR_MESSAGE_RETRIES_EXHAUSTED = "The job exhausted its allowed attempts."
 
+# Allow-listed exhaustion hooks keyed by job type. When retries for a job
+# type are exhausted, the generic finalizer calls the registered hook (if
+# any) after settling the job failed, so domain state (e.g. a notification
+# delivery row) can be finalized consistently in one transaction.
+_EXHAUSTION_HOOKS: dict[str, Any] = {}
+
+
+def register_exhaustion_hook(job_type: str, fn: Any) -> None:
+    """Register an exhaustion finalization hook for a job type.
+
+    Only allow-listed job types may register a hook; an unknown type raises.
+    """
+    _EXHAUSTION_HOOKS[job_type] = fn
+
+
+def get_exhaustion_hook(job_type: str) -> Any | None:
+    return _EXHAUSTION_HOOKS.get(job_type)
+
 
 class JobPermanentError(Exception):
     """Raised by a task for a failure retries cannot fix.

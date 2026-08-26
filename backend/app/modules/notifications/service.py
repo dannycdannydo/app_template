@@ -435,6 +435,25 @@ async def mark_delivery_running(
     return delivery
 
 
+async def return_delivery_to_queue(
+    session: AsyncSession,
+    *,
+    delivery_id: uuid.UUID,
+) -> NotificationDelivery:
+    """Return a retryable owned delivery to ``queued`` before broker retry.
+
+    This is deliberately not a failure and emits no audit row: the next
+    Dramatiq attempt is still responsible for the same delivery.  Terminal
+    deliveries are left untouched so a stale attempt cannot reopen them.
+    """
+    delivery = await get_delivery_for_task(session, delivery_id=delivery_id)
+    if not is_delivery_terminal(delivery.status):
+        delivery.status = NotificationDeliveryStatus.QUEUED
+        await session.commit()
+        await session.refresh(delivery)
+    return delivery
+
+
 async def mark_delivery_succeeded(
     session: AsyncSession,
     *,

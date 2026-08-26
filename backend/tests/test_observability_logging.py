@@ -186,6 +186,9 @@ async def test_worker_tasks_emit_context_bound_log_lines(
     # --- jobs task: the retries-exhausted finalizer logs with job_id only. ---
     recorded: list[str] = []
 
+    class _SettledJob:
+        job_type = "file.processing"
+
     async def _settle(
         session: object,
         *,
@@ -194,7 +197,7 @@ async def test_worker_tasks_emit_context_bound_log_lines(
         exhausted_owner_token: object,
     ) -> object:
         recorded.append("settled")
-        return object()
+        return _SettledJob()
 
     monkeypatch.setattr(jobs_service, "settle_after_retries_exhausted", _settle)
 

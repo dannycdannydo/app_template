@@ -11,6 +11,7 @@ anywhere, which is the point of ADR-0015.
 
 from __future__ import annotations
 
+import smtplib
 import types
 from pathlib import Path
 
@@ -23,7 +24,7 @@ from app.email import (
     FakeEmailProvider,
     get_email_provider,
 )
-from app.email.base import EmailSendError
+from app.email.base import EmailSendError, PermanentEmailSendError, TransientEmailSendError
 from app.email.smtp import SmtpEmailProvider
 from app.email.types import EMAIL_DELIVERY_STATUS_SENT
 
@@ -120,6 +121,48 @@ async def test_smtp_constructor_validates_configuration() -> None:
         SmtpEmailProvider(host="localhost", port=65536)
     with pytest.raises(ValueError, match="timeout"):
         SmtpEmailProvider(host="localhost", port=1025, timeout=0)
+
+
+@pytest.mark.parametrize(
+    ("smtp_error", "expected"),
+    [
+        (OSError("network unavailable"), TransientEmailSendError),
+        (smtplib.SMTPServerDisconnected("connection lost"), TransientEmailSendError),
+        (smtplib.SMTPDataError(450, b"try later"), TransientEmailSendError),
+        (smtplib.SMTPAuthenticationError(535, b"bad credentials"), PermanentEmailSendError),
+        (smtplib.SMTPDataError(550, b"rejected"), PermanentEmailSendError),
+    ],
+)
+async def test_smtp_errors_are_classified_without_exposing_provider_detail(
+    monkeypatch: pytest.MonkeyPatch,
+    smtp_error: Exception,
+    expected: type[EmailSendError],
+) -> None:
+    """P4 retry classification keeps raw SMTP responses out of task errors."""
+
+    class _RaisingSmtp:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> _RaisingSmtp:
+            raise smtp_error
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    monkeypatch.setattr("app.email.smtp.smtplib.SMTP", _RaisingSmtp)
+    provider = SmtpEmailProvider(host="smtp.example.test", port=25)
+    with pytest.raises(expected) as raised:
+        await provider.send_email(
+            from_address="sender@example.com",
+            to_address="recipient@example.com",
+            subject="Subject",
+            text_body="Body",
+            html_body=None,
+        )
+    assert "credentials" not in str(raised.value)
+    assert "try later" not in str(raised.value)
+    assert "bad credentials" not in str(raised.value)
 
 
 # --- Factory (get_email_provider, wired from settings) ---

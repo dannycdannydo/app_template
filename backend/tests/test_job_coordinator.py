@@ -34,7 +34,7 @@ import socket
 import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, ClassVar, cast
 
@@ -58,6 +58,10 @@ from app.job_coordinator.loop import (
     run_cycle,
     settle_published,
 )
+from app.job_coordinator.reconciliation import (
+    reconcile_queued_jobs,
+    schedule_maintenance_events,
+)
 from app.job_coordinator.registry import DispatchRegistry
 from app.modules.jobs import service as jobs_service
 from app.modules.jobs.models import Job
@@ -65,6 +69,7 @@ from app.modules.organisations.models import Organisation
 from app.modules.outbox.contracts import (
     EVENT_TYPE_AI_RETENTION,
     EVENT_TYPE_JOB_DISPATCH,
+    EVENT_TYPE_TRANSFER_RECONCILE,
     EVENT_VERSION_JOB_DISPATCH,
     OutboxContractError,
 )
@@ -325,6 +330,235 @@ def _midpoint_jitter(lo: float, hi: float) -> float:
 def _max_jitter(_lo: float, hi: float) -> float:
     """Deterministic jitter returning the upper bound of the delay range."""
     return hi
+
+
+async def test_reconciliation_creates_one_replacement_for_a_stale_queued_job(
+    migrated_database: str,
+) -> None:
+    """P4: a lost published dispatch becomes one new durable outbox intent."""
+    session_factory = _session_factory(migrated_database)
+    async with session_factory() as session:
+        organisation = await _create_org(session)
+        job = await jobs_service.schedule_job(
+            session,
+            organisation_id=organisation.id,
+            job_type="file.processing",
+            input_reference="file-1",
+        )
+        initial_dispatch = job.dispatch_id
+        assert initial_dispatch is not None
+        await session.execute(
+            text(
+                "UPDATE outbox_events SET status = 'published', processed_at = now() - interval '901 seconds' "
+                "WHERE id = :event_id"
+            ),
+            {"event_id": initial_dispatch},
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        reconciled = await reconcile_queued_jobs(
+            session,
+            now=datetime.now(UTC),
+            threshold_seconds=900,
+            cooldown_seconds=900,
+            limit=10,
+        )
+    assert reconciled == [job.id]
+    async with session_factory() as session:
+        events = (
+            await session.scalars(
+                select(OutboxEvent)
+                .where(OutboxEvent.aggregate_id == job.id)
+                .order_by(OutboxEvent.created_at.asc())
+            )
+        ).all()
+        refreshed = await session.get(Job, job.id)
+        assert len(events) == 2
+        assert events[-1].status is OutboxEventStatus.PENDING
+        assert refreshed is not None and refreshed.dispatch_id == events[-1].id
+
+    # The active replacement prevents a second concurrent/cooled-down pass.
+    async with session_factory() as session:
+        assert not await reconcile_queued_jobs(
+            session,
+            now=datetime.now(UTC),
+            threshold_seconds=900,
+            cooldown_seconds=900,
+            limit=10,
+        )
+
+    # Clean up so later tests' due-event counts stay independent.
+    async with session_factory() as session:
+        await session.execute(
+            text("DELETE FROM outbox_events WHERE aggregate_id = :jid"),
+            {"jid": job.id},
+        )
+        await session.execute(text("DELETE FROM jobs WHERE id = :jid"), {"jid": job.id})
+        await session.commit()
+
+
+async def test_maintenance_schedule_tick_is_deduplicated(migrated_database: str) -> None:
+    """P4: duplicate coordinator ticks create one event per maintenance kind."""
+    session_factory = _session_factory(migrated_database)
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        assert (
+            await schedule_maintenance_events(
+                session,
+                now=now,
+                ai_retention_interval_hours=24,
+                transfer_reconcile_interval_hours=1,
+            )
+            == 2
+        )
+    async with session_factory() as session:
+        assert (
+            await schedule_maintenance_events(
+                session,
+                now=now,
+                ai_retention_interval_hours=24,
+                transfer_reconcile_interval_hours=1,
+            )
+            == 0
+        )
+
+    # Clean up so later tests remain independent.
+    async with session_factory() as session:
+        await session.execute(
+            text("DELETE FROM outbox_events WHERE event_type IN (:a, :t)"),
+            {"a": EVENT_TYPE_AI_RETENTION, "t": EVENT_TYPE_TRANSFER_RECONCILE},
+        )
+        await session.commit()
+
+
+async def test_concurrent_reconciliation_enforces_cooldown(migrated_database: str) -> None:
+    """P4: concurrent coordinators reconcile disjoint jobs and honour cooldown.
+
+    Two coordinators race on ``reconcile_queued_jobs`` which locks candidate
+    rows with ``FOR UPDATE SKIP LOCKED``. Neither can create a replacement
+    for the same job, and the cooldown-scoped deduplication key prevents a
+    second recovery dispatch within the same bucket.
+    """
+    session_factory = _session_factory(migrated_database)
+    async with session_factory() as session:
+        organisation = await _create_org(session)
+        job_ids: list[uuid.UUID] = []
+        for _ in range(4):
+            job = await jobs_service.schedule_job(
+                session,
+                organisation_id=organisation.id,
+                job_type="file.processing",
+                input_reference="file-1",
+            )
+            job_ids.append(job.id)
+            await session.execute(
+                text(
+                    "UPDATE outbox_events SET status = 'published', processed_at = now() - interval '901 seconds' "
+                    "WHERE id = :event_id"
+                ),
+                {"event_id": job.dispatch_id},
+            )
+        await session.commit()
+
+    now = datetime.now(UTC)
+    results_a: list[uuid.UUID] = []
+    results_b: list[uuid.UUID] = []
+    barrier = asyncio.Event()
+
+    async def _reconcile_a() -> None:
+        barrier.set()
+        async with session_factory() as session:
+            results_a.extend(
+                await reconcile_queued_jobs(
+                    session,
+                    now=now,
+                    threshold_seconds=900,
+                    cooldown_seconds=900,
+                    limit=10,
+                )
+            )
+
+    async def _reconcile_b() -> None:
+        await barrier.wait()
+        async with session_factory() as session:
+            results_b.extend(
+                await reconcile_queued_jobs(
+                    session,
+                    now=now,
+                    threshold_seconds=900,
+                    cooldown_seconds=900,
+                    limit=10,
+                )
+            )
+
+    await asyncio.gather(_reconcile_a(), _reconcile_b())
+    # The two coordinators must never reconcile the same job.
+    assert set(results_a).isdisjoint(set(results_b))
+    # Every stale job was recovered by exactly one coordinator.
+    assert set(results_a) | set(results_b) == set(job_ids)
+
+    # A third pass within the cooldown reconciles nothing.
+    async with session_factory() as session:
+        assert not await reconcile_queued_jobs(
+            session,
+            now=now,
+            threshold_seconds=900,
+            cooldown_seconds=900,
+            limit=10,
+        )
+
+    # Clean up all outbox events and jobs created by this test so later
+    # tests' due-event assertions remain independent.
+    async with session_factory() as session:
+        for jid in job_ids:
+            await session.execute(
+                text("DELETE FROM outbox_events WHERE aggregate_id = :jid"),
+                {"jid": jid},
+            )
+            await session.execute(text("DELETE FROM jobs WHERE id = :jid"), {"jid": jid})
+        await session.commit()
+
+
+async def test_concurrent_maintenance_ticks_create_one_event_each(
+    migrated_database: str,
+) -> None:
+    """P4: concurrent schedule ticks converge through the unique key.
+
+    Two coordinators race ``schedule_maintenance_events`` simultaneously;
+    the unique deduplication key is the concurrency boundary, so each
+    event type gets exactly one row regardless of how many ticks overlap.
+    Uses a distinct ``now`` from ``test_maintenance_schedule_tick_is_deduplicated``
+    so the unique keys do not collide.
+    """
+    session_factory = _session_factory(migrated_database)
+    now = datetime.now(UTC) + timedelta(days=1)
+    counts: list[int] = []
+    barrier = asyncio.Event()
+
+    async def _tick() -> None:
+        barrier.set()
+        async with session_factory() as session:
+            counts.append(
+                await schedule_maintenance_events(
+                    session,
+                    now=now,
+                    ai_retention_interval_hours=24,
+                    transfer_reconcile_interval_hours=1,
+                )
+            )
+
+    await asyncio.gather(_tick(), _tick())
+    # The two ticks together created exactly 2 events (one per type).
+    assert sum(counts) == 2
+
+    # Clean up the schedule events so later tests are independent.
+    async with session_factory() as session:
+        await session.execute(
+            text("DELETE FROM outbox_events WHERE event_type IN (:a, :t)"),
+            {"a": EVENT_TYPE_AI_RETENTION, "t": EVENT_TYPE_TRANSFER_RECONCILE},
+        )
+        await session.commit()
 
 
 # --- Pure helpers -------------------------------------------------------------

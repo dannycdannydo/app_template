@@ -136,6 +136,9 @@ async def mark_job_failed_after_retries(
             logger.warning("job.retries_exhausted.skipped", reason="stale_dispatch")
             return
         logger.info("job.retries_exhausted.recorded")
+        hook = jobs_service.get_exhaustion_hook(settled.job_type)
+        if hook is not None:
+            await hook(session, job_id=job_id)
 
 
 mark_job_failed_after_retries_actor = dramatiq.actor(

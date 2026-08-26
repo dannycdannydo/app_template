@@ -38,7 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import NullPool
 
 from app.core.exceptions import NotFoundError
-from app.email.base import EmailSendError
+from app.email.base import EmailSendError, TransientEmailSendError
 from app.modules.audit.models import AuditEvent
 from app.modules.jobs import service as jobs_service
 from app.modules.jobs.models import Job, JobStatus
@@ -698,6 +698,51 @@ async def test_send_notification_email_task_failure_is_permanent(
             )
             assert audit is not None
             assert audit.organisation_id == org.id
+            assert audit.event_metadata is not None
+            assert audit.event_metadata.get("channel") == "email"
+            assert audit.event_metadata.get("error") == "relay refused the message"
+            assert audit.event_metadata.get("delivery_id") is not None
+    finally:
+        await engine.dispose()
+
+
+async def test_send_notification_email_task_transient_failure_requeues_delivery(
+    migrated_database: str,
+    task_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P4: retryable SMTP failures leave both delivery and job retryable."""
+    engine = create_async_engine(migrated_database, poolclass=NullPool)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    class _TransientProvider:
+        async def send_email(self, **kwargs: Any) -> Any:
+            raise TransientEmailSendError("temporary relay outage")
+
+    monkeypatch.setattr(notifications_tasks, "get_email_provider", lambda: _TransientProvider())
+    try:
+        async with session_factory() as session:
+            org, user = await _seed_org_and_user(session)
+            _notification, delivery, job = await notifications_service.send_test_notification(
+                session,
+                organisation_id=org.id,
+                user_id=user.id,
+                recipient_email=user.email,
+                actor_user_id=user.id,
+            )
+            job_id = job.id
+            delivery_id = delivery.id
+
+        with pytest.raises(TransientEmailSendError):
+            await notifications_tasks.send_notification_email(str(job_id))
+
+        async with session_factory() as session:
+            delivery = await session.get(NotificationDelivery, delivery_id)
+            job = await session.get(Job, job_id)
+            assert delivery is not None and delivery.status == NotificationDeliveryStatus.QUEUED
+            assert delivery.attempt_count == 1
+            assert job is not None and job.status == JobStatus.QUEUED
+            assert job.error_code is None
     finally:
         await engine.dispose()
 
