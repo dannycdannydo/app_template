@@ -1,6 +1,6 @@
 # Durable Job Delivery Hardening Plan
 
-Status: Active
+Status: Complete
 
 ## Goal
 
@@ -104,19 +104,19 @@ and the intent to publish it; Redis remains the transient execution broker.
 
 ## Out of scope
 
-| Capability | Boundary |
-| --- | --- |
-| Supabase Queues, Supabase Cron or Edge Functions | explicitly excluded |
-| Replacing Redis or Dramatiq | retain the accepted ADR-0004 stack |
-| Separate worker pools per queue | defer until production load/backlog evidence justifies the operational cost |
-| A general scanner that replays arbitrary stale `running` jobs | deferred; this plan only adds the execution lease required for message redelivery and duplicate exclusion |
-| Public replay/cancel/admin endpoints or frontend job controls | operator CLI and runbook only; no API or permission surface changes |
-| Exactly-once execution | impossible across database, broker and external providers; guarantee at-least-once delivery plus ownership and idempotency |
-| DAGs, priorities, workflow orchestration or a worker dashboard | remain post-v1 concerns |
-| New document-processing features | this plan hardens delivery of existing file, email, AI and maintenance work |
-| Changes to authentication, roles or tenant permissions | existing job/file/notification/AI gates remain unchanged |
-| Rewriting historical release contracts | `TEMPLATE_V0_5_SCOPE.md` and later scope files remain historical records; the new plan, blueprint amendment and ADR record the change |
-| General Prometheus multiprocess aggregation | database-backed coordinator gauges are added to the API metrics surface; broader worker-counter aggregation remains separate work |
+| Capability                                                     | Boundary                                                                                                                              |
+| -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| Supabase Queues, Supabase Cron or Edge Functions               | explicitly excluded                                                                                                                   |
+| Replacing Redis or Dramatiq                                    | retain the accepted ADR-0004 stack                                                                                                    |
+| Separate worker pools per queue                                | defer until production load/backlog evidence justifies the operational cost                                                           |
+| A general scanner that replays arbitrary stale `running` jobs  | deferred; this plan only adds the execution lease required for message redelivery and duplicate exclusion                             |
+| Public replay/cancel/admin endpoints or frontend job controls  | operator CLI and runbook only; no API or permission surface changes                                                                   |
+| Exactly-once execution                                         | impossible across database, broker and external providers; guarantee at-least-once delivery plus ownership and idempotency            |
+| DAGs, priorities, workflow orchestration or a worker dashboard | remain post-v1 concerns                                                                                                               |
+| New document-processing features                               | this plan hardens delivery of existing file, email, AI and maintenance work                                                           |
+| Changes to authentication, roles or tenant permissions         | existing job/file/notification/AI gates remain unchanged                                                                              |
+| Rewriting historical release contracts                         | `TEMPLATE_V0_5_SCOPE.md` and later scope files remain historical records; the new plan, blueprint amendment and ADR record the change |
+| General Prometheus multiprocess aggregation                    | database-backed coordinator gauges are added to the API metrics surface; broader worker-counter aggregation remains separate work     |
 
 ## Decisions and assumptions
 
@@ -288,17 +288,17 @@ cd backend && uv run pytest tests/test_outbox_db.py tests/test_job_coordinator.p
 
 ### Capability traceability
 
-| Observable requirement | Acceptance | Checkpoint | Consumer/operation | Required evidence |
-| --- | --- | --- | --- | --- |
-| Atomic durable scheduling | AC1–AC2 | P1, P3 | file completion, notification creation, async AI classification | PostgreSQL transaction/rollback tests and structural no-direct-send test |
-| Safe duplicate and retry execution | AC4–AC6 | P2 | all durable Dramatiq actors | concurrent duplicate, transient retry, lease expiry and stale-owner tests |
-| Reliable outbox publication | AC2–AC3 | P3 | `make coordinator`, Compose `coordinator` | multi-publisher, Redis outage/recovery and crash-window tests |
-| Automatic queued-job recovery | AC7, AC11–AC13 | P4, P5 | coordinator reconciliation and guarded CLI | threshold/cooldown, dry-run/apply and Redis-loss tests |
-| Correct email retry behaviour | AC8 | P4 | `notification.email` | SMTP taxonomy, eventual success, permanent failure and exhaustion tests |
-| Reliable maintenance scheduling | AC9 | P4 | AI retention and provider-file reconciliation actors | UTC-bucket deduplication and advisory-lock tests |
-| Operational visibility and recovery | AC10–AC13 | P5 | `/metrics`, logs, commands and runbooks | metric values, safe-log assertions, failure-injection and cleanup tests |
-| Accurate architecture contract | AC14 | P1, P6 | contributors and operators | ADR/blueprint/doc consistency review and stale-claim searches |
-| No public-contract regression | AC6, AC11, AC15 | P2–P6 | existing APIs/frontend | API/security suites, generated-client drift check, `make check`, `make e2e` |
+| Observable requirement              | Acceptance      | Checkpoint | Consumer/operation                                              | Required evidence                                                           |
+| ----------------------------------- | --------------- | ---------- | --------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| Atomic durable scheduling           | AC1–AC2         | P1, P3     | file completion, notification creation, async AI classification | PostgreSQL transaction/rollback tests and structural no-direct-send test    |
+| Safe duplicate and retry execution  | AC4–AC6         | P2         | all durable Dramatiq actors                                     | concurrent duplicate, transient retry, lease expiry and stale-owner tests   |
+| Reliable outbox publication         | AC2–AC3         | P3         | `make coordinator`, Compose `coordinator`                       | multi-publisher, Redis outage/recovery and crash-window tests               |
+| Automatic queued-job recovery       | AC7, AC11–AC13  | P4, P5     | coordinator reconciliation and guarded CLI                      | threshold/cooldown, dry-run/apply and Redis-loss tests                      |
+| Correct email retry behaviour       | AC8             | P4         | `notification.email`                                            | SMTP taxonomy, eventual success, permanent failure and exhaustion tests     |
+| Reliable maintenance scheduling     | AC9             | P4         | AI retention and provider-file reconciliation actors            | UTC-bucket deduplication and advisory-lock tests                            |
+| Operational visibility and recovery | AC10–AC13       | P5         | `/metrics`, logs, commands and runbooks                         | metric values, safe-log assertions, failure-injection and cleanup tests     |
+| Accurate architecture contract      | AC14            | P1, P6     | contributors and operators                                      | ADR/blueprint/doc consistency review and stale-claim searches               |
+| No public-contract regression       | AC6, AC11, AC15 | P2–P6      | existing APIs/frontend                                          | API/security suites, generated-client drift check, `make check`, `make e2e` |
 
 ## Implementation checkpoints
 
@@ -307,25 +307,25 @@ cd backend && uv run pytest tests/test_outbox_db.py tests/test_job_coordinator.p
 Dependencies: none
 
 - [x] Add `docs/decisions/0019-harden-dramatiq-delivery-with-an-outbox.md`
-  recording the retained Dramatiq/Redis decision, rejected alternatives,
-  PostgreSQL/Redis responsibilities, at-least-once guarantee, coordinator,
-  execution ownership, rollout/rollback and absence of new dependencies; amend
-  ADR-0004 with a clear pointer to the new decision.
+      recording the retained Dramatiq/Redis decision, rejected alternatives,
+      PostgreSQL/Redis responsibilities, at-least-once guarantee, coordinator,
+      execution ownership, rollout/rollback and absence of new dependencies; amend
+      ADR-0004 with a clear pointer to the new decision.
 - [x] Add `app/modules/outbox/` with ORM status/model, strict internal event
-  payload contracts, query helpers and service boundaries matching existing
-  module patterns; keep all complex claim/reconciliation SQL in `queries.py`
-  and prohibit arbitrary actor/function names in persisted payloads.
+      payload contracts, query helpers and service boundaries matching existing
+      module patterns; keep all complex claim/reconciliation SQL in `queries.py`
+      and prohibit arbitrary actor/function names in persisted payloads.
 - [x] Extend the `Job` persistence model with internal dispatch identity and
-  execution-lease fields, including database constraints/indexes that support
-  ownership and queued reconciliation without altering API schemas.
+      execution-lease fields, including database constraints/indexes that support
+      ownership and queued reconciliation without altering API schemas.
 - [x] Add one additive Alembic migration creating `outbox_events` and the job
-  columns, with upgrade/downgrade coverage, UUID/check/status constraints,
-  unique deduplication keys and indexes for due claims, aggregate history,
-  stale claim recovery and published retention.
+      columns, with upgrade/downgrade coverage, UUID/check/status constraints,
+      unique deduplication keys and indexes for due claims, aggregate history,
+      stale claim recovery and published retention.
 - [x] Add database tests proving job + outbox atomic commit/rollback, tenant
-  association, maintenance-event null-organisation rules, deduplication,
-  payload bounds, state constraints and migration upgrade/downgrade; confirm
-  the generated OpenAPI client is unchanged.
+      association, maintenance-event null-organisation rules, deduplication,
+      payload bounds, state constraints and migration upgrade/downgrade; confirm
+      the generated OpenAPI client is unchanged.
 
 Human review required before application: none; the migration is additive and non-destructive.
 
@@ -334,26 +334,26 @@ Human review required before application: none; the migration is additive and no
 Dependencies: P1
 
 - [x] Replace permissive `mark_running` behaviour with atomic claim, lease
-  renewal, transient release and owner-checked progress/success/failure helpers.
-  Existing messages still carry only `job_id`; a non-terminal legacy row with
-  no dispatch id receives one atomically on first claim.
+      renewal, transient release and owner-checked progress/success/failure helpers.
+      Existing messages still carry only `job_id`; a non-terminal legacy row with
+      no dispatch id receives one atomically on first claim.
 - [x] Add a shared durable-actor execution wrapper that captures the dispatch
-  owner, defers a duplicate until its active lease expires, releases ownership
-  before propagating a transient error, preserves permanent-failure semantics
-  and prevents a stale attempt from settling a newer owner.
+      owner, defers a duplicate until its active lease expires, releases ownership
+      before propagating a transient error, preserves permanent-failure semantics
+      and prevents a stale attempt from settling a newer owner.
 - [x] Apply the wrapper/owner token contract to file processing, notification
-  email and AI execution while preserving each domain service, progress,
-  audit, provider and terminal-idempotency boundary; update the retries-
-  exhausted actor to settle only the currently owned dispatch.
+      email and AI execution while preserving each domain service, progress,
+      audit, provider and terminal-idempotency boundary; update the retries-
+      exhausted actor to settle only the currently owned dispatch.
 - [x] Put the 600,000 ms task time limit into the shared retry policy, add the
-  900-second execution-lease setting and startup validation, renew leases on
-  progress, and add bounded safe structured logs for claimed, deferred,
-  released, taken-over and stale-settlement outcomes.
+      900-second execution-lease setting and startup validation, renew leases on
+      progress, and add bounded safe structured logs for claimed, deferred,
+      released, taken-over and stale-settlement outcomes.
 - [x] Add unit and real-database tests for simultaneous duplicate claims,
-  sequential retry, transient release, lease renewal/expiry takeover,
-  terminal duplicates, stale-owner progress/success/failure, exhausted stale
-  messages and old one-argument broker messages; keep existing file/email/AI
-  lifecycle tests green.
+      sequential retry, transient release, lease renewal/expiry takeover,
+      terminal duplicates, stale-owner progress/success/failure, exhausted stale
+      messages and old one-argument broker messages; keep existing file/email/AI
+      lifecycle tests green.
 
 Human review required before application: none.
 
@@ -362,32 +362,32 @@ Human review required before application: none.
 Dependencies: P1, P2
 
 - [x] Add a typed, allow-listed dispatch registry for the three durable job
-  types and two maintenance events. Validate completeness at startup and in
-  tests; registry handlers build only the existing actor message shapes and
-  never resolve code from persisted strings.
+      types and two maintenance events. Validate completeness at startup and in
+      tests; registry handlers build only the existing actor message shapes and
+      never resolve code from persisted strings.
 - [x] Replace `create_and_enqueue` with a transaction-owned scheduling service
-  that writes the job and `job.dispatch_requested` event together, sets the
-  event id as the job dispatch id and commits once. Migrate every file,
-  notification and async-AI producer and remove durable `Actor.send()` calls
-  from API/service paths.
+      that writes the job and `job.dispatch_requested` event together, sets the
+      event id as the job dispatch id and commits once. Migrate every file,
+      notification and async-AI producer and remove durable `Actor.send()` calls
+      from API/service paths.
 - [x] Implement `app.job_coordinator`: bounded due-row claims using
-  `FOR UPDATE SKIP LOCKED`, claim-token guarded settlement, expired-claim
-  recovery, capped exponential retry with jitter, permanent dead-event
-  handling, graceful shutdown and structured logging. Publishing happens
-  outside the row-lock transaction; crash-window duplicates are expected and
-  handled by P2 ownership.
+      `FOR UPDATE SKIP LOCKED`, claim-token guarded settlement, expired-claim
+      recovery, capped exponential retry with jitter, permanent dead-event
+      handling, graceful shutdown and structured logging. Publishing happens
+      outside the row-lock transaction; crash-window duplicates are expected and
+      handled by P2 ownership.
 - [x] Add all typed coordinator/reconciliation/schedule/retention settings and
-  validators to `app.core.config.Settings` and `.env.example` using the settled
-  defaults in this plan; tests cover bounds and the task-time/lease
-  relationship.
+      validators to `app.core.config.Settings` and `.env.example` using the settled
+      defaults in this plan; tests cover bounds and the task-time/lease
+      relationship.
 - [x] Add `make coordinator`, run it alongside API/worker/frontend in
-  `scripts/dev.sh`, and add the same-backend-image `coordinator` service with
-  liveness check, resource/log limits, dependency ordering and graceful stop to
-  both Compose profiles and deployment validation.
+      `scripts/dev.sh`, and add the same-backend-image `coordinator` service with
+      liveness check, resource/log limits, dependency ordering and graceful stop to
+      both Compose profiles and deployment validation.
 - [x] Add structural, unit, PostgreSQL and real-Redis tests proving no producer
-  publishes directly, registry coverage, two-coordinator claim safety,
-  broker-down retry, recovery publication, invalid-event death, crash-after-
-  send duplication and graceful restart without lost pending intent.
+      publishes directly, registry coverage, two-coordinator claim safety,
+      broker-down retry, recovery publication, invalid-event death, crash-after-
+      send duplication and graceful restart without lost pending intent.
 
 Human review required before application: infrastructure changes (new always-on coordinator process and deployment wiring).
 
@@ -400,26 +400,26 @@ stop and rollout order on 2026-08-19.
 Dependencies: P3
 
 - [x] Implement bounded queued-job reconciliation queries and service logic:
-  select only jobs beyond the 900-second threshold, exclude terminal/running
-  jobs and those with pending/publishing dispatches, create a new deduplicated
-  dispatch event and job dispatch id atomically, and enforce the 900-second
-  cooldown under concurrent coordinators.
+      select only jobs beyond the 900-second threshold, exclude terminal/running
+      jobs and those with pending/publishing dispatches, create a new deduplicated
+      dispatch event and job dispatch id atomically, and enforce the 900-second
+      cooldown under concurrent coordinators.
 - [x] Add coordinator UTC-bucket scheduling for daily AI retention and hourly
-  provider-file reconciliation through outbox events; use unique schedule keys
-  plus handler-side PostgreSQL advisory locks, and prove duplicate ticks or
-  messages cannot run the same maintenance sweep concurrently.
+      provider-file reconciliation through outbox events; use unique schedule keys
+      plus handler-side PostgreSQL advisory locks, and prove duplicate ticks or
+      messages cannot run the same maintenance sweep concurrently.
 - [x] Replace the single email exception with provider-neutral transient and
-  permanent subclasses while preserving `EmailSendError` as their common API;
-  classify SMTP network/timeouts/disconnects and 4xx responses as transient,
-  and authentication, recipient-only 5xx and other 5xx responses as permanent.
+      permanent subclasses while preserving `EmailSendError` as their common API;
+      classify SMTP network/timeouts/disconnects and 4xx responses as transient,
+      and authentication, recipient-only 5xx and other 5xx responses as permanent.
 - [x] Update the notification actor/delivery service so transient failures
-  return the delivery to `queued` before Dramatiq retry, permanent failures
-  settle immediately, and retry exhaustion marks both job and delivery failed
-  exactly once through an allow-listed job-type exhaustion hook.
+      return the delivery to `queued` before Dramatiq retry, permanent failures
+      settle immediately, and retry exhaustion marks both job and delivery failed
+      exactly once through an allow-listed job-type exhaustion hook.
 - [x] Add deterministic fake/SMTP exception tests, delivery/audit database
-  tests, coordinator scheduling/reconciliation concurrency tests and real-
-  broker eventual-success/exhaustion journeys. Assert safe error strings do not
-  expose SMTP responses, credentials, recipients or provider internals.
+      tests, coordinator scheduling/reconciliation concurrency tests and real-
+      broker eventual-success/exhaustion journeys. Assert safe error strings do not
+      expose SMTP responses, credentials, recipients or provider internals.
 
 Human review required before application: none.
 
@@ -428,33 +428,34 @@ Human review required before application: none.
 Dependencies: P3, P4
 
 - [x] Extend the API metrics refresh path with database-backed, low-cardinality
-  gauges for outbox rows by status/event type, oldest due-event age and stale
-  queued-job count. Add rate-limited outage/recovery logging and tests proving
-  organisation/job ids, payloads and errors never become metric labels.
+      gauges for outbox rows by status/event type, oldest due-event age and stale
+      queued-job count. Add rate-limited outage/recovery logging and tests proving
+      organisation/job ids, payloads and errors never become metric labels.
 - [x] Add `backend/scripts/reconcile_jobs.py`, `make jobs-reconcile` (read-only)
-  and a `CONFIRM_RECONCILE=1` guarded apply target. Both paths use the same
-  bounded reconciliation service as the coordinator, print counts/opaque ids
-  rather than content, and make repeated application idempotent.
+      and a `CONFIRM_RECONCILE=1` guarded apply target. Both paths use the same
+      bounded reconciliation service as the coordinator, print counts/opaque ids
+      rather than content, and make repeated application idempotent.
 - [x] Implement daily bounded cleanup for published outbox events older than 30
-  days; prove pending, publishing, dead and newer published events cannot be
-  selected, and log only aggregate cleanup counts.
+      days; prove pending, publishing, dead and newer published events cannot be
+      selected, and log only aggregate cleanup counts.
 - [x] Add alerts and operator checks for oldest pending age, dead events, stale
-  queued jobs, coordinator liveness, reconciliation growth and publication
-  recovery. Define warning/critical thresholds and exact inspect/reconcile/
-  restart/escalate steps.
+      queued jobs, coordinator liveness, reconciliation growth and publication
+      recovery. Define warning/critical thresholds and exact inspect/reconcile/
+      restart/escalate steps.
 - [x] Add a real-infrastructure failure suite that stops/unavailable-stubs
-  Redis at controlled boundaries and proves: API commit while broker is down,
-  later publication, publisher crash duplication without concurrent work,
-  worker lease takeover, simulated empty broker queued recovery, email retry
-  recovery/exhaustion and persistence of actionable rows across restart. API
-  commit while the broker is down is covered structurally by the no-producer-
-  sends test, P1 transaction tests and the coordinator's real-Redis outage test.
+      Redis at controlled boundaries and proves: API commit while broker is down,
+      later publication, publisher crash duplication without concurrent work,
+      worker lease takeover, simulated empty broker queued recovery, email retry
+      recovery/exhaustion and persistence of actionable rows across restart. API
+      commit while the broker is down is covered structurally by the no-producer-
+      sends test, P1 transaction tests and the coordinator's real-Redis outage test.
 - [x] Verify existing protected job/file/notification/AI routes and frontend
-  polling remain unchanged, `PROTECTED_ROUTES` stays complete, no new API
-  security cases are required, and generated client output is diff-free.
+      polling remain unchanged, `PROTECTED_ROUTES` stays complete, no new API
+      security cases are required, and generated client output is diff-free.
 
-Human review approval recorded 2026-08-27: the project owner approved the
-backup/recovery and retention changes for local-only use. There is no
+Human review required before application: backup/recovery and guarded
+reconciliation changes require recorded approval. Approval recorded 2026-08-27:
+the project owner approved those changes for local-only use. There is no
 production environment, so no production application of the guarded recovery
 command is in scope.
 
@@ -462,44 +463,44 @@ command is in scope.
 
 Dependencies: P1, P2, P3, P4, P5
 
-- [ ] Update `Internal_Custom_Application_Starter_Architecture_v2.md` §§18–19,
-  §28 and §§35–36 with the job → outbox → coordinator → Redis → worker flow,
-  schemas, ownership/lease rules, maintenance scheduling, new process and
-  explicit at-least-once/queued-recovery limits; remove the inaccurate direct
-  record-then-enqueue guarantee.
-- [ ] Update `ARCHITECTURE.md`, `API_CONVENTIONS.md`, `SECURITY.md`, `README.md`,
-  `.env.example`, Makefile help, module docstrings and relevant ADR-0007/0008
-  deployment/local-development descriptions so contributor and application
-  guidance consistently matches the implemented coordinator/outbox system.
-- [ ] Update `docs/operations.md` with process topology, scaling, settings,
-  health, metrics, alert thresholds, scheduled maintenance, dead-event triage,
-  reconciliation, published cleanup and deployment/rollback runbooks.
-- [ ] Update `docs/backup-and-recovery.md` with PostgreSQL outbox backup/restore,
-  Redis-loss automatic queued recovery, running-job limitations, coordinator
-  restart order, rollback procedure and guarded operator recovery; remove the
-  statement that continuity requires unspecified manual re-enqueueing.
-- [ ] Add a checked task-authoring section documenting registry registration,
-  reference-only payloads, atomic scheduling, execution ownership, transient
-  release, permanent failure, exhaustion hooks, idempotency and tests required
-  for every future durable actor.
-- [ ] Search for and correct stale claims that the API publishes jobs directly,
-  Redis is durable application state, retries provide exactly-once behaviour,
-  or all provider/email failures are permanent. Run every required command and
-  record infrastructure and backup/recovery human-review approval before the
-  final checkpoint is applied.
+- [x] Update `Internal_Custom_Application_Starter_Architecture_v2.md` §§18–19,
+      §28 and §§35–36 with the job → outbox → coordinator → Redis → worker flow,
+      schemas, ownership/lease rules, maintenance scheduling, new process and
+      explicit at-least-once/queued-recovery limits; remove the inaccurate direct
+      record-then-enqueue guarantee.
+- [x] Update `ARCHITECTURE.md`, `API_CONVENTIONS.md`, `SECURITY.md`, `README.md`,
+      `.env.example`, Makefile help, module docstrings and relevant ADR-0007/0008
+      deployment/local-development descriptions so contributor and application
+      guidance consistently matches the implemented coordinator/outbox system.
+- [x] Update `docs/operations.md` with process topology, scaling, settings,
+      health, metrics, alert thresholds, scheduled maintenance, dead-event triage,
+      reconciliation, published cleanup and deployment/rollback runbooks.
+- [x] Update `docs/backup-and-recovery.md` with PostgreSQL outbox backup/restore,
+      Redis-loss automatic queued recovery, running-job limitations, coordinator
+      restart order, rollback procedure and guarded operator recovery; remove the
+      statement that continuity requires unspecified manual re-enqueueing.
+- [x] Add a checked task-authoring section documenting registry registration,
+      reference-only payloads, atomic scheduling, execution ownership, transient
+      release, permanent failure, exhaustion hooks, idempotency and tests required
+      for every future durable actor.
+- [x] Search for and correct stale claims that the API publishes jobs directly,
+      Redis is durable application state, retries provide exactly-once behaviour,
+      or all provider/email failures are permanent. Run every required command and
+      record infrastructure and backup/recovery human-review approval before the
+      final checkpoint is applied.
 
 Human review required before application: infrastructure changes and backup and recovery changes must have recorded human approval before documentation is treated as the deployed contract.
 
 ## Reference map
 
-| Checkpoint | Governing sources | What to extract |
-| --- | --- | --- |
-| P1 | `Internal_Custom_Application_Starter_Architecture_v2.md:1083-1245`; `backend/app/modules/jobs/models.py:1-135`; `backend/app/modules/jobs/service.py:188-253`; existing `backend/alembic/versions/` | Background-job/outbox rules, durable job shape, current dual-write/claim behaviour, model and migration conventions |
-| P2 | `Internal_Custom_Application_Starter_Architecture_v2.md:1140-1192`; `backend/app/modules/jobs/service.py:51-96,232-353`; `backend/app/modules/jobs/tasks.py:41-92`; `backend/app/modules/files/tasks.py`; `backend/app/modules/notifications/tasks.py`; `backend/app/ai/execution.py` | Retry policy, terminal/idempotency rules, worker helper boundaries, actor-specific progress/failure/audit behaviour |
-| P3 | `Internal_Custom_Application_Starter_Architecture_v2.md:1224-1245,2122-2277`; `backend/app/broker.py:22-50`; `backend/app/workers.py:38-54`; `Makefile:31-83`; `scripts/dev.sh`; `deploy/compose/compose.local.yml:153-193`; `deploy/compose/compose.hybrid-vps.yml:129-178` | PostgreSQL durability boundary, broker factory, task registration, one-image/multiple-command convention, native and container process wiring |
-| P4 | `Internal_Custom_Application_Starter_Architecture_v2.md:1140-1158,1249-1285`; `backend/app/email/base.py:19-51`; `backend/app/email/smtp.py:56-85`; `backend/app/modules/notifications/tasks.py:65-180`; `backend/app/ai/persistence/tasks.py` | Transient/permanent retries, email-only-in-workers rule, current collapsed SMTP error handling, maintenance actor contracts |
-| P5 | `Internal_Custom_Application_Starter_Architecture_v2.md:1674-1695,1884-1953`; `backend/app/observability/metrics.py:45-164,307-330`; `docs/operations.md:90-176,220-289`; `docs/backup-and-recovery.md:371-391`; `backend/tests/test_jobs_broker.py` | Metrics/logging constraints, integration-test priority, existing queue alerts and Redis-loss semantics, real-broker test pattern |
-| P6 | `Internal_Custom_Application_Starter_Architecture_v2.md:1083-1245,1674-1695,2122-2277`; `ARCHITECTURE.md:290-322`; `API_CONVENTIONS.md:176-217`; `SECURITY.md:135-169`; `README.md:115-162`; `docs/decisions/0004-use-dramatiq.md`; `docs/decisions/0007-two-deployment-profiles.md`; `docs/decisions/0008-local-development-model.md`; `docs/operations.md`; `docs/backup-and-recovery.md`; `.env.example:157-186` | Canonical architecture, public API non-change, security/privacy limits, developer commands, deployment/operations/recovery documentation that must be made consistent |
+| Checkpoint | Governing sources                                                                                                                                                                                                                                                                                                                                                                                                   | What to extract                                                                                                                                                       |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| P1         | `Internal_Custom_Application_Starter_Architecture_v2.md:1083-1245`; `backend/app/modules/jobs/models.py:1-135`; `backend/app/modules/jobs/service.py:188-253`; existing `backend/alembic/versions/`                                                                                                                                                                                                                 | Background-job/outbox rules, durable job shape, current dual-write/claim behaviour, model and migration conventions                                                   |
+| P2         | `Internal_Custom_Application_Starter_Architecture_v2.md:1140-1192`; `backend/app/modules/jobs/service.py:51-96,232-353`; `backend/app/modules/jobs/tasks.py:41-92`; `backend/app/modules/files/tasks.py`; `backend/app/modules/notifications/tasks.py`; `backend/app/ai/execution.py`                                                                                                                               | Retry policy, terminal/idempotency rules, worker helper boundaries, actor-specific progress/failure/audit behaviour                                                   |
+| P3         | `Internal_Custom_Application_Starter_Architecture_v2.md:1224-1245,2122-2277`; `backend/app/broker.py:22-50`; `backend/app/workers.py:38-54`; `Makefile:31-83`; `scripts/dev.sh`; `deploy/compose/compose.local.yml:153-193`; `deploy/compose/compose.hybrid-vps.yml:129-178`                                                                                                                                        | PostgreSQL durability boundary, broker factory, task registration, one-image/multiple-command convention, native and container process wiring                         |
+| P4         | `Internal_Custom_Application_Starter_Architecture_v2.md:1140-1158,1249-1285`; `backend/app/email/base.py:19-51`; `backend/app/email/smtp.py:56-85`; `backend/app/modules/notifications/tasks.py:65-180`; `backend/app/ai/persistence/tasks.py`                                                                                                                                                                      | Transient/permanent retries, email-only-in-workers rule, current collapsed SMTP error handling, maintenance actor contracts                                           |
+| P5         | `Internal_Custom_Application_Starter_Architecture_v2.md:1674-1695,1884-1953`; `backend/app/observability/metrics.py:45-164,307-330`; `docs/operations.md:90-176,220-289`; `docs/backup-and-recovery.md:371-391`; `backend/tests/test_jobs_broker.py`                                                                                                                                                                | Metrics/logging constraints, integration-test priority, existing queue alerts and Redis-loss semantics, real-broker test pattern                                      |
+| P6         | `Internal_Custom_Application_Starter_Architecture_v2.md:1083-1245,1674-1695,2122-2277`; `ARCHITECTURE.md:290-322`; `API_CONVENTIONS.md:176-217`; `SECURITY.md:135-169`; `README.md:115-162`; `docs/decisions/0004-use-dramatiq.md`; `docs/decisions/0007-two-deployment-profiles.md`; `docs/decisions/0008-local-development-model.md`; `docs/operations.md`; `docs/backup-and-recovery.md`; `.env.example:157-186` | Canonical architecture, public API non-change, security/privacy limits, developer commands, deployment/operations/recovery documentation that must be made consistent |
 
 ## API, data and security impact
 

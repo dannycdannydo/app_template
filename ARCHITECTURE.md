@@ -104,7 +104,7 @@ AIService.execute(task=...)          app/ai/service.py
   staging objects are AI-owned derivatives and deletion never touches the
   feature-owned source; caller-supplied HTTP(S) URLs remain prohibited.
 - Small bounded tasks run synchronously; document-scale work enqueues an
-  `ai.execute` job on the `ai` queue with the durable record-then-enqueue
+  `ai.execute` job on the `ai` queue with the durable scheduling/outbox
   lifecycle. Organisation AI settings are default-off, use versioned full
   replacements so stale platform-admin writes return 409, and are
   budget-enforced in `AIService`; content never reaches logs, Sentry or audit
@@ -287,25 +287,44 @@ object from storage (document.deleted audit)
 
 File lifecycle statuses: `pending → uploaded → processing → ready` with the failure states `failed` / `quarantined` and the soft-delete state `deleted`. Every transition is audited append-only (`file.upload_started`, `file.uploaded`, `file.upload_failed`, `file.processing`, `file.ready`, `document.deleted`). A stored object whose size does not match the declared `size_bytes` fails the file at completion.
 
-## Worker and durable job flow (v0.5)
+## Durable jobs, outbox and coordinator
 
-Long-running work runs in Dramatiq workers, never in HTTP handlers (ADR-0004, blueprint §18). The worker is the same backend image running `uv run dramatiq app.workers` (`make worker`, the `dev-docker` `worker` service, and natively as part of `make dev`), with Redis as the broker on `REDIS_URL`.
+Long-running work runs in Dramatiq workers, never HTTP handlers (ADR-0004 and ADR-0019). The API, worker and coordinator use the same backend image under separate commands: `make worker` runs `uv run dramatiq app.workers`; `make coordinator` runs `uv run python -m app.job_coordinator`; `make dev` starts both natively, and `dev-docker` starts both services.
 
-Jobs are durable, tenant-scoped rows in the `jobs` table. The service writes the row before enqueuing (record-then-enqueue), so a durable `queued` record exists even if the broker is down, and the bounded retry policy self-heals a job that was never picked up:
+PostgreSQL, not Redis, is the scheduling source of truth. `schedule_job` writes the tenant-scoped `queued` job and a strict, reference-only `job.dispatch_requested` outbox event in one transaction. The standalone coordinator claims pending events in bounded `FOR UPDATE SKIP LOCKED` batches, publishes through a checked-in job/event allow-list, then settles each event with its claim token:
 
 ```text
-HTTP request → jobs_service.create_and_enqueue()   writes `queued` row, then
-                                                   enqueues the task
-        │
-        ▼
-Dramatiq worker → mark_running → update_progress(0–100) → succeed | fail
-        │                                                        │
-        ▼                                                        ▼
-job `succeeded`, file `ready`                     job `failed` + error_code/error_message,
-(job.succeeded audit)                             file `failed` (job.failed audit)
+request → job + outbox event committed in PostgreSQL
+                         │
+                         ▼
+coordinator → Redis/Dramatiq message containing only job_id
+                         │
+                         ▼
+worker → atomic dispatch claim → progress (0–100) → succeed | fail
 ```
 
-Retries are bounded: transient errors retry up to `MAX_ATTEMPTS` total attempts; permanent validation errors are not retried. Terminal states (`succeeded` / `failed` / `cancelled`) are never re-run, and completion/failure is idempotent. The org-scoped job endpoints `GET /api/v1/jobs` (list, paginated, `status` / `job_type` filters) and `GET /api/v1/jobs/{job_id}` (status + progress 0–100) let the frontend poll a processing file to completion; they are gated by `documents.read` (ADR-0014 — the files module is the only job producer today, so a generic `jobs.*` permission waits for a second producer).
+Redis publication failures are retried durably with capped backoff; malformed or unsupported events become `dead` for operator triage. A crash after Redis accepts a message but before the outbox row is settled may republish it. Delivery is therefore **at-least-once**, not exactly-once. An execution lease and owner token prevent two copies from running business work concurrently; stale owners cannot mutate progress or settle a newer attempt, and domain handlers remain idempotent for side effects.
+
+Transient worker errors release the owned dispatch to `queued` for bounded Dramatiq retry; permanent errors settle immediately. Terminal states (`succeeded` / `failed` / `cancelled`) never run again. The coordinator also creates deduplicated hourly/daily maintenance events and re-dispatches only suitably old queued jobs under a cooldown. The public polling routes are unchanged: `GET /api/v1/jobs` and `GET /api/v1/jobs/{job_id}` remain org-scoped and gated by `documents.read` (ADR-0014).
+
+### Authoring a durable actor
+
+Every new durable actor must be reviewed as a scheduling and ownership change.
+
+1. Define a stable job type and register its actor in the checked-in dispatch
+   registry; never persist an import path or actor name.
+2. Schedule it only through `jobs.service.schedule_job`, which writes the job
+   and reference-only outbox event atomically. Do not call `Actor.send()` from
+   a route, service or domain event handler.
+3. Accept only `job_id`, use the shared durable execution wrapper, and keep
+   business work idempotent. Progress and settlement must use its owner-checked
+   helpers; transient errors release ownership before retry, while permanent
+   errors fail the job directly.
+4. Add an allow-listed exhaustion hook if the durable job owns another domain
+   record that must be settled with retry exhaustion.
+5. Add unit, database and broker-path tests for registry completeness,
+   atomic scheduling, duplicate/lease behaviour, transient/permanent failure,
+   idempotency and any side-effect/audit boundary.
 
 ## Observability (v0.6)
 

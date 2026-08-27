@@ -24,7 +24,7 @@ Three questions had to be answered:
 
 - **Durable Dramatiq job per delivery (adopted)**: each email delivery runs
   as a `notification.email` job through the v0.5 job service with the durable
-  record-then-enqueue lifecycle, bounded retries and idempotency that
+  transactional scheduling/outbox lifecycle, bounded retries and idempotency that
   pipeline already owns (blueprint §18). In-app notifications need no job —
   they are written in the request transaction.
 - **Send from the HTTP handler**: violates blueprint §20 ("email sent through

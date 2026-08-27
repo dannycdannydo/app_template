@@ -16,8 +16,8 @@ The template targets UK SME/corporate clients with different operational budgets
 
 Support **two deployment profiles** in the template (blueprint §35):
 
-1. **Hybrid VPS**: Caddy, Vue static frontend, FastAPI, Dramatiq worker, Redis on the VPS; managed PostgreSQL, object storage, WorkOS, email, and monitoring externally.
-2. **Fully managed**: containers on a managed platform with managed PostgreSQL, Redis, object storage, static frontend/CDN, and monitoring.
+1. **Hybrid VPS**: Caddy, Vue static frontend, FastAPI, Dramatiq worker, outbox coordinator and Redis on the VPS; managed PostgreSQL, object storage, WorkOS, email, and monitoring externally.
+2. **Fully managed**: API, Dramatiq worker and outbox coordinator containers on a managed platform with managed PostgreSQL, Redis, object storage, static frontend/CDN, and monitoring.
 
 The same immutable backend image is used everywhere; provider-specific infrastructure files live under `deploy/` (`hybrid-vps/`, `managed/`). The starter ships one complete managed reference deployment, likely Azure, and adds AWS/GCP when a real project requires them.
 
@@ -26,5 +26,8 @@ The same immutable backend image is used everywhere; provider-specific infrastru
 - Deployment is a configuration exercise, not a code fork.
 - The template must keep the two profiles documented and validated so neither rots.
 - Hybrid VPS mandates operational protections (firewall, SSH keys only, non-public Redis, backups, monitoring) that are documented in `SECURITY.md` and blueprint §35.1.
+- Both profiles run the same backend image as API, worker and coordinator. The
+  coordinator is required wherever durable jobs are enabled: PostgreSQL holds
+  scheduling intent and Redis is only transient execution transport (ADR-0019).
 
 ---

@@ -1,4 +1,5 @@
 # Internal Custom Application Starter
+
 ## Architecture Blueprint — Version 2
 
 ## 1. Purpose
@@ -1088,16 +1089,20 @@ Use:
 - Redis
 - PostgreSQL job records
 
-Flow:
+Durable-delivery flow:
 
 ```text
 FastAPI request
       │
       ▼
-Create durable job record
+Create durable job record + job.dispatch_requested outbox event
+in one PostgreSQL transaction
       │
       ▼
-Enqueue task in Redis
+Coordinator claims and publishes the outbox event
+      │
+      ▼
+Redis / Dramatiq broker (transient execution transport)
       │
       ▼
 Dramatiq worker
@@ -1125,6 +1130,8 @@ created_by_user_id
 created_at
 started_at
 completed_at
+dispatch_id                 # internal current outbox-dispatch identity
+execution_lease_expires_at  # internal worker-ownership expiry
 ```
 
 ## Statuses
@@ -1143,17 +1150,31 @@ cancelled
 - Workers must be idempotent where practical.
 - Retry transient errors.
 - Do not retry permanent validation errors indefinitely.
+- A durable producer writes the job and a reference-only
+  `job.dispatch_requested` outbox event in one PostgreSQL transaction; it
+  does not call an actor's `send()` method.
+- A coordinator is the only production publisher. It claims due outbox rows
+  with short `FOR UPDATE SKIP LOCKED` transactions, publishes outside the row
+  lock through a checked-in allow-list, and settles with a claim token.
+- Worker execution is at-least-once, not exactly-once. A worker atomically
+  claims one dispatch with an execution lease; duplicate messages defer while
+  that lease is live. Every progress, success, failure and transient-release
+  mutation verifies the captured owner token. Expired leases may be taken
+  over, so domain work must still be idempotent.
+- Broker messages carry a durable job id only. Actor selection and routing
+  come from an internal allow-listed registry, never an importable function
+  name or arbitrary persisted payload.
 - Heavy workloads may use separate queues.
 - Worker concurrency must be configurable.
 - AI work (v0.7) always runs through `AIService`, which keeps a bounded
   synchronous path for small tasks and an `ai.execute` job on the `ai` queue
-  for document-scale work; the durable record-then-enqueue rules below apply
+  for document-scale work; the durable scheduling/outbox rules below apply
   unchanged, and worker logs/metrics carry `ai_request_id` alongside `job_id`.
 - AI large-file transfers (v0.8) keep broker messages reference-only: retries
   re-head and re-digest the private source before reuse or upload, worker
   memory/concurrency stay bounded, and terminal outcomes trigger cleanup
   without duplicate output/cost records. A bounded Dramatiq reconciliation job
-  covers only expired, orphaned or deletion-failed *provider-file* references;
+  covers only expired, orphaned or deletion-failed _provider-file_ references;
   it never processes managed signed URLs, GCS staging objects or feature-owned
   sources (Scope §2.5, §6.7).
 
@@ -1167,29 +1188,26 @@ ai
 emails
 ```
 
-## Durable job records (v0.5)
+## Durable delivery (v0.5, hardened)
 
-The v0.5 release adds the durable `jobs` table and the record-then-enqueue
-service:
+PostgreSQL is the scheduling source of truth; Redis executes accepted work but
+is not durable application state. `schedule_job` writes a `queued` job and its
+outbox event together, then the coordinator publishes it. Temporary broker
+unavailability therefore cannot prevent the request transaction from committing.
 
-- `create_and_enqueue` writes the durable row (status `queued`) in the
-  request's transaction before the task is enqueued, so a row exists even if
-  the broker is unreachable; the bounded retry policy self-heals a job that
-  was never picked up.
-- The worker writes status, `attempt_count`, `started_at`/`completed_at` and
-  progress through the `mark_running`, `update_progress`, `succeed` and
-  `fail` helpers; terminal states (`succeeded`/`failed`/`cancelled`) are
-  never re-run.
-- Retries are bounded: transient errors retry up to `MAX_ATTEMPTS` total
-  attempts; permanent validation errors are not retried and fail the job
-  immediately. Completion and permanent failure write `job.succeeded` /
-  `job.failed` audit rows in the same transaction as the status transition.
-- The job endpoints (`GET /api/v1/jobs`, `GET /api/v1/jobs/{job_id}`) are
-  org-scoped and gated by the file module's `documents.read` code; a generic
-  `jobs.*` permission is deferred until a second job producer appears (rule
-  of three).
-- Long-running work never runs in HTTP handlers; the worker is the same
-  backend image running `uv run dramatiq app.workers` (see §36).
+Outbox events move through `pending`, `publishing`, `published` or `dead`.
+Temporary publication failures use durable capped backoff; malformed/unknown
+events become `dead` for operator investigation. A coordinator crash after a
+broker publish and before settlement can cause a duplicate message. This is an
+intentional at-least-once limit, made safe by worker ownership and idempotent
+domain handlers—not an exactly-once guarantee.
+
+The worker records `attempt_count`, `started_at`/`completed_at` and progress
+through owner-checked helpers. Transient failures release a still-owned attempt
+back to `queued`; permanent errors settle immediately; terminal states are never
+run again. The standard task limit is 600 seconds and its execution lease is at
+least 60 seconds longer. The job endpoints remain org-scoped and use
+`documents.read` until a second producer justifies a generic permission.
 
 ---
 
@@ -1221,7 +1239,7 @@ membership.role_changed
 import.completed
 ```
 
-## Outbox
+## Durable scheduling outbox
 
 Use the transactional outbox where missed delivery would matter.
 
@@ -1234,15 +1252,30 @@ event_type
 event_version
 payload_json
 status
+available_at
+claimed_at
+claim_token
 created_at
 processed_at
 attempt_count
 last_error
 ```
 
-The business change and outbox event are written in the same PostgreSQL transaction.
+The business change and outbox event are written in the same PostgreSQL
+transaction. The coordinator claims due rows in bounded batches with `FOR
+UPDATE SKIP LOCKED`, publishes outside that transaction, and uses claim-token
+guarded settlement. Claims have a lease; a crashed publisher may be retried.
 
-Redis is the execution queue; PostgreSQL provides durability.
+Outbox payloads are strict internal contracts. A durable dispatch contains
+only `job_id`; a global maintenance event has no tenant payload. A checked-in
+allow-list maps durable job/event types to actors—never resolve code from a
+database value. Use stable deduplication keys for initial dispatches, scheduled
+UTC buckets and reconciliation cooldowns.
+
+Retain `published` rows for diagnosis, then delete them in bounded batches
+after the configured retention period. Do not automatically delete `pending`,
+`publishing` or `dead` rows. Redis is the execution queue; PostgreSQL provides
+durability.
 
 ---
 
@@ -1681,7 +1714,8 @@ Use:
 - health and readiness endpoints;
 - basic metrics;
 - uptime monitoring;
-- worker failure visibility.
+- worker failure visibility;
+- coordinator liveness and durable outbox delivery visibility.
 
 ## Standard endpoints
 
@@ -1690,6 +1724,22 @@ Use:
 /ready
 /metrics
 ```
+
+## Durable job delivery visibility (v0.5)
+
+Run the coordinator as an observable, always-on backend process alongside the
+API and Dramatiq workers. Its successful cycles are logged as
+`coordinator.cycle_completed`; alert if that signal is absent for two minutes
+or its healthcheck fails.
+
+`/metrics` exposes PostgreSQL-backed, low-cardinality gauges for the durable
+delivery boundary: `outbox_events` by finite `status` and `event_type`,
+`outbox_oldest_due_age_seconds`, and `stale_queued_jobs`. Alert on an oldest
+due event older than 300 seconds (warning) or 900 seconds (critical), any
+`dead` outbox event, and queued jobs eligible for reconciliation that remain
+non-zero for 15 minutes. These gauges, coordinator logs and the existing job
+failure counters make delayed publication, dead events and stalled recovery
+visible without logging payloads, tenant ids or error text.
 
 ## Logging context
 
@@ -2128,6 +2178,7 @@ Caddy
 Vue static frontend
 FastAPI
 Dramatiq worker
+Outbox coordinator
 Redis
 ```
 
@@ -2157,10 +2208,15 @@ Use Docker Compose for:
 
 - API;
 - worker;
+- coordinator;
 - Redis;
 - Caddy.
 
-The API and worker use the same backend image with different commands.
+The API, worker and coordinator use the same backend image with different
+commands. The coordinator is an always-on process: it turns PostgreSQL outbox
+events into Redis/Dramatiq messages, performs bounded queued-job reconciliation
+and creates deduplicated maintenance schedule intents. Scale it horizontally
+only with its PostgreSQL claim/lease protocol enabled.
 
 ### Deployment flow
 
@@ -2250,6 +2306,12 @@ Worker command:
 dramatiq app.workers
 ```
 
+Coordinator command:
+
+```bash
+python -m app.job_coordinator
+```
+
 The frontend is primarily a static build artefact:
 
 ```text
@@ -2274,7 +2336,7 @@ Do not use production Compose to describe fully managed cloud infrastructure.
 
 ## Local development model
 
-The blueprint is intentionally silent on whether application code runs natively or inside containers during local development. That decision is fixed by **ADR-0008** (`docs/decisions/0008-local-development-model.md`): day-to-day development runs Vue, FastAPI, and the worker natively with PostgreSQL and Redis in Docker (`make dev`), while a full-container path (`make dev-docker`) exists for CI parity and onboarding.
+The blueprint is intentionally silent on whether application code runs natively or inside containers during local development. That decision is fixed by **ADR-0008** (`docs/decisions/0008-local-development-model.md`): day-to-day development runs Vue, FastAPI, the worker and the coordinator natively with PostgreSQL and Redis in Docker (`make dev`), while a full-container path (`make dev-docker`) exists for CI parity and onboarding.
 
 ---
 

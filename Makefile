@@ -1,7 +1,8 @@
 # Root Makefile — v0.1 command surface (blueprint §32, Scope §4).
 #
 # Two dev entry points per ADR-0008: native app code with containerised
-# infrastructure (`make dev`, including the Dramatiq worker natively) and the
+# infrastructure (`make dev`, including the Dramatiq worker and outbox
+# coordinator natively) and the
 # full-container path for CI parity and onboarding (`make dev-docker`).
 # `make check` is the complete local quality gate (lint + typecheck + test +
 # generated-client drift).
@@ -30,8 +31,9 @@ endef
 
 .PHONY: dev dev-docker dev-infra-check dev-down dev-reset worker coordinator jobs-reconcile jobs-reconcile-apply migrate provision-admin provision-admin-delete lint typecheck test test-ai-contracts e2e format generate-client validate-ai-registries validate-execution-contracts check
 
-## Start PostgreSQL + Redis + MinIO + Mailhog in Docker, then run the API, the
-## Dramatiq worker and the frontend natively with live reload (ADR-0008).
+## Start PostgreSQL + Redis + MinIO + Mailhog in Docker, then run the API,
+## Dramatiq worker, outbox coordinator and frontend natively with live reload
+## (ADR-0008/ADR-0019).
 ## Infra stays up after Ctrl-C so `make migrate` and repeat `make dev` runs
 ## keep working; stop it with
 ## `make dev-down`.
