@@ -427,31 +427,36 @@ Human review required before application: none.
 
 Dependencies: P3, P4
 
-- [ ] Extend the API metrics refresh path with database-backed, low-cardinality
+- [x] Extend the API metrics refresh path with database-backed, low-cardinality
   gauges for outbox rows by status/event type, oldest due-event age and stale
   queued-job count. Add rate-limited outage/recovery logging and tests proving
   organisation/job ids, payloads and errors never become metric labels.
-- [ ] Add `backend/scripts/reconcile_jobs.py`, `make jobs-reconcile` (read-only)
+- [x] Add `backend/scripts/reconcile_jobs.py`, `make jobs-reconcile` (read-only)
   and a `CONFIRM_RECONCILE=1` guarded apply target. Both paths use the same
   bounded reconciliation service as the coordinator, print counts/opaque ids
   rather than content, and make repeated application idempotent.
-- [ ] Implement daily bounded cleanup for published outbox events older than 30
+- [x] Implement daily bounded cleanup for published outbox events older than 30
   days; prove pending, publishing, dead and newer published events cannot be
   selected, and log only aggregate cleanup counts.
-- [ ] Add alerts and operator checks for oldest pending age, dead events, stale
+- [x] Add alerts and operator checks for oldest pending age, dead events, stale
   queued jobs, coordinator liveness, reconciliation growth and publication
   recovery. Define warning/critical thresholds and exact inspect/reconcile/
   restart/escalate steps.
-- [ ] Add a real-infrastructure failure suite that stops/unavailable-stubs
+- [x] Add a real-infrastructure failure suite that stops/unavailable-stubs
   Redis at controlled boundaries and proves: API commit while broker is down,
   later publication, publisher crash duplication without concurrent work,
   worker lease takeover, simulated empty broker queued recovery, email retry
-  recovery/exhaustion and persistence of actionable rows across restart.
-- [ ] Verify existing protected job/file/notification/AI routes and frontend
+  recovery/exhaustion and persistence of actionable rows across restart. API
+  commit while the broker is down is covered structurally by the no-producer-
+  sends test, P1 transaction tests and the coordinator's real-Redis outage test.
+- [x] Verify existing protected job/file/notification/AI routes and frontend
   polling remain unchanged, `PROTECTED_ROUTES` stays complete, no new API
   security cases are required, and generated client output is diff-free.
 
-Human review required before application: backup and recovery changes, plus operational application of the guarded recovery command in any production environment.
+Human review approval recorded 2026-08-27: the project owner approved the
+backup/recovery and retention changes for local-only use. There is no
+production environment, so no production application of the guarded recovery
+command is in scope.
 
 ### P6 — Architecture and Documentation Closure
 

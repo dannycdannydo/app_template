@@ -149,6 +149,42 @@ The AI layer adds its own families (`ai_requests_total`,
 | Certificate expiry | Let's Encrypt renewal failures in Caddy logs; cert expiry within 14 days | critical |
 | Backup failure | failed backup job / missing backup marker (docs/backup-and-recovery.md) | critical |
 | Redis unavailable | API `rate_limiter_unavailable` errors; `redis-cli ping` failure | critical |
+| Outbox publication backlog | `outbox_oldest_due_age_seconds` > 300 s (warning), > 900 s (critical) | warning / critical |
+| Dead outbox events | `sum(outbox_events{status="dead"}) > 0` | critical |
+| Queued-job recovery | `stale_queued_jobs > 0` for 15 min | warning |
+| Coordinator unavailable | coordinator healthcheck failing or no `coordinator.cycle_completed` log for 2 min | critical |
+
+## Durable job delivery runbook
+
+PostgreSQL is the scheduling source of truth; Redis is transient execution
+transport. Scrape these database-backed gauges from `/metrics`: `outbox_events`
+(`status`, `event_type` only), `outbox_oldest_due_age_seconds`, and
+`stale_queued_jobs`. They deliberately never label an organisation, job id,
+payload, error or provider reference.
+
+When a delivery alert fires:
+
+1. Inspect `docker compose logs --tail=200 coordinator worker` and the gauge
+   values. Do not copy outbox payloads or stored errors into tickets.
+2. If the coordinator is unhealthy, restore PostgreSQL/Redis connectivity and
+   restart only the coordinator; pending rows remain durable and will publish.
+3. For `dead` events, investigate the allow-listed event/job contract before
+   any repair. They are intentionally never auto-replayed.
+4. For stale queued jobs, run `make jobs-reconcile` first. It is read-only and
+   prints only opaque job ids. After confirming the candidates and cause, use
+   `CONFIRM_RECONCILE=1 make jobs-reconcile-apply`; repeated application is
+   idempotent because the same bounded reconciliation service creates
+   deduplicated dispatch intents.
+5. Escalate if the oldest due age remains critical after broker recovery, dead
+   events grow, or reconciliation candidates recur after the cooldown. Preserve
+   PostgreSQL/outbox rows for diagnosis; do not clear Redis to "fix" a backlog.
+
+The coordinator deletes only one bounded batch of `published` outbox rows
+older than 30 days each UTC cleanup interval (settings:
+`OUTBOX_RETENTION_DAYS`, `OUTBOX_CLEANUP_BATCH_SIZE`,
+`OUTBOX_CLEANUP_INTERVAL_HOURS`). A durable cleanup-bucket marker makes this
+cadence safe across coordinator replicas and restarts. Pending, publishing and
+dead rows are retained.
 
 ## Redis
 

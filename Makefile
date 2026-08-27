@@ -28,7 +28,7 @@ define load_env
 	set -a; [ -f .env ] && . ./.env; set +a;
 endef
 
-.PHONY: dev dev-docker dev-infra-check dev-down dev-reset worker coordinator migrate provision-admin provision-admin-delete lint typecheck test test-ai-contracts e2e format generate-client validate-ai-registries validate-execution-contracts check
+.PHONY: dev dev-docker dev-infra-check dev-down dev-reset worker coordinator jobs-reconcile jobs-reconcile-apply migrate provision-admin provision-admin-delete lint typecheck test test-ai-contracts e2e format generate-client validate-ai-registries validate-execution-contracts check
 
 ## Start PostgreSQL + Redis + MinIO + Mailhog in Docker, then run the API, the
 ## Dramatiq worker and the frontend natively with live reload (ADR-0008).
@@ -89,6 +89,14 @@ worker:
 ## run safely (FOR UPDATE SKIP LOCKED claims).
 coordinator:
 	@$(load_env) cd backend && uv run python -m app.job_coordinator
+
+## Inspect stranded queued jobs without mutation (durable delivery plan P5).
+jobs-reconcile:
+	@$(load_env) cd backend && uv run python -m scripts.reconcile_jobs
+
+## Create deduplicated recovery intents; requires CONFIRM_RECONCILE=1.
+jobs-reconcile-apply:
+	@$(load_env) cd backend && uv run python -m scripts.reconcile_jobs --apply
 
 ## Create the bootstrap platform admin in WorkOS (email + password; idempotent).
 ## Reads BOOTSTRAP_PLATFORM_ADMIN_EMAIL / BOOTSTRAP_PLATFORM_ADMIN_PASSWORD from

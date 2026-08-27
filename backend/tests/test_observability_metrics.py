@@ -20,11 +20,13 @@ from dramatiq.brokers.stub import StubBroker
 from httpx import ASGITransport, AsyncClient, Response
 from prometheus_client import generate_latest
 from sqlalchemy.ext.asyncio import AsyncSession
+from structlog.testing import capture_logs
 from tests.context_helpers import ContextState, FakeSession, make_job
 
 from app.main import create_app
 from app.modules.jobs import service as jobs_service
 from app.modules.jobs.models import JobStatus
+from app.observability import metrics
 from app.observability.metrics import normalise_path, update_queue_depths
 
 _ALL_METRICS = (
@@ -247,3 +249,103 @@ def test_queue_depth_refresh_failure_never_raises(
     # The previous sample survives: the gauge is stale, not zeroed.
     body = generate_latest().decode()
     assert 'dramatiq_queue_depth{queue="ai"} 3.0' in body
+
+
+# --- Durable outbox gauges (durable delivery plan P5) -----------------------
+
+
+class _MetricResult:
+    def __init__(self, rows: list[tuple[str, str, int]]) -> None:
+        self._rows = rows
+
+    def all(self) -> list[tuple[str, str, int]]:
+        return self._rows
+
+
+class _MetricSession:
+    def __init__(
+        self,
+        rows: list[tuple[str, str, int]],
+        oldest_due: object,
+        stale_count: int,
+    ) -> None:
+        self.rows = rows
+        self.scalar_values = [oldest_due, stale_count]
+
+    async def __aenter__(self) -> _MetricSession:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        return None
+
+    async def execute(self, statement: object) -> _MetricResult:
+        return _MetricResult(self.rows)
+
+    async def scalar(self, statement: object) -> object:
+        return self.scalar_values.pop(0)
+
+
+def _metric_session_factory(
+    rows: list[tuple[str, str, int]], oldest_due: object = None, stale_count: int = 0
+) -> Any:
+    return cast(Any, lambda: _MetricSession(rows, oldest_due, stale_count))
+
+
+async def test_outbox_metrics_zero_fill_closed_labels_and_exclude_row_content() -> None:
+    organisation_id = uuid.uuid4()
+    job_id = uuid.uuid4()
+    await metrics.refresh_outbox_metrics(
+        _metric_session_factory(
+            [
+                ("pending", "job.dispatch_requested", 3),
+                ("published", "untrusted.event.payload", 99),
+            ],
+            stale_count=2,
+        ),
+        reconciliation_threshold_seconds=900,
+        reconciliation_cooldown_seconds=1_800,
+    )
+
+    body = generate_latest().decode()
+    assert 'outbox_events{event_type="job.dispatch_requested",status="pending"} 3.0' in body
+    assert 'outbox_events{event_type="ai.retention",status="pending"} 0.0' in body
+    assert 'outbox_events{event_type="job.dispatch_requested",status="published"} 0.0' in body
+    assert 'outbox_events{event_type="untrusted.event.payload"' not in body
+    assert str(organisation_id) not in body
+    assert str(job_id) not in body
+    assert "sensitive payload or error" not in body
+    assert "stale_queued_jobs 2.0" in body
+
+
+async def test_outbox_metric_refresh_logs_once_per_outage_and_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FailingSession:
+        async def __aenter__(self) -> _FailingSession:
+            raise RuntimeError("database unavailable with secret")
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    monkeypatch.setattr(metrics, "_outbox_metrics_refresh_failed", False)
+    with capture_logs() as logs:
+        await metrics.refresh_outbox_metrics(
+            cast(Any, lambda: _FailingSession()),
+            reconciliation_threshold_seconds=900,
+            reconciliation_cooldown_seconds=900,
+        )
+        await metrics.refresh_outbox_metrics(
+            cast(Any, lambda: _FailingSession()),
+            reconciliation_threshold_seconds=900,
+            reconciliation_cooldown_seconds=900,
+        )
+        await metrics.refresh_outbox_metrics(
+            _metric_session_factory([]),
+            reconciliation_threshold_seconds=900,
+            reconciliation_cooldown_seconds=900,
+        )
+
+    assert [event["event"] for event in logs] == [
+        "outbox_metrics.refresh_failed",
+        "outbox_metrics.refresh_recovered",
+    ]

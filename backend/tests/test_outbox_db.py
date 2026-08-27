@@ -29,6 +29,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from app.job_coordinator.reconciliation import cleanup_published_events
 from app.modules.jobs.models import Job
 from app.modules.organisations.models import Organisation
 from app.modules.outbox import service as outbox_service
@@ -536,5 +537,59 @@ async def test_stale_claim_and_retention_queries_select_only_their_rows(
             )
             assert [row.id for row in retention_rows] == [published_old.id]
             assert dead.id not in [row.id for row in retention_rows]
+    finally:
+        await engine.dispose()
+
+
+async def test_cleanup_is_bounded_and_runs_once_per_utc_bucket(
+    migrated_database: str,
+) -> None:
+    """Cleanup retains non-published rows and its durable marker suppresses repeats."""
+    engine = create_async_engine(migrated_database, poolclass=NullPool)
+    factory = _session_factory(migrated_database)
+    # A unique historical bucket isolates this fixture from published rows
+    # created by earlier tests in the shared migrated database, while avoiding
+    # a collision with any current cleanup marker.
+    now = datetime.fromtimestamp(1_500_000_000 + uuid.uuid4().int % 10_000_000, UTC)
+    try:
+        async with factory() as session:
+            old_published = OutboxEvent(
+                event_type="job.dispatch_requested",
+                event_version=1,
+                aggregate_type="job",
+                aggregate_id=uuid.uuid4(),
+                payload={"job_id": str(uuid.uuid4())},
+                deduplication_key=f"test.cleanup:{uuid.uuid4()}",
+                status=OutboxEventStatus.PUBLISHED,
+                created_at=now - timedelta(days=31),
+            )
+            dead = OutboxEvent(
+                event_type="job.dispatch_requested",
+                event_version=1,
+                aggregate_type="job",
+                aggregate_id=uuid.uuid4(),
+                payload={"job_id": str(uuid.uuid4())},
+                deduplication_key=f"test.cleanup:{uuid.uuid4()}",
+                status=OutboxEventStatus.DEAD,
+                created_at=now - timedelta(days=31),
+            )
+            session.add_all([old_published, dead])
+            await session.commit()
+        async with factory() as session:
+            assert (
+                await cleanup_published_events(
+                    session, now=now, retention_days=30, limit=10, interval_hours=24
+                )
+                == 1
+            )
+        async with factory() as session:
+            assert (
+                await cleanup_published_events(
+                    session, now=now, retention_days=30, limit=10, interval_hours=24
+                )
+                == 0
+            )
+            assert await session.get(OutboxEvent, old_published.id) is None
+            assert await session.get(OutboxEvent, dead.id) is not None
     finally:
         await engine.dispose()

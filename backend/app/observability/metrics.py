@@ -16,6 +16,7 @@ format (public like ``/health`` and ``/ready``). Two families are maintained:
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime, timedelta
 from time import perf_counter
 from typing import Any, cast
 
@@ -30,7 +31,21 @@ from prometheus_client import (
     Histogram,
     generate_latest,
 )
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.middleware.base import RequestResponseEndpoint
+
+from app.modules.outbox.contracts import (
+    EVENT_TYPE_AI_RETENTION,
+    EVENT_TYPE_JOB_DISPATCH,
+    EVENT_TYPE_OUTBOX_CLEANUP_COMPLETED,
+    EVENT_TYPE_TRANSFER_RECONCILE,
+)
+from app.modules.outbox.models import OutboxEventStatus
+from app.modules.outbox.queries import (
+    oldest_due_event_statement,
+    outbox_metric_rows_statement,
+    stale_queued_job_count_statement,
+)
 
 router = APIRouter(tags=["metrics"])
 logger = structlog.get_logger()
@@ -163,8 +178,33 @@ DRAMATIQ_QUEUE_DEPTH = Gauge(
     ["queue"],
 )
 
+# These gauges are refreshed from PostgreSQL, the source of truth for durable
+# scheduling. Labels are only the finite event/status vocabulary; ids, tenant
+# values, payloads and error text remain in database rows and never metrics.
+OUTBOX_EVENTS = Gauge(
+    "outbox_events",
+    "Durable outbox rows by lifecycle status and event type",
+    ["status", "event_type"],
+)
+OUTBOX_OLDEST_DUE_AGE_SECONDS = Gauge(
+    "outbox_oldest_due_age_seconds",
+    "Age in seconds of the oldest due pending outbox event",
+)
+STALE_QUEUED_JOBS = Gauge(
+    "stale_queued_jobs",
+    "Queued jobs eligible for durable dispatch reconciliation",
+)
+
 #: Rate-limit the refresh-failure log to one line per outage/recovery.
 _queue_depth_refresh_failed = False
+_outbox_metrics_refresh_failed = False
+
+_OUTBOX_EVENT_TYPES = (
+    EVENT_TYPE_JOB_DISPATCH,
+    EVENT_TYPE_AI_RETENTION,
+    EVENT_TYPE_TRANSFER_RECONCILE,
+    EVENT_TYPE_OUTBOX_CLEANUP_COMPLETED,
+)
 
 _UUID_SEGMENT = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
@@ -347,3 +387,58 @@ def update_queue_depths() -> None:
         _queue_depth_refresh_failed = False
     for queue in TEMPLATE_QUEUES:
         DRAMATIQ_QUEUE_DEPTH.labels(queue=queue).set(counts.get(queue, 0))
+
+
+async def refresh_outbox_metrics(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    reconciliation_threshold_seconds: int,
+    reconciliation_cooldown_seconds: int,
+) -> None:
+    """Refresh durable-delivery gauges without making a metrics scrape fail.
+
+    PostgreSQL aggregation returns only safe, low-cardinality values. A database
+    outage retains the last samples and emits a rate-limited generic log event;
+    exceptions are never rendered because connection strings can contain
+    credentials.
+    """
+    global _outbox_metrics_refresh_failed
+    now = datetime.now(UTC)
+    try:
+        async with session_factory() as session:
+            rows = (await session.execute(outbox_metric_rows_statement())).all()
+            oldest_due = await session.scalar(oldest_due_event_statement(now=now))
+            stale_count = await session.scalar(
+                stale_queued_job_count_statement(
+                    published_before=now
+                    - timedelta(
+                        seconds=max(
+                            reconciliation_threshold_seconds,
+                            reconciliation_cooldown_seconds,
+                        )
+                    )
+                )
+            )
+    except Exception:
+        if not _outbox_metrics_refresh_failed:
+            logger.warning("outbox_metrics.refresh_failed")
+            _outbox_metrics_refresh_failed = True
+        return
+    if _outbox_metrics_refresh_failed:
+        logger.info("outbox_metrics.refresh_recovered")
+        _outbox_metrics_refresh_failed = False
+    counts = {
+        (str(status), event_type): count
+        for status, event_type, count in rows
+        if event_type in _OUTBOX_EVENT_TYPES
+        and str(status) in {status.value for status in OutboxEventStatus}
+    }
+    for status in OutboxEventStatus:
+        for event_type in _OUTBOX_EVENT_TYPES:
+            OUTBOX_EVENTS.labels(status=status.value, event_type=event_type).set(
+                counts.get((status.value, event_type), 0)
+            )
+    OUTBOX_OLDEST_DUE_AGE_SECONDS.set(
+        max((now - oldest_due).total_seconds(), 0) if oldest_due is not None else 0
+    )
+    STALE_QUEUED_JOBS.set(stale_count or 0)

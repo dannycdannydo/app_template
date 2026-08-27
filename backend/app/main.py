@@ -49,7 +49,11 @@ from app.modules.platform_admin.router import router as platform_admin_router
 from app.modules.records.router import router as records_router
 from app.modules.users.router import router as users_router
 from app.modules.webhooks.router import router as webhooks_router
-from app.observability.metrics import metrics_middleware, update_queue_depths
+from app.observability.metrics import (
+    metrics_middleware,
+    refresh_outbox_metrics,
+    update_queue_depths,
+)
 from app.observability.metrics import router as metrics_router
 from app.observability.sentry import capture_exception, initialise_sentry
 
@@ -206,8 +210,16 @@ async def _queue_depth_refresh_loop() -> None:
     """
     if get_settings().app_env == "test":
         return
+    from app.db.session import async_session_factory
+
     while True:
         await asyncio.to_thread(update_queue_depths)
+        settings = get_settings()
+        await refresh_outbox_metrics(
+            async_session_factory,
+            reconciliation_threshold_seconds=settings.job_reconcile_threshold_seconds,
+            reconciliation_cooldown_seconds=settings.job_reconcile_cooldown_seconds,
+        )
         await asyncio.sleep(30)
 
 

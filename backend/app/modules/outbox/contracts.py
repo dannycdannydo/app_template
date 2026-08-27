@@ -45,6 +45,11 @@ EVENT_VERSION_AI_RETENTION = 1
 EVENT_TYPE_TRANSFER_RECONCILE = "ai.transfer_reconcile"
 EVENT_VERSION_TRANSFER_RECONCILE = 1
 
+# Internal retention-ledger event (durable delivery plan P5).  This is never
+# dispatched; it records completion of one UTC cleanup bucket.
+EVENT_TYPE_OUTBOX_CLEANUP_COMPLETED = "outbox.cleanup_completed"
+EVENT_VERSION_OUTBOX_CLEANUP_COMPLETED = 1
+
 # Aggregate names recorded on outbox rows for aggregate-history queries.
 AGGREGATE_TYPE_JOB = "job"
 
@@ -87,6 +92,10 @@ _PAYLOAD_CONTRACTS: dict[tuple[str, int], type[BaseModel]] = {
     (EVENT_TYPE_JOB_DISPATCH, EVENT_VERSION_JOB_DISPATCH): JobDispatchPayload,
     (EVENT_TYPE_AI_RETENTION, EVENT_VERSION_AI_RETENTION): MaintenancePayload,
     (EVENT_TYPE_TRANSFER_RECONCILE, EVENT_VERSION_TRANSFER_RECONCILE): MaintenancePayload,
+    (
+        EVENT_TYPE_OUTBOX_CLEANUP_COMPLETED,
+        EVENT_VERSION_OUTBOX_CLEANUP_COMPLETED,
+    ): MaintenancePayload,
 }
 
 
