@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import cast
 
-from sqlalchemy import Select, exists, select
+from sqlalchemy import Select, exists, func, select
 from sqlalchemy.orm import aliased
 
 from app.modules.jobs.models import Job, JobStatus
@@ -120,6 +121,37 @@ def published_events_retention_statement(
         )
         .order_by(OutboxEvent.created_at.asc())
         .limit(limit)
+    )
+
+
+def outbox_metric_rows_statement() -> Select[tuple[OutboxEventStatus, str, int]]:
+    """Return bounded outbox backlog counts grouped by stable dimensions.
+
+    Event type and status are closed application-owned identifiers; no tenant,
+    aggregate, payload or error value can become a metric label.
+    """
+    return select(OutboxEvent.status, OutboxEvent.event_type, func.count()).group_by(
+        OutboxEvent.status, OutboxEvent.event_type
+    )
+
+
+def oldest_due_event_statement(*, now: datetime) -> Select[tuple[datetime | None]]:
+    """Return the oldest pending due time, or ``None`` when the backlog is empty."""
+    return cast(
+        Select[tuple[datetime | None]],
+        select(func.min(OutboxEvent.available_at)).where(
+            OutboxEvent.status == OutboxEventStatus.PENDING,
+            OutboxEvent.available_at <= now,
+        ),
+    )
+
+
+def stale_queued_job_count_statement(*, published_before: datetime) -> Select[tuple[int]]:
+    """Count jobs eligible for queued-delivery recovery without exposing ids."""
+    return select(func.count()).select_from(
+        queued_jobs_for_reconciliation_statement(
+            published_before=published_before, limit=1_000_000
+        ).subquery()
     )
 
 

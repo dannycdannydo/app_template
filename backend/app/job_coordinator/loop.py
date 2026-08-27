@@ -100,6 +100,7 @@ class CycleStats:
     settled_stale: int = 0
     reconciled_jobs: int = 0
     scheduled_events: int = 0
+    cleaned_events: int = 0
 
     @property
     def transient(self) -> bool:
@@ -475,6 +476,9 @@ async def run_cycle(
     reconciliation_cooldown_seconds: int | None = None,
     ai_retention_interval_hours: int | None = None,
     transfer_reconcile_interval_hours: int | None = None,
+    outbox_retention_days: int | None = None,
+    outbox_cleanup_batch_size: int | None = None,
+    outbox_cleanup_interval_hours: int | None = None,
 ) -> CycleStats:
     """Run one claim -> publish -> settle cycle and return its counts.
 
@@ -543,12 +547,18 @@ async def run_cycle(
             reconciliation_cooldown_seconds,
             ai_retention_interval_hours,
             transfer_reconcile_interval_hours,
+            outbox_retention_days,
+            outbox_cleanup_batch_size,
+            outbox_cleanup_interval_hours,
         )
     ):
         assert reconciliation_threshold_seconds is not None
         assert reconciliation_cooldown_seconds is not None
         assert ai_retention_interval_hours is not None
         assert transfer_reconcile_interval_hours is not None
+        assert outbox_retention_days is not None
+        assert outbox_cleanup_batch_size is not None
+        assert outbox_cleanup_interval_hours is not None
         maintenance = await run_maintenance_pass(
             session_factory,
             now=now,
@@ -557,9 +567,13 @@ async def run_cycle(
             reconciliation_limit=batch_size,
             ai_retention_interval_hours=ai_retention_interval_hours,
             transfer_reconcile_interval_hours=transfer_reconcile_interval_hours,
+            outbox_retention_days=outbox_retention_days,
+            outbox_cleanup_batch_size=outbox_cleanup_batch_size,
+            outbox_cleanup_interval_hours=outbox_cleanup_interval_hours,
         )
         stats.reconciled_jobs = maintenance.reconciled_jobs
         stats.scheduled_events = maintenance.scheduled_events
+        stats.cleaned_events = maintenance.cleaned_events
     return stats
 
 
@@ -599,6 +613,9 @@ async def run_coordinator(
     reconciliation_cooldown_seconds: int | None = None,
     ai_retention_interval_hours: int | None = None,
     transfer_reconcile_interval_hours: int | None = None,
+    outbox_retention_days: int | None = None,
+    outbox_cleanup_batch_size: int | None = None,
+    outbox_cleanup_interval_hours: int | None = None,
 ) -> None:
     """Run the coordinator until ``shutdown_event`` is set.
 
@@ -636,6 +653,9 @@ async def run_coordinator(
                 reconciliation_cooldown_seconds=reconciliation_cooldown_seconds,
                 ai_retention_interval_hours=ai_retention_interval_hours,
                 transfer_reconcile_interval_hours=transfer_reconcile_interval_hours,
+                outbox_retention_days=outbox_retention_days,
+                outbox_cleanup_batch_size=outbox_cleanup_batch_size,
+                outbox_cleanup_interval_hours=outbox_cleanup_interval_hours,
             )
             transient = stats.transient
             logger.info(
@@ -648,6 +668,7 @@ async def run_coordinator(
                 settled_stale=stats.settled_stale,
                 reconciled_jobs=stats.reconciled_jobs,
                 scheduled_events=stats.scheduled_events,
+                cleaned_events=stats.cleaned_events,
             )
         except Exception as exc:
             # A database-level failure (unreachable PostgreSQL, broken pool)
@@ -736,6 +757,9 @@ async def _async_main() -> None:
             reconciliation_cooldown_seconds=settings.job_reconcile_cooldown_seconds,
             ai_retention_interval_hours=settings.maintenance_ai_retention_interval_hours,
             transfer_reconcile_interval_hours=settings.maintenance_transfer_reconcile_interval_hours,
+            outbox_retention_days=settings.outbox_retention_days,
+            outbox_cleanup_batch_size=settings.outbox_cleanup_batch_size,
+            outbox_cleanup_interval_hours=settings.outbox_cleanup_interval_hours,
         )
     except RegistryCompletenessError as exc:
         raise SystemExit(f"coordinator registry incomplete: {exc}") from exc
