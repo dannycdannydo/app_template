@@ -105,13 +105,13 @@ Validation example:
 
 Services raise domain exceptions; central FastAPI exception handlers translate them to HTTP responses. Typical mappings:
 
-| Exception | HTTP status |
-| --- | --- |
-| `NotFoundError` | 404 |
-| `PermissionDenied` | 403 |
-| `ConflictError` | 409 |
-| `ValidationError` | 422 |
-| `RateLimitExceeded` | 429 |
+| Exception           | HTTP status |
+| ------------------- | ----------- |
+| `NotFoundError`     | 404         |
+| `PermissionDenied`  | 403         |
+| `ConflictError`     | 409         |
+| `ValidationError`   | 422         |
+| `RateLimitExceeded` | 429         |
 
 - Error messages must not leak internals, stack traces, or secrets.
 - Every error response includes the `request_id` from the request context to correlate with logs.
@@ -181,14 +181,14 @@ Files and jobs are org-scoped resources under `/api/v1`, gated by the existing `
 
 The files API implements the direct upload flow (blueprint §17): the backend issues a signed PUT URL, the browser uploads straight to storage, and completion verifies the stored object. The client never supplies an object key or a storage provider — request schemas use `extra="forbid"` so those fields are rejected.
 
-| Method & path | Permission | Purpose | Notes |
-| --- | --- | --- | --- |
-| `POST /api/v1/files` | `documents.upload` | Upload intent: validates declared filename/content-type/size against `STORAGE_ALLOWED_CONTENT_TYPES` / `STORAGE_MAX_UPLOAD_SIZE` (rejected before any URL is issued), creates a `pending` record, returns `{file_id, upload_url, expires_at}` | `201` |
-| `POST /api/v1/files/{file_id}/complete` | `documents.upload` | Verify the stored object (exists, size matches, checksum when supplied); `uploaded` + enqueue the processing job; returns `FileDetail` plus `processing_job_id` | mismatch → `failed`/`quarantined` + audit |
-| `GET /api/v1/files` | `documents.read` | Paginated list, standard envelope, optional `status` filter; deleted files excluded by default | `?page=1&page_size=50&status=ready` |
-| `GET /api/v1/files/{file_id}` | `documents.read` | File detail | cross-org id → `404` |
-| `GET /api/v1/files/{file_id}/download-url` | `documents.read` | Short-lived signed GET URL | |
-| `DELETE /api/v1/files/{file_id}` | `documents.delete` | Soft delete (`deleted_at`) + object removed from storage + `document.deleted` audit | `204` |
+| Method & path                              | Permission         | Purpose                                                                                                                                                                                                                                       | Notes                                     |
+| ------------------------------------------ | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| `POST /api/v1/files`                       | `documents.upload` | Upload intent: validates declared filename/content-type/size against `STORAGE_ALLOWED_CONTENT_TYPES` / `STORAGE_MAX_UPLOAD_SIZE` (rejected before any URL is issued), creates a `pending` record, returns `{file_id, upload_url, expires_at}` | `201`                                     |
+| `POST /api/v1/files/{file_id}/complete`    | `documents.upload` | Verify the stored object (exists, size matches, checksum when supplied); `uploaded` + schedules the processing job; returns `FileDetail` plus `processing_job_id`                                                                             | mismatch → `failed`/`quarantined` + audit |
+| `GET /api/v1/files`                        | `documents.read`   | Paginated list, standard envelope, optional `status` filter; deleted files excluded by default                                                                                                                                                | `?page=1&page_size=50&status=ready`       |
+| `GET /api/v1/files/{file_id}`              | `documents.read`   | File detail                                                                                                                                                                                                                                   | cross-org id → `404`                      |
+| `GET /api/v1/files/{file_id}/download-url` | `documents.read`   | Short-lived signed GET URL                                                                                                                                                                                                                    |                                           |
+| `DELETE /api/v1/files/{file_id}`           | `documents.delete` | Soft delete (`deleted_at`) + object removed from storage + `document.deleted` audit                                                                                                                                                           | `204`                                     |
 
 File statuses: `pending`, `uploaded`, `processing`, `ready`, `failed`, `quarantined`, `deleted`.
 
@@ -196,10 +196,10 @@ File statuses: `pending`, `uploaded`, `processing`, `ready`, `failed`, `quaranti
 
 Jobs are durable records the client polls while background work runs; the file-processing job (`job_type="file.processing"`) drives progress 0→100.
 
-| Method & path | Permission | Purpose | Notes |
-| --- | --- | --- | --- |
-| `GET /api/v1/jobs` | `documents.read` | Paginated list of the caller's organisation's jobs, standard envelope, `status` / `job_type` filters | |
-| `GET /api/v1/jobs/{job_id}` | `documents.read` | Job detail: status + progress (0–100) | cross-org id → `404`; terminal states never re-run |
+| Method & path               | Permission       | Purpose                                                                                              | Notes                                              |
+| --------------------------- | ---------------- | ---------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| `GET /api/v1/jobs`          | `documents.read` | Paginated list of the caller's organisation's jobs, standard envelope, `status` / `job_type` filters |                                                    |
+| `GET /api/v1/jobs/{job_id}` | `documents.read` | Job detail: status + progress (0–100)                                                                | cross-org id → `404`; terminal states never re-run |
 
 Job statuses: `queued`, `running`, `succeeded`, `failed`, `cancelled`.
 
@@ -207,11 +207,17 @@ Job statuses: `queued`, `running`, `succeeded`, `failed`, `cancelled`.
 
 Notifications are org-scoped resources under `/api/v1` (ADR-0016, blueprint §20), gated by the `notifications.read` / `notifications.manage` permission codes added to the catalogue in v0.6 (owner/administrator/manager: both; member: `read`; viewer: none — default-deny). All four routes are in the security suite's `PROTECTED_ROUTES` table.
 
-| Method & path | Permission | Purpose | Notes |
-| --- | --- | --- | --- |
-| `GET /api/v1/notifications` | `notifications.read` | Paginated list of the **caller's own** notifications in the caller's organisation; standard envelope plus `unread_count`; optional `type` filter | `?page=1&page_size=50&type=file.ready` |
-| `GET /api/v1/notifications/unread-count` | `notifications.read` | The caller's unread count (feeds the bell badge; poll-friendly) | |
-| `PATCH /api/v1/notifications/{notification_id}/read` | `notifications.read` | Marks the notification read (`read_at`); idempotent | foreign or other-user id → `404` |
-| `POST /api/v1/notifications/test` | `notifications.manage` | Creates an in-app notification for the caller and enqueues the email delivery job — the demonstrable "send a test notification" | `201`; audited |
+| Method & path                                        | Permission             | Purpose                                                                                                                                          | Notes                                  |
+| ---------------------------------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------- |
+| `GET /api/v1/notifications`                          | `notifications.read`   | Paginated list of the **caller's own** notifications in the caller's organisation; standard envelope plus `unread_count`; optional `type` filter | `?page=1&page_size=50&type=file.ready` |
+| `GET /api/v1/notifications/unread-count`             | `notifications.read`   | The caller's unread count (feeds the bell badge; poll-friendly)                                                                                  |                                        |
+| `PATCH /api/v1/notifications/{notification_id}/read` | `notifications.read`   | Marks the notification read (`read_at`); idempotent                                                                                              | foreign or other-user id → `404`       |
+| `POST /api/v1/notifications/test`                    | `notifications.manage` | Creates an in-app notification for the caller and schedules durable email delivery — the demonstrable "send a test notification"                 | `201`; audited                         |
 
 Notification types: `file.ready`, `file.failed`, `notification.test_sent`. Deliveries run as durable jobs (`job_type="notification.email"`) — email is never sent from an HTTP handler. The unread count is also carried in the list envelope, so the bell can use either the count endpoint or the list response.
+
+Job scheduling is internal: the API commits a job and a reference-only outbox
+event together, and the coordinator later publishes the job id to Dramatiq.
+This changes neither a request nor a response schema; clients continue polling
+the durable job resource and must not infer exactly-once execution from a
+successful scheduling response.

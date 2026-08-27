@@ -79,6 +79,24 @@ The v0.5 release ships the storage boundary (blueprint §17, §30):
 - **Audited lifecycle**: every transition (`file.upload_started`, `file.uploaded`, `file.upload_failed`, `file.processing`, `file.ready`, `document.deleted`) is written to the append-only audit log.
 - **Deferred to post-v1**: malware scanning (the quarantine state and the scanning hook seam ship in v0.5, the scanner does not), decompression-bomb protections, page limits, and server-side document processing beyond verify-and-mark-ready.
 
+## Durable-job delivery security
+
+- **PostgreSQL owns scheduling intent**: a durable job and its strict,
+  reference-only outbox event commit together. Redis is transient execution
+  transport; no API or business service sends durable actors directly.
+- **No executable persisted routing**: coordinator actor selection comes from
+  a checked-in allow-list. Dispatch payloads carry only a job id; they never
+  carry object keys, signed URLs, recipients, credentials, content or import
+  paths.
+- **At-least-once with ownership**: a coordinator crash may duplicate a broker
+  message. Worker execution leases and owner-checked mutations prevent
+  concurrent business execution and stale settlement, while domain handlers
+  remain idempotent. This is not an exactly-once external-side-effect claim.
+- **Safe operations data**: outbox errors are bounded/sanitised; logs and
+  metrics use event types and opaque ids only. `dead` events are investigated,
+  never automatically replayed; guarded reconciliation creates deduplicated
+  recovery intents only for eligible queued jobs.
+
 ## SSRF
 
 User-supplied URLs must not access:

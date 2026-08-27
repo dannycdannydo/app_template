@@ -4,7 +4,7 @@ Status: Accepted
 
 ## Context
 
-Blueprint §36 mandates that the template ships Dockerfiles and a set of Compose files, but it is intentionally silent on *how* application code runs during day-to-day local development. As the v0.1 §6.7 work unit was scoped, the scope file drifted into an internal contradiction: §2 lists "Docker Compose for local development (PostgreSQL, Redis)" (infrastructure only), while §6.7 required `compose.local.yml` to run PostgreSQL, Redis, the API, and the frontend with "volume mounts for live reload."
+Blueprint §36 mandates that the template ships Dockerfiles and a set of Compose files, but it is intentionally silent on _how_ application code runs during day-to-day local development. As the v0.1 §6.7 work unit was scoped, the scope file drifted into an internal contradiction: §2 lists "Docker Compose for local development (PostgreSQL, Redis)" (infrastructure only), while §6.7 required `compose.local.yml` to run PostgreSQL, Redis, the API, and the frontend with "volume mounts for live reload."
 
 Bind-mounting application source into containers for live reload is a known source of friction: slower reloads, file-watcher edge cases across host/container boundaries, harder debugger attachment, and a worse experience for coding agents, which must wrap every command in `docker compose exec` instead of invoking `uv run` or `pnpm` directly. This decision resolves the contradiction and records the canonical local development model so that v0.1 §6.7 implements a single, consistent approach.
 
@@ -24,11 +24,12 @@ Host (native)                  Docker Compose
 Vue (pnpm dev)                 PostgreSQL
 FastAPI (uvicorn --reload)     Redis
 Dramatiq (uv run dramatiq)     (MinIO, Mailpit in later releases)
+Outbox coordinator
 ```
 
-- `make dev` is the canonical development command. It starts the infrastructure services from `deploy/compose/compose.local.yml` and launches the API and frontend natively with live reload.
+- `make dev` is the canonical development command. It starts the infrastructure services from `deploy/compose/compose.local.yml` and launches the API, worker, coordinator and frontend natively with live reload.
 - `make dev` verifies Redis through the host-facing `REDIS_URL` before it starts native application processes. Compose's container-internal health check is necessary but insufficient: it cannot detect a missing host port publication or broken network attachment.
-- A second command, `make dev-docker`, runs the **entire** stack (API, frontend, worker, Postgres, Redis) in containers. It exists for CI parity, fresh-clone onboarding verification, Dockerfile validation, and deployment debugging — not for daily use.
+- A second command, `make dev-docker`, runs the **entire** stack (API, frontend, worker, coordinator, Postgres, Redis) in containers. It exists for CI parity, fresh-clone onboarding verification, Dockerfile validation, and deployment debugging — not for daily use.
 - `compose.local.yml` carries the local services. Docker Compose profiles (or an equivalent mechanism within the single file) separate the infra-only set from the full-stack set, so both commands are served from the blueprint's existing three-file Compose layout (BP §36) without adding a fourth file.
 - PostgreSQL, Redis and MinIO use explicit named volumes. `make dev-down` preserves them; guarded `CONFIRM_RESET=1 make dev-reset` deletes and recreates all three together before applying migrations. Resetting only the database or broker is unsupported because Dramatiq messages reference durable PostgreSQL job rows. External WorkOS identities remain outside this local reset boundary.
 - `backend/Dockerfile` and `frontend/Dockerfile` remain required: they serve CI, both production profiles (BP §35), and the `make dev-docker` path.

@@ -41,23 +41,24 @@ cd /opt/app-template
 export COMPOSE="docker compose -f compose.hybrid-vps.yml --env-file .env.production"
 ```
 
-The application's durable state lives in two external services — managed
-PostgreSQL and S3-compatible object storage — plus the private Redis on the
-host (broker and rate-limit store only, never a source of truth). Backing up
-those external services is the priority; the VPS disk itself holds no
-application data that is not recoverable from them plus the deployment
-artifacts.
+The application's durable state lives in managed PostgreSQL (including jobs
+and `outbox_events`) and S3-compatible object storage. Redis is private,
+transient execution transport and the rate-limit store—not a source of truth.
+The coordinator republishes durable intents and reconciles eligible stranded
+queued jobs after Redis loss. Backing up PostgreSQL and object storage is the
+priority; the VPS disk itself holds no application data that is not recoverable
+from them plus the deployment artifacts.
 
 ## What to back up, how often, and where
 
-| Asset | Source of truth | Backup mechanism | Frequency | Retention | RPO | RTO |
-| --- | --- | --- | --- | --- | --- | --- |
-| Database (PostgreSQL) | Managed DB provider | Provider-native backups + point-in-time recovery (PITR) | Continuous PITR (≥ 24 h window) + nightly logical dump (`pg_dump -Fc`) sent off-site | PITR ≥ 7 days; dumps ≥ 30 days | ≤ 5 min | ≤ 30 min |
-| Object storage bucket | S3-compatible provider | Bucket versioning + cross-region/bucket replication | Continuous (per object write) | Versioning ≥ 90 days; replicate to a second bucket | 0 (versioned) | ≤ 15 min |
-| Secrets (`.env.production`) | Operator | Encrypted copy off the host (password manager, secret vault, or encrypted archive) | On every change | Indefinite (every version) | 0 | ≤ 30 min |
-| Deployment artifacts (compose file, Caddyfile, images, frontend artifact) | Git + container registry | Git history + immutable images in the registry; the host retains the newest 3 releases | Every release | Images/artifacts ≥ 6 months; host releases 3 | 0 | ≤ 30 min |
-| Certificates (TLS) | Caddy (Let's Encrypt) | Auto-renewed by Caddy; no manual backup needed | Continuous | Renewed before expiry | 0 | automatic |
-| Redis (`redis_data` volume) | Transient | None required (AOF only) | n/a | n/a | n/a | see [Redis recovery semantics](#redis-recovery-semantics) |
+| Asset                                                                     | Source of truth          | Backup mechanism                                                                       | Frequency                                                                            | Retention                                          | RPO           | RTO                                                       |
+| ------------------------------------------------------------------------- | ------------------------ | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ | -------------------------------------------------- | ------------- | --------------------------------------------------------- |
+| Database (PostgreSQL)                                                     | Managed DB provider      | Provider-native backups + point-in-time recovery (PITR)                                | Continuous PITR (≥ 24 h window) + nightly logical dump (`pg_dump -Fc`) sent off-site | PITR ≥ 7 days; dumps ≥ 30 days                     | ≤ 5 min       | ≤ 30 min                                                  |
+| Object storage bucket                                                     | S3-compatible provider   | Bucket versioning + cross-region/bucket replication                                    | Continuous (per object write)                                                        | Versioning ≥ 90 days; replicate to a second bucket | 0 (versioned) | ≤ 15 min                                                  |
+| Secrets (`.env.production`)                                               | Operator                 | Encrypted copy off the host (password manager, secret vault, or encrypted archive)     | On every change                                                                      | Indefinite (every version)                         | 0             | ≤ 30 min                                                  |
+| Deployment artifacts (compose file, Caddyfile, images, frontend artifact) | Git + container registry | Git history + immutable images in the registry; the host retains the newest 3 releases | Every release                                                                        | Images/artifacts ≥ 6 months; host releases 3       | 0             | ≤ 30 min                                                  |
+| Certificates (TLS)                                                        | Caddy (Let's Encrypt)    | Auto-renewed by Caddy; no manual backup needed                                         | Continuous                                                                           | Renewed before expiry                              | 0             | automatic                                                 |
+| Redis (`redis_data` volume)                                               | Transient                | None required (AOF only)                                                               | n/a                                                                                  | n/a                                                | n/a           | see [Redis recovery semantics](#redis-recovery-semantics) |
 
 RPO/RTO targets are operational defaults: the numbers above assume a
 single-region managed PostgreSQL with ≥ 24 h PITR and an object-storage bucket
@@ -74,16 +75,16 @@ versioning/replication health check to that alert.
 The application is stateless across containers; the external services it
 depends on and what losing each one means:
 
-| External service | What the app needs | If lost | Recovery action |
-| --- | --- | --- | --- |
-| Managed PostgreSQL | `DATABASE_URL`; all durable application data | Complete data loss if backups are also lost; app serves 500s | Procedure 1 (database restore) |
-| Object storage | `STORAGE_*` bucket; all file payloads | Files unreachable; app serves upload/download errors | Procedure 2 (object-storage recovery) |
-| WorkOS | `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, webhook secret; org mapping + auth | No logins, no org provisioning; webhook deliveries rejected (fail-closed) | Re-enter credentials; dashboard config (redirect URIs, CORS, webhook endpoint) is re-created from `README.md` + `.env.production.example` |
-| Transactional email (SMTP relay) | `SMTP_*` + `EMAIL_FROM` | Notification/test emails not delivered (jobs still succeed/fail durably) | Re-enter credentials; deliveries retry or re-send via the notifications API |
-| Sentry | `SENTRY_DSN` | No error capture; app otherwise unaffected | Re-enter DSN; `SENTRY_ENVIRONMENT` routing restored |
-| Monitoring (uptime checks, Prometheus scraper) | `/health`, `/ready`, `/metrics` endpoints | No alerts; no visibility | Re-create checks per `docs/operations.md` |
-| DNS | A/AAAA record → host IP | Site unreachable | Update the record to the (new) host IP; see DNS/TLS recovery |
-| Let's Encrypt | `ACME_EMAIL`, ports 80/443 reachable | Certificate expiry | Automatic renewal by Caddy; see DNS/TLS recovery |
+| External service                               | What the app needs                                                       | If lost                                                                   | Recovery action                                                                                                                           |
+| ---------------------------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| Managed PostgreSQL                             | `DATABASE_URL`; all durable application data                             | Complete data loss if backups are also lost; app serves 500s              | Procedure 1 (database restore)                                                                                                            |
+| Object storage                                 | `STORAGE_*` bucket; all file payloads                                    | Files unreachable; app serves upload/download errors                      | Procedure 2 (object-storage recovery)                                                                                                     |
+| WorkOS                                         | `WORKOS_API_KEY`, `WORKOS_CLIENT_ID`, webhook secret; org mapping + auth | No logins, no org provisioning; webhook deliveries rejected (fail-closed) | Re-enter credentials; dashboard config (redirect URIs, CORS, webhook endpoint) is re-created from `README.md` + `.env.production.example` |
+| Transactional email (SMTP relay)               | `SMTP_*` + `EMAIL_FROM`                                                  | Notification/test emails not delivered (jobs still succeed/fail durably)  | Re-enter credentials; deliveries retry or re-send via the notifications API                                                               |
+| Sentry                                         | `SENTRY_DSN`                                                             | No error capture; app otherwise unaffected                                | Re-enter DSN; `SENTRY_ENVIRONMENT` routing restored                                                                                       |
+| Monitoring (uptime checks, Prometheus scraper) | `/health`, `/ready`, `/metrics` endpoints                                | No alerts; no visibility                                                  | Re-create checks per `docs/operations.md`                                                                                                 |
+| DNS                                            | A/AAAA record → host IP                                                  | Site unreachable                                                          | Update the record to the (new) host IP; see DNS/TLS recovery                                                                              |
+| Let's Encrypt                                  | `ACME_EMAIL`, ports 80/443 reachable                                     | Certificate expiry                                                        | Automatic renewal by Caddy; see DNS/TLS recovery                                                                                          |
 
 Recovery ordering after a partial or total loss: restore the database first
 (most state), then object storage, then secrets/configuration, then start the
@@ -113,7 +114,7 @@ The general steps:
    `.env.production` (secret recovery rules apply, see Procedure 3), then
    recreate the services so the API and worker pick up the new URL.
 4. Bring the schema to head: `$COMPOSE run --rm --no-deps api alembic
-   upgrade head` (a no-op when the backup is already at head; migrations are
+upgrade head` (a no-op when the backup is already at head; migrations are
    forward-only by policy).
 5. Recreate the services and wait for readiness:
 
@@ -231,10 +232,14 @@ Releases are immutable and the frontend is served from
 flip plus a recreate. The previous release is retained on the host by the
 deploy workflow (newest 3 releases plus the rollback target).
 
-**Application rollback (API/worker/frontend):**
+**Application rollback (API/worker/coordinator/frontend):** Stop the
+coordinator first so the older application image never receives new dispatch
+intents while rollback is in progress. Do not delete `jobs` or `outbox_events`;
+they are the roll-forward recovery record.
 
 ```bash
 cd /opt/app-template
+$COMPOSE stop coordinator
 # Second-newest by mtime; pick the release directory name explicitly if the
 # ordering is ambiguous (see docs/operations.md — rollback).
 PREV=$(ls -1t "$RELEASE_DIR"/releases | sed -n 2p)
@@ -243,7 +248,7 @@ $COMPOSE up -d --remove-orphans
 $COMPOSE exec -T api python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready', timeout=3)"
 ```
 
-**Backend image rollback:** the API and worker run the commit-pinned image
+**Backend image rollback:** the API, worker and coordinator run the commit-pinned image
 (`BACKEND_IMAGE`, set by the workflow at deploy time). Rolling back to a
 previous release therefore requires either re-running the deploy workflow for
 the previous SHA (the workflow pulls and tags that commit's image) or, on the
@@ -296,7 +301,7 @@ semantics) and the `redis_data` volume is rebuilt empty.
    `.env.production`, or the compose-file placeholders will not pull):
 
    ```bash
-   $COMPOSE pull api worker caddy
+   $COMPOSE pull api worker coordinator caddy
    ```
 
 5. **Run exactly one deliberate migration** (the database is external and was
@@ -320,8 +325,11 @@ semantics) and the `redis_data` volume is rebuilt empty.
    monitoring checks and alerts per `docs/operations.md`.
 
 Redis state is not restored: the AOF is rebuilt empty, queued Dramatiq
-messages are lost, and the rate-limit counters reset — none of that is
-application data (see Redis recovery semantics).
+messages are lost, and rate-limit counters reset. Start PostgreSQL, Redis,
+workers and the coordinator in that order; the coordinator automatically
+re-dispatches eligible queued jobs from PostgreSQL after its threshold and
+cooldown. It never blindly replays `running` jobs (see Redis recovery
+semantics).
 
 The lost-host and environment-recreation procedures share the same core —
 this procedure was exercised against scratch infrastructure in
@@ -379,17 +387,21 @@ application data.**
 - **Container restart / host reboot**: the AOF (`appendonly yes`,
   `--save 60 1000`) survives; queued messages and counters are retained.
 - **Wiped `redis_data` volume (lost host)**: the queue and counters are lost,
-  not application data. Durable job *records* live in the `jobs` table in
-  PostgreSQL and survive; messages still queued at loss time do not (re-enqueue
-  from the job records if continuity matters). Rate-limit counters reset —
+  not application data. Durable jobs and outbox rows live in PostgreSQL and
+  survive. After Redis, workers and the coordinator are running, the
+  coordinator automatically creates deduplicated recovery dispatch intents
+  for eligible `queued` jobs after the configured threshold/cooldown; it does
+  not scan `running` jobs or promise exactly-once external effects. Rate-limit counters reset —
   the limiter fails closed with 503 until Redis returns
   (`rate_limiter_unavailable`), so a healthy Redis is required before the API
   accepts traffic.
 - **Recovery**: start Redis, verify with
   `docker exec <redis-container> redis-cli -a "$REDIS_PASSWORD" ping`
-  (PONG), then recreate the API/worker so they reconnect. No restore step
-  exists or is needed; keep `redis_data` in the off-site backup picture only
-  for continuity, never as a source of truth.
+  (PONG), then start workers and the coordinator before recreating the API.
+  Watch `outbox_oldest_due_age_seconds` and `stale_queued_jobs`; use the
+  guarded `make jobs-reconcile` / `CONFIRM_RECONCILE=1 make
+jobs-reconcile-apply` procedure only after inspecting candidates. No Redis
+  restore is needed; keep `redis_data` off the backup critical path.
 
 ---
 
@@ -431,15 +443,15 @@ Alembic migration chain applied; one marker row in the append-only
 `audit_events` table (simulating production audit data); a custom-format
 logical dump as the backup.
 
-| Step | Command | Result |
-| --- | --- | --- |
-| Start scratch PostgreSQL | `docker run -d --name scratch-pg -e POSTGRES_USER=app -e POSTGRES_PASSWORD=app -e POSTGRES_DB=app postgres:16-alpine` | ready |
-| Apply the real schema | `DATABASE_URL=postgresql+asyncpg://app:app@127.0.0.1:55432/app uv --directory backend run alembic upgrade head` | all 16 migrations applied |
-| Insert marker data | `INSERT INTO audit_events (action, resource_type, resource_id, metadata) VALUES ('record.created', 'record', '...0001', '{"request_id":"scratch-restore-test"}')` | 1 row |
-| Take the backup | `pg_dump -U app -Fc -d app > app-backup.dump` | 56 660-byte archive |
-| Simulate data loss | `DROP SCHEMA public CASCADE; CREATE SCHEMA public;` | all 20 tables gone |
-| Restore | `pg_restore -U app -d app -c backup.dump` | 113 ignored errors (expected: the `-c` clean-mode DROP statements for already-absent objects); all tables recreated |
-| Verify | count of marker row = 1; `alembic_version` = `9e4f5c6a7d8b` (head); 20 tables present | **PASS** |
+| Step                     | Command                                                                                                                                                           | Result                                                                                                              |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| Start scratch PostgreSQL | `docker run -d --name scratch-pg -e POSTGRES_USER=app -e POSTGRES_PASSWORD=app -e POSTGRES_DB=app postgres:16-alpine`                                             | ready                                                                                                               |
+| Apply the real schema    | `DATABASE_URL=postgresql+asyncpg://app:app@127.0.0.1:55432/app uv --directory backend run alembic upgrade head`                                                   | all 16 migrations applied                                                                                           |
+| Insert marker data       | `INSERT INTO audit_events (action, resource_type, resource_id, metadata) VALUES ('record.created', 'record', '...0001', '{"request_id":"scratch-restore-test"}')` | 1 row                                                                                                               |
+| Take the backup          | `pg_dump -U app -Fc -d app > app-backup.dump`                                                                                                                     | 56 660-byte archive                                                                                                 |
+| Simulate data loss       | `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`                                                                                                               | all 20 tables gone                                                                                                  |
+| Restore                  | `pg_restore -U app -d app -c backup.dump`                                                                                                                         | 113 ignored errors (expected: the `-c` clean-mode DROP statements for already-absent objects); all tables recreated |
+| Verify                   | count of marker row = 1; `alembic_version` = `9e4f5c6a7d8b` (head); 20 tables present                                                                             | **PASS**                                                                                                            |
 
 The run validates the logical-dump escape hatch end to end. The primary
 provider-native PITR path cannot be executed against scratch infrastructure
@@ -456,15 +468,15 @@ off-site configuration backup), a scratch `.env.production` built from
 network (the "managed PostgreSQL" stand-in), and the backend image built from
 the release checkout.
 
-| Step | Command | Result |
-| --- | --- | --- |
-| Restore artifacts | copy compose file, Caddyfile, env file into fresh `$DEPLOY_ROOT` | **PASS** |
-| Validate configuration | `docker compose -f compose.hybrid-vps.yml --env-file .env.production config --quiet` | **PASS** |
-| Start private Redis | `docker compose up -d redis` | **PASS** (`redis-cli ping` → `PONG`, healthy) |
-| Stand up scratch managed PostgreSQL | `docker run -d --network app-template-prod_default ... postgres:16-alpine` | **PASS** (reachable as `scratch-pg-recreate:5432`) |
-| Run exactly one migration | `docker compose run --rm --no-deps api alembic upgrade head` | **FAIL** — see defect D1 below |
-| Full stack up | `docker compose up -d` | Redis healthy; **API and worker crash-loop** — see defect D1; **Caddy crash-loops** — see defect D2 |
-| `/ready` wait | `docker compose exec -T api python -c "urllib.request.urlopen('http://localhost:8000/ready')"` | blocked by D1 (API never boots) |
+| Step                                | Command                                                                                        | Result                                                                                              |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Restore artifacts                   | copy compose file, Caddyfile, env file into fresh `$DEPLOY_ROOT`                               | **PASS**                                                                                            |
+| Validate configuration              | `docker compose -f compose.hybrid-vps.yml --env-file .env.production config --quiet`           | **PASS**                                                                                            |
+| Start private Redis                 | `docker compose up -d redis`                                                                   | **PASS** (`redis-cli ping` → `PONG`, healthy)                                                       |
+| Stand up scratch managed PostgreSQL | `docker run -d --network app-template-prod_default ... postgres:16-alpine`                     | **PASS** (reachable as `scratch-pg-recreate:5432`)                                                  |
+| Run exactly one migration           | `docker compose run --rm --no-deps api alembic upgrade head`                                   | **FAIL** — see defect D1 below                                                                      |
+| Full stack up                       | `docker compose up -d`                                                                         | Redis healthy; **API and worker crash-loop** — see defect D1; **Caddy crash-loops** — see defect D2 |
+| `/ready` wait                       | `docker compose exec -T api python -c "urllib.request.urlopen('http://localhost:8000/ready')"` | blocked by D1 (API never boots)                                                                     |
 
 **Result: FAIL on the shipped artifacts — production-blocking defects D1/D2
 recorded below.** The recreation procedure itself (artifact restore,
@@ -485,16 +497,16 @@ compose network, and the backend and Caddy images built from the fixed
 release checkout (the fixes are in `config.py`, `compose.hybrid-vps.yml`,
 `main.py` and the example env files).
 
-| Step | Command | Result |
-| --- | --- | --- |
-| Restore artifacts | copy compose file, Caddyfile, env file into fresh `$DEPLOY_ROOT` | **PASS** |
-| Validate configuration | `docker compose -f compose.hybrid-vps.yml --env-file .env.production config --quiet` | **PASS** |
-| Start private Redis | `docker compose up -d redis` | **PASS** (`redis-cli ping` → `PONG`, healthy) |
-| Stand up scratch managed PostgreSQL | `docker run -d --network app-template-prod_default --name scratch-pg-recreate -e POSTGRES_USER=app -e POSTGRES_PASSWORD=app -e POSTGRES_DB=app postgres:16-alpine` | **PASS** (reachable as `scratch-pg-recreate:5432`) |
-| Run exactly one migration | `docker compose run --rm --no-deps api alembic upgrade head` | **PASS** — full chain applied, `alembic_version` = `9e4f5c6a7d8b` (head) |
-| Full stack up | `docker compose up -d` | **PASS** — all four services healthy: `redis`, `api`, `worker`, `caddy` |
-| `/ready` wait | `docker compose exec -T api python -c "urllib.request.urlopen('http://localhost:8000/ready')"` | **PASS** — HTTP 200 |
-| Edge liveness | Caddy healthcheck (308 auto-HTTPS probe on :80) | **PASS** — `caddy` healthy |
+| Step                                | Command                                                                                                                                                            | Result                                                                   |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
+| Restore artifacts                   | copy compose file, Caddyfile, env file into fresh `$DEPLOY_ROOT`                                                                                                   | **PASS**                                                                 |
+| Validate configuration              | `docker compose -f compose.hybrid-vps.yml --env-file .env.production config --quiet`                                                                               | **PASS**                                                                 |
+| Start private Redis                 | `docker compose up -d redis`                                                                                                                                       | **PASS** (`redis-cli ping` → `PONG`, healthy)                            |
+| Stand up scratch managed PostgreSQL | `docker run -d --network app-template-prod_default --name scratch-pg-recreate -e POSTGRES_USER=app -e POSTGRES_PASSWORD=app -e POSTGRES_DB=app postgres:16-alpine` | **PASS** (reachable as `scratch-pg-recreate:5432`)                       |
+| Run exactly one migration           | `docker compose run --rm --no-deps api alembic upgrade head`                                                                                                       | **PASS** — full chain applied, `alembic_version` = `9e4f5c6a7d8b` (head) |
+| Full stack up                       | `docker compose up -d`                                                                                                                                             | **PASS** — all four services healthy: `redis`, `api`, `worker`, `caddy`  |
+| `/ready` wait                       | `docker compose exec -T api python -c "urllib.request.urlopen('http://localhost:8000/ready')"`                                                                     | **PASS** — HTTP 200                                                      |
+| Edge liveness                       | Caddy healthcheck (308 auto-HTTPS probe on :80)                                                                                                                    | **PASS** — `caddy` healthy                                               |
 
 **Result: PASS.** The environment-recreation procedure completes end to end
 against the shipped artifacts: artifacts restored, configuration validated,

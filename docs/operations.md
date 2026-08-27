@@ -27,16 +27,22 @@ export COMPOSE="docker compose -f compose.hybrid-vps.yml --env-file .env.product
 
 ## Service model
 
-| Service | Image / command | Scaling unit | Notes |
-| --- | --- | --- | --- |
-| `caddy` | custom image from `deploy/caddy/Dockerfile` (Caddy v2.11.4 + caddy-ratelimit v0.1.0) | 1 instance | Edge TLS, static frontend, `/api` proxy, security headers, edge rate limits |
-| `api` | backend image, `uvicorn app.main:app` | replicas via `--scale api=N` | Health-checked on `/ready`; Caddy load-balances across replicas |
-| `worker` | backend image, `dramatiq app.workers --processes 1 --threads N` | `WORKER_CONCURRENCY` per process, `--scale worker=N` for more processes | Durable job pipeline (ADR-0004) |
-| `redis` | `redis:7-alpine`, password + AOF persistence | 1 instance | Dramatiq broker + API rate-limit store; never published |
+| Service       | Image / command                                                                      | Scaling unit                                                            | Notes                                                                                                                                |
+| ------------- | ------------------------------------------------------------------------------------ | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `caddy`       | custom image from `deploy/caddy/Dockerfile` (Caddy v2.11.4 + caddy-ratelimit v0.1.0) | 1 instance                                                              | Edge TLS, static frontend, `/api` proxy, security headers, edge rate limits                                                          |
+| `api`         | backend image, `uvicorn app.main:app`                                                | replicas via `--scale api=N`                                            | Health-checked on `/ready`; Caddy load-balances across replicas                                                                      |
+| `worker`      | backend image, `dramatiq app.workers --processes 1 --threads N`                      | `WORKER_CONCURRENCY` per process, `--scale worker=N` for more processes | Durable job pipeline (ADR-0004)                                                                                                      |
+| `coordinator` | backend image, `python -m app.job_coordinator`                                       | normally 1; safe to replicate                                           | Claims PostgreSQL outbox rows, publishes reference-only broker messages, reconciles queued jobs and schedules maintenance (ADR-0019) |
+| `redis`       | `redis:7-alpine`, password + AOF persistence                                         | 1 instance                                                              | Dramatiq broker + API rate-limit store; never published                                                                              |
 
 Initial defaults: 1 API replica, 1 worker process at `WORKER_CONCURRENCY=8`,
-1 Caddy, 1 Redis. Compose limits each service (CPU/memory) and rotates JSON
+1 coordinator, 1 Caddy, 1 Redis. Compose limits each service (CPU/memory) and rotates JSON
 logs (`json-file` driver, `max-size`/`max-file` per service).
+
+Human review record: Daniel approved the coordinator process, liveness probe,
+resource/log limits, dependency order, graceful stop and rollout order on
+2026-08-19. The project owner approved the local-only backup/recovery,
+retention and guarded-reconciliation procedures on 2026-08-27.
 
 The `caddy` service runs the pinned custom edge image
 (`deploy/caddy/Dockerfile`: Caddy v2.11.4 + caddy-ratelimit v0.1.0). The
@@ -98,6 +104,7 @@ Check state manually:
 $COMPOSE ps
 $COMPOSE logs --tail=100 api
 $COMPOSE logs --tail=100 worker
+$COMPOSE logs --tail=100 coordinator
 ```
 
 ## Monitoring
@@ -140,19 +147,19 @@ The AI layer adds its own families (`ai_requests_total`,
 
 ### Alerts to configure
 
-| Alert | Signal | Severity |
-| --- | --- | --- |
-| Readiness / API failure | `/ready` non-200 from the uptime monitor or scraper | critical |
-| Worker / job failures | `jobs_failed_total` rising; delivery rows `failed` | critical |
-| Stale worker messages | `jobs_stale_messages_total` rising | warning |
-| Disk pressure | host disk or Caddy/Redis log volumes ≥ 80% | warning (90% critical) |
-| Certificate expiry | Let's Encrypt renewal failures in Caddy logs; cert expiry within 14 days | critical |
-| Backup failure | failed backup job / missing backup marker (docs/backup-and-recovery.md) | critical |
-| Redis unavailable | API `rate_limiter_unavailable` errors; `redis-cli ping` failure | critical |
-| Outbox publication backlog | `outbox_oldest_due_age_seconds` > 300 s (warning), > 900 s (critical) | warning / critical |
-| Dead outbox events | `sum(outbox_events{status="dead"}) > 0` | critical |
-| Queued-job recovery | `stale_queued_jobs > 0` for 15 min | warning |
-| Coordinator unavailable | coordinator healthcheck failing or no `coordinator.cycle_completed` log for 2 min | critical |
+| Alert                      | Signal                                                                            | Severity               |
+| -------------------------- | --------------------------------------------------------------------------------- | ---------------------- |
+| Readiness / API failure    | `/ready` non-200 from the uptime monitor or scraper                               | critical               |
+| Worker / job failures      | `jobs_failed_total` rising; delivery rows `failed`                                | critical               |
+| Stale worker messages      | `jobs_stale_messages_total` rising                                                | warning                |
+| Disk pressure              | host disk or Caddy/Redis log volumes ≥ 80%                                        | warning (90% critical) |
+| Certificate expiry         | Let's Encrypt renewal failures in Caddy logs; cert expiry within 14 days          | critical               |
+| Backup failure             | failed backup job / missing backup marker (docs/backup-and-recovery.md)           | critical               |
+| Redis unavailable          | API `rate_limiter_unavailable` errors; `redis-cli ping` failure                   | critical               |
+| Outbox publication backlog | `outbox_oldest_due_age_seconds` > 300 s (warning), > 900 s (critical)             | warning / critical     |
+| Dead outbox events         | `sum(outbox_events{status="dead"}) > 0`                                           | critical               |
+| Queued-job recovery        | `stale_queued_jobs > 0` for 15 min                                                | warning                |
+| Coordinator unavailable    | coordinator healthcheck failing or no `coordinator.cycle_completed` log for 2 min | critical               |
 
 ## Durable job delivery runbook
 
@@ -197,14 +204,15 @@ from `.env.production` and must match `REDIS_URL`).
 
 `docker compose stop redis` runs SIGTERM and Redis flushes the AOF before
 exit (default `stop_grace_period`); `docker compose restart redis` is safe.
-The API fails closed when Redis is unavailable (`rate_limiter_unavailable`,
-503) rather than silently dropping the abuse control — a deliberate choice.
+The API fails closed when Redis is unavailable (`rate_limiter_unavailable`, 503) rather than silently dropping the abuse control — a deliberate choice.
 
 ### Consequences of Redis loss
 
 - **Broker**: queued Dramatiq messages are lost; jobs already delivered to a
-  worker continue. Durable job *records* (the `jobs` table) survive in
-  PostgreSQL, so job state is recoverable, but messages in the queue are not.
+  worker continue. PostgreSQL retains each job and its outbox publication
+  intent. After Redis returns, the coordinator automatically creates a
+  cooldown-limited replacement dispatch for eligible stranded `queued` jobs;
+  it does not scan or replay `running` work.
 - **Rate limiting**: API traffic fails closed with 503 until Redis returns
   (the rate limiter is the only Redis consumer at the edge; `REDIS_URL`
   connectivity is the dependency).
@@ -262,26 +270,26 @@ labels.
 
 ### AI metrics families
 
-| Metric | Type | Labels | Meaning |
-| --- | --- | --- | --- |
-| `ai_requests_total` | counter | `task`, `provider`, `model`, `status` (`succeeded`/`failed`) | provider executions by terminal outcome, one sample per settled attempt |
-| `ai_request_duration_seconds` | histogram | `task`, `provider`, `model` | provider execution latency |
-| `ai_tokens_total` | counter | `task`, `provider`, `model`, `direction` (`input`/`output`) | tokens consumed |
-| `ai_cost_total` | counter | `task`, `provider`, `model` | spend in USD, priced with the registry's reviewed rates (the registry's single pricing currency) |
-| `ai_validation_failures_total` | counter | `task`, `provider`, `model` | structured-output validation failures (each followed by one bounded repair or a task retry) |
-| `ai_retries_total` | counter | `task`, `provider`, `model` | bounded retry dispatches after the first (including repair dispatches) |
-| `ai_fallbacks_total` | counter | `task`, `provider`, `model` | reviewed provider/model fallbacks under the task's fallback policy |
-| `ai_budget_denials_total` | counter | `task` | monthly organisation budget denials before dispatch |
-| `dramatiq_queue_depth` | gauge | `queue` | undelivered messages waiting in a Dramatiq queue (`LLEN dramatiq:<queue>` on Redis); refreshed by the API process every 30 s, so the promised backlog alert is queryable from `GET /metrics` |
+| Metric                         | Type      | Labels                                                       | Meaning                                                                                                                                                                                      |
+| ------------------------------ | --------- | ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ai_requests_total`            | counter   | `task`, `provider`, `model`, `status` (`succeeded`/`failed`) | provider executions by terminal outcome, one sample per settled attempt                                                                                                                      |
+| `ai_request_duration_seconds`  | histogram | `task`, `provider`, `model`                                  | provider execution latency                                                                                                                                                                   |
+| `ai_tokens_total`              | counter   | `task`, `provider`, `model`, `direction` (`input`/`output`)  | tokens consumed                                                                                                                                                                              |
+| `ai_cost_total`                | counter   | `task`, `provider`, `model`                                  | spend in USD, priced with the registry's reviewed rates (the registry's single pricing currency)                                                                                             |
+| `ai_validation_failures_total` | counter   | `task`, `provider`, `model`                                  | structured-output validation failures (each followed by one bounded repair or a task retry)                                                                                                  |
+| `ai_retries_total`             | counter   | `task`, `provider`, `model`                                  | bounded retry dispatches after the first (including repair dispatches)                                                                                                                       |
+| `ai_fallbacks_total`           | counter   | `task`, `provider`, `model`                                  | reviewed provider/model fallbacks under the task's fallback policy                                                                                                                           |
+| `ai_budget_denials_total`      | counter   | `task`                                                       | monthly organisation budget denials before dispatch                                                                                                                                          |
+| `dramatiq_queue_depth`         | gauge     | `queue`                                                      | undelivered messages waiting in a Dramatiq queue (`LLEN dramatiq:<queue>` on Redis); refreshed by the API process every 30 s, so the promised backlog alert is queryable from `GET /metrics` |
 
 #### v0.8 large-file transfer metrics
 
-| Metric | Type | Labels | Meaning |
-| --- | --- | --- | --- |
-| `ai_transfer_selections_total` | counter | `mode`, `provider` | selected transfer mode by mode and provider (`inline`, `provider_upload`, `managed_signed_url`, `storage_reference`) |
-| `ai_transfer_outcomes_total` | counter | `mode`, `provider`, `result` | transfer lifecycle outcomes (upload/stage success, reuse, expiry, terminal deletion, deletion failure) |
-| `ai_transfer_reconciliation_total` | counter | `provider`, `result` | provider-file reconciliation sweep outcomes (`deleted`/`failed` per claimed reference) |
-| `ai_transfer_cleanup_backlog` | gauge | `mode` | provider-file references currently waiting on the reconciliation sweep (see the cleanup-backlog runbook below) |
+| Metric                             | Type    | Labels                       | Meaning                                                                                                              |
+| ---------------------------------- | ------- | ---------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `ai_transfer_selections_total`     | counter | `mode`, `provider`           | selected transfer mode by mode and provider (`inline`, `provider_upload`, `managed_signed_url`, `storage_reference`) |
+| `ai_transfer_outcomes_total`       | counter | `mode`, `provider`, `result` | transfer lifecycle outcomes (upload/stage success, reuse, expiry, terminal deletion, deletion failure)               |
+| `ai_transfer_reconciliation_total` | counter | `provider`, `result`         | provider-file reconciliation sweep outcomes (`deleted`/`failed` per claimed reference)                               |
+| `ai_transfer_cleanup_backlog`      | gauge   | `mode`                       | provider-file references currently waiting on the reconciliation sweep (see the cleanup-backlog runbook below)       |
 
 The durable `ai_attachment_references` rows are the per-request source of truth
 for transfer state; these counters are the aggregate signal. Labels are
@@ -296,18 +304,18 @@ file so any Prometheus-compatible frontend (Grafana, managed dashboards) can
 implement it. One panel per row; every query is a PromQL expression over the
 families above, with a corresponding alert rule (aggregate table below).
 
-| Panel | PromQL query | Type | Alert rule |
-| --- | --- | --- | --- |
-| Provider success rate | `1 - sum(rate(ai_requests_total{status="failed"}[10m])) / sum(rate(ai_requests_total[10m]))` | gauge (0-1) | `< 0.95` (provider outage, critical) |
-| Provider latency p95 | `histogram_quantile(0.95, sum(rate(ai_request_duration_seconds_bucket[10m])) by (le, task))` | gauge (s) | `> 30` (warning; per-task override) |
-| Token throughput | `sum(rate(ai_tokens_total[10m])) by (direction)` | gauge (tokens/s) | trend only |
-| Spend rate | `sum(rate(ai_cost_total[10m]))` | gauge (USD/s) | daily-normalised `ai_cost_total` rate above budget threshold (warning) |
-| Validation failures | `sum(rate(ai_validation_failures_total[10m]))` | gauge (events/s) | rising, or retry/repair ratio `> 0.2` of requests (warning) |
-| Retry/fallback ratio | `sum(rate(ai_retries_total[10m])) / clamp_min(sum(rate(ai_requests_total[10m])), 1e-9)` | gauge (ratio) | `> 0.2` (warning) |
-| Budget denials | `sum(rate(ai_budget_denials_total[10m]))` | gauge (events/s) | `> 0` (warning; info if deliberate) |
-| Transfer failure rate | `sum(rate(ai_transfer_outcomes_total{result="failed"}[10m])) / clamp_min(sum(rate(ai_transfer_outcomes_total[10m])), 1e-9)` | gauge (ratio) | `> 0.05` over 10 min (warning; upload/staging/deletion health) |
-| Cleanup backlog | `ai_transfer_cleanup_backlog` | gauge | `> 10` for `> 15 min` (warning; provider files persist until deleted) |
-| AI queue backlog | `dramatiq_queue_depth{queue="ai"}` | gauge (messages) | `> 10` for `> 5 min` (warning) |
+| Panel                 | PromQL query                                                                                                                | Type             | Alert rule                                                             |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------- | ---------------- | ---------------------------------------------------------------------- |
+| Provider success rate | `1 - sum(rate(ai_requests_total{status="failed"}[10m])) / sum(rate(ai_requests_total[10m]))`                                | gauge (0-1)      | `< 0.95` (provider outage, critical)                                   |
+| Provider latency p95  | `histogram_quantile(0.95, sum(rate(ai_request_duration_seconds_bucket[10m])) by (le, task))`                                | gauge (s)        | `> 30` (warning; per-task override)                                    |
+| Token throughput      | `sum(rate(ai_tokens_total[10m])) by (direction)`                                                                            | gauge (tokens/s) | trend only                                                             |
+| Spend rate            | `sum(rate(ai_cost_total[10m]))`                                                                                             | gauge (USD/s)    | daily-normalised `ai_cost_total` rate above budget threshold (warning) |
+| Validation failures   | `sum(rate(ai_validation_failures_total[10m]))`                                                                              | gauge (events/s) | rising, or retry/repair ratio `> 0.2` of requests (warning)            |
+| Retry/fallback ratio  | `sum(rate(ai_retries_total[10m])) / clamp_min(sum(rate(ai_requests_total[10m])), 1e-9)`                                     | gauge (ratio)    | `> 0.2` (warning)                                                      |
+| Budget denials        | `sum(rate(ai_budget_denials_total[10m]))`                                                                                   | gauge (events/s) | `> 0` (warning; info if deliberate)                                    |
+| Transfer failure rate | `sum(rate(ai_transfer_outcomes_total{result="failed"}[10m])) / clamp_min(sum(rate(ai_transfer_outcomes_total[10m])), 1e-9)` | gauge (ratio)    | `> 0.05` over 10 min (warning; upload/staging/deletion health)         |
+| Cleanup backlog       | `ai_transfer_cleanup_backlog`                                                                                               | gauge            | `> 10` for `> 15 min` (warning; provider files persist until deleted)  |
+| AI queue backlog      | `dramatiq_queue_depth{queue="ai"}`                                                                                          | gauge (messages) | `> 10` for `> 5 min` (warning)                                         |
 
 Queue-depth source: the API process reads the broker's queue lengths through
 `RedisBroker.get_queue_message_counts` (Dramatiq stores each queue as a Redis
@@ -319,16 +327,16 @@ leaves the gauge stale (logged once) rather than failing the scrape.
 
 ### AI alerts to configure
 
-| Alert | Signal | Severity |
-| --- | --- | --- |
-| Provider outage | `ai_requests_total{status="failed"}` error rate above threshold (e.g. 5% over 10 min, or a step change in `provider_unavailable`/`provider_timeout` failures) | critical |
-| Provider latency | `ai_request_duration_seconds` `p95` above the SLO threshold (default 30 s; raise per task/provider) | warning |
-| Validation degradation | `ai_validation_failures_total` rising or repair/retry ratio above threshold (e.g. > 20% of requests) | warning |
-| Spend spike | `ai_cost_total` rate above the daily budget-normalised threshold | warning |
-| Budget denials | `ai_budget_denials_total` growth (users hitting the monthly cap) | warning (info if deliberate) |
-| Transfer failures | `ai_transfer_outcomes_total` deletion-failure / upload-failure rate above threshold (e.g. > 5% over 10 min) | warning |
-| Cleanup backlog | `ai_transfer_cleanup_backlog` above threshold (e.g. > 10) for > 15 min, or `ai_transfer_reconciliation_total` deletion failures rising | warning (provider files persist until deleted; see the cleanup-backlog runbook) |
-| Queue backlog | `dramatiq_queue_depth{queue="ai"}` above threshold (e.g. 10) for > 5 min (AI jobs are durable; see "Consequences of Redis loss") | warning |
+| Alert                  | Signal                                                                                                                                                        | Severity                                                                        |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| Provider outage        | `ai_requests_total{status="failed"}` error rate above threshold (e.g. 5% over 10 min, or a step change in `provider_unavailable`/`provider_timeout` failures) | critical                                                                        |
+| Provider latency       | `ai_request_duration_seconds` `p95` above the SLO threshold (default 30 s; raise per task/provider)                                                           | warning                                                                         |
+| Validation degradation | `ai_validation_failures_total` rising or repair/retry ratio above threshold (e.g. > 20% of requests)                                                          | warning                                                                         |
+| Spend spike            | `ai_cost_total` rate above the daily budget-normalised threshold                                                                                              | warning                                                                         |
+| Budget denials         | `ai_budget_denials_total` growth (users hitting the monthly cap)                                                                                              | warning (info if deliberate)                                                    |
+| Transfer failures      | `ai_transfer_outcomes_total` deletion-failure / upload-failure rate above threshold (e.g. > 5% over 10 min)                                                   | warning                                                                         |
+| Cleanup backlog        | `ai_transfer_cleanup_backlog` above threshold (e.g. > 10) for > 15 min, or `ai_transfer_reconciliation_total` deletion failures rising                        | warning (provider files persist until deleted; see the cleanup-backlog runbook) |
+| Queue backlog          | `dramatiq_queue_depth{queue="ai"}` above threshold (e.g. 10) for > 5 min (AI jobs are durable; see "Consequences of Redis loss")                              | warning                                                                         |
 
 ### AI runbooks
 
@@ -585,22 +593,24 @@ docker compose -f compose.hybrid-vps.yml --env-file .env.production up -d --remo
 ```
 
 The backend image is pinned to the release SHA in the compose environment
-(`BACKEND_IMAGE`), so to roll the API/worker back to `$PREV` re-run the deploy
-workflow for that SHA, or pull and re-tag the previous image. Migrations are
+(`BACKEND_IMAGE`), so to roll the API/worker/coordinator back to `$PREV`, first
+stop the coordinator, then re-run the deploy workflow for that SHA or pull and
+re-tag the previous image before recreating the services. Migrations are
 forward-only by policy; see `docs/backup-and-recovery.md` for the database
 restore path that a schema rollback would require.
 
 ## Tuning reference
 
-| Parameter | Default | Where |
-| --- | --- | --- |
-| Worker threads per process | 8 | `WORKER_CONCURRENCY` in `.env.production` |
-| API replicas | 1 | `docker compose up -d --scale api=N` |
-| Worker processes | 1 | `docker compose up -d --scale worker=N` |
-| API memory/CPU limits | 512 MB / 1 CPU | `compose.hybrid-vps.yml` `deploy.resources` |
-| Worker memory/CPU limits | 1 GB / 2 CPU | `compose.hybrid-vps.yml` `deploy.resources` |
-| Redis memory cap / eviction | 200 MB / allkeys-lru | `compose.hybrid-vps.yml` |
-| Edge API rate limit | 600/min per IP | `deploy/caddy/Caddyfile` |
-| App rate limit (/api/v1) | 300/min per key | `app/core/rate_limit.py` |
-| API graceful shutdown | 30 s | `compose.hybrid-vps.yml` `stop_grace_period` |
-| Worker graceful shutdown | 120 s | `compose.hybrid-vps.yml` `stop_grace_period` |
+| Parameter                   | Default              | Where                                        |
+| --------------------------- | -------------------- | -------------------------------------------- |
+| Worker threads per process  | 8                    | `WORKER_CONCURRENCY` in `.env.production`    |
+| API replicas                | 1                    | `docker compose up -d --scale api=N`         |
+| Worker processes            | 1                    | `docker compose up -d --scale worker=N`      |
+| Coordinator replicas        | 1                    | `docker compose up -d --scale coordinator=N` |
+| API memory/CPU limits       | 512 MB / 1 CPU       | `compose.hybrid-vps.yml` `deploy.resources`  |
+| Worker memory/CPU limits    | 1 GB / 2 CPU         | `compose.hybrid-vps.yml` `deploy.resources`  |
+| Redis memory cap / eviction | 200 MB / allkeys-lru | `compose.hybrid-vps.yml`                     |
+| Edge API rate limit         | 600/min per IP       | `deploy/caddy/Caddyfile`                     |
+| App rate limit (/api/v1)    | 300/min per key      | `app/core/rate_limit.py`                     |
+| API graceful shutdown       | 30 s                 | `compose.hybrid-vps.yml` `stop_grace_period` |
+| Worker graceful shutdown    | 120 s                | `compose.hybrid-vps.yml` `stop_grace_period` |

@@ -43,7 +43,7 @@ Frameworks with planning loops, tools and memory solve a different problem.
 They hide the request/response contract behind an orchestration model, make
 deterministic costing/tracking harder, and add a large dependency that most
 derived applications do not need. The scope explicitly defers autonomous
-agents to a future orchestration layer that can sit *above* `AIService`. Rejected for v0.7.
+agents to a future orchestration layer that can sit _above_ `AIService`. Rejected for v0.7.
 
 ### 4. Provider-neutral `AIService` with task/prompt/model registries (adopted)
 
@@ -104,7 +104,7 @@ The contract includes:
   transaction-safe reservation so a budget cannot be materially overrun.
 - **Jobs**: small bounded tasks run synchronously; document-scale work enqueues
   an `ai.execute` Dramatiq job on the `ai` queue with the existing durable
-  record-then-enqueue lifecycle (BP §18).
+  transactional scheduling/outbox lifecycle (BP §18–19).
 
 ### Amendment (v0.7 attachment/regional, Scope §6.1)
 

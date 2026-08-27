@@ -1,9 +1,9 @@
 """Shared Dramatiq broker configuration (BP §18, v0.5 Scope §6.4).
 
-Both the API process and the Dramatiq worker install a broker from this module.
-Keeping the factory separate from ``app.workers`` lets API startup publish jobs
-without importing the worker entrypoint, whose task imports are intentionally
-registration side effects.
+The API process, coordinator and Dramatiq worker install a broker from this
+module. Keeping the factory separate from ``app.workers`` lets coordinator
+startup publish jobs without importing the worker entrypoint, whose task imports
+are intentionally registration side effects.
 """
 
 from __future__ import annotations
