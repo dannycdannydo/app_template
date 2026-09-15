@@ -76,13 +76,13 @@ You are the **reviewer**. You did not write this code. Your job is to find probl
    where they add independent evidence: reproduce a suspected defect, exercise
    a missing or high-risk path, or confirm a test meaningfully covers the
    claimed behaviour. Do not rerun `make lint`, `make typecheck`, `make test`
-   or `make check` in full by default; prompt 03 owns the single complete local
-   gate after review feedback is applied.
+   or `make check`; prompt 03 owns the single complete local gate after review
+   feedback is applied.
 
-   Run a broader or complete gate only when the diff is unusually broad or
-   high-risk, the contract explicitly requires it at review time, or the
-   implementation handoff lacks credible validation for an affected surface.
-   Record every command actually run and its result in the review.
+   Never run a broader or complete gate in this stage, regardless of scope,
+   sensitivity, risk or contract wording. If the handoff lacks credible
+   validation, run the missing focused check or request changes. Record every
+   command actually run and its result in the review.
 
 7. **Write the review to `.handoff/review.md`.** This file is what the next step reads — they will not see your chat output. Use this format:
 

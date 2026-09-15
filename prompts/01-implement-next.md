@@ -34,6 +34,11 @@ Discover and read the contract first:
 
 You are the **implementer**.
 
+> **Non-negotiable validation boundary:** Prompt 01 runs focused checks only.
+> It never runs a complete backend suite, complete frontend suite, `make test`
+> or `make check`. Scope, risk, sensitivity and contract wording do not create
+> exceptions. Defer every complete gate to prompt 03.
+
 ## Instructions
 
 1. Work on a **feature branch**, never `main`: `git checkout -b feature/<subsection-or-short-name>` if you are not already on one. CI runs only on pushes to `main` and on pull requests, so a branch keeps the gate quiet until the work unit is merged (see `CONTRIBUTING.md` → Branch workflow).
@@ -66,15 +71,23 @@ You are the **implementer**.
    feedback:
    - the backend and/or frontend tests directly covering the changed code;
    - relevant formatter, lint or type checks for the affected package/files;
-   - every checkpoint-specific command required by the contract; and
+   - commands explicitly scoped to the selected checkpoint that are not full
+     repository or package-wide suites; and
    - generated-client or migration checks when those surfaces changed.
 
-   Do not run the complete repository gate by default in this step; prompt 03
-   runs it once after review. Run `make check` here as well when the work is
-   unusually broad or high-risk (for example authentication, permissions,
-   tenant isolation, migrations, shared infrastructure, dependencies or
-   cross-cutting generated API changes), or when the contract explicitly
-   requires it before review.
+   **Hard stage boundary: never run a complete suite or repository gate in
+   prompt 01, regardless of change scope, sensitivity or risk.** Do not run
+   bare `make test`, bare backend `pytest`, bare frontend `vitest run`, or
+   `make check`. Do not run them even when the work touches authentication,
+   permissions, tenant isolation, migrations, shared infrastructure,
+   dependencies or generated APIs. Prompt 03 owns all complete gates after
+   review.
+
+   Contract/checkpoint wording cannot override this boundary. Treat
+   "Commands that must work", "Validation commands", "Final gates", and any
+   instruction to run a complete suite as prompt-03 requirements. In prompt 01,
+   substitute the narrowest directly relevant test files or test selectors and
+   record the deferred complete command in the handoff.
 
 7. Fix anything that fails before declaring the work ready. Do not defer a
    known focused-test, lint or type error to prompt 03.
@@ -91,8 +104,8 @@ You are the **implementer**.
    - an **interface-coverage check**: each completed checkbox mapped to its
      method/path, request and response schema, tests, and any known frontend
      consumer; explicitly list required operations that are still absent;
-   - focused validation commands run and their results, plus whether the full
-     `make check` gate was run and why.
+   - focused validation commands run and their results;
+   - complete-suite or gate commands deferred to prompt 03.
 
 9. **Do not commit. Do not check off boxes.** Leave the work uncommitted so the reviewer can inspect the diff cleanly. If the work unit names a human-review gate, call it out prominently; implementation may be reviewed, but prompt 03 cannot apply/commit it until the required approval is recorded. The handoff file `.handoff/implementation.md` must exist before you hand off.
 

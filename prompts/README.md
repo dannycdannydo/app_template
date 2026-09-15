@@ -31,11 +31,11 @@ The daily loop deliberately avoids running the same complete local gate three
 times:
 
 - **Prompt 01** runs the tests and static checks closest to the changed code,
-  plus checkpoint-specific validation. Broad or high-risk changes may also run
-  the complete gate before review.
+  plus narrowly scoped checkpoint validation. It never runs complete backend
+  or frontend suites or `make check`, regardless of scope or risk.
 - **Prompt 02** assesses the validation evidence and runs focused checks when
-  they help investigate a risk or review finding. It does not repeat the whole
-  suite by default.
+  they help investigate a risk or review finding. It never runs a complete
+  suite or repository gate.
 - **Prompt 03** runs `make check` once after all review feedback is applied,
   plus any additional commands required by the active contract.
 - **Pull-request CI** is the authoritative clean-environment merge gate and
@@ -44,6 +44,9 @@ times:
 
 Known failures are never deferred between stages: focused checks must be green
 before review, and the complete local gate must be green before commit and PR.
+Contract sections named "Commands that must work", "Validation commands" or
+"Final gates" belong to prompt 03 when they name complete suites. They never
+override the prompt-01 or prompt-02 stage boundary.
 
 ## The periodic audit
 

@@ -51,7 +51,9 @@ from structlog.testing import capture_logs
 
 from app.broker import worker_middleware
 from app.job_coordinator.loop import (
+    CycleStats,
     claim_due_events,
+    cycle_log_due,
     publish_event,
     reclaim_stale_claims,
     run_coordinator,
@@ -580,6 +582,17 @@ def test_backoff_delay_is_capped_and_jittered() -> None:
     for _ in range(20):
         delay = backoff_delay(consecutive_failures=2000, initial_seconds=1.0, max_seconds=300.0)
         assert 0 <= delay <= 300.0
+
+
+def test_cycle_log_is_immediate_for_work_and_throttled_when_idle() -> None:
+    """Idle polls retain a one-minute liveness log without console spam."""
+    idle = CycleStats()
+    assert cycle_log_due(idle, now=10.0, last_log_at=None)
+    assert not cycle_log_due(idle, now=69.9, last_log_at=10.0)
+    assert cycle_log_due(idle, now=70.0, last_log_at=10.0)
+
+    active = CycleStats(claimed=1, published=1)
+    assert cycle_log_due(active, now=10.1, last_log_at=10.0)
 
 
 def test_bounded_error_truncates_to_column_width() -> None:

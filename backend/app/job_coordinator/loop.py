@@ -71,6 +71,10 @@ logger = structlog.get_logger()
 #: payload content); mirrors the database column width.
 MAX_ERROR_CHARS = 500
 
+# Keep the production liveness signal comfortably inside the documented
+# two-minute alert window without writing one no-op INFO record per idle poll.
+COORDINATOR_HEARTBEAT_SECONDS = 60.0
+
 
 class PublishOutcome(StrEnum):
     """Result of one claimed event's publication attempt."""
@@ -106,6 +110,34 @@ class CycleStats:
     def transient(self) -> bool:
         """True when any event could not be published this cycle."""
         return self.released > 0
+
+    @property
+    def active(self) -> bool:
+        """True when the cycle observed or performed reportable work."""
+        return any(
+            (
+                self.claimed,
+                self.stale_reclaimed,
+                self.published,
+                self.dead,
+                self.released,
+                self.settled_stale,
+                self.reconciled_jobs,
+                self.scheduled_events,
+                self.cleaned_events,
+            )
+        )
+
+
+def cycle_log_due(
+    stats: CycleStats,
+    *,
+    now: float,
+    last_log_at: float | None,
+    heartbeat_seconds: float = COORDINATOR_HEARTBEAT_SECONDS,
+) -> bool:
+    """Return whether an active-cycle or idle-heartbeat log is due."""
+    return stats.active or last_log_at is None or now - last_log_at >= heartbeat_seconds
 
 
 def _new_claim_token() -> str:
@@ -638,6 +670,8 @@ async def run_coordinator(
         publication_lease_seconds=publication_lease_seconds,
     )
     consecutive_failures = 0
+    last_cycle_log_at: float | None = None
+    monotonic = asyncio.get_running_loop().time
     while not shutdown_event.is_set():
         transient = False
         try:
@@ -658,18 +692,25 @@ async def run_coordinator(
                 outbox_cleanup_interval_hours=outbox_cleanup_interval_hours,
             )
             transient = stats.transient
-            logger.info(
-                "coordinator.cycle_completed",
-                claimed=stats.claimed,
-                stale_reclaimed=stats.stale_reclaimed,
-                published=stats.published,
-                dead=stats.dead,
-                released=stats.released,
-                settled_stale=stats.settled_stale,
-                reconciled_jobs=stats.reconciled_jobs,
-                scheduled_events=stats.scheduled_events,
-                cleaned_events=stats.cleaned_events,
-            )
+            cycle_finished_at = monotonic()
+            if cycle_log_due(
+                stats,
+                now=cycle_finished_at,
+                last_log_at=last_cycle_log_at,
+            ):
+                logger.info(
+                    "coordinator.cycle_completed",
+                    claimed=stats.claimed,
+                    stale_reclaimed=stats.stale_reclaimed,
+                    published=stats.published,
+                    dead=stats.dead,
+                    released=stats.released,
+                    settled_stale=stats.settled_stale,
+                    reconciled_jobs=stats.reconciled_jobs,
+                    scheduled_events=stats.scheduled_events,
+                    cleaned_events=stats.cleaned_events,
+                )
+                last_cycle_log_at = cycle_finished_at
         except Exception as exc:
             # A database-level failure (unreachable PostgreSQL, broken pool)
             # is transient too: back off and try the whole cycle again.
