@@ -31,6 +31,20 @@ from app.ai.transfer import MAX_LARGE_ATTACHMENT_BYTES, TransferMode
 DEFAULT_ALLOWED_TRANSFER_MODES = [TransferMode.INLINE.value]
 
 
+class PlatformAIModelOption(BaseModel):
+    """One reviewed, currently available model safe to show to platform admins.
+
+    The model registry remains the source of truth. This deliberately exposes
+    routing identifiers and provider model names only; it never exposes
+    provider credentials, endpoints, pricing inputs or other deployment
+    configuration.
+    """
+
+    id: str
+    provider_id: str
+    provider_model: str
+
+
 class PlatformOrganisationAISettingsUpdate(BaseModel):
     """Request payload for replacing one organisation's AI policy.
 
@@ -74,6 +88,7 @@ class PlatformOrganisationAISettingsResponse(BaseModel):
     organisation_id: uuid.UUID
     version: int
     enabled: bool
+    available_models: list[PlatformAIModelOption]
     allowed_provider_ids: list[str]
     allowed_model_ids: list[str]
     provider_override: str | None

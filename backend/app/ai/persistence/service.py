@@ -77,7 +77,7 @@ from app.ai.persistence.queries import (
     organisations_with_retention_policy_statement,
     stale_running_requests_statement,
 )
-from app.ai.registry import CapabilityCostModelRegistry, load_registry_bundle
+from app.ai.registry import CapabilityCostModelRegistry, ModelDefinition, load_registry_bundle
 from app.ai.schemas import CostEstimate, TokenUsage
 from app.ai.transfer import (
     INLINE_AGGREGATE_THRESHOLD_BYTES,
@@ -138,6 +138,21 @@ def ai_scratch_prefix(organisation_id: uuid.UUID) -> str:
 def _model_registry() -> CapabilityCostModelRegistry:
     """The checked-in model registry, cached (the registry is immutable)."""
     return load_registry_bundle().models
+
+
+def list_available_models() -> list[ModelDefinition]:
+    """Return reviewed registry models that may be presented as policy choices.
+
+    Deployment credentials and endpoints deliberately stay outside this
+    catalogue. Request-time routing remains authoritative: a selected model's
+    provider must still be enabled in deployment configuration and allowed by
+    the organisation policy.
+    """
+
+    return sorted(
+        (model for model in _model_registry().all() if model.available),
+        key=lambda model: (model.provider, model.id),
+    )
 
 
 def _registry_error(field: str, message: str) -> ValidationError:
