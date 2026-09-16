@@ -32,6 +32,18 @@ function settingsRow(overrides: Partial<AISettings> = {}): AISettings {
     organisation_id: ORGANISATION_ID,
     version: 1,
     enabled: false,
+    available_models: [
+      {
+        id: 'fake.document-classifier',
+        provider_id: 'fake',
+        provider_model: 'fake-model-document.classify',
+      },
+      {
+        id: 'vertex.gemini-2.0-flash',
+        provider_id: 'vertex',
+        provider_model: 'gemini-2.0-flash',
+      },
+    ],
     allowed_provider_ids: [],
     allowed_model_ids: [],
     provider_override: null,
@@ -142,6 +154,41 @@ describe('PlatformOrganisationAISettingsView', () => {
           max_large_attachment_bytes: 50000000,
         }),
       },
+    )
+  })
+
+  it('filters model controls by selected providers and saves selected registry ids', async () => {
+    getMock.mockResolvedValue({ data: settingsRow(), error: undefined })
+    putMock.mockResolvedValue({ data: settingsRow({ version: 2 }), error: undefined })
+    const wrapper = mountView()
+    await flushPromises()
+    await flushPromises()
+
+    await wrapper.find('[data-testid="ai-settings-provider-vertex"]').setValue(true)
+
+    const modelIds = wrapper.find('[data-testid="ai-settings-model-ids"]')
+    expect(
+      modelIds.findAll('option').map((option) => option.element.getAttribute('value')),
+    ).toEqual(['vertex.gemini-2.0-flash'])
+    await modelIds.setValue(['vertex.gemini-2.0-flash'])
+    await wrapper.find('[data-testid="ai-settings-provider-override"]').setValue('vertex')
+    await wrapper
+      .find('[data-testid="ai-settings-model-override"]')
+      .setValue('vertex.gemini-2.0-flash')
+    await wrapper.find('[data-testid="ai-settings-save"]').trigger('click')
+    await flushPromises()
+    await flushPromises()
+
+    expect(putMock).toHaveBeenCalledWith(
+      '/api/v1/platform/organisations/{organisation_id}/ai-settings',
+      expect.objectContaining({
+        body: expect.objectContaining({
+          allowed_provider_ids: ['vertex'],
+          allowed_model_ids: ['vertex.gemini-2.0-flash'],
+          provider_override: 'vertex',
+          model_override: 'vertex.gemini-2.0-flash',
+        }),
+      }),
     )
   })
 

@@ -35,6 +35,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import select, text, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -50,7 +51,8 @@ from app.modules.audit.queries import audit_events_statement
 from app.modules.audit.service import ACTION_JOB_FAILED, ACTION_JOB_SUCCEEDED
 from app.modules.jobs import execution as jobs_execution
 from app.modules.jobs import service as jobs_service
-from app.modules.jobs.models import Job, JobStatus
+from app.modules.jobs.models import Job, JobAttempt, JobAttemptStatus, JobStatus
+from app.modules.jobs.queries import job_attempt_history_statement
 from app.modules.organisations.models import Organisation
 from app.modules.outbox.models import OutboxEvent, OutboxEventStatus
 
@@ -151,7 +153,7 @@ async def test_claim_dispatch_transitions_and_counts_attempts(migrated_database:
 
     The first claim assigns a dispatch identity to the durable row and sets
     the execution lease; a transient release returns the row to ``queued`` so
-    the retry of the same dispatch can claim it again with a fresh lease,
+    the next durable dispatch can claim it again with a fresh lease,
     keeping the original ``started_at`` (plan P2).
     """
     engine = create_async_engine(migrated_database, poolclass=NullPool)
@@ -181,22 +183,31 @@ async def test_claim_dispatch_transitions_and_counts_attempts(migrated_database:
             first_token = claim.owner_token
             assert first_token is not None
 
-            # A transient release returns the row to queued and clears the
-            # lease, so the retry of the same dispatch can claim it again.
-            released = await jobs_service.release_dispatch(
+            # A transient settlement returns the row to queued, closes the
+            # attempt and creates the next durable dispatch.
+            decision = await jobs_service.settle_retryable_failure(
                 session, job_id=job.id, owner_token=first_token
             )
-            assert released is True
+            assert decision is JobStatus.QUEUED
             row_after_release = await session.get(Job, job.id)
             assert row_after_release is not None
             assert row_after_release.status == JobStatus.QUEUED
             assert row_after_release.execution_lease_expires_at is None
 
+            assert row_after_release.dispatch_id != first_dispatch
+            next_event = await session.get(OutboxEvent, row_after_release.dispatch_id)
+            assert next_event is not None
+            assert next_event.status == OutboxEventStatus.PENDING
+            assert next_event.available_at > datetime.now(UTC)
+            assert (
+                await jobs_service.claim_dispatch(session, job_id=job.id)
+            ).outcome == jobs_service.ClaimOutcome.DEFERRED
+            next_event.status = OutboxEventStatus.PUBLISHED  # coordinator published the due event
+            await session.commit()
             retried = await jobs_service.claim_dispatch(session, job_id=job.id)
             assert retried.outcome == jobs_service.ClaimOutcome.CLAIMED
-            assert retried.dispatch_id == first_dispatch
-            # The retry rotates the ownership token: the released attempt's
-            # credential is superseded even though the dispatch is unchanged.
+            assert retried.dispatch_id == row_after_release.dispatch_id
+            # The retry rotates both dispatch and owner credentials.
             assert retried.owner_token is not None
             assert retried.owner_token != first_token
             assert retried.job is not None
@@ -284,6 +295,14 @@ async def test_expired_lease_can_be_taken_over(migrated_database: str) -> None:
             assert takeover.job is not None
             assert takeover.job.attempt_count == 2
             assert takeover.job.execution_lease_expires_at is not None
+            attempts = list((await session.scalars(job_attempt_history_statement(job.id))).all())
+            assert [attempt.attempt_number for attempt in attempts] == [1, 2]
+            assert [attempt.status for attempt in attempts] == [
+                JobAttemptStatus.ABANDONED,
+                JobAttemptStatus.RUNNING,
+            ]
+            assert attempts[0].completed_at is not None
+            assert attempts[1].taken_over is True
     finally:
         await engine.dispose()
 
@@ -339,7 +358,9 @@ async def test_takeover_supersedes_old_attempt_owner(migrated_database: str) -> 
                     owner_token=stale_token,
                 )
             with pytest.raises(jobs_service.StaleDispatchError):
-                await jobs_service.release_dispatch(session, job_id=job.id, owner_token=stale_token)
+                await jobs_service.settle_retryable_failure(
+                    session, job_id=job.id, owner_token=stale_token
+                )
 
             row = await session.get(Job, job.id)
             assert row is not None
@@ -455,6 +476,10 @@ async def test_succeed_marks_terminal_and_audits(migrated_database: str) -> None
             assert events[0].organisation_id == organisation.id
             assert events[0].event_metadata["job_type"] == "file.processing"
             assert events[0].event_metadata["attempt_count"] == 1
+            attempt = await session.scalar(job_attempt_history_statement(job.id))
+            assert attempt is not None
+            assert attempt.status is JobAttemptStatus.SUCCEEDED
+            assert attempt.completed_at is not None
     finally:
         await engine.dispose()
 
@@ -521,6 +546,11 @@ async def test_fail_records_error_and_audits(migrated_database: str) -> None:
             events = await _job_audit_events(session, job_id=job.id, action=ACTION_JOB_FAILED)
             assert len(events) == 1
             assert events[0].event_metadata["error_code"] == "upload_verification_failed"
+            attempt = await session.scalar(job_attempt_history_statement(job.id))
+            assert attempt is not None
+            assert attempt.status is JobAttemptStatus.FAILED
+            assert attempt.completed_at is not None
+            assert attempt.error_code == "upload_verification_failed"
 
             # Idempotent: a re-delivered failure does not double-audit.
             again = await jobs_service.fail(
@@ -588,7 +618,9 @@ async def test_stale_owner_mutations_are_rejected(migrated_database: str) -> Non
                     owner_token=stale_token,
                 )
             with pytest.raises(jobs_service.StaleDispatchError):
-                await jobs_service.release_dispatch(session, job_id=job.id, owner_token=stale_token)
+                await jobs_service.settle_retryable_failure(
+                    session, job_id=job.id, owner_token=stale_token
+                )
 
             row = await session.get(Job, job.id)
             assert row is not None
@@ -653,15 +685,8 @@ async def test_terminal_states_are_never_rerun(migrated_database: str) -> None:
         await engine.dispose()
 
 
-async def test_retries_exhausted_settles_owned_queued_job(migrated_database: str) -> None:
-    """The finalizer settles the owned attempt once retries run out (P2).
-
-    A transient failure releases the owned attempt back to ``queued``; the
-    exhausted message then settles that attempt failed with the exhausted
-    error code and one audit row — the job never sits in ``running`` forever.
-    The settlement passes the dispatch id and owner token the message stamped
-    at its last claim, matching the row's current attempt.
-    """
+async def test_legacy_finalizer_is_stale_after_durable_retry(migrated_database: str) -> None:
+    """A legacy exhausted callback cannot cancel a new durable dispatch."""
     engine = create_async_engine(migrated_database, poolclass=NullPool)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
@@ -676,7 +701,7 @@ async def test_retries_exhausted_settles_owned_queued_job(migrated_database: str
             claim = await jobs_service.claim_dispatch(session, job_id=job.id)
             assert claim.dispatch_id is not None
             assert claim.owner_token is not None
-            await jobs_service.release_dispatch(
+            await jobs_service.settle_retryable_failure(
                 session, job_id=job.id, owner_token=claim.owner_token
             )
 
@@ -686,14 +711,11 @@ async def test_retries_exhausted_settles_owned_queued_job(migrated_database: str
                 exhausted_dispatch_id=claim.dispatch_id,
                 exhausted_owner_token=claim.owner_token,
             )
-            assert settled is not None
-            assert settled.status == JobStatus.FAILED
-            assert settled.error_code == jobs_service.ERROR_CODE_RETRIES_EXHAUSTED
-            assert settled.error_message == jobs_service.ERROR_MESSAGE_RETRIES_EXHAUSTED
-            assert settled.completed_at is not None
-            assert settled.execution_lease_expires_at is None
+            assert settled is None  # rolling-deployment finalizer cannot cancel a new dispatch
+            row = await session.get(Job, job.id)
+            assert row is not None and row.status == JobStatus.QUEUED
             assert (
-                len(await _job_audit_events(session, job_id=job.id, action=ACTION_JOB_FAILED)) == 1
+                len(await _job_audit_events(session, job_id=job.id, action=ACTION_JOB_FAILED)) == 0
             )
     finally:
         await engine.dispose()
@@ -782,7 +804,7 @@ async def test_retries_exhausted_superseded_dispatch_is_stale(migrated_database:
             assert claim.owner_token is not None
             exhausted_dispatch = claim.dispatch_id
             exhausted_token = claim.owner_token
-            await jobs_service.release_dispatch(
+            await jobs_service.settle_retryable_failure(
                 session, job_id=job.id, owner_token=claim.owner_token
             )
 
@@ -859,17 +881,23 @@ async def test_retries_exhausted_rotated_token_same_dispatch_is_stale(
             claim_a = await jobs_service.claim_dispatch(session, job_id=job.id)
             assert claim_a.dispatch_id is not None
             assert claim_a.owner_token is not None
-            await jobs_service.release_dispatch(
+            await jobs_service.settle_retryable_failure(
                 session, job_id=job.id, owner_token=claim_a.owner_token
             )
 
-            # Attempt B re-claims the SAME dispatch (the retry of the same
-            # outbox event): the token rotates, the identity is retained.
+            # The coordinator publishes the durable retry event; B then claims
+            # the new dispatch, rotating its owner credential.
+            row = await session.get(Job, job.id)
+            assert row is not None and row.dispatch_id is not None
+            retry_event = await session.get(OutboxEvent, row.dispatch_id)
+            assert retry_event is not None
+            retry_event.status = OutboxEventStatus.PUBLISHED
+            await session.commit()
             claim_b = await jobs_service.claim_dispatch(session, job_id=job.id)
-            assert claim_b.dispatch_id == claim_a.dispatch_id
+            assert claim_b.dispatch_id != claim_a.dispatch_id
             assert claim_b.owner_token != claim_a.owner_token
             assert claim_b.owner_token is not None
-            await jobs_service.release_dispatch(
+            await jobs_service.settle_retryable_failure(
                 session, job_id=job.id, owner_token=claim_b.owner_token
             )
 
@@ -889,16 +917,39 @@ async def test_retries_exhausted_rotated_token_same_dispatch_is_stale(
             assert row.status == JobStatus.QUEUED
             assert row.error_code is None
 
-            # B's own exhausted finalizer (its stamped token) settles normally.
+            # B's old finalizer also cannot settle the newly scheduled C dispatch.
             settled = await jobs_service.settle_after_retries_exhausted(
                 session,
                 job_id=job.id,
                 exhausted_dispatch_id=claim_b.dispatch_id,
                 exhausted_owner_token=claim_b.owner_token,
             )
-            assert settled is not None
-            assert settled.status == JobStatus.FAILED
-            assert settled.error_code == jobs_service.ERROR_CODE_RETRIES_EXHAUSTED
+            assert settled is None
+            next_row = await session.get(Job, job.id)
+            assert next_row is not None and next_row.dispatch_id is not None
+            next_event = await session.get(OutboxEvent, next_row.dispatch_id)
+            assert next_event is not None
+            next_event.status = OutboxEventStatus.PUBLISHED
+            await session.commit()
+            claim_c = await jobs_service.claim_dispatch(session, job_id=job.id)
+            assert claim_c.owner_token is not None
+            assert (
+                await jobs_service.settle_retryable_failure(
+                    session, job_id=job.id, owner_token=claim_c.owner_token
+                )
+                == JobStatus.FAILED
+            )
+            failed_row = await session.get(Job, job.id)
+            assert failed_row is not None
+            assert failed_row.error_code == jobs_service.ERROR_CODE_RETRIES_EXHAUSTED
+            attempts = list((await session.scalars(job_attempt_history_statement(job.id))).all())
+            assert [attempt.attempt_number for attempt in attempts] == [1, 2, 3]
+            assert [attempt.status for attempt in attempts] == [
+                JobAttemptStatus.RETRY_SCHEDULED,
+                JobAttemptStatus.RETRY_SCHEDULED,
+                JobAttemptStatus.EXHAUSTED,
+            ]
+            assert all(attempt.completed_at is not None for attempt in attempts)
     finally:
         await engine.dispose()
 
@@ -930,7 +981,7 @@ async def test_retries_exhausted_never_claimed_duplicate_is_stale(migrated_datab
             # just before the never-claimed duplicate's finalizer runs.
             claim = await jobs_service.claim_dispatch(session, job_id=job.id)
             assert claim.owner_token is not None
-            await jobs_service.release_dispatch(
+            await jobs_service.settle_retryable_failure(
                 session, job_id=job.id, owner_token=claim.owner_token
             )
 
@@ -991,19 +1042,16 @@ async def test_retries_exhausted_legacy_unclaimed_row_settles(migrated_database:
 # --- Shared execution wrapper (durable delivery plan P2) ---
 
 
-async def test_wrapper_releases_owned_attempt_on_transient_failure(
+async def test_wrapper_durably_schedules_retry_on_transient_failure(
     migrated_database: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A transient failure releases the owned attempt back to queued (P2).
-
-    The wrapper claims, the handler raises, and the wrapper owner-checked
-    releases the attempt before the exception propagates, so the retry of the
-    same dispatch can re-claim it.
-    """
+    """A transient failure is captured and durably schedules its retry."""
     engine = create_async_engine(migrated_database, poolclass=NullPool)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     monkeypatch.setattr(jobs_execution, "async_session_factory", session_factory)
+    captured: list[BaseException] = []
+    monkeypatch.setattr(jobs_execution, "capture_exception", captured.append)
     try:
         async with session_factory() as session:
             organisation = await _create_org(session)
@@ -1018,8 +1066,11 @@ async def test_wrapper_releases_owned_attempt_on_transient_failure(
         async def _boom(context: jobs_execution.DurableJobContext, session: AsyncSession) -> None:
             raise RuntimeError("storage temporarily unreachable")
 
-        with pytest.raises(RuntimeError, match="storage temporarily unreachable"):
-            await jobs_execution.run_claimed(job_id=job_id, handler=_boom)
+        await jobs_execution.run_claimed(job_id=job_id, handler=_boom)
+
+        assert len(captured) == 1
+        assert isinstance(captured[0], RuntimeError)
+        assert str(captured[0]) == "storage temporarily unreachable"
 
         async with session_factory() as session:
             row = await session.get(Job, job_id)
@@ -1028,6 +1079,111 @@ async def test_wrapper_releases_owned_attempt_on_transient_failure(
             assert row.execution_lease_expires_at is None
             assert row.dispatch_id is not None
             assert row.attempt_count == 1
+            attempt = await session.scalar(job_attempt_history_statement(job_id))
+            assert attempt is not None
+            assert attempt.status == JobAttemptStatus.RETRY_SCHEDULED
+    finally:
+        await engine.dispose()
+
+
+async def test_retry_decision_rolls_back_if_dispatch_creation_fails(
+    migrated_database: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Attempt closure and next dispatch are one rollback-safe transaction."""
+    engine = create_async_engine(migrated_database, poolclass=NullPool)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            organisation = await _create_org(session)
+            job = await jobs_service.schedule_job(
+                session,
+                organisation_id=organisation.id,
+                job_type="file.processing",
+                input_reference="file-1",
+            )
+            claim = await jobs_service.claim_dispatch(session, job_id=job.id)
+            assert claim.owner_token is not None
+            job_id = job.id
+            owner_token = claim.owner_token
+
+        async def _fail_dispatch(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("injected outbox failure")
+
+        monkeypatch.setattr(jobs_service, "create_dispatch_event", _fail_dispatch)
+        with pytest.raises(RuntimeError, match="injected outbox failure"):
+            async with session_factory() as session:
+                await jobs_service.settle_retryable_failure(
+                    session, job_id=job_id, owner_token=owner_token
+                )
+
+        async with session_factory() as session:
+            row = await session.get(Job, job_id)
+            attempt = await session.scalar(job_attempt_history_statement(job_id))
+            assert row is not None and row.status is JobStatus.RUNNING
+            assert row.owner_token == owner_token
+            assert attempt is not None and attempt.status is JobAttemptStatus.RUNNING
+    finally:
+        await engine.dispose()
+
+
+async def test_database_rejects_two_running_attempts_for_one_job(
+    migrated_database: str,
+) -> None:
+    """The partial unique index enforces one current attempt per job."""
+    engine = create_async_engine(migrated_database, poolclass=NullPool)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            organisation = await _create_org(session)
+            job = await jobs_service.schedule_job(
+                session,
+                organisation_id=organisation.id,
+                job_type="file.processing",
+                input_reference="file-1",
+            )
+            claim = await jobs_service.claim_dispatch(session, job_id=job.id)
+            assert claim.dispatch_id is not None
+            assert claim.job is not None
+            session.add(
+                JobAttempt(
+                    job_id=job.id,
+                    dispatch_id=claim.dispatch_id,
+                    owner_token=uuid.uuid4(),
+                    attempt_number=2,
+                    lease_expires_at=claim.job.execution_lease_expires_at,
+                    started_at=datetime.now(UTC),
+                )
+            )
+            with pytest.raises(IntegrityError):
+                await session.commit()
+    finally:
+        await engine.dispose()
+
+
+async def test_claim_at_global_attempt_ceiling_settles_exhausted(
+    migrated_database: str,
+) -> None:
+    """A queued duplicate cannot grant work beyond PostgreSQL's global limit."""
+    engine = create_async_engine(migrated_database, poolclass=NullPool)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            organisation = await _create_org(session)
+            job = await jobs_service.schedule_job(
+                session,
+                organisation_id=organisation.id,
+                job_type="file.processing",
+                input_reference="file-1",
+            )
+            job.attempt_count = jobs_service.MAX_ATTEMPTS
+            await session.commit()
+
+            result = await jobs_service.claim_dispatch(session, job_id=job.id)
+            assert result.outcome is jobs_service.ClaimOutcome.EXHAUSTED
+            assert result.job is not None
+            assert result.job.status is JobStatus.FAILED
+            assert result.job.error_code == jobs_service.ERROR_CODE_RETRIES_EXHAUSTED
     finally:
         await engine.dispose()
 

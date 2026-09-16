@@ -173,6 +173,10 @@ async def test_get_ai_settings_returns_both_transfer_fields_with_defaults(
     assert body["organisation_id"] == str(organisation.id)
     assert body["version"] == 1
     assert body["enabled"] is False
+    assert {model["id"] for model in body["available_models"]} >= {
+        "fake.document-classifier",
+        "vertex.gemini-2.0-flash",
+    }
     assert body["allowed_transfer_modes"] == ["inline"]
     assert body["max_large_attachment_bytes"] == 50_000_000
 

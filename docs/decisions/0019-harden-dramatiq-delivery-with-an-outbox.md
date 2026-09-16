@@ -67,6 +67,27 @@ recording publication may duplicate a message, but ownership prevents two
 copies from running the business task concurrently, and terminal settlement
 makes the loser a no-op.
 
+## 2026-09 amendment: PostgreSQL-owned attempts and retry decisions
+
+The outbox alone made initial dispatch durable, but a transient failure still
+returned a claimed job to `queued` and relied on Dramatiq retry delivery and
+its `on_retry_exhausted` callback for the final outcome. The callback is a
+separate Redis message and cannot be the durable finalization boundary.
+
+Every successful claim now creates one internal `job_attempts` row in the
+same transaction as the running job transition. The PostgreSQL attempt count
+is the global limit. Progress renews both leases; success and permanent
+failure close the current attempt with the job. A transient failure closes
+the attempt and, in one transaction, either writes a delayed reference-only
+outbox dispatch or fails the job and runs its allow-listed domain failure
+hook. Retry scheduling and exhaustion therefore survive lost Redis messages.
+
+The old zero-retry exhausted actor remains registered so messages from a
+rolling deployment can be acknowledged or owner-checked and settled. New
+durable actors no longer rely on it for correctness. The guarantee remains
+at-least-once, and a superseded worker must still be fenced at each domain
+mutation boundary (closure plan P2).
+
 Rollout order: migration first, backward-compatible workers second, the
 coordinator third, outbox-producing API last. Rollback pauses the coordinator
 before reverting application containers; job and outbox rows remain durable
@@ -91,4 +112,3 @@ This decision amends ADR-0004 (retain the Dramatiq stack) rather than
 replacing it.
 
 ---
-

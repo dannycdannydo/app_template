@@ -13,7 +13,27 @@ import uuid
 
 from sqlalchemy import Select, func, select
 
-from app.modules.jobs.models import Job, JobStatus
+from app.modules.jobs.models import Job, JobAttempt, JobAttemptStatus, JobStatus
+
+
+def running_attempt_statement(
+    *, job_id: uuid.UUID, owner_token: uuid.UUID
+) -> Select[tuple[JobAttempt]]:
+    """Select the current internal attempt for an owned job mutation."""
+    return select(JobAttempt).where(
+        JobAttempt.job_id == job_id,
+        JobAttempt.owner_token == owner_token,
+        JobAttempt.status == JobAttemptStatus.RUNNING,
+    )
+
+
+def job_attempt_history_statement(job_id: uuid.UUID) -> Select[tuple[JobAttempt]]:
+    """Select immutable internal attempt history in execution order."""
+    return (
+        select(JobAttempt)
+        .where(JobAttempt.job_id == job_id)
+        .order_by(JobAttempt.attempt_number.asc())
+    )
 
 
 def org_scoped_jobs_statement(

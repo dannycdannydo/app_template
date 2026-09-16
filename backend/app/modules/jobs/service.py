@@ -14,19 +14,17 @@ The job service is the single owner of the durable ``jobs`` table:
   increments ``attempt_count``, sets the execution lease and rotates the
   attempt-distinguishing ``owner_token``. A duplicate whose lease is still
   live is *deferred*, never executed concurrently.
-- :func:`release_dispatch` returns an owned attempt to ``queued`` after a
-  transient failure; :func:`update_progress`, :func:`succeed` and
+- :func:`settle_retryable_failure` closes a transient attempt and atomically
+  writes its delayed next dispatch or terminal exhaustion;
+  :func:`update_progress`, :func:`succeed` and
   :func:`fail` are the owner-checked mutation helpers the worker tasks call
   through the shared execution wrapper (``app.modules.jobs.execution``). Every
   mutation verifies the owner token captured at claim time, so an
   expired/stale attempt can never overwrite a newer owner — including after an
   expired-lease takeover, which rotates the token — and terminal settlement
   clears the lease.
-- :func:`settle_after_retries_exhausted` is the finalizer the Retries
-  middleware messages when a job's transient retries ran out: it settles only
-  the dispatch the exhausted message attempted (correlated by the dispatch id
-  the wrapper stamps into the message at claim time), and treats a terminal
-  job, a still-live lease or a superseded dispatch as a stale message.
+- :func:`settle_after_retries_exhausted` remains only as a rolling-deployment
+  bridge for older broker messages; PostgreSQL owns all new retry decisions.
 
 The retry policy: transient errors are retried up to ``MAX_ATTEMPTS``;
 permanent validation errors raise :class:`JobPermanentError`, which tasks
@@ -55,9 +53,14 @@ from app.modules.audit.service import (
     ACTION_JOB_SUCCEEDED,
     record_event,
 )
-from app.modules.jobs.models import Job, JobStatus
-from app.modules.jobs.queries import org_jobs_count_statement, org_scoped_jobs_statement
-from app.modules.outbox.service import create_dispatch_event
+from app.modules.jobs.models import Job, JobAttempt, JobAttemptStatus, JobStatus
+from app.modules.jobs.queries import (
+    org_jobs_count_statement,
+    org_scoped_jobs_statement,
+    running_attempt_statement,
+)
+from app.modules.outbox.models import OutboxEvent, OutboxEventStatus
+from app.modules.outbox.service import create_dispatch_event, retry_dispatch_key
 from app.observability.metrics import JOBS_ENQUEUED_TOTAL, JOBS_FAILED_TOTAL, JOBS_SUCCEEDED_TOTAL
 
 # The pagination envelope contract shared with the files module (BP §12):
@@ -80,6 +83,8 @@ RETRY_MIN_BACKOFF_MS = 1000
 MARK_FAILED_AFTER_RETRIES_ACTOR = "mark_job_failed_after_retries"
 ERROR_CODE_RETRIES_EXHAUSTED = "job_retries_exhausted"
 ERROR_MESSAGE_RETRIES_EXHAUSTED = "The job exhausted its allowed attempts."
+ERROR_CODE_DISPATCH_INVALID = "job_dispatch_invalid"
+ERROR_CODE_TRANSIENT = "job_transient_failure"
 
 # Allow-listed exhaustion hooks keyed by job type. When retries for a job
 # type are exhausted, the generic finalizer calls the registered hook (if
@@ -159,15 +164,50 @@ class ClaimOutcome(StrEnum):
 
     CLAIMED = "claimed"
     DEFERRED = "deferred"
+    EXHAUSTED = "exhausted"
     STALE = "stale"
+
+
+def _retry_delay(attempt_number: int) -> timedelta:
+    """Bound the durable retry delay; Redis middleware is only assistance."""
+    return timedelta(milliseconds=min(RETRY_MIN_BACKOFF_MS * 2 ** (attempt_number - 1), 60_000))
+
+
+async def _running_attempt(session: AsyncSession, job: Job) -> JobAttempt | None:
+    if job.owner_token is None:
+        return None
+    return await session.scalar(
+        running_attempt_statement(job_id=job.id, owner_token=job.owner_token)
+    )
+
+
+def _close_attempt(
+    attempt: JobAttempt | None,
+    *,
+    status: JobAttemptStatus,
+    now: datetime,
+    error_code: str | None = None,
+) -> None:
+    if attempt is None:
+        return  # Legacy pre-migration owner; rolling deployment compatibility.
+    attempt.status = status
+    attempt.completed_at = now
+    attempt.error_code = error_code
+
+
+async def _run_exhaustion_hook(session: AsyncSession, job: Job, *, failure_code: str) -> None:
+    hook = get_exhaustion_hook(job.job_type)
+    if hook is not None:
+        await hook(session, job_id=job.id, failure_code=failure_code)
 
 
 @dataclass(frozen=True)
 class ClaimResult:
     """The outcome of :func:`claim_dispatch`.
 
-    ``job`` is the durable row (``CLAIMED``: the fresh owner; ``STALE``: the
-    terminal row; ``DEFERRED``: the leased row). ``dispatch_id`` is the
+    ``job`` is the durable row (``CLAIMED``: the fresh owner; ``EXHAUSTED``:
+    the claim that reached the global limit; ``STALE``: a previously terminal
+    row; ``DEFERRED``: the leased or not-yet-due row). ``dispatch_id`` is the
     dispatch the caller now owns (``CLAIMED`` only); ``owner_token`` is the
     attempt-distinguishing credential rotated for this claim (``CLAIMED``
     only); ``deferred_until`` is the live lease bound a deferred duplicate
@@ -192,11 +232,10 @@ def retry_policy() -> dict[str, Any]:
         async def process_file(job_id: str) -> None:
             ...
 
-    ``max_retries`` bounds the total attempts to ``MAX_ATTEMPTS``; ``throws``
-    declares :class:`JobPermanentError` as never-retried; the exhausted
-    message lands on the ``mark_job_failed_after_retries`` actor so the durable
-    row records the failure; ``time_limit`` is the standard actor time limit
-    (plan P2), which the execution lease exceeds by at least 60 seconds.
+    ``max_retries`` and the exhausted callback remain transport/rolling-release
+    assistance. PostgreSQL's attempt ledger is the global bound and durable
+    terminal boundary. ``throws`` prevents retries of permanent errors;
+    ``time_limit`` is the standard task limit, which the lease exceeds.
     """
     return {
         "max_retries": MAX_ATTEMPTS - 1,
@@ -387,7 +426,11 @@ async def claim_dispatch(session: AsyncSession, *, job_id: uuid.UUID) -> ClaimRe
     arrives while the first claim's transaction is still open blocks on the
     row lock, then observes the fresh lease and returns ``DEFERRED``.
 
-    - ``queued`` -> ``running``: the attempt claims the dispatch, increments
+    - ``queued`` with a not-yet-due current event: the result is ``DEFERRED``.
+      A duplicate already in transport may wait for that PostgreSQL due time
+      and claim it; the later coordinator publication is an at-least-once
+      duplicate constrained by the same ownership and global attempt limit.
+    - due ``queued`` -> ``running``: the attempt claims the dispatch, increments
       ``attempt_count``, records ``started_at`` on the first attempt, rotates
       the attempt-distinguishing ``owner_token`` and sets the execution lease.
       A legacy row with no dispatch identity receives one atomically on this
@@ -395,9 +438,11 @@ async def claim_dispatch(session: AsyncSession, *, job_id: uuid.UUID) -> ClaimRe
     - ``running`` with a non-expired lease: another live attempt owns the
       dispatch; the result is ``DEFERRED`` with the lease bound.
     - ``running`` with an expired lease: the dead attempt is taken over
-      (``taken_over=True``); the dispatch identity is unchanged, but the
-      ``owner_token`` is rotated so the dead attempt's captured credential is
-      superseded and cannot mutate over the new owner.
+      (``taken_over=True``); the ``owner_token`` is rotated so the dead
+      attempt's captured credential is superseded and cannot mutate over the
+      new owner.
+    - global attempt limit reached: the claim atomically fails the job and
+      returns ``EXHAUSTED``.
     - terminal: the message is a ``STALE`` no-op; terminal states are never
       re-run (acceptance §5.7).
     """
@@ -415,22 +460,65 @@ async def claim_dispatch(session: AsyncSession, *, job_id: uuid.UUID) -> ClaimRe
             job=job,
             deferred_until=job.execution_lease_expires_at,
         )
+    if job.status == JobStatus.QUEUED and job.dispatch_id is not None:
+        current_event = await session.scalar(
+            select(OutboxEvent).where(OutboxEvent.id == job.dispatch_id)
+        )
+        if (
+            current_event is not None
+            and current_event.status == OutboxEventStatus.PENDING
+            and current_event.available_at > now
+        ):
+            return ClaimResult(
+                outcome=ClaimOutcome.DEFERRED,
+                job=job,
+                deferred_until=current_event.available_at,
+            )
     taken_over = job.status == JobStatus.RUNNING
+    if job.attempt_count >= MAX_ATTEMPTS:
+        # A lost broker message or a restarted coordinator cannot reset the
+        # budget: the locked PostgreSQL count is the global ceiling.
+        await _fail_locked(
+            session,
+            job,
+            error_code=ERROR_CODE_RETRIES_EXHAUSTED,
+            error_message=ERROR_MESSAGE_RETRIES_EXHAUSTED,
+            attempt_status=JobAttemptStatus.EXHAUSTED,
+        )
+        await _run_exhaustion_hook(session, job, failure_code=ERROR_CODE_RETRIES_EXHAUSTED)
+        await session.commit()
+        JOBS_FAILED_TOTAL.labels(job_type=job.job_type).inc()
+        return ClaimResult(outcome=ClaimOutcome.EXHAUSTED, job=job)
+    if taken_over:
+        old_attempt = await _running_attempt(session, job)
+        _close_attempt(old_attempt, status=JobAttemptStatus.ABANDONED, now=now)
     if job.dispatch_id is None:
         # Legacy row (published before the outbox cutover, or by an earlier
         # release): assign a dispatch identity on the first claim so
         # ownership checks apply from here on.
         job.dispatch_id = uuid7()
-    # Rotate the attempt-distinguishing ownership token on every claim: an
-    # expired-lease takeover and a retry re-claim both supersede the previous
-    # attempt's credential, so a stale worker can never mutate over the new
-    # owner even though the dispatch identity is unchanged.
+    # Rotate the attempt-distinguishing ownership token on every claim. An
+    # expired-lease takeover may retain the dispatch id, while a durably
+    # scheduled retry has a new one; either way the old credential cannot
+    # mutate over the new owner.
     job.owner_token = uuid7()
     job.status = JobStatus.RUNNING
     job.attempt_count = job.attempt_count + 1
     if job.started_at is None:
         job.started_at = now
     job.execution_lease_expires_at = now + timedelta(seconds=_execution_lease_seconds())
+    session.add(
+        JobAttempt(
+            job_id=job.id,
+            dispatch_id=job.dispatch_id,
+            owner_token=job.owner_token,
+            attempt_number=job.attempt_count,
+            status=JobAttemptStatus.RUNNING,
+            lease_expires_at=job.execution_lease_expires_at,
+            started_at=now,
+            taken_over=taken_over,
+        )
+    )
     await session.commit()
     await session.refresh(job)
     return ClaimResult(
@@ -442,32 +530,57 @@ async def claim_dispatch(session: AsyncSession, *, job_id: uuid.UUID) -> ClaimRe
     )
 
 
-async def release_dispatch(
+async def settle_retryable_failure(
     session: AsyncSession,
     *,
     job_id: uuid.UUID,
     owner_token: uuid.UUID,
-) -> bool:
-    """Release an owned attempt back to ``queued`` after a transient failure.
+) -> JobStatus | None:
+    """Atomically close an attempt and schedule retry or terminal exhaustion.
 
-    Owner-checked: only the attempt that currently owns the dispatch may
-    release it, and a terminal row is never un-terminaled. Returns ``True``
-    when the attempt was actually released, ``False`` when the row already
-    reached a terminal state under the same owner (nothing to release); a
-    superseded attempt raises :class:`StaleDispatchError` before any write,
-    even on a terminal row, so the wrapper logs the actual outcome. The
-    dispatch id and ``started_at`` are retained so a genuine retry of the same
-    dispatch re-claims the row with the same identity (and a fresh token).
+    A duplicate callback can never create a second event. The outbox event
+    carries only the job id, and its due time is owned by PostgreSQL.
     """
     job = await _get_job_locked(session, job_id=job_id)
     _verify_owner(job, owner_token)
     if _terminal(job.status):
-        return False
+        return None
+    if job.status != JobStatus.RUNNING:
+        return None
+    now = datetime.now(UTC)
+    attempt = await _running_attempt(session, job)
+    if job.attempt_count >= MAX_ATTEMPTS:
+        await _fail_locked(
+            session,
+            job,
+            error_code=ERROR_CODE_RETRIES_EXHAUSTED,
+            error_message=ERROR_MESSAGE_RETRIES_EXHAUSTED,
+            attempt_status=JobAttemptStatus.EXHAUSTED,
+        )
+        await _run_exhaustion_hook(session, job, failure_code=ERROR_CODE_RETRIES_EXHAUSTED)
+        await session.commit()
+        JOBS_FAILED_TOTAL.labels(job_type=job.job_type).inc()
+        return JobStatus.FAILED
+    _close_attempt(
+        attempt,
+        status=JobAttemptStatus.RETRY_SCHEDULED,
+        now=now,
+        error_code=ERROR_CODE_TRANSIENT,
+    )
+    next_dispatch_id = uuid7()
+    next_event = await create_dispatch_event(
+        session,
+        organisation_id=job.organisation_id,
+        job_id=job.id,
+        event_id=next_dispatch_id,
+        deduplication_key=retry_dispatch_key(job.id, attempt_number=job.attempt_count),
+    )
+    next_event.available_at = now + _retry_delay(job.attempt_count)
     job.status = JobStatus.QUEUED
+    job.dispatch_id = next_dispatch_id
     job.execution_lease_expires_at = None
     await session.commit()
-    await session.refresh(job)
-    return True
+    return JobStatus.QUEUED
 
 
 async def update_progress(
@@ -504,10 +617,16 @@ async def update_progress(
             message="A finished job cannot be updated.",
         )
     _verify_owner(job, owner_token)
+    if job.status != JobStatus.RUNNING:
+        raise ConflictError(
+            code="job_not_running", message="Only a running job can report progress."
+        )
     job.progress = progress
-    job.execution_lease_expires_at = datetime.now(UTC) + timedelta(
-        seconds=_execution_lease_seconds()
-    )
+    lease_expires_at = datetime.now(UTC) + timedelta(seconds=_execution_lease_seconds())
+    job.execution_lease_expires_at = lease_expires_at
+    attempt = await _running_attempt(session, job)
+    if attempt is not None:
+        attempt.lease_expires_at = lease_expires_at
     await session.commit()
     await session.refresh(job)
     return job
@@ -539,8 +658,14 @@ async def succeed(
         )
     job.status = JobStatus.SUCCEEDED
     job.progress = 100
-    job.completed_at = datetime.now(UTC)
+    completed_at = datetime.now(UTC)
+    job.completed_at = completed_at
     job.execution_lease_expires_at = None
+    _close_attempt(
+        await _running_attempt(session, job),
+        status=JobAttemptStatus.SUCCEEDED,
+        now=completed_at,
+    )
     if result_reference is not None:
         job.result_reference = result_reference
     await record_event(
@@ -561,6 +686,44 @@ async def succeed(
     await session.refresh(job)
     JOBS_SUCCEEDED_TOTAL.labels(job_type=job.job_type).inc()
     return job
+
+
+async def _fail_locked(
+    session: AsyncSession,
+    job: Job,
+    *,
+    error_code: str,
+    error_message: str,
+    attempt_status: JobAttemptStatus = JobAttemptStatus.FAILED,
+) -> None:
+    """Write failure, attempt outcome and audit before the caller commits."""
+    now = datetime.now(UTC)
+    _close_attempt(
+        await _running_attempt(session, job),
+        status=attempt_status,
+        now=now,
+        error_code=error_code,
+    )
+    job.status = JobStatus.FAILED
+    job.error_code = error_code
+    job.error_message = error_message
+    job.completed_at = now
+    job.execution_lease_expires_at = None
+    await record_event(
+        session,
+        organisation_id=job.organisation_id,
+        actor_user_id=job.created_by_user_id,
+        action=ACTION_JOB_FAILED,
+        resource_type="job",
+        resource_id=str(job.id),
+        metadata={
+            "job_type": job.job_type,
+            "input_reference": job.input_reference,
+            "error_code": error_code,
+            "error_message": error_message,
+            "attempt_count": job.attempt_count,
+        },
+    )
 
 
 async def fail(
@@ -588,26 +751,7 @@ async def fail(
             code="job_in_terminal_state",
             message="A finished job cannot fail.",
         )
-    job.status = JobStatus.FAILED
-    job.error_code = error_code
-    job.error_message = error_message
-    job.completed_at = datetime.now(UTC)
-    job.execution_lease_expires_at = None
-    await record_event(
-        session,
-        organisation_id=job.organisation_id,
-        actor_user_id=job.created_by_user_id,
-        action=ACTION_JOB_FAILED,
-        resource_type="job",
-        resource_id=str(job.id),
-        metadata={
-            "job_type": job.job_type,
-            "input_reference": job.input_reference,
-            "error_code": error_code,
-            "error_message": error_message,
-            "attempt_count": job.attempt_count,
-        },
-    )
+    await _fail_locked(session, job, error_code=error_code, error_message=error_message)
     await session.commit()
     await session.refresh(job)
     JOBS_FAILED_TOTAL.labels(job_type=job.job_type).inc()
@@ -672,10 +816,47 @@ async def settle_after_retries_exhausted(
         and job.execution_lease_expires_at > datetime.now(UTC)
     ):
         return None
-    return await fail(
+    await _fail_locked(
         session,
-        job_id=job_id,
+        job,
         error_code=ERROR_CODE_RETRIES_EXHAUSTED,
         error_message=ERROR_MESSAGE_RETRIES_EXHAUSTED,
-        owner_token=job.owner_token,
+        attempt_status=JobAttemptStatus.EXHAUSTED,
     )
+    await _run_exhaustion_hook(session, job, failure_code=ERROR_CODE_RETRIES_EXHAUSTED)
+    await session.commit()
+    JOBS_FAILED_TOTAL.labels(job_type=job.job_type).inc()
+    return job
+
+
+async def settle_dead_initial_dispatch(
+    session: AsyncSession,
+    *,
+    event_id: uuid.UUID,
+    aggregate_id: uuid.UUID | None,
+    organisation_id: uuid.UUID | None,
+) -> Job | None:
+    """Fail only a current, never-claimed job behind a dead initial event.
+
+    The coordinator owns the event claim and commits this change together
+    with its dead-event settlement. A stale dispatch cannot fail a newer job.
+    """
+    if aggregate_id is None or organisation_id is None:
+        return None
+    job = await session.scalar(select(Job).where(Job.id == aggregate_id).with_for_update())
+    if (
+        job is None
+        or job.organisation_id != organisation_id
+        or job.dispatch_id != event_id
+        or job.status != JobStatus.QUEUED
+        or job.attempt_count != 0
+    ):
+        return None
+    await _fail_locked(
+        session,
+        job,
+        error_code=ERROR_CODE_DISPATCH_INVALID,
+        error_message="The job could not be delivered.",
+    )
+    await _run_exhaustion_hook(session, job, failure_code=ERROR_CODE_DISPATCH_INVALID)
+    return job

@@ -1626,6 +1626,23 @@ export interface components {
       updated_at: string
     }
     /**
+     * PlatformAIModelOption
+     * @description One reviewed, currently available model safe to show to platform admins.
+     *
+     *     The model registry remains the source of truth. This deliberately exposes
+     *     routing identifiers and provider model names only; it never exposes
+     *     provider credentials, endpoints, pricing inputs or other deployment
+     *     configuration.
+     */
+    PlatformAIModelOption: {
+      /** Id */
+      id: string
+      /** Provider Id */
+      provider_id: string
+      /** Provider Model */
+      provider_model: string
+    }
+    /**
      * PlatformAdminGrant
      * @description Grant the seeded platform-admin role to an existing enabled user.
      */
@@ -1831,6 +1848,8 @@ export interface components {
       version: number
       /** Enabled */
       enabled: boolean
+      /** Available Models */
+      available_models: components['schemas']['PlatformAIModelOption'][]
       /** Allowed Provider Ids */
       allowed_provider_ids: string[]
       /** Allowed Model Ids */

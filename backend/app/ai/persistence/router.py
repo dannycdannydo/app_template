@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.ai.persistence import service
 from app.ai.persistence.models import OrganisationAISettings
 from app.ai.persistence.schemas import (
+    PlatformAIModelOption,
     PlatformOrganisationAISettingsResponse,
     PlatformOrganisationAISettingsUpdate,
 )
@@ -37,6 +38,14 @@ def _item(settings_row: OrganisationAISettings) -> PlatformOrganisationAISetting
         organisation_id=settings_row.organisation_id,
         version=settings_row.version,
         enabled=settings_row.enabled,
+        available_models=[
+            PlatformAIModelOption(
+                id=model.id,
+                provider_id=model.provider,
+                provider_model=model.model,
+            )
+            for model in service.list_available_models()
+        ],
         allowed_provider_ids=list(settings_row.allowed_provider_ids),
         allowed_model_ids=list(settings_row.allowed_model_ids),
         provider_override=settings_row.provider_override,

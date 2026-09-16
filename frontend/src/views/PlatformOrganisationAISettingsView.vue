@@ -65,7 +65,7 @@ interface FormState {
   version: number
   enabled: boolean
   allowedProviderIds: string[]
-  allowedModelIds: string
+  allowedModelIds: string[]
   providerOverride: string
   modelOverride: string
   // `type="number"` inputs coerce v-model to numbers and the API serializes
@@ -81,7 +81,7 @@ function emptyForm(version: number): FormState {
     version,
     enabled: false,
     allowedProviderIds: [],
-    allowedModelIds: '',
+    allowedModelIds: [],
     providerOverride: '',
     modelOverride: '',
     monthlyBudget: '',
@@ -100,7 +100,7 @@ watch(
     form.version = value.version
     form.enabled = value.enabled
     form.allowedProviderIds = [...value.allowed_provider_ids]
-    form.allowedModelIds = value.allowed_model_ids.join(', ')
+    form.allowedModelIds = [...value.allowed_model_ids]
     form.providerOverride = value.provider_override ?? ''
     form.modelOverride = value.model_override ?? ''
     form.monthlyBudget = value.monthly_budget ?? ''
@@ -123,8 +123,25 @@ function toggleListItem(list: string[], id: string): string[] {
   return list.includes(id) ? list.filter((item) => item !== id) : [...list, id]
 }
 
+function modelsForProviders(providerIds: string[]) {
+  const models = settings.value?.available_models ?? []
+  return providerIds.length === 0
+    ? models
+    : models.filter((model) => providerIds.includes(model.provider_id))
+}
+
 function toggleProvider(id: string): void {
   form.allowedProviderIds = toggleListItem(form.allowedProviderIds, id)
+  const selectableModelIds = new Set(
+    modelsForProviders(form.allowedProviderIds).map((model) => model.id),
+  )
+  form.allowedModelIds = form.allowedModelIds.filter((modelId) => selectableModelIds.has(modelId))
+  if (!form.allowedProviderIds.includes(form.providerOverride)) {
+    form.providerOverride = ''
+  }
+  if (!selectableModelIds.has(form.modelOverride)) {
+    form.modelOverride = ''
+  }
 }
 
 function toggleTransferMode(id: string): void {
@@ -143,6 +160,31 @@ const maxBytesValid = computed(
   () => parsedMaxBytes.value >= 1 && parsedMaxBytes.value <= 50_000_000,
 )
 
+const selectableModels = computed(() => modelsForProviders(form.allowedProviderIds))
+
+const providerOverrideOptions = computed(() => [
+  ...new Set(selectableModels.value.map((model) => model.provider_id)),
+])
+
+const modelOverrideOptions = computed(() => {
+  const models = form.providerOverride
+    ? selectableModels.value.filter((model) => model.provider_id === form.providerOverride)
+    : selectableModels.value
+  return form.allowedModelIds.length === 0
+    ? models
+    : models.filter((model) => form.allowedModelIds.includes(model.id))
+})
+
+function modelLabel(model: { id: string; provider_id: string; provider_model: string }): string {
+  return `${model.id} — ${model.provider_id}/${model.provider_model}`
+}
+
+function clearIneligibleModelOverride(): void {
+  if (!modelOverrideOptions.value.some((model) => model.id === form.modelOverride)) {
+    form.modelOverride = ''
+  }
+}
+
 const canSave = computed(() => maxBytesValid.value && form.allowedTransferModes.includes('inline'))
 
 async function save(): Promise<void> {
@@ -157,10 +199,7 @@ async function save(): Promise<void> {
         version: form.version,
         enabled: form.enabled,
         allowed_provider_ids: form.allowedProviderIds,
-        allowed_model_ids: form.allowedModelIds
-          .split(',')
-          .map((item) => item.trim())
-          .filter(Boolean),
+        allowed_model_ids: form.allowedModelIds,
         provider_override: form.providerOverride.trim() || null,
         model_override: form.modelOverride.trim() || null,
         monthly_budget: budget ? budget : null,
@@ -352,33 +391,55 @@ async function save(): Promise<void> {
         </CardHeader>
         <CardContent class="grid max-w-md gap-4">
           <div class="flex flex-col gap-2">
-            <Label for="ai-settings-model-ids">
-              Allowed model ids (comma-separated registry ids)
-            </Label>
-            <Input
+            <Label for="ai-settings-model-ids">Allowed models</Label>
+            <select
               id="ai-settings-model-ids"
               v-model="form.allowedModelIds"
-              placeholder="vertex.gemini-2.0-flash"
+              multiple
+              class="border-input bg-background ring-offset-background focus-visible:ring-ring min-h-28 rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
               data-testid="ai-settings-model-ids"
-            />
+              :disabled="selectableModels.length === 0"
+              @change="clearIneligibleModelOverride"
+            >
+              <option v-for="model in selectableModels" :key="model.id" :value="model.id">
+                {{ modelLabel(model) }}
+              </option>
+            </select>
+            <p class="text-muted-foreground text-xs">
+              Select one or more approved models. Leave none selected to avoid adding a model
+              allowlist restriction. Provider selections narrow the choices shown here.
+            </p>
           </div>
           <div class="flex flex-col gap-2">
             <Label for="ai-settings-provider-override">Provider override</Label>
-            <Input
+            <select
               id="ai-settings-provider-override"
               v-model="form.providerOverride"
-              placeholder="vertex"
+              class="border-input bg-background ring-offset-background h-9 rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
               data-testid="ai-settings-provider-override"
-            />
+              :disabled="providerOverrideOptions.length === 0"
+              @change="clearIneligibleModelOverride"
+            >
+              <option value="">No provider override</option>
+              <option v-for="provider in providerOverrideOptions" :key="provider" :value="provider">
+                {{ KNOWN_PROVIDERS.find((item) => item.id === provider)?.label ?? provider }}
+              </option>
+            </select>
           </div>
           <div class="flex flex-col gap-2">
             <Label for="ai-settings-model-override">Model override</Label>
-            <Input
+            <select
               id="ai-settings-model-override"
               v-model="form.modelOverride"
-              placeholder="vertex.gemini-2.0-flash"
+              class="border-input bg-background ring-offset-background h-9 rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50"
               data-testid="ai-settings-model-override"
-            />
+              :disabled="modelOverrideOptions.length === 0"
+            >
+              <option value="">No model override</option>
+              <option v-for="model in modelOverrideOptions" :key="model.id" :value="model.id">
+                {{ modelLabel(model) }}
+              </option>
+            </select>
           </div>
         </CardContent>
       </Card>

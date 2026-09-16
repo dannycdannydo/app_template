@@ -1,8 +1,14 @@
-# Critical Job Reliability Closure Plan
+# Critical Reliability, Security and Audit Closure Plan
 
-Status: Draft
+Status: Active
 
 ## Goal
+
+This existing job-reliability plan now also tracks the critical findings from
+the September 2026 starter review. P1-P5 retain their original job scope;
+P6-P10 are separate, review-gated work units. Updating this draft authorises
+planning, not application of authentication, permission, tenant, API,
+infrastructure or destructive data changes.
 
 Close the remaining failure modes in the PostgreSQL + Redis + Dramatiq job
 system that can leave accepted work permanently stranded, lose the durable
@@ -75,6 +81,13 @@ The resulting contract is not exactly-once execution. It is:
 - Update architecture, ADRs, operations and backup/recovery documentation so
   guarantees, ambiguous outcomes, Redis topology and operator actions match the
   implementation exactly.
+- Close the document-source, mutable-upload, file-completion and scratch-object
+  gaps before treating uploaded documents as trusted AI or download inputs.
+- Prevent invitation/revocation races and last-platform-admin lockout, and give
+  auditable business records a real conflict/revision contract.
+- Make production browser upload and client-IP controls work in the deployed
+  topology, and make the cloneable starter's release and capability claims
+  truthful.
 
 ## Findings and evidence
 
@@ -117,6 +130,67 @@ The resulting contract is not exactly-once execution. It is:
   for Dramatiq and rate limiting with `allkeys-lru`. Memory pressure may evict
   broker state silently; PostgreSQL recovery does not currently cover every
   running or maintenance execution state.
+- `backend/app/ai/storage_resolver.py` and `backend/app/ai/streamed_source.py`
+  accept organisation-prefixed document storage references by object metadata
+  and MIME/size, without requiring a live `files` row in an allowed lifecycle
+  state. AI can read a pending, failed, quarantined or unknown-key document;
+  a fake-storage regression reproduced the missing-row case. Organisation
+  prefix checks correctly reject cross-tenant keys but do not prove document
+  readiness or caller authority.
+- `backend/app/storage/s3.py` signs PUT on the final document key. The URL is
+  reusable until expiry; `backend/app/modules/files/service.py` verifies the
+  object at completion but does not pin an immutable version/digest through
+  processing, AI reads and downloads. A same-key overwrite after completion
+  can change what a previously approved File row refers to.
+- `backend/app/modules/files/service.py` commits the `UPLOADED` transition and
+  audit before calling `jobs_service.schedule_job()` in a second transaction.
+  A failed schedule leaves an uploaded file with no processing job, while
+  retrying completion conflicts with the changed status.
+- `backend/app/modules/invitations/service.py` accepts a previously selected
+  invitation without serialising `SENT -> ACCEPTED` against revocation or
+  duplicate login. A stale acceptance may grant membership after a concurrent
+  revoke; provider and database outcomes also lack an explicit reconciliation
+  rule.
+- `backend/app/modules/platform_admin/service.py` counts remaining admin
+  memberships without excluding disabled users or serialising concurrent
+  revocations/deactivations. Two removals can each observe another admin, and
+  an inactive remaining admin is not a recovery principal.
+- `backend/app/modules/records/service.py` updates records without a version
+  check and hard-deletes them; its action-only audit events cannot reconstruct
+  prior values. `backend/app/modules/audit/models.py` uses `ON DELETE SET NULL`
+  on actor/organisation links and lacks database-level append-only protection.
+  This is weaker than blueprint §10's collaborative-edit concurrency and the
+  starter's auditable-business-app goal.
+- `backend/app/modules/ai_demo/router.py` permits scratch upload without an
+  AI-enabled check. Scratch objects have no durable upload lifecycle; retention
+  selection in `backend/app/ai/persistence/queries.py` excludes organisations
+  with null retention, leaving objects without a global maximum lifetime.
+- `backend/app/modules/files/service.py` presently allows downloads at
+  `UPLOADED` and `PROCESSING`, before the worker establishes `READY`; this must
+  be reconciled with any scan/quarantine trust gate rather than preserved by
+  accident. `backend/app/modules/users/service.py` and invitation acceptance
+  also perform repeated WorkOS profile reads on the login path; P7 should
+  measure and remove redundant calls without changing identity semantics.
+- Production CSP in `deploy/caddy/Caddyfile` and `frontend/nginx.conf` allows
+  same-origin and WorkOS connections but not the external S3 upload origin in
+  `.env.production.example`. Browser direct PUT therefore fails in the example
+  deployment. `backend/app/main.py` rate-limits by `request.client.host`; the
+  hybrid Compose Uvicorn/Caddy topology does not explicitly trust only the
+  Caddy proxy for forwarded client IP, so distinct clients may share one quota.
+- `backend/app/modules/users/service.py` unions role codes across all user
+  memberships for `/me`; `frontend/src/lib/permissions.ts` uses those global
+  roles for selected-organisation UI capabilities. A multi-org owner/viewer
+  can see write affordances in the viewer org. Backend authorisation remains
+  the enforced boundary; the frontend contract is misleading.
+- `/ai/ask` in `backend/app/modules/ai_demo/router.py` performs managed AI work
+  synchronously even for large document attachments. The starter rule places
+  long-running work behind Dramatiq. File processing also does not provide a
+  malware-scanning/quarantine gate before readiness; `SECURITY.md` explicitly
+  defers scanning.
+- The repository is tagged `v0.8.0` while backend/frontend package versions
+  remain `0.7.0`, and `TEMPLATE_V0_8_SCOPE.md` still says planned despite its
+  completed checkboxes. Blueprint §41's upgrade-guide expectation is not met;
+  clone consumers cannot reliably infer the template's implemented release.
 
 ## Out of scope
 
@@ -125,7 +199,7 @@ The resulting contract is not exactly-once execution. It is:
 | Exactly-once execution or external side effects | impossible across PostgreSQL, Redis and external providers; ambiguous outcomes remain explicit |
 | General workflow orchestration, DAGs, priorities or cancellation | no change to the one-job execution model |
 | Public replay, cancel or job-administration APIs | operator/database-backed recovery remains internal |
-| A general event-sourcing rewrite | `job_attempts` and maintenance runs are narrow operational ledgers, not domain event sourcing |
+| A general event-sourcing rewrite | `job_attempts` and maintenance runs are narrow operational ledgers; P8 adds bounded record revisions, not whole-system event sourcing |
 | A worker dashboard or new monitoring product | repair existing metrics and document alert queries only |
 | Separate worker pools per queue | queue isolation remains a later capacity decision |
 | New email provider SDK | retain the provider-neutral adapter; stable identity and ambiguity semantics apply to SMTP now and future adapters |
@@ -133,6 +207,9 @@ The resulting contract is not exactly-once execution. It is:
 | Reworking successful AI request idempotency and provider accounting | retain the existing deterministic request/replay contract; add ownership fencing only where needed |
 | Arbitrary replay of dead outbox events | current-dispatch death settles visibly; repair remains guarded and contract-specific |
 | Broad dependency upgrades | pin/validate the existing Dramatiq line needed by this work; no unrelated upgrades |
+| Exactly-once object writes or provider calls | staged promotion/version pinning and honest ambiguity are the achievable boundaries |
+| A full commercial-property domain model | prove the starter contract with one representative editable record and document journey; app-specific schemas remain clone work |
+| An automatic malware verdict without a selected provider | P6 must define a deny-by-default scan/quarantine boundary and a documented adapter; provider choice requires separate review |
 
 ## Decisions and assumptions
 
@@ -182,9 +259,19 @@ The resulting contract is not exactly-once execution. It is:
 - Queue metrics use only supported behavior verified against the locked
   Dramatiq version and real Redis. Tests must instantiate the production broker;
   a fake-only method is insufficient evidence.
-- No authentication, permission, tenant-isolation or public API change is
-  authorised. Infrastructure, secret/configuration, backup/recovery and any
-  migration affecting terminal semantics require the human-review gates below.
+- P6-P10 may require authentication, permission, tenant-isolation, additive
+  public API, infrastructure or secret/configuration changes. Those choices
+  remain proposals until the owner selects the contract and human review is
+  completed; no public API break or destructive migration is implied by this
+  draft. Infrastructure, backup/recovery and terminal semantics retain their
+  existing review gates.
+- A signed storage URL is a time-limited capability, not a proof that object
+  bytes are immutable. Document AI/download access must derive File identity,
+  tenant, status and pinned content identity from validated database context;
+  AI scratch keys must use a separate, bounded lifecycle contract.
+- Critical transaction races must be tested with two real PostgreSQL sessions,
+  not only single-session mocks. Recovery and audit guarantees must hold through
+  rollback, concurrent requests, worker restart and user deletion/deactivation.
 
 ## Commands that must work
 
@@ -217,6 +304,11 @@ make generate-client
 make validate-execution-contracts
 make check
 ```
+
+P6-P10 also require targeted PostgreSQL, MinIO, browser, WorkOS-webhook and
+concurrency regression runs created with those checkpoints. Do not count an
+environment-skipped database test as closure evidence. Each new protected
+route must enter `backend/tests/test_security_suite.py` before final gates.
 
 Deployment validation must also prove the two-Redis topology:
 
@@ -267,9 +359,48 @@ docker compose -f deploy/compose/compose.local.yml --profile fullstack config
 11. Operator documentation provides exact queries and actions for expired
     running jobs, exhausted attempts, dead current dispatches, ambiguous email,
     failed maintenance runs, broker capacity and metric-refresh failure.
-12. No endpoint, response schema, permission, tenant-isolation behavior or
-    generated frontend API type changes. Existing file, notification and AI
-    successful journeys remain green.
+12. P1-P5 introduce no endpoint, response schema, permission, tenant-isolation
+    behavior or generated frontend API type changes. Existing file,
+    notification and AI successful journeys remain green; any P6-P10 public
+    contract addition is explicit, reviewed and regenerated.
+13. AI document reads require a live tenant-matched File record in an allowed
+    completed/ready state and the exact pinned object identity. Pending,
+    failed, quarantined, deleted, unknown and cross-org document keys fail
+    closed at request and worker execution; scratch keys use their own guard.
+14. A completed document cannot be silently changed by replaying a signed PUT.
+    Staging/promotion or version/digest pinning is verified through processing,
+    AI and download, including same-size overwrites and interrupted promotion.
+15. File completion, audit, job and outbox are one recoverable/idempotent
+    transaction. Scheduling failure and two concurrent completions leave no
+    `UPLOADED` file without one processable job and no duplicate jobs.
+16. Revocation and invitation acceptance are serialised around the legal state
+    transition and membership grant. A committed revoke cannot later become
+    accepted or grant access; duplicate login and provider/webhook races are
+    reconciled without reopening access.
+17. Last-admin checks count only active recovery principals and are safe under
+    concurrent revocation and user deactivation. An audited break-glass path is
+    specified for pre-existing zero-active-admin states; ordinary actions
+    cannot silently create one.
+18. A representative business record has optimistic concurrency, history and
+    durable provenance. Stale updates/deletes return conflict, revisions can
+    reconstruct approved changes without sensitive audit leakage, and actor/
+    organisation identity survives deletion according to a reviewed retention
+    policy. Database-level append-only enforcement is validated.
+19. Scratch upload respects the organisation AI policy and every scratch object
+    has a bounded global maximum lifetime, including null per-org retention,
+    aborted uploads, worker crashes and storage cleanup failure. Untrusted
+    document bytes cannot become ready/AI-readable before the reviewed
+    quarantine/scanning decision.
+20. Example production browser PUT works with a deliberately scoped storage
+    CSP origin and CORS policy. Per-client limits use a verified Caddy-to-
+    Uvicorn forwarded-IP trust boundary; forged headers cannot bypass limits.
+21. `/me` and generated frontend types provide selected-organisation roles or
+    capabilities; multi-org UI write affordances match the backend 403. Large
+    AI asks either use a durable job/result path or reject above a documented
+    synchronous bound; no 50 MB provider work runs inside an API request.
+22. Tag, package metadata, scope status and upgrade guidance consistently
+    describe the released starter. A fresh clone passes environment, migration,
+    generated-client and deployment smoke checks with no undocumented steps.
 
 ### Capability traceability
 
@@ -283,6 +414,12 @@ docker compose -f deploy/compose/compose.local.yml --profile fullstack config
 | Dead-dispatch terminal visibility | AC8 | P1-P2 | owner-checked dead-current-dispatch settlement tests |
 | Broker integrity and truthful metrics | AC9-AC10 | P5 | real Redis pressure/compatibility tests and Compose validation |
 | Operational and public-contract closure | AC11-AC12 | P5 | runbook review, security suite and diff-free generated client |
+| Document source and immutable file bytes | AC13-AC15 | P6 | real-DB lifecycle/atomicity races and MinIO PUT-replay/version tests |
+| Identity and recovery-admin safety | AC16-AC17 | P7 | two-session invitation/revoke/admin/deactivation races and WorkOS webhook tests |
+| Business audit and conflicts | AC18 | P8 | revision/409/delete/provenance/DB append-only tests |
+| Scratch, scanning and async AI | AC19, AC21 | P6, P9 | AI-disabled/null-retention/orphan tests, scan boundary and large-ask job tests |
+| Deployed browser and proxy security | AC20 | P9 | external-origin browser E2E, Compose/CSP/CORS and forged-XFF tests |
+| Selected-org UI and release truth | AC21-AC22 | P10 | multi-org frontend/API contract and fresh-clone/release smoke tests |
 
 ## Implementation checkpoints
 
@@ -290,27 +427,27 @@ docker compose -f deploy/compose/compose.local.yml --profile fullstack config
 
 Dependencies: none
 
-- [ ] Add an ADR amendment recording PostgreSQL-owned attempt history, global
+- [x] Add an ADR amendment recording PostgreSQL-owned attempt history, global
       retry limits and terminal settlement; explicitly retire the claim that a
       Dramatiq `on_retry_exhausted` message is the durable finalization boundary.
-- [ ] Add `job_attempts` model/query/service boundaries following existing
+- [x] Add `job_attempts` model/query/service boundaries following existing
       module patterns, with closed statuses, safe error codes, ownership fields,
       constraints and indexes for current attempt, lease expiry and job history.
-- [ ] Add an additive Alembic migration and migration tests. Keep attempt rows
+- [x] Add an additive Alembic migration and migration tests. Keep attempt rows
       internal; do not alter public job request/response schemas.
-- [ ] Change claim, progress/lease renewal and terminal helpers so attempt and
+- [x] Change claim, progress/lease renewal and terminal helpers so attempt and
       job state remain transactionally consistent. A claimed owner is represented
       by exactly one running attempt row.
-- [ ] Add a PostgreSQL-owned retry decision service: retryable outcome closes the
+- [x] Add a PostgreSQL-owned retry decision service: retryable outcome closes the
       current attempt and creates a delayed next dispatch atomically; exhaustion
       closes the attempt and fails the job plus its allow-listed domain hook
       atomically. Remove durable correctness dependence on the zero-retry
       exhausted-handler actor while preserving rolling-deployment compatibility.
-- [ ] When a permanently invalid event still owns the job's current initial
+- [x] When a permanently invalid event still owns the job's current initial
       dispatch, settle the job and attempt to a safe delivery-contract failure
       in the same claim-token/dispatch-checked transaction. A dead stale event is
       a no-op against a newer dispatch.
-- [ ] Add database and real-broker tests for commit/rollback, duplicate callback,
+- [x] Add database and real-broker tests for commit/rollback, duplicate callback,
       Redis loss before/after retry scheduling, global attempt ceiling, failed
       finalizer compatibility and dead current/stale dispatch settlement.
 
@@ -428,6 +565,132 @@ Dependencies: P2, P3, P4
 Human review required before application: infrastructure changes, Redis
 credentials/configuration, backup/recovery changes and deployment/rollback order.
 
+### P6 — Document Authority, Immutable Uploads and Atomic File Completion
+
+Dependencies: P1-P2 for worker fencing; security design may be reviewed earlier
+
+- [ ] Define one source-authorisation service for document keys used by inline
+      AI, streamed/provider AI, job retries and download. Resolve the File from
+      validated organisation context; require an allowed lifecycle status and
+      pinned content identity. Do not treat a prefix, object HEAD, MIME or size
+      as authorisation. Scratch keys use a distinct durable intent/expiry guard.
+- [ ] Choose and review a provider-neutral immutable upload strategy: unique
+      staging key plus verified promotion, or object-version/digest pinning with
+      a proven S3-compatible adapter. Bound signed PUT lifetime, prevent old
+      capabilities from mutating approved bytes, and reconcile DB/object-store
+      partial failures without exposing unverified content.
+- [ ] Move File completion transition, audit, durable processing job and
+      dispatch outbox into one transaction. Lock the File, make completion
+      replay idempotent, and preserve one processable job under parallel calls.
+- [ ] Define untrusted-file quarantine/scanning policy and adapter boundary.
+      `READY`, AI and download must be gated until the approved verdict; a
+      scanner outage must not turn unscanned content into trusted content.
+- [ ] Require AI-enabled policy before scratch upload capability issuance;
+      persist scratch expiry/usage state, apply a global maximum independent of
+      optional per-org retention, and configure storage lifecycle as a backstop.
+      Reconcile aborted uploads, failed cleanup and in-use provider transfers.
+- [ ] Add real-DB, concurrent-session, fake-storage and MinIO tests: unknown/
+      pending/failed/quarantined/deleted/cross-org keys; AI inline and streamed
+      reads; PUT reuse and same-size overwrite; completion rollback/parallel
+      replay; scanner unavailable; disabled AI and null-retention expiry.
+
+Human review required before application: tenant isolation, signed capability
+and secret handling, File lifecycle/public API compatibility, storage
+infrastructure, malware policy and backup/recovery. Destructive object cleanup
+needs a reviewed retention/restore boundary.
+
+### P7 — Invitation Revocation and Platform-Admin Recovery Safety
+
+Dependencies: none; coordinate authentication rollouts with existing v0.4 flow
+
+- [ ] Specify legal invitation transitions and provider/database conflict
+      precedence. Lock or conditionally update `SENT -> ACCEPTED` in the same
+      transaction as membership grant; revoke, webhook and duplicate acceptance
+      must use the same serialisation boundary. Reconcile provider failures
+      without accepting a committed revoked invitation.
+- [ ] Make the last-platform-admin invariant count enabled users with active
+      admin membership. Serialise grant/revoke and user disable/delete/webhook
+      pathways that can remove the last active principal. Define an audited,
+      tightly scoped operator recovery path for an already locked-out plane.
+- [ ] Add two-session PostgreSQL race tests for accept-vs-revoke, duplicate
+      login, two concurrent admin removals, admin disable/delete and WorkOS
+      revoke/deactivation webhooks. Preserve cross-plane and non-admin 403
+      security-suite cases.
+- [ ] Measure and eliminate duplicate WorkOS profile retrieval during a
+      successful login when the same validated identity can be reused; retain
+      fail-closed profile and membership checks.
+
+Human review required before application: authentication, permission model,
+tenant isolation, provider reconciliation and break-glass secret handling.
+
+### P8 — Auditable Business Records and Conflict-Safe Edits
+
+Dependencies: none; share audit retention decisions with P6-P7
+
+- [ ] Add a version/conditional-update contract to the representative records
+      module. Stale update/delete returns 409; retries do not lose a later
+      writer's work. Keep ORM objects out of request schemas and regenerate
+      frontend API types for reviewed additive response fields.
+- [ ] Design a bounded immutable revision record or redacted field-diff that
+      can reconstruct business changes without copying secrets or sensitive
+      document contents into generic audit metadata. Review actor/org stable
+      identity on user/organisation deletion and retention/erasure tradeoffs.
+- [ ] Enforce audit append-only at the database privilege/trigger boundary, or
+      document and test an equivalent separately held immutable export. Make
+      hard delete/restore semantics explicit and protect revision history from
+      normal API callers.
+- [ ] Add migrations and two-session tests for stale writes/deletes, revision
+      reconstruction, actor deletion, tenant scope, append-only denial and
+      restoration. Add security-suite route coverage for any new protected API.
+
+Human review required before application: public API, permissions, tenant
+isolation, destructive migration/retention, backup/recovery and audit privacy.
+
+### P9 — Production Browser/Proxy Boundaries and Bounded AI Work
+
+Dependencies: P6 for document trust; P5 for production topology verification
+
+- [ ] Set the production CSP `connect-src` to exact configured public storage
+      origins without signed query strings or broad wildcard origins. Configure
+      storage CORS for the actual browser PUT method/headers and authorised
+      frontend origin. Keep WorkOS and other existing restrictions intact.
+- [ ] Establish the precise Caddy-to-Uvicorn trusted-proxy boundary for client
+      IP extraction and rate limiting. Reject client-supplied forwarded headers
+      from untrusted peers; verify separate real users have separate quotas.
+- [ ] Move large `/ai/ask` work behind the durable job path with an explicit
+      accepted/result contract, or cap synchronous attachments below a tested
+      latency/size limit and reject larger requests. Keep provider calls behind
+      AI adapters and avoid public provider-accounting leakage.
+- [ ] Add external-S3-origin browser E2E, CSP/CORS negative cases, Compose
+      forwarded-IP/spoofing tests, rate-limit separation and large-ask timeout/
+      duplicate/job recovery tests. Update production examples and runbooks.
+
+Human review required before application: infrastructure, proxy/auth security,
+secret handling, tenant isolation and any additive public AI API contract.
+
+### P10 — Organisation-Scoped UI and Clone/Release Truth
+
+Dependencies: P7 for final permission semantics; P6-P9 for clone smoke closure
+
+- [ ] Make `/me` expose per-organisation roles/capabilities (or an explicit
+      selected-org capability endpoint); never interpret a union of roles as
+      selected-org authority. Generate frontend API types and derive selected-
+      org UI affordances from that context. Backend permission checks remain
+      decisive and the viewer-write security suite remains green.
+- [ ] Reconcile the historical `v0.8.0` tag, package versions and
+      `TEMPLATE_V0_8_SCOPE.md` state without rewriting the immutable tag.
+      Document the version convention and a v0.7-to-v0.8 upgrade guide with
+      migration, config, worker and frontend-client implications.
+- [ ] Run a fresh-clone smoke scenario: example environment validation,
+      migrations, generated client, protected-route security suite, external
+      upload and deployment Compose configuration. Record unsupported/deferred
+      features (including chosen malware provider) honestly in starter docs.
+- [ ] Add multi-org owner/viewer frontend and API tests plus version/scope
+      consistency checks; keep all final lint, typing, test and E2E gates green.
+
+Human review required before application: permission model, additive public
+API, generated frontend types, release contract and deployment documentation.
+
 ## Reference map
 
 | Checkpoint | Governing sources | What to extract |
@@ -437,16 +700,23 @@ credentials/configuration, backup/recovery changes and deployment/rollback order
 | P3 | BP §18 and BP §20; `backend/app/email/base.py`; `backend/app/email/smtp.py`; `backend/app/modules/notifications/models.py`; `backend/app/modules/notifications/tasks.py`; `backend/app/modules/notifications/service.py` | Provider-neutral adapter rules, delivery states, audit fields, SMTP ambiguity and current retry classification |
 | P4 | BP §18-§19 and BP §28; `backend/app/ai/persistence/tasks.py`; `backend/app/ai/persistence/service.py`; `backend/app/ai/persistence/reconciliation.py`; `backend/app/job_coordinator/registry.py`; `backend/app/job_coordinator/reconciliation.py` | Maintenance privacy, bounded sweeps, advisory locks, scheduling deduplication and missing durable run outcome |
 | P5 | BP §28 and BP §35-§36; `backend/app/broker.py`; `backend/app/core/config.py`; `backend/app/observability/metrics.py`; `deploy/compose/compose.local.yml`; `deploy/compose/compose.hybrid-vps.yml`; `docs/operations.md`; `docs/backup-and-recovery.md`; locked Dramatiq source/API | Production Redis topology, fail-visible capacity behavior, supported queue observability, liveness, rollback and recovery documentation |
+| P6 | BP §17, §29 and §30; `ARCHITECTURE.md` storage/AI flow; `backend/app/modules/files/service.py`; `backend/app/storage/s3.py`; `backend/app/ai/storage_resolver.py`; `backend/app/ai/streamed_source.py`; `backend/app/ai/persistence/queries.py`; `SECURITY.md` | File/scratch lifecycle authority, final-key signing, non-atomic completion, retention and quarantine policy |
+| P7 | BP §7-§9 and §31; `ARCHITECTURE.md` invitation/platform flows; `backend/app/modules/invitations/service.py`; `backend/app/modules/platform_admin/service.py`; identity webhook services | Invite transition races, provider reconciliation and active last-admin invariant |
+| P8 | BP §10-§11 and §22; `backend/app/modules/records/service.py`; `backend/app/modules/audit/models.py`; `backend/app/modules/audit/service.py`; `docs/backup-and-recovery.md` | Representative record concurrency, revision/erasure design and durable audit provenance |
+| P9 | BP §30, §35 and §36; `deploy/caddy/Caddyfile`; `frontend/nginx.conf`; `deploy/compose/compose.hybrid-vps.yml`; `backend/app/main.py`; `backend/app/modules/ai_demo/router.py`; production environment example | Browser storage origin/CORS, trusted client IP and long-running AI request boundary |
+| P10 | BP §8, §14, §31 and §41; `backend/app/modules/users/service.py`; `frontend/src/lib/permissions.ts`; `TEMPLATE_V0_8_SCOPE.md`; package manifests; `CONTRIBUTING.md` | Selected-org UI authority, version/upgrade truth and fresh-clone release proof |
 
 ## API, data and security impact
 
-- **API/frontend:** no endpoint, permission, request or response schema change is
-  planned. Attempt, maintenance-run and internal delivery-attention state remain
-  backend operational details. `make generate-client` must be diff-free.
-- **Database:** additive `job_attempts` and `maintenance_runs` migrations plus
-  the minimum notification-delivery fields/status change needed for stable
-  identity and ambiguity. No destructive migration or automatic deletion of
-  business/audit rows is authorised.
+- **API/frontend:** P1-P5 retain the diff-free public contract. P8-P10 may add
+  reviewed record version, large-AI job and per-org capability schemas; every
+  endpoint has an explicit response model, security-suite coverage and
+  regenerated frontend types. No unreviewed public break is authorised.
+- **Database:** P1-P5 add `job_attempts`, `maintenance_runs` and minimal delivery
+  state. P6-P8 may add scratch/upload intents, File identity/reconciliation,
+  revision and identity safety constraints; every change gets an Alembic
+  migration. No destructive migration or deletion of audit history is
+  authorised without the explicit human retention/recovery decision.
 - **Tenant isolation:** job attempts inherit their job's validated organisation;
   all reconciliation and domain fencing derives organisation from the locked
   durable row. Maintenance runs are global and contain no tenant payload.
@@ -459,9 +729,9 @@ credentials/configuration, backup/recovery changes and deployment/rollback order
 - **Secrets/infrastructure:** splitting Redis adds a second authenticated
   endpoint/credential surface and changes backup/deployment topology. Human
   infrastructure, secret-handling and backup/recovery review is mandatory.
-- **Public compatibility:** no public cancellation/replay behavior and no
-  generic administrative bypass are introduced. Protected-route coverage is
-  unchanged and must remain green.
+- **Public compatibility:** no public cancellation/replay or generic admin
+  bypass. New protected routes join `PROTECTED_ROUTES` in the mandatory suite;
+  platform routes get non-admin and cross-plane denial cases and no `X-Org-Id`.
 
 ## Validation plan
 
@@ -483,21 +753,34 @@ credentials/configuration, backup/recovery changes and deployment/rollback order
 - **Domain regression tests:** file ready/failed notifications, email success,
   AI request replay/budget/output persistence, retention and provider-file
   reconciliation remain correct under the owner fence.
+- **Document/storage tests:** real PostgreSQL File lifecycle gates for both AI
+  modes; MinIO signed-PUT replay/version and same-size overwrite; completion
+  rollback and concurrent replay; scratch null-retention/orphans and scanner
+  unavailable. Cross-tenant and unknown-key cases fail closed.
+- **Identity/audit tests:** two-session accept/revoke/admin/deactivation races,
+  duplicate WorkOS webhook; stale record 409, revision reconstruction,
+  actor/org deletion and DB append-only enforcement.
+- **Browser/proxy/UI tests:** external-origin browser upload with scoped CSP/
+  CORS, forged forwarded-IP denial, large AI ask bound/job path, and multi-org
+  owner/viewer UI with matching backend 403.
 - **Security/contract tests:** no tenant id from broker payload, no sensitive
-  attempt/error content, no new public route, mandatory protected routes green
-  and generated client unchanged.
+  attempt/error content, all added routes in mandatory protected-route suite,
+  per-org generated types reviewed, and P1-P5 public client diff-free.
 - **Operational tests:** two Redis services, credentials, AOF/noeviction,
   backup/restore, rolling deployment, coordinator/worker restart and alerts for
   every new durable attention state.
-- **Final gates:** after review findings are applied, run the focused commands,
+- **Release/clone tests:** package/scope/tag consistency, v0.7-to-v0.8 upgrade
+  guidance and fresh-clone migration/client/Compose/environment smoke proof.
+- **Final gates:** after review findings are applied, run focused commands,
   then `make check` once plus every additional contract command. Do not weaken
   linting, typing, tests or security coverage.
 
 ## Review and delivery
 
-- Execute P1 through P5 in order. Each checkpoint is one independent
-  implement → review → apply-and-commit cycle on its own feature branch under
-  `CONTRIBUTING.md`.
+- Execute P1-P5 in their dependency order. P6-P10 are separately reviewable
+  work units with the dependencies above, not permission to combine security
+  and job changes in one unreviewed commit. Each checkpoint follows
+  implement → review → apply-and-commit under `CONTRIBUTING.md`.
 - Keep this plan `Status: Draft` until the owner approves its decisions and
   human-review gates. Activation uses the exact transition to `Status: Active`;
   completion uses `Status: Complete` only after all evidence is reviewed.
@@ -505,22 +788,29 @@ credentials/configuration, backup/recovery changes and deployment/rollback order
   and do not fold the current coordinator/logging edits into this plan unless
   their owner deliberately assigns them to a checkpoint.
 - P1 stops before application for migration and terminal-semantics review. P2
-  stops for tenant-isolation and recovery review. P3 stops for external-delivery
-  semantics review. P4 stops for cleanup/privacy recovery review. P5 stops for
-  infrastructure, secrets and backup/recovery review.
-- Recommended rollout: migrations first; backward-compatible workers that can
-  read old and new messages second; coordinator/attempt retry contract third;
-  domain-fenced actors fourth; durable maintenance fifth; split Redis and metric
-  cutover last. Observe old/new attempt, stale-running, maintenance and broker
-  signals at every stage.
+  stops for tenant-isolation/recovery review. P3 stops for external-delivery
+  review. P4 stops for cleanup/privacy recovery review. P5 stops for
+  infrastructure, secrets and backup/recovery review. P6-P10 stop for their
+  respective human-review gates, especially authentication, permission,
+  tenant, public API, storage and audit-retention decisions.
+- Recommended job rollout: migrations first; backward-compatible workers that
+  can read old and new messages second; coordinator/attempt retry contract
+  third; domain-fenced actors fourth; durable maintenance fifth; split Redis
+  and metric cutover last. P6 document gating needs a non-destructive inventory
+  and reconciliation of existing File/object states before enabling deny gates;
+  P7 identity transitions need WorkOS/webhook rollback rehearsal; P8 revisions
+  need a reviewed historical-data baseline; P9-P10 deploy only after the
+  storage/proxy/API contracts are stable. Observe attention/backlog signals at
+  each stage.
 - Rollback must pause coordinator publication/reconciliation before reverting
   application containers. Preserve job, attempt, maintenance and outbox rows for
   roll-forward. Do not downgrade additive migrations in production merely to
   roll back application code.
-- No new dependency, public API, authentication, permission or tenant model is
-  authorised. Discovery of such a requirement returns the affected checkpoint
-  to draft for an explicit decision and human review.
-- Completion requires all acceptance evidence, real PostgreSQL/Redis failure
-  journeys, reviewed infrastructure and recovery procedures, green final gates,
-  consistent documentation and an honest statement of remaining exactly-once
-  limitations.
+- No major dependency, public API break, authentication, permission or tenant
+  model change is automatically authorised by this draft. Discovery of such a
+  requirement returns the affected checkpoint to explicit owner decision and
+  human review. Preserve the existing historical `v0.8.0` tag.
+- Completion requires AC1-AC22 evidence, real PostgreSQL/Redis/MinIO failure
+  journeys, reviewed identity/storage/audit/infrastructure recovery procedures,
+  green final gates, an independently cloneable release and honest statements
+  of remaining exactly-once and deferred malware-provider limitations.

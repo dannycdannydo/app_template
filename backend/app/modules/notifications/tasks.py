@@ -13,8 +13,8 @@ Email is only ever sent from this worker task — never inside an HTTP handler
 Idempotency and execution ownership follow the durable delivery plan (P2):
 the task runs its domain work through ``app.modules.jobs.execution``'s shared
 wrapper, which claims the dispatch atomically, defers a duplicate with a live
-lease, releases ownership before a transient error propagates and treats a
-stale attempt as a no-op. A re-delivered message for a job or delivery that
+lease, persists the retry decision after a transient error and treats a stale
+attempt as a no-op. A re-delivered message for a job or delivery that
 already reached a terminal state is a no-op, so a retried or re-delivered
 message can never double-send. The delivery row is marked ``failed`` (with its
 ``notification.delivery_failed`` audit row) and the durable job ``failed``
@@ -212,14 +212,10 @@ async def _fail_invalid_context(
     raise jobs_service.JobPermanentError("the notification job context is invalid")
 
 
-async def _on_notification_email_exhausted(session: AsyncSession, *, job_id: uuid.UUID) -> None:
-    """Mark the notification delivery failed when email retries are exhausted.
-
-    The transient path returns the delivery to ``queued`` before each Dramatiq
-    retry (P4), so on exhaustion the delivery is still ``queued`` while the
-    durable job is now ``failed``. This hook finalizes the delivery row in the
-    same session the finalizer uses, so both rows fail exactly once.
-    """
+async def _on_notification_email_exhausted(
+    session: AsyncSession, *, job_id: uuid.UUID, failure_code: str
+) -> None:
+    """Finalize the delivery with the job's exact terminal cause."""
     job = await session.get(Job, job_id)
     if job is None:
         return
@@ -227,11 +223,17 @@ async def _on_notification_email_exhausted(session: AsyncSession, *, job_id: uui
         delivery_id = uuid.UUID(job.input_reference)
     except ValueError:
         return
+    error_message = (
+        "The notification email could not be dispatched."
+        if failure_code == jobs_service.ERROR_CODE_DISPATCH_INVALID
+        else "The notification email could not be sent after all retries."
+    )
     await notifications_service.mark_delivery_failed(
         session,
         delivery_id=delivery_id,
         organisation_id=job.organisation_id,
-        error_message="The notification email could not be sent after all retries.",
+        error_message=error_message,
+        commit=False,
     )
 
 

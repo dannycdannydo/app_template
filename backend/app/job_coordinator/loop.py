@@ -53,6 +53,7 @@ from app.job_coordinator.registry import (
     RegistryError,
     build_default_registry,
 )
+from app.modules.jobs import service as jobs_service
 from app.modules.jobs.models import Job
 from app.modules.outbox.contracts import (
     EVENT_TYPE_JOB_DISPATCH,
@@ -64,6 +65,7 @@ from app.modules.outbox.queries import (
     due_outbox_events_statement,
     stale_claim_events_statement,
 )
+from app.observability.metrics import JOBS_FAILED_TOTAL
 
 logger = structlog.get_logger()
 
@@ -332,32 +334,40 @@ async def settle_dead(
 ) -> bool:
     """Mark a permanently invalid event ``dead`` with a bounded, safe error.
 
-    The same single conditional ``UPDATE`` as :func:`settle_published`: the
-    row is only touched while it still belongs to this claim, so a stale
-    publisher cannot condemn a row a newer owner has already republished.
-    ``processed_at`` is the database clock at this settlement, matching the
-    actual settlement time used by :func:`release_claim`.
+    A locked read verifies that the event still belongs to this claim before
+    the event and any current never-claimed job are settled in one transaction.
+    ``processed_at`` uses the database clock, matching the other settlement
+    paths and the reconciliation thresholds that compare against it.
     """
-    result = cast(
-        CursorResult[Any],
-        await session.execute(
-            update(OutboxEvent)
-            .where(
-                OutboxEvent.id == event_id,
-                OutboxEvent.status == OutboxEventStatus.PUBLISHING,
-                OutboxEvent.claim_token == claim_token,
-            )
-            .values(
-                status=OutboxEventStatus.DEAD,
-                last_error=error[:MAX_ERROR_CHARS],
-                processed_at=func.now(),
-                claimed_at=None,
-                claim_token=None,
-            )
-        ),
+    event = await session.scalar(
+        select(OutboxEvent).where(OutboxEvent.id == event_id).with_for_update()
     )
+    if (
+        event is None
+        or event.status != OutboxEventStatus.PUBLISHING
+        or event.claim_token != claim_token
+    ):
+        return False
+    event.status = OutboxEventStatus.DEAD
+    event.last_error = error[:MAX_ERROR_CHARS]
+    processed_at = await session.scalar(select(func.now()))
+    assert processed_at is not None
+    event.processed_at = processed_at
+    event.claimed_at = None
+    event.claim_token = None
+    if event.event_type == EVENT_TYPE_JOB_DISPATCH:
+        failed_job = await jobs_service.settle_dead_initial_dispatch(
+            session,
+            event_id=event.id,
+            aggregate_id=event.aggregate_id,
+            organisation_id=event.organisation_id,
+        )
+    else:
+        failed_job = None
     await session.commit()
-    return result.rowcount == 1
+    if failed_job is not None:
+        JOBS_FAILED_TOTAL.labels(job_type=failed_job.job_type).inc()
+    return True
 
 
 async def release_claim(

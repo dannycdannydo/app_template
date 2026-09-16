@@ -86,6 +86,10 @@ line-ending = "auto"
 
 [tool.pyright]
 pythonVersion = "3.13"
+# CI and local `uv sync` both create backend/.venv; make that interpreter
+# explicit so strict focused checks resolve the locked dependencies.
+venvPath = "."
+venv = ".venv"
 typeCheckingMode = "strict"
 include = ["app", "tests", "scripts"]
 exclude = ["**/__pycache__"]
