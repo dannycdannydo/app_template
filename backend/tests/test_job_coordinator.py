@@ -44,7 +44,7 @@ from alembic import command
 from alembic.config import Config
 from dramatiq.brokers.redis import RedisBroker
 from dramatiq.worker import Worker
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 from structlog.testing import capture_logs
@@ -62,12 +62,14 @@ from app.job_coordinator.loop import (
 )
 from app.job_coordinator.reconciliation import (
     reconcile_queued_jobs,
+    reconcile_running_jobs,
     schedule_maintenance_events,
 )
 from app.job_coordinator.registry import DispatchRegistry
 from app.modules.audit.models import AuditEvent
 from app.modules.jobs import service as jobs_service
-from app.modules.jobs.models import Job, JobStatus
+from app.modules.jobs.models import Job, JobAttemptStatus, JobStatus
+from app.modules.jobs.queries import job_attempt_history_statement
 from app.modules.notifications import service as notifications_service
 from app.modules.notifications.models import NotificationDelivery, NotificationDeliveryStatus
 from app.modules.organisations.models import Organisation
@@ -524,6 +526,271 @@ async def test_concurrent_reconciliation_enforces_cooldown(migrated_database: st
             )
             await session.execute(text("DELETE FROM jobs WHERE id = :jid"), {"jid": jid})
         await session.commit()
+
+
+# --- P2: expired-running recovery (empty-Redis backstop) ----------------------
+
+
+async def _make_running_expired_job(
+    session_factory: Any, *, organisation_id: uuid.UUID
+) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
+    """Create a claimed job whose worker died and execution lease expired.
+
+    The initial dispatch is marked published with an old ``processed_at`` so
+    the recovery cooldown is satisfied; the job is then claimed and its lease
+    moved into the past, modelling a worker killed before settlement with no
+    Redis copy of its message left. Returns ``(job_id, initial_dispatch,
+    stale_owner_token)``.
+    """
+    async with session_factory() as session:
+        job = await jobs_service.schedule_job(
+            session,
+            organisation_id=organisation_id,
+            job_type="file.processing",
+            input_reference="file-1",
+        )
+        assert job.dispatch_id is not None
+        initial_dispatch = job.dispatch_id
+        event = await session.get(OutboxEvent, initial_dispatch)
+        assert event is not None
+        event.status = OutboxEventStatus.PUBLISHED
+        event.processed_at = datetime.now(UTC) - timedelta(seconds=3600)
+        await session.commit()
+        claim = await jobs_service.claim_dispatch(session, job_id=job.id)
+        assert claim.owner_token is not None
+        stale_owner = claim.owner_token
+        await session.execute(
+            update(Job)
+            .where(Job.id == job.id)
+            .values(execution_lease_expires_at=datetime.now(UTC) - timedelta(seconds=5))
+        )
+        await session.commit()
+        return job.id, initial_dispatch, stale_owner
+
+
+async def _cleanup_jobs(session_factory: Any, job_ids: list[uuid.UUID]) -> None:
+    """Delete test-owned jobs, attempts and outbox rows (attempts before jobs)."""
+    async with session_factory() as session:
+        for jid in job_ids:
+            await session.execute(
+                text("DELETE FROM outbox_events WHERE aggregate_id = :jid"), {"jid": jid}
+            )
+            await session.execute(
+                text("DELETE FROM job_attempts WHERE job_id = :jid"), {"jid": jid}
+            )
+            await session.execute(text("DELETE FROM jobs WHERE id = :jid"), {"jid": jid})
+        await session.commit()
+
+
+async def test_expired_running_job_recovers_into_one_durable_dispatch(
+    migrated_database: str,
+) -> None:
+    """AC4: a dead worker is recovered from PostgreSQL with no Redis copy.
+
+    The expired-running sweep locks the candidate, closes the dead attempt
+    ``abandoned``, rotates the dispatch/owner boundary, returns the job to
+    ``queued`` and creates exactly one cooldown-keyed outbox intent — never a
+    direct Redis publish. The dead attempt's captured token is fenced out.
+    """
+    session_factory = _session_factory(migrated_database)
+    async with session_factory() as session:
+        organisation = await _create_org(session)
+    job_id, initial_dispatch, stale_owner = await _make_running_expired_job(
+        session_factory, organisation_id=organisation.id
+    )
+
+    async with session_factory() as session:
+        recovered = await reconcile_running_jobs(
+            session,
+            now=datetime.now(UTC),
+            threshold_seconds=60,
+            cooldown_seconds=60,
+            limit=10,
+        )
+    assert recovered == [job_id]
+
+    async with session_factory() as session:
+        row = await session.get(Job, job_id)
+        assert row is not None
+        assert row.status is JobStatus.QUEUED
+        assert row.dispatch_id is not None and row.dispatch_id != initial_dispatch
+        assert row.owner_token is not None and row.owner_token != stale_owner
+        assert row.execution_lease_expires_at is None
+        replacement = await session.get(OutboxEvent, row.dispatch_id)
+        assert replacement is not None
+        assert replacement.status is OutboxEventStatus.PENDING
+        attempts = list((await session.scalars(job_attempt_history_statement(job_id))).all())
+        assert [attempt.status for attempt in attempts] == [JobAttemptStatus.ABANDONED]
+        assert attempts[0].completed_at is not None
+        # The dead attempt's captured credential is fenced out (AC5).
+        with pytest.raises(jobs_service.StaleDispatchError):
+            await jobs_service.verify_ownership(
+                session,
+                jobs_service.JobOwnership(
+                    job_id=job_id,
+                    owner_token=stale_owner,
+                    organisation_id=organisation.id,
+                ),
+            )
+
+    # A second pass within the cooldown recovers nothing: the job is queued and
+    # its replacement dispatch is active.
+    async with session_factory() as session:
+        assert not await reconcile_running_jobs(
+            session,
+            now=datetime.now(UTC),
+            threshold_seconds=60,
+            cooldown_seconds=60,
+            limit=10,
+        )
+
+    await _cleanup_jobs(session_factory, [job_id])
+
+
+async def test_expired_running_job_at_global_ceiling_settles_failed(
+    migrated_database: str,
+) -> None:
+    """AC3: recovery never grants an attempt beyond the global ceiling."""
+    session_factory = _session_factory(migrated_database)
+    async with session_factory() as session:
+        organisation = await _create_org(session)
+    job_id, initial_dispatch, _stale = await _make_running_expired_job(
+        session_factory, organisation_id=organisation.id
+    )
+    async with session_factory() as session:
+        await session.execute(
+            update(Job).where(Job.id == job_id).values(attempt_count=jobs_service.MAX_ATTEMPTS)
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        recovered = await reconcile_running_jobs(
+            session,
+            now=datetime.now(UTC),
+            threshold_seconds=60,
+            cooldown_seconds=60,
+            limit=10,
+        )
+    assert recovered == []
+
+    async with session_factory() as session:
+        row = await session.get(Job, job_id)
+        assert row is not None
+        assert row.status is JobStatus.FAILED
+        assert row.error_code == jobs_service.ERROR_CODE_RETRIES_EXHAUSTED
+        events = (
+            await session.scalars(select(OutboxEvent).where(OutboxEvent.aggregate_id == job_id))
+        ).all()
+        assert [event.id for event in events] == [initial_dispatch]  # no new dispatch
+        attempts = list((await session.scalars(job_attempt_history_statement(job_id))).all())
+        assert [attempt.status for attempt in attempts] == [JobAttemptStatus.EXHAUSTED]
+
+    await _cleanup_jobs(session_factory, [job_id])
+
+
+async def test_queued_reconciliation_at_global_ceiling_settles_failed(
+    migrated_database: str,
+) -> None:
+    """AC3: queued reconciliation exhausts instead of resetting the budget."""
+    session_factory = _session_factory(migrated_database)
+    async with session_factory() as session:
+        organisation = await _create_org(session)
+        job = await jobs_service.schedule_job(
+            session,
+            organisation_id=organisation.id,
+            job_type="file.processing",
+            input_reference="file-1",
+        )
+        assert job.dispatch_id is not None
+        initial_dispatch = job.dispatch_id
+        await session.execute(
+            update(Job).where(Job.id == job.id).values(attempt_count=jobs_service.MAX_ATTEMPTS)
+        )
+        await session.execute(
+            text(
+                "UPDATE outbox_events SET status = 'published', "
+                "processed_at = now() - interval '901 seconds' WHERE id = :event_id"
+            ),
+            {"event_id": initial_dispatch},
+        )
+        await session.commit()
+        job_id = job.id
+
+    async with session_factory() as session:
+        reconciled = await reconcile_queued_jobs(
+            session,
+            now=datetime.now(UTC),
+            threshold_seconds=900,
+            cooldown_seconds=900,
+            limit=10,
+        )
+    assert reconciled == []
+
+    async with session_factory() as session:
+        row = await session.get(Job, job_id)
+        assert row is not None
+        assert row.status is JobStatus.FAILED
+        assert row.error_code == jobs_service.ERROR_CODE_RETRIES_EXHAUSTED
+        events = (
+            await session.scalars(select(OutboxEvent).where(OutboxEvent.aggregate_id == job_id))
+        ).all()
+        assert [event.id for event in events] == [initial_dispatch]
+
+    await _cleanup_jobs(session_factory, [job_id])
+
+
+async def test_concurrent_running_recovery_never_double_recovers(
+    migrated_database: str,
+) -> None:
+    """AC4: two coordinators recover disjoint expired-running jobs.
+
+    ``FOR UPDATE SKIP LOCKED`` plus the per-job cooldown key mean concurrent
+    coordinators never create two replacement dispatches for one job.
+    """
+    session_factory = _session_factory(migrated_database)
+    async with session_factory() as session:
+        organisation = await _create_org(session)
+    job_ids: list[uuid.UUID] = []
+    for _ in range(4):
+        job_id, _initial, _stale = await _make_running_expired_job(
+            session_factory, organisation_id=organisation.id
+        )
+        job_ids.append(job_id)
+
+    now = datetime.now(UTC)
+    results_a: list[uuid.UUID] = []
+    results_b: list[uuid.UUID] = []
+    barrier = asyncio.Event()
+
+    async def _recover(target: list[uuid.UUID], *, wait: bool) -> None:
+        if wait:
+            await barrier.wait()
+        else:
+            barrier.set()
+        async with session_factory() as session:
+            target.extend(
+                await reconcile_running_jobs(
+                    session,
+                    now=now,
+                    threshold_seconds=60,
+                    cooldown_seconds=60,
+                    limit=10,
+                )
+            )
+
+    await asyncio.gather(_recover(results_a, wait=False), _recover(results_b, wait=True))
+    assert set(results_a).isdisjoint(set(results_b))
+    assert set(results_a) | set(results_b) == set(job_ids)
+
+    # Every recovered job ended with exactly one replacement dispatch.
+    async with session_factory() as session:
+        for job_id in job_ids:
+            events = (
+                await session.scalars(select(OutboxEvent).where(OutboxEvent.aggregate_id == job_id))
+            ).all()
+            assert len(events) == 2  # initial + one recovery
+
+    await _cleanup_jobs(session_factory, job_ids)
 
 
 async def test_concurrent_maintenance_ticks_create_one_event_each(

@@ -155,6 +155,69 @@ def stale_queued_job_count_statement(*, published_before: datetime) -> Select[tu
     )
 
 
+def stale_running_job_count_statement(
+    *, lease_expired_before: datetime, published_before: datetime
+) -> Select[tuple[int]]:
+    """Count jobs eligible for expired-running recovery without exposing ids.
+
+    The running-sweep counterpart of :func:`stale_queued_job_count_statement`:
+    it lets the observability refresh surface the automatic recovery backlog
+    before the P5 operator CLI/runbook does (plan P2 review, should-fix 2).
+    """
+    return select(func.count()).select_from(
+        running_jobs_for_reconciliation_statement(
+            lease_expired_before=lease_expired_before,
+            published_before=published_before,
+            limit=1_000_000,
+        ).subquery()
+    )
+
+
+def running_jobs_for_reconciliation_statement(
+    *,
+    lease_expired_before: datetime,
+    published_before: datetime,
+    limit: int,
+) -> Select[tuple[Job]]:
+    """Select running jobs whose execution lease expired and need recovery.
+
+    Only a job whose *current* dispatch event is the latest published one
+    qualifies: the join pins ``latest.id == Job.dispatch_id``, so a job whose
+    replacement dispatch is still pending/publishing is never recovered. The
+    published-at cutoff enforces the recovery cooldown, and the active-event
+    guard mirrors the queued scan. Expired-running recovery (plan P2) locks
+    each selected row and creates its replacement intent atomically.
+    """
+    latest = aliased(OutboxEvent)
+    active = aliased(OutboxEvent)
+    return (
+        select(Job)
+        .join(
+            latest,
+            (latest.id == Job.dispatch_id)
+            & (latest.aggregate_type == "job")
+            & (latest.aggregate_id == Job.id)
+            & (latest.status == OutboxEventStatus.PUBLISHED),
+        )
+        .where(
+            Job.status == JobStatus.RUNNING,
+            Job.execution_lease_expires_at.is_not(None),
+            Job.execution_lease_expires_at <= lease_expired_before,
+            latest.processed_at.is_not(None),
+            latest.processed_at <= published_before,
+            ~exists(
+                select(1).where(
+                    active.aggregate_type == "job",
+                    active.aggregate_id == Job.id,
+                    active.status.in_((OutboxEventStatus.PENDING, OutboxEventStatus.PUBLISHING)),
+                )
+            ),
+        )
+        .order_by(Job.execution_lease_expires_at.asc(), Job.id.asc())
+        .limit(limit)
+    )
+
+
 def queued_jobs_for_reconciliation_statement(
     *,
     published_before: datetime,

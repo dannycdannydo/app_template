@@ -23,6 +23,12 @@ The job service is the single owner of the durable ``jobs`` table:
   expired/stale attempt can never overwrite a newer owner — including after an
   expired-lease takeover, which rotates the token — and terminal settlement
   clears the lease.
+- :func:`verify_ownership` is the reusable worker-side ownership guard (plan
+  P2): domain services and worker tasks pass a :class:`JobOwnership` value and
+  it locks the job and its open attempt in the caller's transaction, raising
+  :class:`StaleDispatchError` when a superseded attempt tries a consequential
+  mutation. :func:`enforce_attempt_ceiling_locked` and
+  :func:`close_running_attempt_abandoned` support bounded coordinator recovery.
 - :func:`settle_after_retries_exhausted` remains only as a rolling-deployment
   bridge for older broker messages; PostgreSQL owns all new retry decisions.
 
@@ -268,8 +274,15 @@ async def _get_job(session: AsyncSession, *, job_id: uuid.UUID) -> Job:
     The worker knows only the job id it was messaged with; the org-scoped
     lookup is a query-level concern of the API endpoints (Scope §6.5), where
     the caller's organisation filters the statement so a foreign job is a 404.
+
+    ``populate_existing`` forces the live row to overwrite any identity-mapped
+    copy the calling session still holds, so the ownership checks compare the
+    database's current token — not a cached snapshot captured before a
+    cross-session takeover (plan P2, AC5).
     """
-    job = await session.scalar(select(Job).where(Job.id == job_id))
+    job = await session.scalar(
+        select(Job).where(Job.id == job_id).execution_options(populate_existing=True)
+    )
     if job is None:
         raise _not_found()
     return job
@@ -280,9 +293,17 @@ async def _get_job_locked(session: AsyncSession, *, job_id: uuid.UUID) -> Job:
 
     ``FOR UPDATE`` serialises concurrent mutations of the same row: two
     attempts racing to claim, settle or release the same job cannot interleave
-    their read-modify-write cycles (plan P2 atomicity).
+    their read-modify-write cycles (plan P2 atomicity). ``populate_existing``
+    additionally ensures the locked read repopulates any stale identity-mapped
+    ``Job`` the caller still references, so the subsequent ownership checks see
+    a takeover that happened in another session (plan P2, AC5).
     """
-    job = await session.scalar(select(Job).where(Job.id == job_id).with_for_update())
+    job = await session.scalar(
+        select(Job)
+        .where(Job.id == job_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if job is None:
         raise _not_found()
     return job
@@ -314,6 +335,89 @@ def _verify_owner(job: Job, owner_token: uuid.UUID | None) -> None:
         return
     if job.owner_token != owner_token:
         raise StaleDispatchError(job.id, job.owner_token, owner_token)
+
+
+@dataclass(frozen=True)
+class JobOwnership:
+    """The attempt credential a worker captured at claim time (plan P2).
+
+    Domain services and the shared execution wrapper pass this value — never a
+    detached ORM ``Job`` — so every consequential worker mutation re-locks and
+    re-verifies the owning job in its own transaction before it commits.
+    """
+
+    job_id: uuid.UUID
+    owner_token: uuid.UUID
+    organisation_id: uuid.UUID
+
+
+async def verify_ownership(
+    session: AsyncSession,
+    ownership: JobOwnership,
+    *,
+    lock: bool = True,
+) -> Job:
+    """Verify (and by default lock) the owning job and its open attempt.
+
+    Locks the job row ``FOR UPDATE`` and confirms the captured owner token is
+    still current, the job is ``running`` and exactly one matching attempt is
+    open, so a caller can commit a consequential domain mutation in the same
+    transaction without a superseded attempt ever landing it (plan P2, AC5).
+    Raises :class:`StaleDispatchError` for a stale, terminal, re-leased or
+    differently-owned job, which the execution wrapper acknowledges as a
+    no-op/abandoned attempt rather than a retryable failure.
+
+    ``lock=False`` performs the same checks without the row lock: it is the
+    immediate pre-provider-call revalidation, where holding a row lock across a
+    network call would be undesirable.
+    """
+    if lock:
+        job = await _get_job_locked(session, job_id=ownership.job_id)
+    else:
+        job = await _get_job(session, job_id=ownership.job_id)
+    if job.organisation_id != ownership.organisation_id:
+        raise StaleDispatchError(job.id, job.owner_token, ownership.owner_token)
+    if job.status != JobStatus.RUNNING or job.owner_token is None:
+        raise StaleDispatchError(job.id, job.owner_token, ownership.owner_token)
+    if job.owner_token != ownership.owner_token:
+        raise StaleDispatchError(job.id, job.owner_token, ownership.owner_token)
+    if await _running_attempt(session, job) is None:
+        raise StaleDispatchError(job.id, job.owner_token, ownership.owner_token)
+    return job
+
+
+async def enforce_attempt_ceiling_locked(session: AsyncSession, job: Job) -> bool:
+    """Fail a locked job terminally once it reaches the global attempt ceiling.
+
+    Reconciliation calls this before granting a replacement dispatch, so a job
+    that already consumed every allowed attempt settles failed in PostgreSQL
+    instead of receiving a fresh nominal retry budget (plan P2, AC3). Returns
+    ``True`` when the job was settled exhausted; the caller owns the commit.
+    """
+    if job.attempt_count < MAX_ATTEMPTS:
+        return False
+    await _fail_locked(
+        session,
+        job,
+        error_code=ERROR_CODE_RETRIES_EXHAUSTED,
+        error_message=ERROR_MESSAGE_RETRIES_EXHAUSTED,
+        attempt_status=JobAttemptStatus.EXHAUSTED,
+    )
+    await _run_exhaustion_hook(session, job, failure_code=ERROR_CODE_RETRIES_EXHAUSTED)
+    return True
+
+
+async def close_running_attempt_abandoned(
+    session: AsyncSession, job: Job, *, now: datetime
+) -> None:
+    """Close the owning attempt as ``abandoned`` under a locked job.
+
+    Expired-running recovery (plan P2) calls this in the same transaction that
+    rotates the dispatch/owner boundary, so the dead attempt is durably closed
+    without touching the newer owner.
+    """
+    attempt = await _running_attempt(session, job)
+    _close_attempt(attempt, status=JobAttemptStatus.ABANDONED, now=now)
 
 
 async def get_job(

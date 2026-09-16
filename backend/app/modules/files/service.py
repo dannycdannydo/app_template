@@ -424,6 +424,7 @@ async def mark_file_processing(
     *,
     organisation_id: uuid.UUID,
     file_id: uuid.UUID,
+    ownership: jobs_service.JobOwnership | None = None,
 ) -> File:
     """Transition a file ``uploaded`` -> ``processing`` (worker-side, §6.5).
 
@@ -432,7 +433,13 @@ async def mark_file_processing(
     re-runs after the file finished) is returned untouched, so the task can be
     safely re-run on a re-delivered message. Any other state is a 409 — a
     pending, failed or deleted file never enters processing.
+
+    When ``ownership`` is supplied (the worker path), the owning job is locked
+    and re-verified in this transaction before the transition commits, so a
+    superseded attempt cannot mutate the file (plan P2, AC5).
     """
+    if ownership is not None:
+        await jobs_service.verify_ownership(session, ownership)
     file = await get_file(session, organisation_id=organisation_id, file_id=file_id)
     if file.status in (FileStatus.PROCESSING, FileStatus.READY):
         return file
@@ -463,13 +470,18 @@ async def mark_file_ready(
     *,
     organisation_id: uuid.UUID,
     file_id: uuid.UUID,
+    ownership: jobs_service.JobOwnership | None = None,
 ) -> File:
     """Transition a file ``processing`` -> ``ready`` (worker-side, §6.5).
 
     Called by the ``process_file`` task once the stored object is verified. A
     file that is already ``ready`` is returned untouched (idempotent retry); a
     file not in ``processing`` is a 409, so a ready file is never moved again.
+    When ``ownership`` is supplied the owning job is locked and re-verified in
+    this transaction before the transition commits (plan P2, AC5).
     """
+    if ownership is not None:
+        await jobs_service.verify_ownership(session, ownership)
     file = await get_file(session, organisation_id=organisation_id, file_id=file_id)
     if file.status == FileStatus.READY:
         return file
@@ -501,6 +513,7 @@ async def mark_file_failed(
     organisation_id: uuid.UUID,
     file_id: uuid.UUID,
     reason: str,
+    ownership: jobs_service.JobOwnership | None = None,
 ) -> File:
     """Mark a file ``failed`` after a worker-side verification failure (§6.5).
 
@@ -509,8 +522,12 @@ async def mark_file_failed(
     declaration). Idempotent: an already-``failed`` or ``deleted`` file is
     returned untouched, so a retried message cannot double-audit. The audit
     row reuses ``file.upload_failed`` with the reason in the metadata, exactly
-    like the completion-time failure path.
+    like the completion-time failure path. When ``ownership`` is supplied the
+    owning job is locked and re-verified in this transaction before the
+    transition commits (plan P2, AC5).
     """
+    if ownership is not None:
+        await jobs_service.verify_ownership(session, ownership)
     file = await get_file(session, organisation_id=organisation_id, file_id=file_id)
     if file.status in (FileStatus.FAILED, FileStatus.DELETED):
         return file

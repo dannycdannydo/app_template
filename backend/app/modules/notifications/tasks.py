@@ -100,8 +100,7 @@ async def _send_notification_email_attempt(
     context: DurableJobContext, session: AsyncSession
 ) -> None:
     """One owned attempt of the email-delivery job (plan P2 ownership)."""
-    job = context.job
-    if job.job_type != JOB_TYPE_NOTIFICATION_EMAIL:
+    if context.job_type != JOB_TYPE_NOTIFICATION_EMAIL:
         # The wrong-type settlement runs under the claimed owner (plan P2), so
         # it is accepted even once every job row carries a dispatch id (P3):
         # the handler fails the durable row with the invalid-context error
@@ -113,12 +112,12 @@ async def _send_notification_email_attempt(
             owner_token=context.owner_token,
         )
     delivery = await notifications_service.get_delivery_for_task(
-        session, delivery_id=uuid.UUID(job.input_reference)
+        session, delivery_id=uuid.UUID(context.input_reference)
     )
     notification = await notifications_service.get_notification_for_task(
         session, notification_id=delivery.notification_id
     )
-    if notification.organisation_id != job.organisation_id:
+    if notification.organisation_id != context.organisation_id:
         await _fail_invalid_context(
             session,
             job_id=context.job_id,
@@ -141,7 +140,15 @@ async def _send_notification_email_attempt(
 
     # The durable reference context is complete and owned before the delivery
     # row moves to running or an external provider can be called.
-    await notifications_service.mark_delivery_running(session, delivery_id=delivery.id)
+    await notifications_service.mark_delivery_running(
+        session, delivery_id=delivery.id, ownership=context.ownership
+    )
+    # Revalidate ownership immediately before the external provider call (plan
+    # P2, AC5): holding the job row lock across the network call is
+    # undesirable, so this is a lock-free read that still rejects a superseded
+    # attempt before any external effect. The outcome commit below re-locks and
+    # re-verifies through ``mark_delivery_succeeded``.
+    await jobs_service.verify_ownership(session, context.ownership, lock=False)
     settings = get_settings()
     provider = get_email_provider()
     try:
@@ -152,15 +159,18 @@ async def _send_notification_email_attempt(
             text_body=notification.body,
         )
     except TransientEmailSendError:
-        await notifications_service.return_delivery_to_queue(session, delivery_id=delivery.id)
+        await notifications_service.return_delivery_to_queue(
+            session, delivery_id=delivery.id, ownership=context.ownership
+        )
         logger.warning("notification.email.retrying", error_code="email_delivery_transient")
         raise
     except (PermanentEmailSendError, EmailSendError) as exc:
         await notifications_service.mark_delivery_failed(
             session,
             delivery_id=delivery.id,
-            organisation_id=job.organisation_id,
+            organisation_id=context.organisation_id,
             error_message=str(exc),
+            ownership=context.ownership,
         )
         await jobs_service.fail(
             session,
@@ -176,6 +186,7 @@ async def _send_notification_email_attempt(
         session,
         delivery_id=delivery.id,
         provider_message_id=result.provider_message_id,
+        ownership=context.ownership,
     )
     await jobs_service.succeed(
         session,
@@ -215,7 +226,13 @@ async def _fail_invalid_context(
 async def _on_notification_email_exhausted(
     session: AsyncSession, *, job_id: uuid.UUID, failure_code: str
 ) -> None:
-    """Finalize the delivery with the job's exact terminal cause."""
+    """Finalize the delivery with the job's exact terminal cause.
+
+    The exhaustion hook runs inside the owner-checked job-settlement
+    transaction (``jobs_service._fail_locked`` is only reached after the
+    captured owner token is verified), so the delivery mutation it performs is
+    already fenced by the job ownership guard and needs no second credential.
+    """
     job = await session.get(Job, job_id)
     if job is None:
         return

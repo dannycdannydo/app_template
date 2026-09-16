@@ -458,24 +458,24 @@ semantics changes must be reviewed. The migration is additive and non-destructiv
 
 Dependencies: P1
 
-- [ ] Add a reusable internal ownership guard that locks/verifies the job and
+- [x] Add a reusable internal ownership guard that locks/verifies the job and
       running attempt in the same transaction as a consequential domain
       mutation. Do not pass ORM job objects as authority across commits.
-- [ ] Apply the guard to file processing transitions/notification creation,
+- [x] Apply the guard to file processing transitions/notification creation,
       notification delivery transitions, AI execution persistence and all
       domain exhaustion hooks. Preserve existing service boundaries and audit
       semantics.
-- [ ] Revalidate ownership immediately before each external provider call and
+- [x] Revalidate ownership immediately before each external provider call and
       before committing its outcome. Treat stale ownership as a no-op/abandoned
       attempt, not as a retryable domain failure.
-- [ ] Add bounded coordinator queries/services for execution-lease-expired
+- [x] Add bounded coordinator queries/services for execution-lease-expired
       `running` jobs: lock with `FOR UPDATE SKIP LOCKED`, close the old attempt
       abandoned, rotate the dispatch boundary, queue the job and create one
       cooldown-keyed outbox event atomically.
-- [ ] Enforce the global attempt ceiling during queued and running
+- [x] Enforce the global attempt ceiling during queued and running
       reconciliation. Exhausted work settles terminally instead of receiving a
       fresh dispatch.
-- [ ] Add database and real-worker failure injection covering worker SIGKILL,
+- [x] Add database and real-worker failure injection covering worker SIGKILL,
       empty Redis, lease expiry, two coordinators, stale worker resumption and
       stale mutations at every domain boundary.
 

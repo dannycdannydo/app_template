@@ -105,6 +105,7 @@ class CycleStats:
     released: int = 0
     settled_stale: int = 0
     reconciled_jobs: int = 0
+    recovered_running_jobs: int = 0
     scheduled_events: int = 0
     cleaned_events: int = 0
 
@@ -125,6 +126,7 @@ class CycleStats:
                 self.released,
                 self.settled_stale,
                 self.reconciled_jobs,
+                self.recovered_running_jobs,
                 self.scheduled_events,
                 self.cleaned_events,
             )
@@ -614,6 +616,7 @@ async def run_cycle(
             outbox_cleanup_interval_hours=outbox_cleanup_interval_hours,
         )
         stats.reconciled_jobs = maintenance.reconciled_jobs
+        stats.recovered_running_jobs = maintenance.recovered_running_jobs
         stats.scheduled_events = maintenance.scheduled_events
         stats.cleaned_events = maintenance.cleaned_events
     return stats
@@ -717,6 +720,7 @@ async def run_coordinator(
                     released=stats.released,
                     settled_stale=stats.settled_stale,
                     reconciled_jobs=stats.reconciled_jobs,
+                    recovered_running_jobs=stats.recovered_running_jobs,
                     scheduled_events=stats.scheduled_events,
                     cleaned_events=stats.cleaned_events,
                 )

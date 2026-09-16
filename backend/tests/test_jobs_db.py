@@ -1375,3 +1375,76 @@ async def _claim_in_own_session(
         if result.outcome is jobs_service.ClaimOutcome.DEFERRED:
             assert result.deferred_until is not None
         return None
+
+
+async def test_verify_ownership_fences_stale_terminal_and_cross_org_attempts(
+    migrated_database: str,
+) -> None:
+    """The reusable ownership guard accepts only the live owning attempt (AC5).
+
+    ``verify_ownership`` locks the job and its open attempt in the caller's
+    transaction. A replaced token (takeover), a terminal job and a mismatched
+    organisation all raise :class:`StaleDispatchError`, while the lock-free
+    pre-provider-call revalidation accepts the live owner.
+    """
+    engine = create_async_engine(migrated_database, poolclass=NullPool)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            organisation = await _create_org(session)
+            job = await jobs_service.schedule_job(
+                session,
+                organisation_id=organisation.id,
+                job_type="file.processing",
+                input_reference="file-1",
+            )
+            claim = await jobs_service.claim_dispatch(session, job_id=job.id)
+            assert claim.owner_token is not None
+            owner = jobs_service.JobOwnership(
+                job_id=job.id,
+                owner_token=claim.owner_token,
+                organisation_id=organisation.id,
+            )
+            assert (await jobs_service.verify_ownership(session, owner)).id == job.id
+            # The lock-free pre-provider-call revalidation accepts the owner too.
+            assert (await jobs_service.verify_ownership(session, owner, lock=False)).id == job.id
+
+        # A mismatched organisation is rejected even with the right token.
+        async with session_factory() as session:
+            with pytest.raises(jobs_service.StaleDispatchError):
+                await jobs_service.verify_ownership(
+                    session,
+                    jobs_service.JobOwnership(
+                        job_id=job.id,
+                        owner_token=claim.owner_token,
+                        organisation_id=uuid.uuid4(),
+                    ),
+                )
+
+        # A takeover rotates the token: the superseded attempt is rejected.
+        async with session_factory() as session:
+            await session.execute(
+                update(Job)
+                .where(Job.id == job.id)
+                .values(execution_lease_expires_at=datetime.now(UTC) - timedelta(seconds=1))
+            )
+            await session.commit()
+            takeover = await jobs_service.claim_dispatch(session, job_id=job.id)
+            assert takeover.taken_over is True
+            assert takeover.owner_token is not None
+            assert takeover.owner_token != claim.owner_token
+            with pytest.raises(jobs_service.StaleDispatchError):
+                await jobs_service.verify_ownership(session, owner)
+            new_owner = jobs_service.JobOwnership(
+                job_id=job.id,
+                owner_token=takeover.owner_token,
+                organisation_id=organisation.id,
+            )
+            assert (await jobs_service.verify_ownership(session, new_owner)).id == job.id
+
+            # Once the job is terminal even the last owner is rejected.
+            await jobs_service.succeed(session, job_id=job.id, owner_token=takeover.owner_token)
+            with pytest.raises(jobs_service.StaleDispatchError):
+                await jobs_service.verify_ownership(session, new_owner)
+    finally:
+        await engine.dispose()

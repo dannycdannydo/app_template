@@ -24,16 +24,21 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
+import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import dramatiq
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import inspect, select, text
+from dramatiq.brokers.stub import StubBroker
+from dramatiq.worker import Worker
+from sqlalchemy import inspect, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -41,7 +46,8 @@ from app.core.exceptions import NotFoundError
 from app.email.base import EmailSendError, TransientEmailSendError
 from app.modules.audit.models import AuditEvent
 from app.modules.jobs import service as jobs_service
-from app.modules.jobs.models import Job, JobStatus
+from app.modules.jobs.models import Job, JobAttemptStatus, JobStatus
+from app.modules.jobs.queries import job_attempt_history_statement
 from app.modules.notifications import service as notifications_service
 from app.modules.notifications import tasks as notifications_tasks
 from app.modules.notifications.models import (
@@ -60,6 +66,7 @@ from app.modules.permissions.models import Permission, Role, RolePermission
 from app.modules.users.models import User
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
+_QUEUE = "test-notifications-db"
 
 
 def _database_reachable(database_url: str) -> bool:
@@ -882,5 +889,199 @@ async def test_send_notification_email_rejects_wrong_job_type(
             assert job.error_code == notifications_tasks.ERROR_CODE_INVALID_JOB_CONTEXT
             assert delivery is not None
             assert delivery.status == NotificationDeliveryStatus.QUEUED
+    finally:
+        await engine.dispose()
+
+
+async def test_stale_delivery_worker_cannot_mutate_after_takeover(
+    migrated_database: str,
+) -> None:
+    """AC5: a superseded email worker is fenced out of delivery state.
+
+    The stale attempt is taken over after its lease expires; every delivery
+    transition it then attempts with its captured owner token is rejected, so
+    it can never record a success or failure over the newer owner.
+    """
+    engine = create_async_engine(migrated_database, poolclass=NullPool)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            org, user = await _seed_org_and_user(session)
+            _notification, delivery, job = await notifications_service.send_test_notification(
+                session,
+                organisation_id=org.id,
+                user_id=user.id,
+                recipient_email=user.email,
+                actor_user_id=user.id,
+            )
+            claim = await jobs_service.claim_dispatch(session, job_id=job.id)
+            assert claim.owner_token is not None
+            stale_owner = jobs_service.JobOwnership(
+                job_id=job.id,
+                owner_token=claim.owner_token,
+                organisation_id=org.id,
+            )
+            await session.execute(
+                update(Job)
+                .where(Job.id == job.id)
+                .values(execution_lease_expires_at=datetime.now(UTC) - timedelta(seconds=1))
+            )
+            await session.commit()
+            takeover = await jobs_service.claim_dispatch(session, job_id=job.id)
+            assert takeover.taken_over is True
+            delivery_id = delivery.id
+
+            with pytest.raises(jobs_service.StaleDispatchError):
+                await notifications_service.mark_delivery_succeeded(
+                    session,
+                    delivery_id=delivery_id,
+                    provider_message_id="stale-provider-id",
+                    ownership=stale_owner,
+                )
+            with pytest.raises(jobs_service.StaleDispatchError):
+                await notifications_service.mark_delivery_failed(
+                    session,
+                    delivery_id=delivery_id,
+                    organisation_id=org.id,
+                    error_message="stale failure",
+                    ownership=stale_owner,
+                )
+            with pytest.raises(jobs_service.StaleDispatchError):
+                await notifications_service.return_delivery_to_queue(
+                    session, delivery_id=delivery_id, ownership=stale_owner
+                )
+
+            row = await session.get(NotificationDelivery, delivery_id)
+            assert row is not None
+            assert row.status == NotificationDeliveryStatus.QUEUED
+            assert row.provider_message_id is None
+    finally:
+        await engine.dispose()
+
+
+# --- P2: paused real-worker fencing across a cross-session takeover ----------
+
+
+@pytest.fixture
+async def broker_and_worker() -> AsyncIterator[tuple[StubBroker, Worker, Any]]:
+    """A StubBroker + in-process Worker running the real email handler.
+
+    The actor is re-declared bound to this test's broker (``Actor.send()``
+    enqueues on the actor's own broker) and the middleware stack is the same
+    factory the worker process uses, so the async task runs on the AsyncIO
+    event-loop thread exactly as in production.
+    """
+    from app.broker import worker_middleware
+
+    broker = StubBroker(middleware=worker_middleware())
+    dramatiq.set_broker(broker)
+    email_task = dramatiq.actor(queue_name=_QUEUE, **jobs_service.retry_policy())(
+        notifications_tasks.send_notification_email
+    )
+    worker = Worker(broker, worker_timeout=100, worker_threads=2)
+    worker.start()
+    yield broker, worker, email_task
+    worker.stop()
+    broker.flush_all()
+    # Dispose the process-wide pool so no loop-bound connection outlives this
+    # test's worker (same reason as ``test_files_jobs.py``).
+    from app.db.session import engine
+
+    await engine.dispose()
+
+
+async def _wait_for_event(event: threading.Event, *, timeout: float = 20.0) -> None:
+    """Wait until the worker thread signals it reached the test block point."""
+    deadline = time.monotonic() + timeout
+    while not event.is_set() and time.monotonic() < deadline:
+        await asyncio.sleep(0.02)
+    assert event.is_set(), "the worker never reached the test block point"
+
+
+class _BlockedProviderResult:
+    """The minimal provider result the handler records on success."""
+
+    def __init__(self, provider_message_id: str) -> None:
+        self.provider_message_id = provider_message_id
+
+
+async def test_paused_delivery_worker_cannot_record_outcome_after_takeover(
+    migrated_database: str,
+    broker_and_worker: tuple[StubBroker, Worker, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC5: a real email worker paused across lease expiry is fenced on resume.
+
+    The delivery actor runs on the in-process worker, dispatches to a
+    test-controlled provider that blocks inside ``send_email``, and is held
+    there while a separate session expires its lease and takes the dispatch
+    over. When the handler resumes, the provider acceptance can no longer be
+    recorded: ``mark_delivery_succeeded`` re-locks the job, sees the rotated
+    owner token and raises :class:`StaleDispatchError`, leaving the delivery
+    ``running`` and the job owned by the new attempt.
+    """
+    broker, _worker, email_task = broker_and_worker
+    engine = create_async_engine(migrated_database, poolclass=NullPool)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    reached = threading.Event()
+    release = threading.Event()
+
+    class _BlockingProvider:
+        async def send_email(self, **kwargs: Any) -> Any:
+            reached.set()
+            if not release.wait(timeout=30):
+                raise AssertionError("the test never released the paused email worker")
+            return _BlockedProviderResult(provider_message_id="blocked-provider-id")
+
+    monkeypatch.setattr(notifications_tasks, "get_email_provider", lambda: _BlockingProvider())
+
+    try:
+        async with session_factory() as session:
+            org, user = await _seed_org_and_user(session)
+            _notification, delivery, job = await notifications_service.send_test_notification(
+                session,
+                organisation_id=org.id,
+                user_id=user.id,
+                recipient_email=user.email,
+                actor_user_id=user.id,
+            )
+            delivery_id = delivery.id
+            job_id = job.id
+
+        email_task.send(job_id=str(job_id))  # the coordinator publishes
+        await _wait_for_event(reached)
+
+        # The worker is paused inside the provider call. Expire its lease and
+        # let a different session take the dispatch over.
+        async with session_factory() as session:
+            await session.execute(
+                update(Job)
+                .where(Job.id == job_id)
+                .values(execution_lease_expires_at=datetime.now(UTC) - timedelta(seconds=1))
+            )
+            await session.commit()
+        async with session_factory() as session:
+            takeover = await jobs_service.claim_dispatch(session, job_id=job_id)
+            assert takeover.taken_over is True
+            assert takeover.owner_token is not None
+            new_owner = takeover.owner_token
+
+        release.set()
+        broker.join(_QUEUE, timeout=10000)
+
+        async with session_factory() as session:
+            delivery_row = await session.get(NotificationDelivery, delivery_id)
+            assert delivery_row is not None
+            assert delivery_row.status == NotificationDeliveryStatus.RUNNING
+            assert delivery_row.provider_message_id is None
+            job_row = await session.get(Job, job_id)
+            assert job_row is not None
+            assert job_row.status == JobStatus.RUNNING
+            assert job_row.owner_token == new_owner
+            attempts = list((await session.scalars(job_attempt_history_statement(job_id))).all())
+            assert [attempt.status for attempt in attempts] == [
+                JobAttemptStatus.ABANDONED,
+                JobAttemptStatus.RUNNING,
+            ]
     finally:
         await engine.dispose()
