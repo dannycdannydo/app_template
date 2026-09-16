@@ -480,6 +480,7 @@ async def mark_delivery_failed(
     delivery_id: uuid.UUID,
     organisation_id: uuid.UUID,
     error_message: str,
+    commit: bool = True,
 ) -> NotificationDelivery:
     """Record a failed send on the delivery row and audit it.
 
@@ -487,7 +488,8 @@ async def mark_delivery_failed(
     in the same transaction, with the reason in the metadata (the worker-side
     failure path, acceptance §5.5). Idempotent across re-delivery: a delivery
     already in a terminal state is returned untouched, so a retried message
-    cannot double-audit.
+    cannot double-audit. When ``commit`` is false, the caller owns the commit
+    so this transition can join a wider atomic terminal-settlement transaction.
     """
     delivery = await get_delivery_for_task(session, delivery_id=delivery_id)
     if is_delivery_terminal(delivery.status):
@@ -506,6 +508,7 @@ async def mark_delivery_failed(
             "error": error_message,
         },
     )
-    await session.commit()
-    await session.refresh(delivery)
+    if commit:
+        await session.commit()
+        await session.refresh(delivery)
     return delivery

@@ -61,6 +61,11 @@ def reconciliation_dispatch_key(job_id: uuid.UUID, *, cooldown_bucket: int) -> s
     return f"{EVENT_TYPE_JOB_DISPATCH}:{job_id}:reconcile:{cooldown_bucket}"
 
 
+def retry_dispatch_key(job_id: uuid.UUID, *, attempt_number: int) -> str:
+    """Return the idempotency key for a retry after ``attempt_number``."""
+    return f"{EVENT_TYPE_JOB_DISPATCH}:{job_id}:retry:{attempt_number}"
+
+
 def _check_payload_size(payload: dict[str, Any], event_type: str) -> None:
     """Fail fast when a payload would exceed the database bound.
 

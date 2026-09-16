@@ -55,6 +55,7 @@ from app.modules.notifications.queries import (
     user_notifications_statement,
 )
 from app.modules.organisations.models import Organisation
+from app.modules.outbox.models import OutboxEvent, OutboxEventStatus
 from app.modules.permissions.models import Permission, Role, RolePermission
 from app.modules.users.models import User
 
@@ -733,8 +734,7 @@ async def test_send_notification_email_task_transient_failure_requeues_delivery(
             job_id = job.id
             delivery_id = delivery.id
 
-        with pytest.raises(TransientEmailSendError):
-            await notifications_tasks.send_notification_email(str(job_id))
+        await notifications_tasks.send_notification_email(str(job_id))
 
         async with session_factory() as session:
             delivery = await session.get(NotificationDelivery, delivery_id)
@@ -743,6 +743,10 @@ async def test_send_notification_email_task_transient_failure_requeues_delivery(
             assert delivery.attempt_count == 1
             assert job is not None and job.status == JobStatus.QUEUED
             assert job.error_code is None
+            assert job.dispatch_id is not None
+            retry_event = await session.get(OutboxEvent, job.dispatch_id)
+            assert retry_event is not None
+            assert retry_event.status is OutboxEventStatus.PENDING
     finally:
         await engine.dispose()
 

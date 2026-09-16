@@ -24,6 +24,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     Enum,
@@ -31,8 +32,10 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    UniqueConstraint,
     Uuid,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -48,6 +51,20 @@ class JobStatus(enum.StrEnum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+
+class JobAttemptStatus(enum.StrEnum):
+    RUNNING = "running"
+    RETRY_SCHEDULED = "retry_scheduled"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    EXHAUSTED = "exhausted"
+    ABANDONED = "abandoned"
+
+
+def _job_attempt_status_values(enum_class: type[JobAttemptStatus]) -> list[str]:
+    """Return the values stored by the attempt-status column."""
+    return [member.value for member in enum_class]
 
 
 def _job_status_values(enum_class: type[JobStatus]) -> list[str]:
@@ -159,3 +176,52 @@ class Job(Base):
     execution_lease_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
     )
+
+
+class JobAttempt(Base):
+    """Internal, PostgreSQL-owned history of successful worker claims."""
+
+    __tablename__ = "job_attempts"
+    __table_args__ = (
+        UniqueConstraint("job_id", "attempt_number", name="uq_job_attempts_job_number"),
+        UniqueConstraint("owner_token", name="uq_job_attempts_owner_token"),
+        Index("ix_job_attempts_job_history", "job_id", "started_at"),
+        Index("ix_job_attempts_status_lease", "status", "lease_expires_at"),
+        Index(
+            "uq_job_attempts_one_running_per_job",
+            "job_id",
+            unique=True,
+            postgresql_where=text("status = 'running'"),
+        ),
+        CheckConstraint("attempt_number > 0", name="positive_attempt_number"),
+        CheckConstraint(
+            "status IN ('running', 'retry_scheduled', 'succeeded', 'failed', 'exhausted', 'abandoned')",
+            name="job_attempt_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UuidV7, primary_key=True, default=uuid7)
+    # RESTRICT preserves the attempt ledger even when an old cleanup path
+    # tries to remove the parent job. It contains no tenant payload.
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("jobs.id", ondelete="RESTRICT"), nullable=False
+    )
+    dispatch_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    owner_token: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[JobAttemptStatus] = mapped_column(
+        Enum(
+            JobAttemptStatus,
+            name="job_attempt_status",
+            native_enum=False,
+            length=20,
+            values_callable=_job_attempt_status_values,
+        ),
+        nullable=False,
+        default=JobAttemptStatus.RUNNING,
+    )
+    lease_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    taken_over: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    error_code: Mapped[str | None] = mapped_column(String(80))

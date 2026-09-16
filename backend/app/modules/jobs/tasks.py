@@ -1,9 +1,9 @@
 """Job-infrastructure Dramatiq tasks (Scope §6.4, blueprint §18).
 
-This module is the home of the tasks every job depends on. Today that is a
-single actor — ``mark_job_failed_after_retries`` — which the Retries
-middleware messages when a job's transient retries are exhausted, so the
-durable row records the failure instead of sitting in ``running`` forever.
+This module retains ``mark_job_failed_after_retries`` for messages created by
+older workers during a rolling deployment. New workers durably decide retry
+or exhaustion in PostgreSQL before returning, so correctness does not depend
+on this broker-only callback.
 Domain tasks (the first is the file-processing job, Scope §6.5) live next to
 their domain module and are imported by ``app.workers`` alongside this one.
 
@@ -11,9 +11,8 @@ The handler function is deliberately separate from its actor declaration so a
 test can re-declare it bound to its own broker; the actor is the thin wrapper
 that registers the function under the name ``jobs_service.retry_policy()``
 declares in ``on_retry_exhausted``. The ``throws=()`` declaration means
-*nothing* this actor raises is retried: it is a finalizer, and if it cannot
-reach the database there is nothing a retry would fix (the message fails
-loudly and stays visible in the broker's dead-letter queue).
+*nothing* this compatibility actor raises is retried; any failure stays
+visible in the broker while PostgreSQL reconciliation remains authoritative.
 """
 
 from __future__ import annotations
@@ -57,9 +56,10 @@ class AttemptStamp:
 
     ``dispatch_id`` is the outbox dispatch the message last attempted;
     ``owner_token`` is the attempt-distinguishing credential rotated for that
-    claim. Both are needed to correlate the finalizer with the *attempt*: a
-    retry re-claim or an expired-lease takeover keeps the dispatch while
-    rotating the token, so dispatch alone cannot distinguish attempts.
+    claim. Both are needed to correlate the finalizer with the *attempt*: an
+    expired-lease takeover or transport retry before durable settlement may
+    keep the dispatch while rotating the token, so dispatch alone cannot
+    distinguish attempts.
     """
 
     dispatch_id: uuid.UUID
@@ -136,9 +136,6 @@ async def mark_job_failed_after_retries(
             logger.warning("job.retries_exhausted.skipped", reason="stale_dispatch")
             return
         logger.info("job.retries_exhausted.recorded")
-        hook = jobs_service.get_exhaustion_hook(settled.job_type)
-        if hook is not None:
-            await hook(session, job_id=job_id)
 
 
 mark_job_failed_after_retries_actor = dramatiq.actor(

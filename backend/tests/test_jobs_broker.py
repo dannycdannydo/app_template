@@ -36,6 +36,7 @@ import os
 import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -66,6 +67,7 @@ from app.modules.notifications.models import (
     NotificationDeliveryStatus,
 )
 from app.modules.organisations.models import Organisation
+from app.modules.outbox.models import OutboxEvent, OutboxEventStatus
 from app.modules.users.models import User
 from app.observability.metrics import JOBS_STALE_MESSAGES_TOTAL
 from app.storage import FakeObjectStorage, get_storage
@@ -291,6 +293,42 @@ async def _wait_for_status(
     raise AssertionError(f"job {job_id} never reached {expected.value!r} within {timeout}s")
 
 
+async def _publish_durable_retry(
+    session_factory: Any,
+    task: Any,
+    job_id: uuid.UUID,
+    *,
+    after_attempt: int,
+) -> None:
+    """Wait for PostgreSQL's retry intent, mark it published, then deliver it."""
+    deadline = time.monotonic() + 20
+    current: Job | None = None
+    while time.monotonic() < deadline:
+        async with session_factory() as session:
+            current = await session.get(Job, job_id)
+        if (
+            current is not None
+            and current.attempt_count == after_attempt
+            and current.status is JobStatus.QUEUED
+        ):
+            break
+        await asyncio.sleep(0.05)
+    else:
+        raise AssertionError("worker did not write a durable retry dispatch")
+    assert current is not None and current.dispatch_id is not None
+    async with session_factory() as session:
+        event = await session.get(OutboxEvent, current.dispatch_id)
+        assert event is not None and event.status is OutboxEventStatus.PENDING
+        delay = max(0.0, (event.available_at - datetime.now(UTC)).total_seconds())
+    await asyncio.sleep(delay + 0.05)
+    async with session_factory() as session:
+        event = await session.get(OutboxEvent, current.dispatch_id)
+        assert event is not None
+        event.status = OutboxEventStatus.PUBLISHED
+        await session.commit()
+    task.send(job_id=str(job_id))
+
+
 async def test_worker_completes_job_lifecycle_with_progress(
     migrated_database: str, broker_and_worker: tuple[RedisBroker, Worker]
 ) -> None:
@@ -317,10 +355,10 @@ async def test_worker_completes_job_lifecycle_with_progress(
     assert finished.error_code is None
 
 
-async def test_transient_exhaustion_records_failed_status(
+async def test_postgres_owned_retry_exhaustion_records_failed_status(
     migrated_database: str, broker_and_worker: tuple[RedisBroker, Worker]
 ) -> None:
-    """Acceptance §5.6: exhausted retries leave a failed row, never a running one."""
+    """Real Redis loss cannot strand the PostgreSQL-owned retry decision."""
     session_factory = _session_factory(migrated_database)
     organisation = await _create_org(session_factory)
     task = _make_transient_failure_task(session_factory)
@@ -333,11 +371,45 @@ async def test_transient_exhaustion_records_failed_status(
         )
     task.send(job_id=str(job.id))  # the coordinator publishes
 
+    # The first worker failure writes a delayed outbox event. Flush its old
+    # broker message before the next dispatch to prove the retry is durable.
+    broker, _worker = broker_and_worker
+    for attempt_number in range(1, jobs_service.MAX_ATTEMPTS):
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            async with session_factory() as session:
+                current = await session.get(Job, job.id)
+                if (
+                    current is not None
+                    and current.attempt_count == attempt_number
+                    and current.status == JobStatus.QUEUED
+                ):
+                    break
+            await asyncio.sleep(0.05)
+        else:
+            raise AssertionError("worker did not write a durable retry dispatch")
+        assert current is not None and current.dispatch_id is not None
+        async with session_factory() as session:
+            event = await session.get(OutboxEvent, current.dispatch_id)
+            assert event is not None and event.status == OutboxEventStatus.PENDING
+            assert event.payload == {"job_id": str(job.id)}
+            # A coordinator publication changes the event state. Its due time
+            # is already enforced in claim_dispatch, so wait until it is due.
+            due_in = max(0.0, (event.available_at - datetime.now(UTC)).total_seconds())
+        broker.flush_all()
+        await asyncio.sleep(due_in + 0.05)
+        async with session_factory() as session:
+            event = await session.get(OutboxEvent, current.dispatch_id)
+            assert event is not None
+            event.status = OutboxEventStatus.PUBLISHED
+            await session.commit()
+        task.send(job_id=str(job.id))
+
     failed = await _wait_for_status(session_factory, job.id, JobStatus.FAILED)
     assert failed.error_code == jobs_service.ERROR_CODE_RETRIES_EXHAUSTED
     assert failed.error_message == jobs_service.ERROR_MESSAGE_RETRIES_EXHAUSTED
     assert failed.completed_at is not None
-    # Three attempts ran (one per MAX_ATTEMPTS) before the handler recorded it.
+    # Three global PostgreSQL attempts ran without the exhausted-handler actor.
     assert failed.attempt_count == jobs_service.MAX_ATTEMPTS
 
 
@@ -421,17 +493,11 @@ async def _wait_for_stale_count(previous: float, *, timeout: float = 20.0) -> No
     raise AssertionError("exhausted handler never processed the stale message")
 
 
-async def test_exhausted_handler_receives_claim_stamp_after_retries(
+async def test_durable_retry_does_not_depend_on_exhausted_handler(
     migrated_database: str, broker_and_worker: tuple[RedisBroker, Worker]
 ) -> None:
-    """The claim stamp survives retries and reaches the exhausted handler (P2).
-
-    A task that claims and then fails transiently retries through the real
-    Retries middleware; on exhaustion the forwarded message must carry the
-    dispatch id and owner token the wrapper stamped at the last claim. This
-    pins the bridge the finalizer's attempt correlation depends on, and
-    proves ``CurrentMessage`` is visible inside an async actor with the stamp.
-    """
+    """Redis loss before settlement cannot erase PostgreSQL's retry intent."""
+    broker, _worker = broker_and_worker
     session_factory = _session_factory(migrated_database)
     organisation = await _create_org(session_factory)
     capture_actor_name = f"capture-exhausted-{uuid.uuid4().hex[:8]}"
@@ -447,6 +513,10 @@ async def test_exhausted_handler_receives_claim_stamp_after_retries(
             assert message is not None
             assert message.options.get("dispatch_id") == str(context.dispatch_id)
             assert message.options.get("owner_token") == str(context.owner_token)
+            # Drop every broker key before the handler fails. The wrapper must
+            # still record the next action because settlement touches only
+            # PostgreSQL, not the exhausted callback or the current message.
+            broker.flush_all()
             raise RuntimeError("storage temporarily unreachable")
 
         await jobs_execution.run_claimed(job_id=job_id_uuid, handler=_fail_transient)
@@ -479,20 +549,20 @@ async def test_exhausted_handler_receives_claim_stamp_after_retries(
         job_id = job.id
     task.send(job_id=str(job_id))  # the coordinator publishes
 
-    deadline = time.monotonic() + 20.0
-    while "message_dict" not in captured and time.monotonic() < deadline:
+    deadline = time.monotonic() + 5.0
+    row: Job | None = None
+    while time.monotonic() < deadline:
+        async with session_factory() as session:
+            row = await session.get(Job, job_id)
+        if row is not None and row.status is JobStatus.QUEUED and row.attempt_count == 1:
+            break
         await asyncio.sleep(0.1)
-    assert "message_dict" in captured, "exhausted handler never ran"
-    assert captured["retry_info"]["retries"] == 1
-
-    # The forwarded message carries the stamp of the last (current) claim,
-    # exactly matching the durable row's dispatch and owner token.
-    options = captured["message_dict"]["options"]
+    assert row is not None and row.status is JobStatus.QUEUED
     async with session_factory() as session:
-        row = await session.get(Job, job_id)
-        assert row is not None
-        assert options["dispatch_id"] == str(row.dispatch_id)
-        assert options["owner_token"] == str(row.owner_token)
+        event = await session.get(OutboxEvent, row.dispatch_id)
+        assert event is not None
+        assert event.status is OutboxEventStatus.PENDING
+    assert captured == {}
 
 
 async def test_exhausted_message_with_superseded_token_is_stale(
@@ -514,12 +584,23 @@ async def test_exhausted_message_with_superseded_token_is_stale(
         claim_a = await jobs_service.claim_dispatch(session, job_id=job_id)
         assert claim_a.dispatch_id is not None
         assert claim_a.owner_token is not None
-        await jobs_service.release_dispatch(session, job_id=job_id, owner_token=claim_a.owner_token)
+        await jobs_service.settle_retryable_failure(
+            session, job_id=job_id, owner_token=claim_a.owner_token
+        )
+        row = await session.get(Job, job_id)
+        assert row is not None and row.dispatch_id is not None
+        retry_event = await session.get(OutboxEvent, row.dispatch_id)
+        assert retry_event is not None
+        retry_event.status = OutboxEventStatus.PUBLISHED
+        retry_event.available_at = datetime.now(UTC)
+        await session.commit()
         claim_b = await jobs_service.claim_dispatch(session, job_id=job_id)
-        assert claim_b.dispatch_id == claim_a.dispatch_id
+        assert claim_b.dispatch_id != claim_a.dispatch_id
         assert claim_b.owner_token != claim_a.owner_token
         assert claim_b.owner_token is not None
-        await jobs_service.release_dispatch(session, job_id=job_id, owner_token=claim_b.owner_token)
+        await jobs_service.settle_retryable_failure(
+            session, job_id=job_id, owner_token=claim_b.owner_token
+        )
         a_dispatch = claim_a.dispatch_id
         a_token = claim_a.owner_token
         assert a_dispatch is not None and a_token is not None
@@ -533,7 +614,7 @@ async def test_exhausted_message_with_superseded_token_is_stale(
         assert row is not None
         assert row.status == JobStatus.QUEUED
         assert row.error_code is None
-        assert row.dispatch_id == a_dispatch
+        assert row.dispatch_id != a_dispatch
 
 
 async def test_exhausted_message_without_stamp_is_stale_for_claimed_row(
@@ -555,7 +636,9 @@ async def test_exhausted_message_without_stamp_is_stale_for_claimed_row(
     async with session_factory() as session:
         claim = await jobs_service.claim_dispatch(session, job_id=job_id)
         assert claim.owner_token is not None
-        await jobs_service.release_dispatch(session, job_id=job_id, owner_token=claim.owner_token)
+        await jobs_service.settle_retryable_failure(
+            session, job_id=job_id, owner_token=claim.owner_token
+        )
 
     baseline_stale = _stale_messages_count()
     _enqueue_exhausted_message(broker, job_id, dispatch_id=None, owner_token=None)
@@ -835,6 +918,7 @@ async def test_notification_email_eventual_success_on_real_broker(
             **jobs_service.retry_policy(),
         )(notifications_tasks.send_notification_email)
         email_task.send(job_id=str(job_id))
+        await _publish_durable_retry(session_factory, email_task, job_id, after_attempt=1)
 
         finished = await _wait_for_status(session_factory, job_id, JobStatus.SUCCEEDED)
         assert finished.result_reference == "provider-123"
@@ -901,6 +985,13 @@ async def test_notification_email_exhaustion_fails_delivery_on_real_broker(
             **jobs_service.retry_policy(),
         )(notifications_tasks.send_notification_email)
         email_task.send(job_id=str(job_id))
+        for attempt_number in range(1, jobs_service.MAX_ATTEMPTS):
+            await _publish_durable_retry(
+                session_factory,
+                email_task,
+                job_id,
+                after_attempt=attempt_number,
+            )
 
         failed_job = await _wait_for_status(session_factory, job_id, JobStatus.FAILED)
         assert failed_job.error_code == jobs_service.ERROR_CODE_RETRIES_EXHAUSTED
@@ -918,5 +1009,8 @@ async def test_notification_email_exhaustion_fails_delivery_on_real_broker(
             )
             assert audit is not None
             assert audit.organisation_id == organisation.id
+            assert audit.event_metadata["error"] == (
+                "The notification email could not be sent after all retries."
+            )
     finally:
         await engine.dispose()

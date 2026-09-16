@@ -1,6 +1,6 @@
 # Critical Reliability, Security and Audit Closure Plan
 
-Status: Draft
+Status: Active
 
 ## Goal
 
@@ -427,27 +427,27 @@ docker compose -f deploy/compose/compose.local.yml --profile fullstack config
 
 Dependencies: none
 
-- [ ] Add an ADR amendment recording PostgreSQL-owned attempt history, global
+- [x] Add an ADR amendment recording PostgreSQL-owned attempt history, global
       retry limits and terminal settlement; explicitly retire the claim that a
       Dramatiq `on_retry_exhausted` message is the durable finalization boundary.
-- [ ] Add `job_attempts` model/query/service boundaries following existing
+- [x] Add `job_attempts` model/query/service boundaries following existing
       module patterns, with closed statuses, safe error codes, ownership fields,
       constraints and indexes for current attempt, lease expiry and job history.
-- [ ] Add an additive Alembic migration and migration tests. Keep attempt rows
+- [x] Add an additive Alembic migration and migration tests. Keep attempt rows
       internal; do not alter public job request/response schemas.
-- [ ] Change claim, progress/lease renewal and terminal helpers so attempt and
+- [x] Change claim, progress/lease renewal and terminal helpers so attempt and
       job state remain transactionally consistent. A claimed owner is represented
       by exactly one running attempt row.
-- [ ] Add a PostgreSQL-owned retry decision service: retryable outcome closes the
+- [x] Add a PostgreSQL-owned retry decision service: retryable outcome closes the
       current attempt and creates a delayed next dispatch atomically; exhaustion
       closes the attempt and fails the job plus its allow-listed domain hook
       atomically. Remove durable correctness dependence on the zero-retry
       exhausted-handler actor while preserving rolling-deployment compatibility.
-- [ ] When a permanently invalid event still owns the job's current initial
+- [x] When a permanently invalid event still owns the job's current initial
       dispatch, settle the job and attempt to a safe delivery-contract failure
       in the same claim-token/dispatch-checked transaction. A dead stale event is
       a no-op against a newer dispatch.
-- [ ] Add database and real-broker tests for commit/rollback, duplicate callback,
+- [x] Add database and real-broker tests for commit/rollback, duplicate callback,
       Redis loss before/after retry scheduling, global attempt ceiling, failed
       finalizer compatibility and dead current/stale dispatch settlement.
 

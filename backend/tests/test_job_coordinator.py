@@ -65,8 +65,11 @@ from app.job_coordinator.reconciliation import (
     schedule_maintenance_events,
 )
 from app.job_coordinator.registry import DispatchRegistry
+from app.modules.audit.models import AuditEvent
 from app.modules.jobs import service as jobs_service
-from app.modules.jobs.models import Job
+from app.modules.jobs.models import Job, JobStatus
+from app.modules.notifications import service as notifications_service
+from app.modules.notifications.models import NotificationDelivery, NotificationDeliveryStatus
 from app.modules.organisations.models import Organisation
 from app.modules.outbox.contracts import (
     EVENT_TYPE_AI_RETENTION,
@@ -78,6 +81,7 @@ from app.modules.outbox.contracts import (
 from app.modules.outbox.models import OutboxEvent, OutboxEventStatus
 from app.modules.outbox.queries import due_outbox_events_statement
 from app.modules.outbox.service import create_schedule_event
+from app.modules.users.models import User
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 _REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
@@ -1046,6 +1050,123 @@ async def test_dispatch_event_for_missing_job_becomes_dead(
     row = await _outbox_row(session_factory, event_id)
     assert row.status is OutboxEventStatus.DEAD
     assert row.last_error == "invalid_outbox_contract"
+
+
+async def test_dead_current_initial_dispatch_fails_job_atomically(
+    migrated_database: str,
+    broker_and_recording: tuple[RedisBroker, Worker, DispatchRegistry, list[str]],
+) -> None:
+    """A permanently invalid current initial dispatch cannot strand its job."""
+    _broker, _worker, _registry, _received = broker_and_recording
+    session_factory = _session_factory(migrated_database)
+    async with session_factory() as session:
+        organisation = await _create_org(session)
+        job = await jobs_service.schedule_job(
+            session,
+            organisation_id=organisation.id,
+            job_type="unregistered.job",
+            input_reference="opaque-reference",
+        )
+        job_id = job.id
+        event_id = job.dispatch_id
+    registry = DispatchRegistry(job_actors={}, maintenance_actors={})
+    stats = await run_cycle(
+        session_factory, registry=registry, batch_size=50, publication_lease_seconds=60
+    )
+    assert stats.dead == 1
+    async with session_factory() as session:
+        event = await session.get(OutboxEvent, event_id)
+        failed = await session.get(Job, job_id)
+        assert event is not None and event.status is OutboxEventStatus.DEAD
+        assert event.last_error == "invalid_dispatch_target"
+        assert failed is not None and failed.status is JobStatus.FAILED
+        assert failed.error_code == jobs_service.ERROR_CODE_DISPATCH_INVALID
+
+
+async def test_dead_notification_dispatch_records_dispatch_failure_reason(
+    migrated_database: str,
+    broker_and_recording: tuple[RedisBroker, Worker, DispatchRegistry, list[str]],
+) -> None:
+    """A never-attempted email is audited as undeliverable, not exhausted."""
+    _broker, _worker, _registry, _received = broker_and_recording
+    session_factory = _session_factory(migrated_database)
+    async with session_factory() as session:
+        organisation = await _create_org(session)
+        user = User(
+            workos_user_id=f"user_{uuid.uuid4().hex}",
+            email="ada@example.com",
+            name="Ada Lovelace",
+        )
+        session.add(user)
+        await session.commit()
+        notification, delivery, job = await notifications_service.send_test_notification(
+            session,
+            organisation_id=organisation.id,
+            user_id=user.id,
+            recipient_email=user.email,
+            actor_user_id=user.id,
+        )
+        delivery_id = delivery.id
+        notification_id = notification.id
+        job_id = job.id
+
+    registry = DispatchRegistry(job_actors={}, maintenance_actors={})
+    stats = await run_cycle(
+        session_factory, registry=registry, batch_size=50, publication_lease_seconds=60
+    )
+    assert stats.dead == 1
+    async with session_factory() as session:
+        failed_job = await session.get(Job, job_id)
+        failed_delivery = await session.get(NotificationDelivery, delivery_id)
+        audit = await session.scalar(
+            select(AuditEvent).where(
+                AuditEvent.action == "notification.delivery_failed",
+                AuditEvent.resource_id == str(notification_id),
+            )
+        )
+        assert failed_job is not None
+        assert failed_job.error_code == jobs_service.ERROR_CODE_DISPATCH_INVALID
+        assert failed_delivery is not None
+        assert failed_delivery.status is NotificationDeliveryStatus.FAILED
+        assert audit is not None
+        assert audit.event_metadata["error"] == ("The notification email could not be dispatched.")
+
+
+async def test_dead_stale_initial_dispatch_does_not_fail_newer_dispatch(
+    migrated_database: str,
+    broker_and_recording: tuple[RedisBroker, Worker, DispatchRegistry, list[str]],
+) -> None:
+    """A dead event is harmless once a newer dispatch owns the queued job."""
+    _broker, _worker, _registry, _received = broker_and_recording
+    session_factory = _session_factory(migrated_database)
+    async with session_factory() as session:
+        organisation = await _create_org(session)
+        job = await jobs_service.schedule_job(
+            session,
+            organisation_id=organisation.id,
+            job_type="unregistered.job",
+            input_reference="opaque-reference",
+        )
+        stale_event_id = job.dispatch_id
+        newer_dispatch_id = uuid.uuid4()
+        job.dispatch_id = newer_dispatch_id
+        await session.commit()
+        job_id = job.id
+
+    registry = DispatchRegistry(job_actors={}, maintenance_actors={})
+    stats = await run_cycle(
+        session_factory, registry=registry, batch_size=50, publication_lease_seconds=60
+    )
+    assert stats.dead == 1
+    async with session_factory() as session:
+        stale_event = await session.get(OutboxEvent, stale_event_id)
+        current = await session.get(Job, job_id)
+        assert stale_event is not None
+        assert stale_event.status is OutboxEventStatus.DEAD
+        assert current is not None
+        assert current.status is JobStatus.QUEUED
+        assert current.dispatch_id == newer_dispatch_id
+        assert current.error_code is None
 
 
 # --- Crash window and graceful restart ---------------------------------------

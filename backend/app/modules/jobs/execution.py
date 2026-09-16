@@ -12,9 +12,9 @@ owns the delivery-ownership concerns every actor shares:
   in-process (bounded); longer leases raise :class:`DispatchDeferredError`
   (a transient error the Retries middleware retries), and the retries-
   exhausted finalizer refuses to fail a still-leased dispatch.
-- **release**: a transient failure releases the owned attempt back to
-  ``queued`` (owner-checked) before the exception propagates, so the retry of
-  the same dispatch can re-claim it.
+- **retry decision**: a transient failure closes the owned attempt and writes
+  either a delayed reference-only outbox dispatch or terminal exhaustion in
+  the same PostgreSQL transaction. The broker callback is not required.
 - **stale settlement**: :class:`StaleDispatchError` from an owner-checked
   mutation means the attempt was superseded; the wrapper acknowledges the
   message as a no-op instead of retrying or failing over a newer owner.
@@ -44,6 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import async_session_factory
 from app.modules.jobs import service as jobs_service
 from app.modules.jobs.models import Job
+from app.observability.sentry import capture_exception
 
 logger = structlog.get_logger()
 
@@ -77,10 +78,10 @@ def _stamp_current_message(dispatch_id: uuid.UUID, owner_token: uuid.UUID) -> No
     The stamp travels with the message (in ``options``, which the Retries
     middleware forwards verbatim to the retries-exhausted handler), so the
     exhausted finalizer can tell which attempt the message actually claimed.
-    Both the dispatch id and the rotated owner token are stamped: a retry
-    re-claim or an expired-lease takeover keeps the dispatch identity while
-    rotating the token, so the finalizer must correlate by attempt, not by
-    dispatch alone, to refuse settling a newer owner of the same dispatch.
+    Both the dispatch id and the rotated owner token are stamped. An
+    expired-lease takeover keeps the dispatch identity while rotating the
+    token, so the finalizer must correlate by attempt, not dispatch alone, to
+    refuse settling a newer owner of the same dispatch.
     When the handler runs outside a broker message (direct test calls) there
     is nothing to stamp and the finalizer falls back to the explicit legacy
     behaviour for never-claimed rows.
@@ -104,7 +105,7 @@ def _log_event(outcome: str, *, job_id: uuid.UUID, **fields: object) -> None:
 async def run_claimed(*, job_id: uuid.UUID, handler: Handler) -> None:
     """Claim the next attempt of ``job_id`` and run ``handler`` under ownership.
 
-    Handles deferral, transient release and stale settlement as described in
+    Handles deferral, durable retry decisions and stale settlement as described in
     the module docstring. Returns normally for a no-op (stale) message and
     re-raises :class:`JobPermanentError` unchanged.
     """
@@ -115,6 +116,10 @@ async def run_claimed(*, job_id: uuid.UUID, handler: Handler) -> None:
 
         if result.outcome is jobs_service.ClaimOutcome.STALE:
             _log_event("attempt_skipped", job_id=job_id, reason="terminal_state")
+            return
+
+        if result.outcome is jobs_service.ClaimOutcome.EXHAUSTED:
+            _log_event("exhausted", job_id=job_id, reason="global_attempt_limit")
             return
 
         if result.outcome is jobs_service.ClaimOutcome.DEFERRED:
@@ -178,35 +183,48 @@ async def run_claimed(*, job_id: uuid.UUID, handler: Handler) -> None:
                 reason="dispatch_superseded",
             )
             return
-        except Exception:
-            # Transient failure: release the owned attempt so a genuine retry
-            # of the same dispatch can re-claim it, then propagate for the
-            # Retries middleware. Releasing from a fresh session keeps the
-            # release independent of whatever state the failing handler left
-            # the session in.
+        except Exception as exc:
+            # PostgreSQL owns the next action: an attempt closes together
+            # with a delayed outbox dispatch or terminal exhaustion. Broker
+            # retries remain a fallback only if this settlement cannot commit.
+            logger.error(
+                "durable.attempt_failed",
+                job_id=str(job_id),
+                dispatch_id=str(result_dispatch_id),
+                exc_info=True,
+            )
+            capture_exception(exc)
             try:
                 async with async_session_factory() as session:
-                    released = await jobs_service.release_dispatch(
+                    decision = await jobs_service.settle_retryable_failure(
                         session,
                         job_id=job_id,
                         owner_token=result_owner_token,
                     )
-                if released:
-                    _log_event("released", job_id=job_id, dispatch_id=str(result_dispatch_id))
-                else:
+                if decision is jobs_service.JobStatus.QUEUED:
+                    _log_event(
+                        "retry_scheduled", job_id=job_id, dispatch_id=str(result_dispatch_id)
+                    )
+                    return
+                if decision is jobs_service.JobStatus.FAILED:
+                    _log_event("exhausted", job_id=job_id, dispatch_id=str(result_dispatch_id))
+                    return
+                if decision is None:
                     _log_event(
                         "settled_stale",
                         job_id=job_id,
                         dispatch_id=str(result_dispatch_id),
                         reason="already_terminal",
                     )
+                    return
             except jobs_service.StaleDispatchError:
                 _log_event(
                     "settled_stale",
                     job_id=job_id,
                     dispatch_id=str(result_dispatch_id),
-                    reason="release_superseded",
+                    reason="retry_settlement_superseded",
                 )
+                return
             except Exception:
                 logger.warning(
                     "durable.release_failed",
@@ -214,4 +232,4 @@ async def run_claimed(*, job_id: uuid.UUID, handler: Handler) -> None:
                     dispatch_id=str(result_dispatch_id),
                     exc_info=True,
                 )
-            raise
+                raise

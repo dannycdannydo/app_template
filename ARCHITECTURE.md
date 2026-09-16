@@ -305,7 +305,7 @@ worker → atomic dispatch claim → progress (0–100) → succeed | fail
 
 Redis publication failures are retried durably with capped backoff; malformed or unsupported events become `dead` for operator triage. A crash after Redis accepts a message but before the outbox row is settled may republish it. Delivery is therefore **at-least-once**, not exactly-once. An execution lease and owner token prevent two copies from running business work concurrently; stale owners cannot mutate progress or settle a newer attempt, and domain handlers remain idempotent for side effects.
 
-Transient worker errors release the owned dispatch to `queued` for bounded Dramatiq retry; permanent errors settle immediately. Terminal states (`succeeded` / `failed` / `cancelled`) never run again. The coordinator also creates deduplicated hourly/daily maintenance events and re-dispatches only suitably old queued jobs under a cooldown. The public polling routes are unchanged: `GET /api/v1/jobs` and `GET /api/v1/jobs/{job_id}` remain org-scoped and gated by `documents.read` (ADR-0014).
+Transient worker errors close the attempt and atomically create a delayed PostgreSQL outbox dispatch or terminally exhaust the job; permanent errors settle immediately. Terminal states (`succeeded` / `failed` / `cancelled`) never run again. The coordinator also creates deduplicated hourly/daily maintenance events and re-dispatches only suitably old queued jobs under a cooldown. The public polling routes are unchanged: `GET /api/v1/jobs` and `GET /api/v1/jobs/{job_id}` remain org-scoped and gated by `documents.read` (ADR-0014).
 
 ### Authoring a durable actor
 
@@ -318,8 +318,8 @@ Every new durable actor must be reviewed as a scheduling and ownership change.
    a route, service or domain event handler.
 3. Accept only `job_id`, use the shared durable execution wrapper, and keep
    business work idempotent. Progress and settlement must use its owner-checked
-   helpers; transient errors release ownership before retry, while permanent
-   errors fail the job directly.
+   helpers; transient errors use the PostgreSQL-owned retry decision, while
+   permanent errors fail the job directly.
 4. Add an allow-listed exhaustion hook if the durable job owns another domain
    record that must be settled with retry exhaustion.
 5. Add unit, database and broker-path tests for registry completeness,
