@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
+import time
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -20,14 +22,18 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import dramatiq
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import select, text
+from dramatiq.brokers.stub import StubBroker
+from dramatiq.worker import Worker
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.ai.errors import BudgetExceededError
+from app.ai.execution import JOB_TYPE_AI_EXECUTE, execute_ai_task
 from app.ai.persistence import service as ai_persistence
 from app.ai.persistence.models import (
     AIOutputRecord,
@@ -50,9 +56,13 @@ from app.modules.audit.service import (
     ACTION_AI_RETENTION_DELETED,
     ACTION_AI_SETTINGS_UPDATED,
 )
+from app.modules.jobs import service as jobs_service
+from app.modules.jobs.models import Job, JobAttemptStatus, JobStatus
+from app.modules.jobs.queries import job_attempt_history_statement
 from app.modules.organisations.models import Organisation
 from app.modules.users.models import User
 from app.observability.metrics import AI_BUDGET_DENIALS_TOTAL
+from app.storage import get_storage
 from app.storage.fake import FakeObjectStorage
 
 
@@ -1575,5 +1585,192 @@ async def test_database_rejects_output_for_foreign_request_organisation(
             )
             with pytest.raises(DBAPIError):
                 await session.commit()
+    finally:
+        await engine.dispose()
+
+
+async def test_ai_persistence_rejects_stale_worker_ownership(
+    migrated_database: str,
+) -> None:
+    """AC5: a superseded AI attempt cannot reserve AI request state.
+
+    The persistence port carries the captured job ownership: after a takeover
+    rotates the owner token, the stale port's ``reserve`` raises
+    :class:`StaleDispatchError` before any AI request row is written.
+    """
+    engine, session_factory = _session_factory(migrated_database)
+    try:
+        async with session_factory() as session:
+            actor = await _seed_actor(session)
+            organisation = await _seed_organisation(session)
+            await _seed_settings(session, organisation.id)
+            await ai_persistence.update_ai_settings(
+                session,
+                actor=actor,
+                organisation_id=organisation.id,
+                enabled=True,
+                allowed_provider_ids=[],
+                allowed_model_ids=[],
+                provider_override=None,
+                model_override=None,
+                monthly_budget=Decimal("1.000000"),
+                retention_policy_days=None,
+            )
+            job = await jobs_service.schedule_job(
+                session,
+                organisation_id=organisation.id,
+                job_type="ai.execute",
+                input_reference="organisations/opaque/scratch/doc",
+                actor_user_id=actor.id,
+            )
+            claim = await jobs_service.claim_dispatch(session, job_id=job.id)
+            assert claim.owner_token is not None
+            stale_owner = jobs_service.JobOwnership(
+                job_id=job.id,
+                owner_token=claim.owner_token,
+                organisation_id=organisation.id,
+            )
+            await session.execute(
+                update(Job)
+                .where(Job.id == job.id)
+                .values(execution_lease_expires_at=datetime.now(UTC) - timedelta(seconds=1))
+            )
+            await session.commit()
+            takeover = await jobs_service.claim_dispatch(session, job_id=job.id)
+            assert takeover.taken_over is True
+
+            stale_port = AIPersistencePortImpl(session, ownership=stale_owner)
+            with pytest.raises(jobs_service.StaleDispatchError):
+                await _reserve(
+                    stale_port,
+                    organisation_id=organisation.id,
+                    request_id="req-stale-owner",
+                    user_id=actor.id,
+                    estimated_cost=Decimal("0.000100"),
+                )
+            assert await _request_rows(session, organisation.id) == []
+    finally:
+        await engine.dispose()
+
+
+# --- P2: paused real-worker AI persistence fencing --------------------------
+
+
+_QUEUE = "test-ai-persistence-db"
+
+
+@pytest.fixture
+async def broker_and_worker() -> Any:
+    """A StubBroker + in-process Worker running the real ``execute_ai_task``.
+
+    The AI actor is re-declared bound to this test's broker (``Actor.send()``
+    enqueues on the actor's own broker) with the production middleware stack.
+    """
+    from app.broker import worker_middleware
+
+    broker = StubBroker(middleware=worker_middleware())
+    dramatiq.set_broker(broker)
+    ai_task = dramatiq.actor(queue_name=_QUEUE, **jobs_service.retry_policy())(execute_ai_task)
+    worker = Worker(broker, worker_timeout=100, worker_threads=2)
+    worker.start()
+    yield broker, worker, ai_task
+    worker.stop()
+    broker.flush_all()
+    from app.db.session import engine
+
+    await engine.dispose()
+
+
+async def _wait_for_event(event: threading.Event, *, timeout: float = 20.0) -> None:
+    """Wait until the worker thread signals it reached the test block point."""
+    deadline = time.monotonic() + timeout
+    while not event.is_set() and time.monotonic() < deadline:
+        await asyncio.sleep(0.02)
+    assert event.is_set(), "the worker never reached the test block point"
+
+
+async def test_paused_ai_worker_cannot_reserve_after_cross_session_takeover(
+    migrated_database: str,
+    broker_and_worker: tuple[StubBroker, Worker, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC5: a real AI worker paused across lease expiry is fenced on resume.
+
+    The ``ai.execute`` actor runs on the in-process worker and blocks inside the
+    persistence port's ``reserve`` — the boundary immediately before the first
+    provider dispatch. A separate session expires its lease and takes the
+    dispatch over; when released, ``reserve`` re-verifies the owning job and
+    raises :class:`StaleDispatchError` before any ``ai_requests`` row is
+    written, so the superseded attempt produces no AI state and the job stays
+    owned by the new attempt.
+    """
+    broker, _worker, ai_task = broker_and_worker
+    engine, session_factory = _session_factory(migrated_database)
+    reached = threading.Event()
+    release = threading.Event()
+    original_reserve = AIPersistencePortImpl.reserve
+
+    async def _blocking_reserve(self: Any, **kwargs: Any) -> Any:
+        reached.set()
+        if not release.wait(timeout=30):
+            raise AssertionError("the test never released the paused AI worker")
+        return await original_reserve(self, **kwargs)
+
+    monkeypatch.setattr(AIPersistencePortImpl, "reserve", _blocking_reserve)
+
+    try:
+        async with session_factory() as session:
+            organisation = await _seed_organisation(session)
+            user = await _seed_actor(session)
+            settings_row = await _seed_settings(session, organisation.id)
+            settings_row.enabled = True
+            await session.commit()
+            storage_key = (
+                f"organisations/{organisation.id}/ai/scratch/doc-{uuid.uuid4().hex[:8]}.txt"
+            )
+            fake_storage: Any = get_storage()
+            await fake_storage.put(storage_key, b"a non-sensitive fixture", "text/plain")
+            job = await jobs_service.schedule_job(
+                session,
+                organisation_id=organisation.id,
+                job_type=JOB_TYPE_AI_EXECUTE,
+                input_reference=storage_key,
+                actor_user_id=user.id,
+            )
+            job_id = job.id
+            organisation_id = organisation.id
+
+        ai_task.send(job_id=str(job_id))  # the coordinator publishes
+        await _wait_for_event(reached)
+
+        # The worker is paused at the persistence boundary. Expire its lease
+        # and let a different session take the dispatch over.
+        async with session_factory() as session:
+            await session.execute(
+                update(Job)
+                .where(Job.id == job_id)
+                .values(execution_lease_expires_at=datetime.now(UTC) - timedelta(seconds=1))
+            )
+            await session.commit()
+        async with session_factory() as session:
+            takeover = await jobs_service.claim_dispatch(session, job_id=job_id)
+            assert takeover.taken_over is True
+            assert takeover.owner_token is not None
+            new_owner = takeover.owner_token
+
+        release.set()
+        broker.join(_QUEUE, timeout=10000)
+
+        async with session_factory() as session:
+            assert await _request_rows(session, organisation_id) == []
+            job_row = await session.get(Job, job_id)
+            assert job_row is not None
+            assert job_row.status == JobStatus.RUNNING
+            assert job_row.owner_token == new_owner
+            attempts = list((await session.scalars(job_attempt_history_statement(job_id))).all())
+            assert [attempt.status for attempt in attempts] == [
+                JobAttemptStatus.ABANDONED,
+                JobAttemptStatus.RUNNING,
+            ]
     finally:
         await engine.dispose()

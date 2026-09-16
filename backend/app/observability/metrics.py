@@ -45,6 +45,7 @@ from app.modules.outbox.queries import (
     oldest_due_event_statement,
     outbox_metric_rows_statement,
     stale_queued_job_count_statement,
+    stale_running_job_count_statement,
 )
 
 router = APIRouter(tags=["metrics"])
@@ -193,6 +194,10 @@ OUTBOX_OLDEST_DUE_AGE_SECONDS = Gauge(
 STALE_QUEUED_JOBS = Gauge(
     "stale_queued_jobs",
     "Queued jobs eligible for durable dispatch reconciliation",
+)
+STALE_RUNNING_JOBS = Gauge(
+    "stale_running_jobs",
+    "Lease-expired running jobs eligible for durable recovery",
 )
 
 #: Rate-limit the refresh-failure log to one line per outage/recovery.
@@ -404,19 +409,19 @@ async def refresh_outbox_metrics(
     """
     global _outbox_metrics_refresh_failed
     now = datetime.now(UTC)
+    published_before = now - timedelta(
+        seconds=max(reconciliation_threshold_seconds, reconciliation_cooldown_seconds)
+    )
     try:
         async with session_factory() as session:
             rows = (await session.execute(outbox_metric_rows_statement())).all()
             oldest_due = await session.scalar(oldest_due_event_statement(now=now))
             stale_count = await session.scalar(
-                stale_queued_job_count_statement(
-                    published_before=now
-                    - timedelta(
-                        seconds=max(
-                            reconciliation_threshold_seconds,
-                            reconciliation_cooldown_seconds,
-                        )
-                    )
+                stale_queued_job_count_statement(published_before=published_before)
+            )
+            stale_running_count = await session.scalar(
+                stale_running_job_count_statement(
+                    lease_expired_before=now, published_before=published_before
                 )
             )
     except Exception:
@@ -442,3 +447,4 @@ async def refresh_outbox_metrics(
         max((now - oldest_due).total_seconds(), 0) if oldest_due is not None else 0
     )
     STALE_QUEUED_JOBS.set(stale_count or 0)
+    STALE_RUNNING_JOBS.set(stale_running_count or 0)

@@ -28,9 +28,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -46,13 +48,15 @@ from sqlalchemy.pool import NullPool
 
 from app.core.exceptions import NotFoundError
 from app.email.base import EmailSendError
+from app.job_coordinator.reconciliation import reconcile_running_jobs
 from app.modules.audit.models import AuditEvent
 from app.modules.files import service as files_service
 from app.modules.files import tasks as files_tasks
 from app.modules.files.models import File, FileStatus
 from app.modules.jobs import execution as jobs_execution
 from app.modules.jobs import service as jobs_service
-from app.modules.jobs.models import Job, JobStatus
+from app.modules.jobs.models import Job, JobAttemptStatus, JobStatus
+from app.modules.jobs.queries import job_attempt_history_statement
 from app.modules.notifications import service as notifications_service
 from app.modules.notifications import tasks as notifications_tasks
 from app.modules.notifications.models import (
@@ -61,6 +65,7 @@ from app.modules.notifications.models import (
     NotificationDeliveryStatus,
 )
 from app.modules.organisations.models import Organisation
+from app.modules.outbox.models import OutboxEvent, OutboxEventStatus
 from app.modules.users.models import User
 from app.storage import FakeObjectStorage, get_storage
 
@@ -779,3 +784,209 @@ async def test_file_loop_no_double_send_on_retry(
             assert delivery.attempt_count == 1  # never sent twice
     finally:
         await engine.dispose()
+
+
+# --- P2: stale worker fencing at the file domain boundary ---------------------
+
+
+async def test_stale_file_worker_cannot_mutate_after_takeover(
+    migrated_database: str,
+) -> None:
+    """AC5: a superseded file worker is fenced out of file state.
+
+    The stale attempt's lease expires, a new owner takes the dispatch over, and
+    every file transition it then attempts — with its captured owner token — is
+    rejected with :class:`StaleDispatchError`; the file row is never moved.
+    """
+    engine = create_async_engine(migrated_database, poolclass=NullPool)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            organisation = await _create_org(session, "File Stale Fence Ltd")
+            file, job_id = await _upload_round_trip(session, organisation.id)
+            claim = await jobs_service.claim_dispatch(session, job_id=job_id)
+            assert claim.owner_token is not None
+            stale_owner = jobs_service.JobOwnership(
+                job_id=job_id,
+                owner_token=claim.owner_token,
+                organisation_id=organisation.id,
+            )
+            # The worker stalls past its lease; another attempt takes over.
+            await session.execute(
+                update(Job)
+                .where(Job.id == job_id)
+                .values(execution_lease_expires_at=datetime.now(UTC) - timedelta(seconds=1))
+            )
+            await session.commit()
+            takeover = await jobs_service.claim_dispatch(session, job_id=job_id)
+            assert takeover.taken_over is True
+
+            with pytest.raises(jobs_service.StaleDispatchError):
+                await files_service.mark_file_processing(
+                    session,
+                    organisation_id=organisation.id,
+                    file_id=file.id,
+                    ownership=stale_owner,
+                )
+            with pytest.raises(jobs_service.StaleDispatchError):
+                await files_service.mark_file_ready(
+                    session,
+                    organisation_id=organisation.id,
+                    file_id=file.id,
+                    ownership=stale_owner,
+                )
+            with pytest.raises(jobs_service.StaleDispatchError):
+                await files_service.mark_file_failed(
+                    session,
+                    organisation_id=organisation.id,
+                    file_id=file.id,
+                    reason="size_mismatch",
+                    ownership=stale_owner,
+                )
+
+            row = await session.get(File, file.id)
+            assert row is not None
+            assert row.status == FileStatus.UPLOADED
+    finally:
+        await engine.dispose()
+
+
+async def test_dead_worker_recovered_file_job_is_reprocessed(
+    migrated_database: str,
+    broker_and_worker: tuple[StubBroker, Worker, Any],
+) -> None:
+    """AC4: a recovered job is reprocessed after its worker died with no message.
+
+    A worker claims the file job and then vanishes (its execution lease
+    expires); the original broker message is gone. PostgreSQL-owned running
+    recovery requeues the job with a fresh durable dispatch, and the recovered
+    job runs to completion on a later worker without the original message.
+    """
+    broker, _worker, process_task = broker_and_worker
+    session_factory = _session_factory(migrated_database)
+    async with session_factory() as session:
+        organisation = await _create_org(session, "File Recovery Ltd")
+        file, job_id = await _upload_round_trip(session, organisation.id)
+        job = await session.get(Job, job_id)
+        assert job is not None and job.dispatch_id is not None
+        event = await session.get(OutboxEvent, job.dispatch_id)
+        assert event is not None
+        event.status = OutboxEventStatus.PUBLISHED
+        event.processed_at = datetime.now(UTC) - timedelta(seconds=3600)
+        await session.commit()
+        # The worker claims the dispatch, then dies before settling.
+        claim = await jobs_service.claim_dispatch(session, job_id=job_id)
+        assert claim.outcome is jobs_service.ClaimOutcome.CLAIMED
+        await session.execute(
+            update(Job)
+            .where(Job.id == job_id)
+            .values(execution_lease_expires_at=datetime.now(UTC) - timedelta(seconds=1))
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        recovered = await reconcile_running_jobs(
+            session,
+            now=datetime.now(UTC),
+            threshold_seconds=60,
+            cooldown_seconds=60,
+            limit=10,
+        )
+    assert recovered == [job_id]
+
+    # The recovered dispatch runs on a fresh worker and completes the file.
+    process_task.send(job_id=str(job_id))
+    broker.join(_QUEUE, timeout=10000)
+    finished = await _wait_for_status(session_factory, job_id, JobStatus.SUCCEEDED)
+    assert finished.result_reference == str(file.id)
+
+    async with session_factory() as session:
+        ready = await files_service.get_file(
+            session, organisation_id=organisation.id, file_id=file.id
+        )
+        assert ready.status == FileStatus.READY
+
+
+# --- P2: paused real-worker fencing across a cross-session takeover ----------
+
+
+async def _wait_for_event(event: threading.Event, *, timeout: float = 20.0) -> None:
+    """Wait until the worker thread signals it reached the test block point."""
+    deadline = time.monotonic() + timeout
+    while not event.is_set() and time.monotonic() < deadline:
+        await asyncio.sleep(0.02)
+    assert event.is_set(), "the worker never reached the test block point"
+
+
+async def test_paused_file_worker_is_fenced_after_cross_session_takeover(
+    migrated_database: str,
+    broker_and_worker: tuple[StubBroker, Worker, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC5: a real file worker paused across lease expiry is fenced on resume.
+
+    Unlike the same-session stale test above, the document actor here actually
+    runs on the in-process worker, blocks on a test-controlled event immediately
+    before the ``uploaded -> processing`` transition, and is held there while a
+    separate test session expires its lease and takes the dispatch over. When
+    the handler resumes, its file transition with the captured stale ownership
+    is rejected with :class:`StaleDispatchError`: the file never moves and the
+    job stays owned by the new attempt.
+    """
+    broker, _worker, process_task = broker_and_worker
+    session_factory = _session_factory(migrated_database)
+    reached = threading.Event()
+    release = threading.Event()
+    original_mark_processing = files_service.mark_file_processing
+
+    async def _blocking_mark_file_processing(*args: Any, **kwargs: Any) -> Any:
+        reached.set()
+        if not release.wait(timeout=30):
+            raise AssertionError("the test never released the paused file worker")
+        return await original_mark_processing(*args, **kwargs)
+
+    monkeypatch.setattr(files_service, "mark_file_processing", _blocking_mark_file_processing)
+
+    async with session_factory() as session:
+        organisation = await _create_org(session, "File Paused Fence Ltd")
+        file, job_id = await _upload_round_trip(session, organisation.id)
+
+    process_task.send(job_id=str(job_id))  # the coordinator publishes
+    await _wait_for_event(reached)
+
+    # The worker is paused before the file transition. Expire its lease and let
+    # a different session take the dispatch over, rotating the owner token.
+    async with session_factory() as session:
+        await session.execute(
+            update(Job)
+            .where(Job.id == job_id)
+            .values(execution_lease_expires_at=datetime.now(UTC) - timedelta(seconds=1))
+        )
+        await session.commit()
+    async with session_factory() as session:
+        takeover = await jobs_service.claim_dispatch(session, job_id=job_id)
+        assert takeover.taken_over is True
+        assert takeover.owner_token is not None
+        new_owner = takeover.owner_token
+
+    release.set()
+    broker.join(_QUEUE, timeout=10000)
+
+    async with session_factory() as session:
+        file_row = await session.get(File, file.id)
+        assert file_row is not None
+        assert file_row.status == FileStatus.UPLOADED
+        job_row = await session.get(Job, job_id)
+        assert job_row is not None
+        assert job_row.status == JobStatus.RUNNING
+        assert job_row.owner_token == new_owner
+        attempts = list((await session.scalars(job_attempt_history_statement(job_id))).all())
+        assert [attempt.status for attempt in attempts] == [
+            JobAttemptStatus.ABANDONED,
+            JobAttemptStatus.RUNNING,
+        ]
+
+    # The rejected transition wrote no file processing audit row.
+    assert (
+        await _audit_count(session_factory, action="file.processing", resource_id=str(file.id)) == 0
+    )

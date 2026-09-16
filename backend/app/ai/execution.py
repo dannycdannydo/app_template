@@ -140,6 +140,7 @@ async def execute_managed_ai(
     request: AIRequest,
     *,
     request_id: str | None = None,
+    ownership: jobs_service.JobOwnership | None = None,
 ) -> AIResult:
     """Execute through ``AIService`` with the platform persistence boundary.
 
@@ -149,10 +150,15 @@ async def execute_managed_ai(
     boundary (Scope §6.3) without any transaction spanning provider I/O. The
     same session carries the transfer-lifecycle audit events (mode selection,
     staging, expiry, deletion — Scope §2.5/§6.7).
+
+    When ``ownership`` is supplied (the durable worker path) the persistence
+    port re-verifies the owning job before reserving and before settling, so a
+    superseded attempt cannot commit AI request state over a newer owner
+    (plan P2, AC5). The synchronously invoked demo path passes ``None``.
     """
     return await runtime.get_ai_service().execute(
         request,
-        recorder=AIPersistencePortImpl(session),
+        recorder=AIPersistencePortImpl(session, ownership=ownership),
         request_id=request_id,
         transfer_references=SQLTransferReferenceStore(session),
         execution_session=session,
@@ -277,8 +283,7 @@ async def _execute_ai_attempt(context: DurableJobContext, session: AsyncSession)
     """
     job_uuid = context.job_id
     request_id = request_id_for_job(job_uuid)
-    job = context.job
-    if job.job_type != JOB_TYPE_AI_EXECUTE:
+    if context.job_type != JOB_TYPE_AI_EXECUTE:
         # The wrong-type settlement runs under the claimed owner (plan P2), so
         # it is accepted even once every job row carries a dispatch id (P3):
         # the handler fails the durable row with the invalid-context error
@@ -296,7 +301,7 @@ async def _execute_ai_attempt(context: DurableJobContext, session: AsyncSession)
             reason="wrong_job_type",
         )
         raise jobs_service.JobPermanentError("the AI job context is invalid")
-    if job.created_by_user_id is None:
+    if context.created_by_user_id is None:
         # A durable AI job always records the initiating user (the demo
         # service passes the authenticated caller). A row without one is a
         # malformed/foreign context: fail permanently rather than retry.
@@ -306,7 +311,7 @@ async def _execute_ai_attempt(context: DurableJobContext, session: AsyncSession)
         )
         await _fail_permanent(session, job_uuid, failure, owner_token=context.owner_token)
         raise jobs_service.JobPermanentError(failure.message)
-    if not job.input_reference:
+    if not context.input_reference:
         failure = _PermanentJobFailure(
             ERROR_CODE_INVALID_JOB_CONTEXT,
             "The AI job has no storage reference to process.",
@@ -319,12 +324,13 @@ async def _execute_ai_attempt(context: DurableJobContext, session: AsyncSession)
             session,
             AIRequest(
                 task=DEMO_TASK,
-                storage_reference=job.input_reference,
-                organisation_id=job.organisation_id,
-                user_id=job.created_by_user_id,
+                storage_reference=context.input_reference,
+                organisation_id=context.organisation_id,
+                user_id=context.created_by_user_id,
                 metadata={"source": "ai_demo", "job_id": str(job_uuid)},
             ),
             request_id=request_id,
+            ownership=context.ownership,
         )
     except AIRequestReplayError:
         # A previous attempt reserved this execution id. Reconcile the job
@@ -334,7 +340,7 @@ async def _execute_ai_attempt(context: DurableJobContext, session: AsyncSession)
         await _reconcile_replay(
             session,
             job_uuid,
-            job.organisation_id,
+            context.organisation_id,
             request_id,
             owner_token=context.owner_token,
         )

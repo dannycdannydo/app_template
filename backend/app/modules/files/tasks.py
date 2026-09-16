@@ -107,8 +107,7 @@ async def process_file(job_id: str) -> None:
 
 async def _process_file_attempt(context: DurableJobContext, session: AsyncSession) -> None:
     """One owned attempt of the file-processing job (plan P2 ownership)."""
-    job = context.job
-    if job.job_type != JOB_TYPE_FILE_PROCESSING:
+    if context.job_type != JOB_TYPE_FILE_PROCESSING:
         # The wrong-type settlement runs under the claimed owner (plan P2), so
         # it is accepted even once every job row carries a dispatch id (P3):
         # the handler fails the durable row with the invalid-context error
@@ -126,11 +125,11 @@ async def _process_file_attempt(context: DurableJobContext, session: AsyncSessio
             reason="wrong_job_type",
         )
         raise jobs_service.JobPermanentError("the file job context is invalid")
-    file_id = uuid.UUID(job.input_reference)
+    file_id = uuid.UUID(context.input_reference)
     try:
         file = await files_service.get_file(
             session,
-            organisation_id=job.organisation_id,
+            organisation_id=context.organisation_id,
             file_id=file_id,
         )
     except NotFoundError as exc:
@@ -161,13 +160,15 @@ async def _process_file_attempt(context: DurableJobContext, session: AsyncSessio
         reason = "object_missing" if object_info is None else "size_mismatch"
         await files_service.mark_file_failed(
             session,
-            organisation_id=job.organisation_id,
+            organisation_id=context.organisation_id,
             file_id=file.id,
             reason=reason,
+            ownership=context.ownership,
         )
         await _notify_uploader(
             session,
-            organisation_id=job.organisation_id,
+            ownership=context.ownership,
+            organisation_id=context.organisation_id,
             file=file,
             notification_type=notifications_service.NOTIFICATION_TYPE_FILE_FAILED,
             title=notifications_service.FILE_FAILED_TITLE,
@@ -195,8 +196,9 @@ async def _process_file_attempt(context: DurableJobContext, session: AsyncSessio
     )
     await files_service.mark_file_processing(
         session,
-        organisation_id=job.organisation_id,
+        organisation_id=context.organisation_id,
         file_id=file.id,
+        ownership=context.ownership,
     )
     await jobs_service.update_progress(
         session,
@@ -206,12 +208,14 @@ async def _process_file_attempt(context: DurableJobContext, session: AsyncSessio
     )
     await files_service.mark_file_ready(
         session,
-        organisation_id=job.organisation_id,
+        organisation_id=context.organisation_id,
         file_id=file.id,
+        ownership=context.ownership,
     )
     await _notify_uploader(
         session,
-        organisation_id=job.organisation_id,
+        ownership=context.ownership,
+        organisation_id=context.organisation_id,
         file=file,
         notification_type=notifications_service.NOTIFICATION_TYPE_FILE_READY,
         title=notifications_service.FILE_READY_TITLE,
@@ -229,6 +233,7 @@ async def _process_file_attempt(context: DurableJobContext, session: AsyncSessio
 async def _notify_uploader(
     session: AsyncSession,
     *,
+    ownership: jobs_service.JobOwnership,
     organisation_id: uuid.UUID,
     file: File,
     notification_type: str,
@@ -255,6 +260,7 @@ async def _notify_uploader(
         return
     await notifications_service.create_file_notification(
         session,
+        ownership=ownership,
         organisation_id=organisation_id,
         user_id=file.created_by_user_id,
         notification_type=notification_type,

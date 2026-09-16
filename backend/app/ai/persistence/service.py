@@ -51,7 +51,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from functools import lru_cache
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from pydantic import BaseModel
@@ -99,6 +99,9 @@ from app.modules.organisations.models import Organisation
 from app.modules.users.models import User
 from app.observability.metrics import observe_ai_budget_denial
 from app.storage.base import ObjectStorage
+
+if TYPE_CHECKING:
+    from app.modules.jobs.service import JobOwnership
 
 #: Module logger. AI persistence log lines bind ``ai_request_id``, task and the
 #: existing organisation context — never prompts, provider responses,
@@ -482,8 +485,28 @@ class AIPersistencePortImpl:
     ``ai.execute`` job both follow this pattern.
     """
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        ownership: JobOwnership | None = None,
+    ) -> None:
         self._session = session
+        self._ownership = ownership
+
+    async def _verify_ownership(self) -> None:
+        """Re-lock and re-verify the owning durable job before a mutation.
+
+        The durable ``ai.execute`` worker passes its captured ownership; the
+        synchronous demo path passes ``None`` and skips the guard. Imported
+        locally to avoid the models import cycle (``app.db.base`` -> AI ->
+        audit), the same reason other AI modules defer job imports.
+        """
+        if self._ownership is None:
+            return
+        from app.modules.jobs import service as jobs_service
+
+        await jobs_service.verify_ownership(self._session, self._ownership)
 
     async def load_policy(self, *, organisation_id: uuid.UUID) -> OrganisationAIPolicy:
         return await get_organisation_policy(self._session, organisation_id=organisation_id)
@@ -529,6 +552,7 @@ class AIPersistencePortImpl:
         a concurrent duplicate execution id falls back to the winner's row
         instead of surfacing a constraint error.
         """
+        await self._verify_ownership()
         session = self._session
         existing = await session.scalar(
             ai_request_by_request_id_statement(organisation_id, request_id, 1)
@@ -684,6 +708,7 @@ class AIPersistencePortImpl:
         ``(organisation_id, request_id, attempt_number)`` with the same
         org-scoped lookup and lost-race fallback as :meth:`reserve`.
         """
+        await self._verify_ownership()
         session = self._session
         existing = await session.scalar(
             ai_request_by_request_id_statement(organisation_id, request_id, attempt_number)
@@ -771,6 +796,7 @@ class AIPersistencePortImpl:
         references/digests only (v0.7 Scope §2). Any failure in this
         transaction rolls everything back, leaving the row running.
         """
+        await self._verify_ownership()
         session = self._session
         record = await session.scalar(ai_request_record_statement(ai_request_id, organisation_id))
         if record is None:

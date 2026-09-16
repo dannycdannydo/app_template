@@ -268,9 +268,10 @@ class _MetricSession:
         rows: list[tuple[str, str, int]],
         oldest_due: object,
         stale_count: int,
+        stale_running_count: int,
     ) -> None:
         self.rows = rows
-        self.scalar_values = [oldest_due, stale_count]
+        self.scalar_values = [oldest_due, stale_count, stale_running_count]
 
     async def __aenter__(self) -> _MetricSession:
         return self
@@ -286,9 +287,15 @@ class _MetricSession:
 
 
 def _metric_session_factory(
-    rows: list[tuple[str, str, int]], oldest_due: object = None, stale_count: int = 0
+    rows: list[tuple[str, str, int]],
+    oldest_due: object = None,
+    stale_count: int = 0,
+    stale_running_count: int = 0,
 ) -> Any:
-    return cast(Any, lambda: _MetricSession(rows, oldest_due, stale_count))
+    return cast(
+        Any,
+        lambda: _MetricSession(rows, oldest_due, stale_count, stale_running_count),
+    )
 
 
 async def test_outbox_metrics_zero_fill_closed_labels_and_exclude_row_content() -> None:
@@ -301,6 +308,7 @@ async def test_outbox_metrics_zero_fill_closed_labels_and_exclude_row_content() 
                 ("published", "untrusted.event.payload", 99),
             ],
             stale_count=2,
+            stale_running_count=4,
         ),
         reconciliation_threshold_seconds=900,
         reconciliation_cooldown_seconds=1_800,
@@ -315,6 +323,7 @@ async def test_outbox_metrics_zero_fill_closed_labels_and_exclude_row_content() 
     assert str(job_id) not in body
     assert "sensitive payload or error" not in body
     assert "stale_queued_jobs 2.0" in body
+    assert "stale_running_jobs 4.0" in body
 
 
 async def test_outbox_metric_refresh_logs_once_per_outage_and_recovery(

@@ -43,7 +43,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import async_session_factory
 from app.modules.jobs import service as jobs_service
-from app.modules.jobs.models import Job
 from app.observability.sentry import capture_exception
 
 logger = structlog.get_logger()
@@ -61,12 +60,31 @@ _DEFER_MARGIN_SECONDS = 0.1
 
 @dataclass(frozen=True)
 class DurableJobContext:
-    """Everything the domain handler needs to run one owned attempt."""
+    """Everything the domain handler needs to run one owned attempt.
+
+    The context deliberately carries only the primitive values the handler
+    needs plus the captured ownership credential. The claimed ORM ``Job`` is
+    never passed across the claim commit, so a handler cannot accidentally use
+    a detached snapshot as authority; consequential mutations go through
+    :meth:`ownership` and ``jobs_service.verify_ownership`` (plan P2).
+    """
 
     job_id: uuid.UUID
-    job: Job
+    organisation_id: uuid.UUID
+    job_type: str
+    input_reference: str
+    created_by_user_id: uuid.UUID | None
     dispatch_id: uuid.UUID
     owner_token: uuid.UUID
+
+    @property
+    def ownership(self) -> jobs_service.JobOwnership:
+        """Return the captured ownership credential for domain mutations."""
+        return jobs_service.JobOwnership(
+            job_id=self.job_id,
+            owner_token=self.owner_token,
+            organisation_id=self.organisation_id,
+        )
 
 
 Handler = Callable[[DurableJobContext, AsyncSession], Awaitable[None]]
@@ -162,7 +180,10 @@ async def run_claimed(*, job_id: uuid.UUID, handler: Handler) -> None:
             )
         context = DurableJobContext(
             job_id=job_id,
-            job=claimed_job,
+            organisation_id=claimed_job.organisation_id,
+            job_type=claimed_job.job_type,
+            input_reference=claimed_job.input_reference,
+            created_by_user_id=claimed_job.created_by_user_id,
             dispatch_id=result_dispatch_id,
             owner_token=result_owner_token,
         )

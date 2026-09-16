@@ -297,6 +297,7 @@ async def create_file_notification(
     resource_id: str,
     recipient_email: str,
     actor_user_id: uuid.UUID | None = None,
+    ownership: jobs_service.JobOwnership | None = None,
 ) -> Notification:
     """Create a file-status notification, its email delivery and the job.
 
@@ -313,7 +314,13 @@ async def create_file_notification(
     creating a second delivery or enqueueing a second email job. A retried or
     re-delivered ``process_file`` message therefore cannot double-notify or
     double-send.
+
+    When ``ownership`` is supplied (the worker path), the owning job is locked
+    and re-verified in this transaction before the notification and its
+    delivery are written (plan P2, AC5).
     """
+    if ownership is not None:
+        await jobs_service.verify_ownership(session, ownership)
     existing = await session.scalar(
         select(Notification).where(
             Notification.organisation_id == organisation_id,
@@ -412,6 +419,7 @@ async def mark_delivery_running(
     session: AsyncSession,
     *,
     delivery_id: uuid.UUID,
+    ownership: jobs_service.JobOwnership | None = None,
 ) -> NotificationDelivery:
     """Transition a delivery to ``running`` at the start of a task attempt.
 
@@ -420,8 +428,11 @@ async def mark_delivery_running(
     job's atomic dispatch claim (``jobs_service.claim_dispatch``). A terminal
     delivery is never re-sent: a message that arrives after the delivery
     already finished raises a 409, which the task's terminal check avoids
-    before sending.
+    before sending. When ``ownership`` is supplied the owning job is locked
+    and re-verified in this transaction (plan P2, AC5).
     """
+    if ownership is not None:
+        await jobs_service.verify_ownership(session, ownership)
     delivery = await get_delivery_for_task(session, delivery_id=delivery_id)
     if is_delivery_terminal(delivery.status):
         raise ConflictError(
@@ -439,13 +450,18 @@ async def return_delivery_to_queue(
     session: AsyncSession,
     *,
     delivery_id: uuid.UUID,
+    ownership: jobs_service.JobOwnership | None = None,
 ) -> NotificationDelivery:
     """Return a retryable owned delivery to ``queued`` before broker retry.
 
     This is deliberately not a failure and emits no audit row: the next
     Dramatiq attempt is still responsible for the same delivery.  Terminal
-    deliveries are left untouched so a stale attempt cannot reopen them.
+    deliveries are left untouched so a stale attempt cannot reopen them. When
+    ``ownership`` is supplied the owning job is locked and re-verified in this
+    transaction (plan P2, AC5).
     """
+    if ownership is not None:
+        await jobs_service.verify_ownership(session, ownership)
     delivery = await get_delivery_for_task(session, delivery_id=delivery_id)
     if not is_delivery_terminal(delivery.status):
         delivery.status = NotificationDeliveryStatus.QUEUED
@@ -459,12 +475,18 @@ async def mark_delivery_succeeded(
     *,
     delivery_id: uuid.UUID,
     provider_message_id: str,
+    ownership: jobs_service.JobOwnership | None = None,
 ) -> NotificationDelivery:
     """Record a successful send on the delivery row.
 
     Sets ``succeeded``, stores the provider's message id as the delivery
-    evidence and stamps ``sent_at`` (blueprint §20 delivery tracking).
+    evidence and stamps ``sent_at`` (blueprint §20 delivery tracking). When
+    ``ownership`` is supplied the owning job is locked and re-verified in this
+    transaction before the outcome commits, so a superseded attempt cannot
+    record an external acceptance over a newer owner (plan P2, AC5/AC6).
     """
+    if ownership is not None:
+        await jobs_service.verify_ownership(session, ownership)
     delivery = await get_delivery_for_task(session, delivery_id=delivery_id)
     delivery.status = NotificationDeliveryStatus.SUCCEEDED
     delivery.provider_message_id = provider_message_id
@@ -481,6 +503,7 @@ async def mark_delivery_failed(
     organisation_id: uuid.UUID,
     error_message: str,
     commit: bool = True,
+    ownership: jobs_service.JobOwnership | None = None,
 ) -> NotificationDelivery:
     """Record a failed send on the delivery row and audit it.
 
@@ -490,7 +513,11 @@ async def mark_delivery_failed(
     already in a terminal state is returned untouched, so a retried message
     cannot double-audit. When ``commit`` is false, the caller owns the commit
     so this transition can join a wider atomic terminal-settlement transaction.
+    When ``ownership`` is supplied the owning job is locked and re-verified in
+    this transaction (plan P2, AC5).
     """
+    if ownership is not None:
+        await jobs_service.verify_ownership(session, ownership)
     delivery = await get_delivery_for_task(session, delivery_id=delivery_id)
     if is_delivery_terminal(delivery.status):
         return delivery

@@ -16,6 +16,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db.conventions import uuid7
+from app.modules.jobs import service as jobs_service
+from app.modules.jobs.models import Job, JobStatus
 from app.modules.outbox.contracts import (
     EVENT_TYPE_AI_RETENTION,
     EVENT_TYPE_OUTBOX_CLEANUP_COMPLETED,
@@ -25,12 +27,14 @@ from app.modules.outbox.models import OutboxEvent, OutboxEventStatus
 from app.modules.outbox.queries import (
     published_events_retention_statement,
     queued_jobs_for_reconciliation_statement,
+    running_jobs_for_reconciliation_statement,
 )
 from app.modules.outbox.service import (
     create_dispatch_event,
     create_schedule_event,
     reconciliation_dispatch_key,
 )
+from app.observability.metrics import JOBS_FAILED_TOTAL
 
 
 @dataclass(frozen=True)
@@ -38,6 +42,7 @@ class ReconciliationStats:
     """Opaque aggregate outcomes for a bounded coordinator maintenance pass."""
 
     reconciled_jobs: int = 0
+    recovered_running_jobs: int = 0
     scheduled_events: int = 0
     cleaned_events: int = 0
 
@@ -70,6 +75,10 @@ async def reconcile_queued_jobs(
     coordinators never create competing replacements.  The latest published
     event must be older than both the loss threshold and cooldown, so a job
     receives no more than one recovery dispatch per cooldown period.
+
+    ``of=Job`` scopes the lock (and ``SKIP LOCKED``) to the ``jobs`` row the
+    statement selects; the joined ``outbox_events`` row is read-only here, so a
+    momentary lock on it must not silently drop a candidate from the pass.
     """
     cutoff = reconciliation_cutoff(
         now=now,
@@ -80,12 +89,19 @@ async def reconcile_queued_jobs(
         await session.scalars(
             queued_jobs_for_reconciliation_statement(
                 published_before=cutoff, limit=limit
-            ).with_for_update(skip_locked=True)
+            ).with_for_update(skip_locked=True, of=Job)
         )
     ).all()
     reconciled: list[uuid.UUID] = []
+    exhausted_job_types: list[str] = []
     bucket = int(now.timestamp()) // cooldown_seconds
     for job in rows:
+        # A job that already consumed every allowed attempt settles failed in
+        # PostgreSQL instead of receiving a fresh nominal retry budget (plan
+        # P2, AC3).
+        if await jobs_service.enforce_attempt_ceiling_locked(session, job):
+            exhausted_job_types.append(job.job_type)
+            continue
         event_id = uuid7()
         await create_dispatch_event(
             session,
@@ -97,6 +113,8 @@ async def reconcile_queued_jobs(
         job.dispatch_id = event_id
         reconciled.append(job.id)
     await session.commit()
+    for job_type in exhausted_job_types:
+        JOBS_FAILED_TOTAL.labels(job_type=job_type).inc()
     return reconciled
 
 
@@ -120,6 +138,91 @@ async def reconciliation_candidates(
         )
     ).all()
     return [job.id for job in rows]
+
+
+async def reconcile_running_jobs(
+    session: AsyncSession,
+    *,
+    now: datetime,
+    threshold_seconds: int,
+    cooldown_seconds: int,
+    limit: int,
+) -> list[uuid.UUID]:
+    """Recover bounded, lease-expired ``running`` jobs into new dispatches.
+
+    A worker that died after claiming can otherwise be stranded forever when
+    Redis holds no copy of its message: this PostgreSQL-owned sweep is the
+    backstop (plan P2, AC4). The candidate query excludes terminal jobs, jobs
+    whose current dispatch is not yet published, and jobs inside the recovery
+    cooldown. Each selected row is locked with ``FOR UPDATE SKIP LOCKED`` and
+    the lease is re-checked under the lock; the dead attempt is closed
+    ``abandoned``, the dispatch/owner boundary is rotated, the job returns to
+    ``queued`` and exactly one cooldown-keyed outbox intent is created in the
+    same transaction — never a direct Redis publish. A job already at the
+    global attempt ceiling is settled failed instead (plan P2, AC3).
+
+    Eligibility uses the shared :func:`reconciliation_cutoff` (the greater of
+    the loss threshold and the cooldown, measured from the current dispatch's
+    publication), so effective recovery latency is
+    ``max(lease expiry, dispatch publication + max(threshold, cooldown))``
+    rather than strictly "lease expiry + cooldown". With the default 900 s
+    lease/threshold/cooldown these coincide, but lowering
+    ``job_execution_lease_seconds`` alone does not shorten recovery below the
+    publication-based bound.
+
+    ``of=Job`` scopes the lock (and ``SKIP LOCKED``) to the ``jobs`` row; the
+    joined dispatch ``outbox_events`` row is read-only, so a momentary lock on
+    it (e.g. by the published-outbox cleanup batch) must not silently drop a
+    candidate from the pass.
+    """
+    published_before = reconciliation_cutoff(
+        now=now,
+        threshold_seconds=threshold_seconds,
+        cooldown_seconds=cooldown_seconds,
+    )
+    rows = (
+        await session.scalars(
+            running_jobs_for_reconciliation_statement(
+                lease_expired_before=now,
+                published_before=published_before,
+                limit=limit,
+            ).with_for_update(skip_locked=True, of=Job)
+        )
+    ).all()
+    recovered: list[uuid.UUID] = []
+    exhausted_job_types: list[str] = []
+    bucket = int(now.timestamp()) // cooldown_seconds
+    for job in rows:
+        # The owner may have completed or renewed the lease while this
+        # coordinator waited for the row lock; only a still-expired running job
+        # is recovered.
+        if job.status != JobStatus.RUNNING:
+            continue
+        if job.execution_lease_expires_at is None or job.execution_lease_expires_at > now:
+            continue
+        if await jobs_service.enforce_attempt_ceiling_locked(session, job):
+            exhausted_job_types.append(job.job_type)
+            continue
+        await jobs_service.close_running_attempt_abandoned(session, job, now=now)
+        event_id = uuid7()
+        await create_dispatch_event(
+            session,
+            organisation_id=job.organisation_id,
+            job_id=job.id,
+            event_id=event_id,
+            deduplication_key=reconciliation_dispatch_key(job.id, cooldown_bucket=bucket),
+        )
+        job.status = JobStatus.QUEUED
+        job.dispatch_id = event_id
+        # Rotate the attempt-distinguishing credential so the dead attempt's
+        # captured owner token can never mutate the recovered job (plan P2).
+        job.owner_token = uuid7()
+        job.execution_lease_expires_at = None
+        recovered.append(job.id)
+    await session.commit()
+    for job_type in exhausted_job_types:
+        JOBS_FAILED_TOTAL.labels(job_type=job_type).inc()
+    return recovered
 
 
 async def schedule_maintenance_events(
@@ -225,6 +328,14 @@ async def run_maintenance_pass(
             limit=reconciliation_limit,
         )
     async with session_factory() as session:
+        recovered = await reconcile_running_jobs(
+            session,
+            now=now,
+            threshold_seconds=reconciliation_threshold_seconds,
+            cooldown_seconds=reconciliation_cooldown_seconds,
+            limit=reconciliation_limit,
+        )
+    async with session_factory() as session:
         scheduled = await schedule_maintenance_events(
             session,
             now=now,
@@ -246,5 +357,8 @@ async def run_maintenance_pass(
                 interval_hours=outbox_cleanup_interval_hours,
             )
     return ReconciliationStats(
-        reconciled_jobs=len(jobs), scheduled_events=scheduled, cleaned_events=cleaned
+        reconciled_jobs=len(jobs),
+        recovered_running_jobs=len(recovered),
+        scheduled_events=scheduled,
+        cleaned_events=cleaned,
     )
