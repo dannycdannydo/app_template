@@ -10,9 +10,10 @@ SendGrid and Resend all expose SMTP).
 Every blocking smtplib call runs in a worker thread via ``asyncio.to_thread``
 so the adapter satisfies the async interface without tying up the event loop
 (the same pattern as the S3 storage adapter). The provider message id is the
-message's ``Message-ID`` header: it is generated before sending, preserved by
-relays, and is what Mailhog's API surfaces, so a delivery can be traced end
-to end.
+message's ``Message-ID`` header, derived from the caller-persisted delivery
+identity and reused on safe retries. Relays preserve it and Mailhog's API
+surfaces it, so a delivery can be traced end to end without treating SMTP
+correlation as an exactly-once guarantee.
 """
 
 from __future__ import annotations
@@ -21,14 +22,28 @@ import asyncio
 import smtplib
 import ssl
 from email.message import EmailMessage
-from email.utils import make_msgid
+from typing import NoReturn
 
 from app.email.base import (
+    AcceptanceUnknownEmailSendError,
+    DefinitelyUnsentEmailSendError,
     EmailProvider,
-    PermanentEmailSendError,
-    TransientEmailSendError,
+    PermanentlyRejectedEmailSendError,
 )
 from app.email.types import EMAIL_DELIVERY_STATUS_SENT, EmailDeliveryResult
+
+
+def _raise_transport_error(*, submission_started: bool, cause: BaseException) -> NoReturn:
+    """Classify a transport failure using the durable SMTP submission boundary."""
+    error_type = (
+        AcceptanceUnknownEmailSendError if submission_started else DefinitelyUnsentEmailSendError
+    )
+    message = (
+        "SMTP acceptance could not be determined."
+        if submission_started
+        else "SMTP transport is temporarily unavailable."
+    )
+    raise error_type(message) from cause
 
 
 class SmtpEmailProvider(EmailProvider):
@@ -60,6 +75,7 @@ class SmtpEmailProvider(EmailProvider):
     def _send_sync(
         self,
         *,
+        delivery_identity: str,
         from_address: str,
         to_address: str,
         subject: str,
@@ -70,46 +86,72 @@ class SmtpEmailProvider(EmailProvider):
         message["From"] = from_address
         message["To"] = to_address
         message["Subject"] = subject
-        message["Message-ID"] = make_msgid(domain=self._host)
+        message["Message-ID"] = f"<{delivery_identity}@{self._host}>"
         message.set_content(text_body)
         if html_body:
             message.add_alternative(html_body, subtype="html")
+        submission_started = False
+        accepted_result: EmailDeliveryResult | None = None
         try:
             with smtplib.SMTP(self._host, self._port, timeout=self._timeout) as client:
                 if self._use_tls:
                     client.starttls(context=ssl.create_default_context())
                 if self._username:
                     client.login(self._username, self._password)
+                submission_started = True
                 client.send_message(message)
+                accepted_result = EmailDeliveryResult(
+                    provider_message_id=message["Message-ID"],
+                    status=EMAIL_DELIVERY_STATUS_SENT,
+                )
         except smtplib.SMTPAuthenticationError as exc:
-            raise PermanentEmailSendError("SMTP authentication was rejected.") from exc
+            if accepted_result is not None:
+                return accepted_result
+            raise PermanentlyRejectedEmailSendError("SMTP authentication was rejected.") from exc
         except smtplib.SMTPRecipientsRefused as exc:
+            if accepted_result is not None:
+                return accepted_result
             codes = [code for code, _message in exc.recipients.values()]
             error_type = (
-                PermanentEmailSendError
+                PermanentlyRejectedEmailSendError
                 if codes and all(500 <= code < 600 for code in codes)
-                else TransientEmailSendError
+                else DefinitelyUnsentEmailSendError
             )
             raise error_type("SMTP recipients were rejected.") from exc
+        except smtplib.SMTPNotSupportedError as exc:
+            if accepted_result is not None:
+                return accepted_result
+            raise PermanentlyRejectedEmailSendError(
+                "SMTP does not support a required message feature."
+            ) from exc
         except smtplib.SMTPResponseException as exc:
+            if accepted_result is not None:
+                return accepted_result
             error_type = (
-                TransientEmailSendError if 400 <= exc.smtp_code < 500 else PermanentEmailSendError
+                DefinitelyUnsentEmailSendError
+                if 400 <= exc.smtp_code < 500
+                else PermanentlyRejectedEmailSendError
             )
             raise error_type("SMTP rejected the message.") from exc
         except smtplib.SMTPServerDisconnected as exc:
-            raise TransientEmailSendError("SMTP transport is temporarily unavailable.") from exc
+            if accepted_result is not None:
+                return accepted_result
+            _raise_transport_error(submission_started=submission_started, cause=exc)
         except smtplib.SMTPException as exc:
-            raise PermanentEmailSendError("SMTP delivery was rejected.") from exc
+            if accepted_result is not None:
+                return accepted_result
+            _raise_transport_error(submission_started=submission_started, cause=exc)
         except (OSError, TimeoutError) as exc:
-            raise TransientEmailSendError("SMTP transport is temporarily unavailable.") from exc
-        return EmailDeliveryResult(
-            provider_message_id=message["Message-ID"],
-            status=EMAIL_DELIVERY_STATUS_SENT,
-        )
+            if accepted_result is not None:
+                return accepted_result
+            _raise_transport_error(submission_started=submission_started, cause=exc)
+        assert accepted_result is not None
+        return accepted_result
 
     async def send_email(
         self,
         *,
+        delivery_identity: str,
         from_address: str,
         to_address: str,
         subject: str,
@@ -118,6 +160,7 @@ class SmtpEmailProvider(EmailProvider):
     ) -> EmailDeliveryResult:
         return await asyncio.to_thread(
             self._send_sync,
+            delivery_identity=delivery_identity,
             from_address=from_address,
             to_address=to_address,
             subject=subject,

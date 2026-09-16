@@ -13,10 +13,11 @@ relationships: loading is deliberate (BP §7) and the database-level
 
 ``notification_deliveries`` tracks one channel delivery per notification
 (starting with ``email``, blueprint §20). The row is the durable record the
-worker task operates on: it moves ``queued -> running -> succeeded/failed``,
-records the provider's message id and the attempt count, and is idempotent by
-construction — a terminal delivery is never re-sent (the same rule the durable
-jobs table applies to terminal jobs, Scope §6.4).
+worker task operates on: it moves ``queued -> running`` and then to
+``succeeded``, ``failed`` or ``attention_required``. It records a stable
+delivery identity, a bounded error code, the provider message id and attempt
+count. Terminal deliveries are never re-sent (the same rule the durable jobs
+table applies to terminal jobs, Scope §6.4).
 """
 
 from __future__ import annotations
@@ -48,6 +49,7 @@ class NotificationDeliveryStatus(enum.StrEnum):
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+    ATTENTION_REQUIRED = "attention_required"
 
 
 def _delivery_status_values(enum_class: type[NotificationDeliveryStatus]) -> list[str]:
@@ -119,7 +121,7 @@ class NotificationDelivery(Base, TimestampMixin):
     the recipient address, the lifecycle status, the provider's message id and
     the attempt count. ``sent_at`` records when the provider accepted the
     message; ``updated_at`` (from ``TimestampMixin``) records the last status
-    transition. Terminal statuses (``succeeded``/``failed``) are never re-sent:
+    transition. All three terminal statuses are never re-sent:
     the worker task checks the status before sending (Scope §6.4 idempotency
     rule), so a re-delivered message cannot double-send.
     """
@@ -127,7 +129,7 @@ class NotificationDelivery(Base, TimestampMixin):
     __tablename__ = "notification_deliveries"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('queued', 'running', 'succeeded', 'failed')",
+            "status IN ('queued', 'running', 'succeeded', 'failed', 'attention_required')",
             name="delivery_status",
         ),
         CheckConstraint("attempt_count >= 0", name="non_negative_attempt_count"),
@@ -141,12 +143,17 @@ class NotificationDelivery(Base, TimestampMixin):
     )
     channel: Mapped[str] = mapped_column(String(20), nullable=False, default="email")
     recipient: Mapped[str] = mapped_column(String(320), nullable=False)
+    # Opaque idempotency/correlation identity persisted before the first send.
+    # Adapters receive this same value on every safe retry.
+    delivery_identity: Mapped[str] = mapped_column(
+        String(36), nullable=False, unique=True, default=lambda: str(uuid7())
+    )
     status: Mapped[NotificationDeliveryStatus] = mapped_column(
         Enum(
             NotificationDeliveryStatus,
             name="delivery_status",
             native_enum=False,
-            length=16,
+            length=20,
             # Persist the enum values ("queued", ...) so rows match the check
             # constraint and server default; SQLAlchemy defaults to names
             # ("QUEUED") for Python enums, which the constraint rejects.
@@ -157,6 +164,7 @@ class NotificationDelivery(Base, TimestampMixin):
         server_default=NotificationDeliveryStatus.QUEUED.value,
     )
     provider_message_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
     attempt_count: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )

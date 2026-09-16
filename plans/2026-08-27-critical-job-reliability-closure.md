@@ -487,24 +487,24 @@ impact, even though no public permission changes are intended.
 
 Dependencies: P1, P2
 
-- [ ] Extend the provider-neutral email contract with a stable caller-supplied
+- [x] Extend the provider-neutral email contract with a stable caller-supplied
       delivery identity and explicit definitely-unsent, permanently-rejected and
       acceptance-unknown failure categories. Keep provider SDKs/adapters behind
       `app/email/`.
-- [ ] Persist the stable delivery identity before the first send and reuse it on
+- [x] Persist the stable delivery identity before the first send and reuse it on
       every safe retry. SMTP uses it as the stable Message-ID; future providers
       may map it to a native idempotency key.
-- [ ] Refine the SMTP adapter so connection/setup failures before message
+- [x] Refine the SMTP adapter so connection/setup failures before message
       submission are retryable, explicit SMTP rejection is permanent according
       to response class, and disconnect/timeout after submission begins is
       acceptance-unknown rather than definitely retryable.
-- [ ] Add an internal terminal attention-required delivery outcome with bounded
+- [x] Add an internal terminal attention-required delivery outcome with bounded
       safe error code and audit event. Do not automatically resend it; document
       provider-side verification and guarded operator resolution.
-- [ ] Ensure job, job-attempt and notification-delivery outcomes settle
+- [x] Ensure job, job-attempt and notification-delivery outcomes settle
       consistently under the captured owner for success, rejection, safe retry,
       ambiguity and exhaustion.
-- [ ] Add deterministic adapter, database and real-SMTP/broker tests including
+- [x] Add deterministic adapter, database and real-SMTP/broker tests including
       provider-accepted-then-worker-crashed, disconnect during submission,
       stable Message-ID reuse and stale-owner resumption.
 
@@ -554,7 +554,7 @@ Dependencies: P2, P3, P4
 - [ ] Add alerts for expired running attempts, retry/exhaustion backlog,
       attention-required email, failed/stale maintenance runs, broker memory/
       rejected writes, dead current dispatches and metric refresh failure.
-- [ ] Update the blueprint, ADR-0004/0019, `ARCHITECTURE.md`, operations,
+- [ ] Update the blueprint, ADR-0004/0015/0019, `ARCHITECTURE.md`, operations,
       backup/recovery, environment examples, deployment docs and task-authoring
       guidance. Remove stale instructions that operators should schedule
       maintenance by calling actor `.send()` directly.

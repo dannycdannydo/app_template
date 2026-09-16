@@ -25,12 +25,26 @@ class EmailSendError(RuntimeError):
     """
 
 
-class TransientEmailSendError(EmailSendError):
-    """An email failure that may succeed when the worker retries it."""
+class DefinitelyUnsentEmailSendError(EmailSendError):
+    """The provider definitely did not accept the message; retrying is safe."""
 
 
-class PermanentEmailSendError(EmailSendError):
-    """An email failure that cannot be corrected by retrying it."""
+class PermanentlyRejectedEmailSendError(EmailSendError):
+    """The provider explicitly rejected the message; retrying cannot help."""
+
+
+class AcceptanceUnknownEmailSendError(EmailSendError):
+    """Submission began but provider acceptance could not be determined.
+
+    Retrying this category automatically could duplicate an externally visible
+    email. Callers must persist an attention-required outcome instead.
+    """
+
+
+# Compatibility names retain the old import surface while making its certainty
+# precise: transient is definitely unsent; permanent is explicitly rejected.
+TransientEmailSendError = DefinitelyUnsentEmailSendError
+PermanentEmailSendError = PermanentlyRejectedEmailSendError
 
 
 class EmailProvider(ABC):
@@ -46,6 +60,7 @@ class EmailProvider(ABC):
     async def send_email(
         self,
         *,
+        delivery_identity: str,
         from_address: str,
         to_address: str,
         subject: str,
@@ -54,7 +69,9 @@ class EmailProvider(ABC):
     ) -> EmailDeliveryResult:
         """Send one email and return the provider's delivery result.
 
-        ``html_body`` is optional; when given, the message is a multipart
-        text/html message. Raises :class:`EmailSendError` on any provider
-        failure (network, authentication, rejected recipient).
+        ``delivery_identity`` is a stable caller-persisted opaque identifier
+        reused on every safe retry. ``html_body`` is optional; when given, the
+        message is a multipart text/html message. Raises
+        :class:`EmailSendError` on any provider failure (network,
+        authentication, rejected recipient).
         """

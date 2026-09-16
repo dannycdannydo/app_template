@@ -932,6 +932,68 @@ async def test_notification_email_eventual_success_on_real_broker(
         await engine.dispose()
 
 
+async def test_notification_email_acceptance_unknown_on_real_broker(
+    migrated_database: str,
+    broker_and_worker: tuple[RedisBroker, Worker],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ambiguous send is terminal and duplicate broker delivery cannot resend it."""
+    from app.email.base import AcceptanceUnknownEmailSendError
+
+    session_factory = _session_factory(migrated_database)
+    engine = create_async_engine(migrated_database, poolclass=NullPool)
+    task_factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(notifications_tasks, "async_session_factory", task_factory)
+    monkeypatch.setattr(jobs_execution, "async_session_factory", task_factory)
+    calls = 0
+
+    class _AmbiguousProvider:
+        async def send_email(self, **kwargs: Any) -> Any:
+            nonlocal calls
+            calls += 1
+            raise AcceptanceUnknownEmailSendError("connection lost after submission")
+
+    monkeypatch.setattr(notifications_tasks, "get_email_provider", _AmbiguousProvider)
+    try:
+        organisation = await _create_org(session_factory)
+        async with session_factory() as session:
+            user = User(
+                workos_user_id=f"user_{uuid.uuid4().hex}",
+                email="ada@example.com",
+                name="Ada Lovelace",
+            )
+            session.add(user)
+            await session.commit()
+            _notification, delivery, job = await notifications_service.send_test_notification(
+                session,
+                organisation_id=organisation.id,
+                user_id=user.id,
+                recipient_email=user.email,
+                actor_user_id=user.id,
+            )
+            job_id = job.id
+            delivery_id = delivery.id
+
+        email_task = dramatiq.actor(
+            queue_name=_QUEUE,
+            **jobs_service.retry_policy(),
+        )(notifications_tasks.send_notification_email)
+        email_task.send(job_id=str(job_id))
+        failed = await _wait_for_status(session_factory, job_id, JobStatus.FAILED)
+        assert failed.error_code == "email_delivery_acceptance_unknown"
+
+        email_task.send(job_id=str(job_id))
+        await asyncio.sleep(0.2)
+        assert calls == 1
+        async with session_factory() as session:
+            delivery_row = await session.get(NotificationDelivery, delivery_id)
+            assert delivery_row is not None
+            assert delivery_row.status is NotificationDeliveryStatus.ATTENTION_REQUIRED
+            assert delivery_row.error_code == "acceptance_unknown"
+    finally:
+        await engine.dispose()
+
+
 async def test_notification_email_exhaustion_fails_delivery_on_real_broker(
     migrated_database: str,
     broker_and_worker: tuple[RedisBroker, Worker],
@@ -1009,8 +1071,8 @@ async def test_notification_email_exhaustion_fails_delivery_on_real_broker(
             )
             assert audit is not None
             assert audit.organisation_id == organisation.id
-            assert audit.event_metadata["error"] == (
-                "The notification email could not be sent after all retries."
+            assert audit.event_metadata["error_code"] == (
+                notifications_service.DELIVERY_ERROR_SAFE_RETRIES_EXHAUSTED
             )
     finally:
         await engine.dispose()

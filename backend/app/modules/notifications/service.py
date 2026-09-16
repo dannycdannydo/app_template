@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, NotFoundError
 from app.modules.audit.service import (
+    ACTION_NOTIFICATION_DELIVERY_ATTENTION_REQUIRED,
     ACTION_NOTIFICATION_DELIVERY_FAILED,
     ACTION_NOTIFICATION_TEST_SENT,
     record_event,
@@ -87,6 +88,21 @@ FILE_READY_TITLE = "File ready"
 FILE_READY_BODY = "Your file {filename} is ready."
 FILE_FAILED_TITLE = "File failed"
 FILE_FAILED_BODY = "Your file {filename} could not be processed."
+
+DELIVERY_ERROR_PERMANENTLY_REJECTED = "permanently_rejected"
+DELIVERY_ERROR_ACCEPTANCE_UNKNOWN = "acceptance_unknown"
+DELIVERY_ERROR_UNCLASSIFIED_PROVIDER = "unclassified_provider_error"
+DELIVERY_ERROR_SAFE_RETRIES_EXHAUSTED = "safe_retries_exhausted"
+DELIVERY_ERROR_DISPATCH_FAILED = "dispatch_failed"
+DELIVERY_ERROR_CODES = frozenset(
+    {
+        DELIVERY_ERROR_PERMANENTLY_REJECTED,
+        DELIVERY_ERROR_ACCEPTANCE_UNKNOWN,
+        DELIVERY_ERROR_UNCLASSIFIED_PROVIDER,
+        DELIVERY_ERROR_SAFE_RETRIES_EXHAUSTED,
+        DELIVERY_ERROR_DISPATCH_FAILED,
+    }
+)
 
 
 def _notification_not_found() -> NotFoundError:
@@ -412,6 +428,7 @@ def is_delivery_terminal(status: NotificationDeliveryStatus) -> bool:
     return status in (
         NotificationDeliveryStatus.SUCCEEDED,
         NotificationDeliveryStatus.FAILED,
+        NotificationDeliveryStatus.ATTENTION_REQUIRED,
     )
 
 
@@ -475,6 +492,7 @@ async def mark_delivery_succeeded(
     *,
     delivery_id: uuid.UUID,
     provider_message_id: str,
+    commit: bool = True,
     ownership: jobs_service.JobOwnership | None = None,
 ) -> NotificationDelivery:
     """Record a successful send on the delivery row.
@@ -490,9 +508,11 @@ async def mark_delivery_succeeded(
     delivery = await get_delivery_for_task(session, delivery_id=delivery_id)
     delivery.status = NotificationDeliveryStatus.SUCCEEDED
     delivery.provider_message_id = provider_message_id
+    delivery.error_code = None
     delivery.sent_at = datetime.now(UTC)
-    await session.commit()
-    await session.refresh(delivery)
+    if commit:
+        await session.commit()
+        await session.refresh(delivery)
     return delivery
 
 
@@ -501,27 +521,30 @@ async def mark_delivery_failed(
     *,
     delivery_id: uuid.UUID,
     organisation_id: uuid.UUID,
-    error_message: str,
+    error_code: str,
     commit: bool = True,
     ownership: jobs_service.JobOwnership | None = None,
 ) -> NotificationDelivery:
     """Record a failed send on the delivery row and audit it.
 
     Sets ``failed`` and writes the ``notification.delivery_failed`` audit event
-    in the same transaction, with the reason in the metadata (the worker-side
-    failure path, acceptance §5.5). Idempotent across re-delivery: a delivery
+    in the same transaction, with a bounded safe error code in metadata (the
+    worker-side failure path, acceptance §5.5). Idempotent across re-delivery: a delivery
     already in a terminal state is returned untouched, so a retried message
     cannot double-audit. When ``commit`` is false, the caller owns the commit
     so this transition can join a wider atomic terminal-settlement transaction.
     When ``ownership`` is supplied the owning job is locked and re-verified in
     this transaction (plan P2, AC5).
     """
+    if error_code not in DELIVERY_ERROR_CODES:
+        raise ValueError("error_code must be a recognised delivery error code")
     if ownership is not None:
         await jobs_service.verify_ownership(session, ownership)
     delivery = await get_delivery_for_task(session, delivery_id=delivery_id)
     if is_delivery_terminal(delivery.status):
         return delivery
     delivery.status = NotificationDeliveryStatus.FAILED
+    delivery.error_code = error_code
     await record_event(
         session,
         organisation_id=organisation_id,
@@ -530,9 +553,48 @@ async def mark_delivery_failed(
         resource_id=str(delivery.notification_id),
         metadata={
             "channel": delivery.channel,
-            "recipient": delivery.recipient,
             "delivery_id": str(delivery.id),
-            "error": error_message,
+            "error_code": error_code,
+        },
+    )
+    if commit:
+        await session.commit()
+        await session.refresh(delivery)
+    return delivery
+
+
+async def mark_delivery_attention_required(
+    session: AsyncSession,
+    *,
+    delivery_id: uuid.UUID,
+    organisation_id: uuid.UUID,
+    commit: bool = True,
+    ownership: jobs_service.JobOwnership | None = None,
+) -> NotificationDelivery:
+    """Persist an acceptance-unknown outcome without automatically resending.
+
+    The audit payload contains only a closed safe error code and opaque ids;
+    provider responses, recipient data and message content are deliberately
+    excluded. The state is terminal until a separately guarded operator
+    workflow verifies the provider-side outcome.
+    """
+    if ownership is not None:
+        await jobs_service.verify_ownership(session, ownership)
+    delivery = await get_delivery_for_task(session, delivery_id=delivery_id)
+    if is_delivery_terminal(delivery.status):
+        return delivery
+    delivery.status = NotificationDeliveryStatus.ATTENTION_REQUIRED
+    delivery.error_code = DELIVERY_ERROR_ACCEPTANCE_UNKNOWN
+    await record_event(
+        session,
+        organisation_id=organisation_id,
+        action=ACTION_NOTIFICATION_DELIVERY_ATTENTION_REQUIRED,
+        resource_type="notification",
+        resource_id=str(delivery.notification_id),
+        metadata={
+            "channel": delivery.channel,
+            "delivery_id": str(delivery.id),
+            "error_code": DELIVERY_ERROR_ACCEPTANCE_UNKNOWN,
         },
     )
     if commit:
