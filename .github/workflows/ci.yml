@@ -140,26 +140,14 @@ jobs:
   # bucket creation. The tests carry the `storage_integration` marker and are
   # excluded from the default `make test` suite (see backend/pyproject.toml),
   # so this dedicated service-backed job is where that marker runs. The
-  # `edge-cicd` image starts the server by default (its `CMD` runs
-  # `server /data`), which the release images do not; the local Compose stack
-  # stays on the pinned release and passes the server command explicitly.
+  # Start the same pinned MinIO release used by local development, sourced
+  # from Quay, explicitly: release images default to the MinIO CLI, while
+  # GitHub service containers cannot override the image command with
+  # `server /data`.
   storage-integration:
     name: Storage integration tests (MinIO)
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    services:
-      minio:
-        image: minio/minio:edge-cicd
-        env:
-          MINIO_ROOT_USER: minioadmin
-          MINIO_ROOT_PASSWORD: minioadmin
-        ports:
-          - 9000:9000
-        options: >-
-          --health-cmd "curl -f http://localhost:9000/minio/health/live"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
     env:
       STORAGE_PROVIDER: s3
       STORAGE_BUCKET: ci-storage-tests
@@ -172,6 +160,22 @@ jobs:
         working-directory: backend
     steps:
       - uses: actions/checkout@v7
+      - name: Start pinned MinIO
+        run: |
+          docker run --detach --rm --name minio-ci \
+            --publish 9000:9000 \
+            --env MINIO_ROOT_USER=minioadmin \
+            --env MINIO_ROOT_PASSWORD=minioadmin \
+            quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z \
+            server /data
+          for attempt in {1..10}; do
+            if curl --fail --silent http://localhost:9000/minio/health/live; then
+              exit 0
+            fi
+            sleep 5
+          done
+          docker logs minio-ci
+          exit 1
       - uses: astral-sh/setup-uv@v9.0.0
         with:
           version: ${{ env.UV_VERSION }}
