@@ -1396,7 +1396,9 @@ async def test_dead_notification_dispatch_records_dispatch_failure_reason(
         assert failed_delivery is not None
         assert failed_delivery.status is NotificationDeliveryStatus.FAILED
         assert audit is not None
-        assert audit.event_metadata["error"] == ("The notification email could not be dispatched.")
+        assert audit.event_metadata["error_code"] == (
+            notifications_service.DELIVERY_ERROR_DISPATCH_FAILED
+        )
 
 
 async def test_dead_stale_initial_dispatch_does_not_fail_newer_dispatch(

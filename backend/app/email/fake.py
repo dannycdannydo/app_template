@@ -20,6 +20,7 @@ from app.email.types import EMAIL_DELIVERY_STATUS_SENT, EmailDeliveryResult
 class SentEmail:
     """One recorded message — everything the fake "delivered"."""
 
+    delivery_identity: str
     from_address: str
     to_address: str
     subject: str
@@ -43,6 +44,7 @@ class FakeEmailProvider(EmailProvider):
     async def send_email(
         self,
         *,
+        delivery_identity: str,
         from_address: str,
         to_address: str,
         subject: str,
@@ -54,6 +56,7 @@ class FakeEmailProvider(EmailProvider):
             raise EmailSendError("simulated provider failure")
         self.messages.append(
             SentEmail(
+                delivery_identity=delivery_identity,
                 from_address=from_address,
                 to_address=to_address,
                 subject=subject,

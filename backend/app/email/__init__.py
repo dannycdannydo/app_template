@@ -7,7 +7,13 @@ never inside an HTTP handler (BP §20, ADR-0004), so a new provider means
 adding one adapter class in ``app/email/`` — no other module changes.
 """
 
-from app.email.base import EmailProvider, EmailSendError
+from app.email.base import (
+    AcceptanceUnknownEmailSendError,
+    DefinitelyUnsentEmailSendError,
+    EmailProvider,
+    EmailSendError,
+    PermanentlyRejectedEmailSendError,
+)
 from app.email.factory import get_email_provider
 from app.email.fake import FakeEmailProvider
 from app.email.smtp import SmtpEmailProvider
@@ -15,10 +21,13 @@ from app.email.types import EMAIL_DELIVERY_STATUS_SENT, EmailDeliveryResult
 
 __all__ = [
     "EMAIL_DELIVERY_STATUS_SENT",
+    "AcceptanceUnknownEmailSendError",
+    "DefinitelyUnsentEmailSendError",
     "EmailDeliveryResult",
     "EmailProvider",
     "EmailSendError",
     "FakeEmailProvider",
+    "PermanentlyRejectedEmailSendError",
     "SmtpEmailProvider",
     "get_email_provider",
 ]

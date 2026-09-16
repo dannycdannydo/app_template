@@ -79,10 +79,12 @@ async def test_smtp_round_trip_delivers_to_mailhog(provider: SmtpEmailProvider) 
     """A real send lands in Mailhog with the provider message id preserved."""
     to_address = f"recipient-{uuid.uuid4().hex[:8]}@example.com"
     subject = f"integration test {uuid.uuid4().hex[:8]}"
+    delivery_identity = uuid.uuid4().hex
     text_body = "hello from the smtp integration test"
     html_body = "<p>hello from the smtp integration test</p>"
 
     result = await provider.send_email(
+        delivery_identity=delivery_identity,
         from_address="sender@example.com",
         to_address=to_address,
         subject=subject,
@@ -91,7 +93,7 @@ async def test_smtp_round_trip_delivers_to_mailhog(provider: SmtpEmailProvider) 
     )
     assert isinstance(result, EmailDeliveryResult)
     assert result.status == EMAIL_DELIVERY_STATUS_SENT
-    assert result.provider_message_id.startswith("<")  # a Message-ID header
+    assert result.provider_message_id == f"<{delivery_identity}@{_SMTP_HOST}>"
 
     messages = await _mailhog_messages()
     matching = [
@@ -118,6 +120,7 @@ async def test_smtp_unreachable_relay_raises_email_send_error() -> None:
     unreachable = SmtpEmailProvider(host="127.0.0.1", port=1, timeout=2.0)
     with pytest.raises(TransientEmailSendError, match="SMTP transport is temporarily unavailable"):
         await unreachable.send_email(
+            delivery_identity=uuid.uuid4().hex,
             from_address="sender@example.com",
             to_address="recipient@example.com",
             subject="Subject",

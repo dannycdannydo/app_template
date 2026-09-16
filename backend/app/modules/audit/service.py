@@ -102,6 +102,7 @@ ACTION_JOB_FAILED = "job.failed"
 # deliver a notification's email. Resource type is ``notification`` for both.
 ACTION_NOTIFICATION_TEST_SENT = "notification.test_sent"
 ACTION_NOTIFICATION_DELIVERY_FAILED = "notification.delivery_failed"
+ACTION_NOTIFICATION_DELIVERY_ATTENTION_REQUIRED = "notification.delivery_attention_required"
 
 # AI platform events (Scope §6.5, BP §29, ADR-0017): the audit events identify
 # actor, task, request id, routing decision, completion/failure and budget

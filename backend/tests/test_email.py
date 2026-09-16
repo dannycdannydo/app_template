@@ -14,6 +14,7 @@ from __future__ import annotations
 import smtplib
 import types
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -24,7 +25,12 @@ from app.email import (
     FakeEmailProvider,
     get_email_provider,
 )
-from app.email.base import EmailSendError, PermanentEmailSendError, TransientEmailSendError
+from app.email.base import (
+    AcceptanceUnknownEmailSendError,
+    EmailSendError,
+    PermanentEmailSendError,
+    TransientEmailSendError,
+)
 from app.email.smtp import SmtpEmailProvider
 from app.email.types import EMAIL_DELIVERY_STATUS_SENT
 
@@ -43,6 +49,7 @@ async def test_fake_is_an_email_provider_implementation(provider: FakeEmailProvi
 async def test_send_email_round_trip_records_the_message(provider: FakeEmailProvider) -> None:
     """The full provider contract: send -> result + recorded message."""
     result = await provider.send_email(
+        delivery_identity="delivery-1",
         from_address="sender@example.com",
         to_address="recipient@example.com",
         subject="Hello from the template",
@@ -56,6 +63,7 @@ async def test_send_email_round_trip_records_the_message(provider: FakeEmailProv
     assert len(provider.messages) == 1
     message = provider.messages[0]
     assert message.from_address == "sender@example.com"
+    assert message.delivery_identity == "delivery-1"
     assert message.to_address == "recipient@example.com"
     assert message.subject == "Hello from the template"
     assert message.text_body == "Plain text body"
@@ -64,6 +72,7 @@ async def test_send_email_round_trip_records_the_message(provider: FakeEmailProv
 
 async def test_send_email_without_html_records_text_only(provider: FakeEmailProvider) -> None:
     result = await provider.send_email(
+        delivery_identity="delivery-1",
         from_address="sender@example.com",
         to_address="recipient@example.com",
         subject="Text only",
@@ -76,6 +85,7 @@ async def test_send_email_without_html_records_text_only(provider: FakeEmailProv
 async def test_provider_message_ids_are_deterministic(provider: FakeEmailProvider) -> None:
     for index in range(1, 4):
         result = await provider.send_email(
+            delivery_identity=f"delivery-{index}",
             from_address="sender@example.com",
             to_address=f"recipient-{index}@example.com",
             subject="Subject",
@@ -89,6 +99,7 @@ async def test_failure_path_raises_and_records_nothing(provider: FakeEmailProvid
     provider.fail_next_send()
     with pytest.raises(EmailSendError, match="simulated provider failure"):
         await provider.send_email(
+            delivery_identity="delivery-1",
             from_address="sender@example.com",
             to_address="recipient@example.com",
             subject="Subject",
@@ -97,6 +108,7 @@ async def test_failure_path_raises_and_records_nothing(provider: FakeEmailProvid
     assert provider.messages == []
 
     result = await provider.send_email(
+        delivery_identity="delivery-1",
         from_address="sender@example.com",
         to_address="recipient@example.com",
         subject="Subject",
@@ -154,6 +166,7 @@ async def test_smtp_errors_are_classified_without_exposing_provider_detail(
     provider = SmtpEmailProvider(host="smtp.example.test", port=25)
     with pytest.raises(expected) as raised:
         await provider.send_email(
+            delivery_identity="delivery-1",
             from_address="sender@example.com",
             to_address="recipient@example.com",
             subject="Subject",
@@ -163,6 +176,130 @@ async def test_smtp_errors_are_classified_without_exposing_provider_detail(
     assert "credentials" not in str(raised.value)
     assert "try later" not in str(raised.value)
     assert "bad credentials" not in str(raised.value)
+
+
+async def test_smtp_disconnect_after_submission_begins_is_acceptance_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _DisconnectDuringSubmission:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> _DisconnectDuringSubmission:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def send_message(self, message: object) -> None:
+            raise smtplib.SMTPServerDisconnected("lost after DATA")
+
+    monkeypatch.setattr("app.email.smtp.smtplib.SMTP", _DisconnectDuringSubmission)
+    provider = SmtpEmailProvider(host="smtp.example.test", port=25)
+    with pytest.raises(AcceptanceUnknownEmailSendError):
+        await provider.send_email(
+            delivery_identity="stable-delivery-id",
+            from_address="sender@example.com",
+            to_address="recipient@example.com",
+            subject="Subject",
+            text_body="Body",
+        )
+
+
+async def test_smtp_teardown_failure_after_acceptance_returns_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message_ids: list[str] = []
+
+    class _AcceptedThenTeardownFailed:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> _AcceptedThenTeardownFailed:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            raise smtplib.SMTPResponseException(421, b"try again later")
+
+        def send_message(self, message: Any) -> None:
+            message_ids.append(str(message["Message-ID"]))
+
+    monkeypatch.setattr("app.email.smtp.smtplib.SMTP", _AcceptedThenTeardownFailed)
+    provider = SmtpEmailProvider(host="smtp.example.test", port=25)
+
+    result = await provider.send_email(
+        delivery_identity="stable-delivery-id",
+        from_address="sender@example.com",
+        to_address="recipient@example.com",
+        subject="Subject",
+        text_body="Body",
+    )
+
+    assert result.provider_message_id == "<stable-delivery-id@smtp.example.test>"
+    assert message_ids == ["<stable-delivery-id@smtp.example.test>"]
+
+
+async def test_smtp_unsupported_message_feature_is_permanently_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _UnsupportedMessageFeature:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> _UnsupportedMessageFeature:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def send_message(self, message: Any) -> None:
+            raise smtplib.SMTPNotSupportedError("SMTPUTF8 is required")
+
+    monkeypatch.setattr("app.email.smtp.smtplib.SMTP", _UnsupportedMessageFeature)
+    provider = SmtpEmailProvider(host="smtp.example.test", port=25)
+
+    with pytest.raises(PermanentEmailSendError, match="required message feature"):
+        await provider.send_email(
+            delivery_identity="stable-delivery-id",
+            from_address="sender@example.com",
+            to_address="recipient@example.com",
+            subject="Subject",
+            text_body="Body",
+        )
+
+
+async def test_smtp_reuses_delivery_identity_as_message_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message_ids: list[str] = []
+
+    class _RecordingSmtp:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> _RecordingSmtp:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def send_message(self, message: Any) -> None:
+            message_ids.append(str(message["Message-ID"]))
+
+    monkeypatch.setattr("app.email.smtp.smtplib.SMTP", _RecordingSmtp)
+    provider = SmtpEmailProvider(host="smtp.example.test", port=25)
+    for _ in range(2):
+        await provider.send_email(
+            delivery_identity="stable-delivery-id",
+            from_address="sender@example.com",
+            to_address="recipient@example.com",
+            subject="Subject",
+            text_body="Body",
+        )
+    assert message_ids == [
+        "<stable-delivery-id@smtp.example.test>",
+        "<stable-delivery-id@smtp.example.test>",
+    ]
 
 
 # --- Factory (get_email_provider, wired from settings) ---

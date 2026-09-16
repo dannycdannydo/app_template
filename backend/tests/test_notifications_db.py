@@ -43,7 +43,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import NullPool
 
 from app.core.exceptions import NotFoundError
-from app.email.base import EmailSendError, TransientEmailSendError
+from app.email.base import (
+    AcceptanceUnknownEmailSendError,
+    EmailSendError,
+    TransientEmailSendError,
+)
 from app.modules.audit.models import AuditEvent
 from app.modules.jobs import service as jobs_service
 from app.modules.jobs.models import Job, JobAttemptStatus, JobStatus
@@ -148,8 +152,10 @@ async def test_migration_creates_notification_tables(migrated_database: str) -> 
             "notification_id",
             "channel",
             "recipient",
+            "delivery_identity",
             "status",
             "provider_message_id",
+            "error_code",
             "attempt_count",
             "sent_at",
             "created_at",
@@ -572,7 +578,7 @@ async def test_mark_delivery_failed_writes_audit(migrated_database: str) -> None
                 session,
                 delivery_id=delivery.id,
                 organisation_id=org.id,
-                error_message="relay refused the message",
+                error_code=notifications_service.DELIVERY_ERROR_PERMANENTLY_REJECTED,
             )
             assert failed.status == NotificationDeliveryStatus.FAILED
 
@@ -692,6 +698,7 @@ async def test_send_notification_email_task_failure_is_permanent(
             delivery = await session.get(NotificationDelivery, delivery_id)
             assert delivery is not None
             assert delivery.status == NotificationDeliveryStatus.FAILED
+            assert delivery.error_code == "unclassified_provider_error"
 
             job = await session.get(Job, job_id)
             assert job is not None
@@ -708,7 +715,9 @@ async def test_send_notification_email_task_failure_is_permanent(
             assert audit.organisation_id == org.id
             assert audit.event_metadata is not None
             assert audit.event_metadata.get("channel") == "email"
-            assert audit.event_metadata.get("error") == "relay refused the message"
+            assert audit.event_metadata.get("error_code") == "unclassified_provider_error"
+            assert "error" not in audit.event_metadata
+            assert "recipient" not in audit.event_metadata
             assert audit.event_metadata.get("delivery_id") is not None
     finally:
         await engine.dispose()
@@ -754,6 +763,165 @@ async def test_send_notification_email_task_transient_failure_requeues_delivery(
             retry_event = await session.get(OutboxEvent, job.dispatch_id)
             assert retry_event is not None
             assert retry_event.status is OutboxEventStatus.PENDING
+    finally:
+        await engine.dispose()
+
+
+async def test_safe_retry_reuses_persisted_delivery_identity(
+    migrated_database: str,
+    task_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A definitely-unsent retry presents the exact same provider identity."""
+    engine = create_async_engine(migrated_database, poolclass=NullPool)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    identities: list[str] = []
+
+    class _RetryProvider:
+        async def send_email(self, **kwargs: Any) -> Any:
+            identities.append(str(kwargs["delivery_identity"]))
+            if len(identities) == 1:
+                raise TransientEmailSendError("not submitted")
+            return type("Result", (), {"provider_message_id": "provider-stable"})()
+
+    monkeypatch.setattr(notifications_tasks, "get_email_provider", lambda: _RetryProvider())
+    try:
+        async with session_factory() as session:
+            org, user = await _seed_org_and_user(session)
+            _notification, delivery, job = await notifications_service.send_test_notification(
+                session,
+                organisation_id=org.id,
+                user_id=user.id,
+                recipient_email=user.email,
+                actor_user_id=user.id,
+            )
+            delivery_identity = delivery.delivery_identity
+            job_id = job.id
+
+        await notifications_tasks.send_notification_email(str(job_id))
+        await notifications_tasks.send_notification_email(str(job_id))
+
+        assert identities == [delivery_identity, delivery_identity]
+        async with session_factory() as session:
+            row = await session.get(NotificationDelivery, delivery.id)
+            assert row is not None
+            assert row.status is NotificationDeliveryStatus.SUCCEEDED
+            assert row.provider_message_id == "provider-stable"
+    finally:
+        await engine.dispose()
+
+
+async def test_acceptance_unknown_is_terminal_and_not_resent(
+    migrated_database: str,
+    task_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ambiguous adapter result settles delivery, attempt and job safely."""
+    engine = create_async_engine(migrated_database, poolclass=NullPool)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    calls = 0
+
+    class _AmbiguousProvider:
+        async def send_email(self, **kwargs: Any) -> Any:
+            nonlocal calls
+            calls += 1
+            raise AcceptanceUnknownEmailSendError("connection lost after DATA")
+
+    monkeypatch.setattr(notifications_tasks, "get_email_provider", lambda: _AmbiguousProvider())
+    try:
+        async with session_factory() as session:
+            org, user = await _seed_org_and_user(session)
+            notification, delivery, job = await notifications_service.send_test_notification(
+                session,
+                organisation_id=org.id,
+                user_id=user.id,
+                recipient_email=user.email,
+                actor_user_id=user.id,
+            )
+            job_id = job.id
+
+        with pytest.raises(jobs_service.JobPermanentError):
+            await notifications_tasks.send_notification_email(str(job_id))
+        await notifications_tasks.send_notification_email(str(job_id))
+        assert calls == 1
+
+        async with session_factory() as session:
+            delivery_row = await session.get(NotificationDelivery, delivery.id)
+            job_row = await session.get(Job, job_id)
+            assert delivery_row is not None
+            assert delivery_row.status is NotificationDeliveryStatus.ATTENTION_REQUIRED
+            assert delivery_row.error_code == "acceptance_unknown"
+            assert job_row is not None
+            assert job_row.status is JobStatus.FAILED
+            assert job_row.error_code == "email_delivery_acceptance_unknown"
+            audit = await session.scalar(
+                select(AuditEvent).where(
+                    AuditEvent.action == "notification.delivery_attention_required",
+                    AuditEvent.resource_id == str(notification.id),
+                )
+            )
+            assert audit is not None
+            assert audit.event_metadata["error_code"] == "acceptance_unknown"
+            assert "recipient" not in audit.event_metadata
+    finally:
+        await engine.dispose()
+
+
+async def test_provider_accepted_then_worker_crashed_is_not_resent(
+    migrated_database: str,
+    task_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A takeover of an in-flight delivery requires attention, not resend."""
+    engine = create_async_engine(migrated_database, poolclass=NullPool)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    accepted: list[str] = []
+
+    class _WorkerCrash(BaseException):
+        pass
+
+    class _AcceptedThenCrashProvider:
+        async def send_email(self, **kwargs: Any) -> Any:
+            accepted.append(str(kwargs["delivery_identity"]))
+            raise _WorkerCrash()
+
+    monkeypatch.setattr(
+        notifications_tasks, "get_email_provider", lambda: _AcceptedThenCrashProvider()
+    )
+    try:
+        async with session_factory() as session:
+            org, user = await _seed_org_and_user(session)
+            _notification, delivery, job = await notifications_service.send_test_notification(
+                session,
+                organisation_id=org.id,
+                user_id=user.id,
+                recipient_email=user.email,
+                actor_user_id=user.id,
+            )
+            job_id = job.id
+
+        with pytest.raises(_WorkerCrash):
+            await notifications_tasks.send_notification_email(str(job_id))
+
+        async with session_factory() as session:
+            await session.execute(
+                update(Job)
+                .where(Job.id == job_id)
+                .values(execution_lease_expires_at=datetime.now(UTC) - timedelta(seconds=1))
+            )
+            await session.commit()
+
+        with pytest.raises(jobs_service.JobPermanentError):
+            await notifications_tasks.send_notification_email(str(job_id))
+        assert accepted == [delivery.delivery_identity]
+
+        async with session_factory() as session:
+            delivery_row = await session.get(NotificationDelivery, delivery.id)
+            job_row = await session.get(Job, job_id)
+            assert delivery_row is not None
+            assert delivery_row.status is NotificationDeliveryStatus.ATTENTION_REQUIRED
+            assert job_row is not None
+            assert job_row.status is JobStatus.FAILED
     finally:
         await engine.dispose()
 
@@ -943,7 +1111,7 @@ async def test_stale_delivery_worker_cannot_mutate_after_takeover(
                     session,
                     delivery_id=delivery_id,
                     organisation_id=org.id,
-                    error_message="stale failure",
+                    error_code=notifications_service.DELIVERY_ERROR_PERMANENTLY_REJECTED,
                     ownership=stale_owner,
                 )
             with pytest.raises(jobs_service.StaleDispatchError):

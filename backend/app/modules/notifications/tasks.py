@@ -3,9 +3,9 @@
 ``send_notification_email`` delivers one notification's email through the
 provider-neutral adapter (ADR-0015): it loads the durable ``notification.email``
 job (whose ``input_reference`` is the delivery id), advances the delivery row
-``queued -> running -> succeeded/failed``, records the provider's message id,
-and closes the durable job exactly like ``process_file`` does for file
-processing.
+from ``queued`` through ``running`` to a terminal outcome, records its stable
+identity and provider message id, and closes the durable job exactly like
+``process_file`` does for file processing.
 
 Email is only ever sent from this worker task — never inside an HTTP handler
 (blueprint §20), a rule the test suite enforces structurally.
@@ -16,12 +16,14 @@ wrapper, which claims the dispatch atomically, defers a duplicate with a live
 lease, persists the retry decision after a transient error and treats a stale
 attempt as a no-op. A re-delivered message for a job or delivery that
 already reached a terminal state is a no-op, so a retried or re-delivered
-message can never double-send. The delivery row is marked ``failed`` (with its
-``notification.delivery_failed`` audit row) and the durable job ``failed``
-with an ``error_code`` before :class:`JobPermanentError` is raised, so the
-message is never retried (a failed delivery is terminal by the same rule a
-succeeded one is). The transient/permanent split of SMTP failures is
-introduced in plan P4; until then every ``EmailSendError`` is permanent.
+message can never double-send. A takeover that finds an in-flight delivery
+records ``attention_required`` instead of resending. The delivery row is
+marked ``failed`` (with its ``notification.delivery_failed`` audit row) and
+the durable job ``failed`` with an ``error_code`` before
+:class:`JobPermanentError` is raised, so the message is never retried (a
+failed delivery is terminal by the same rule a succeeded one is).
+Definitely-unsent failures retry, explicit rejection fails, and
+acceptance-unknown failures terminally require operator attention.
 
 The handler function is deliberately separate from its actor declaration so a
 test can re-declare it bound to its own broker (the same pattern as
@@ -43,7 +45,12 @@ from app.core.config import get_settings
 from app.core.logging import bind_worker_context
 from app.db.session import async_session_factory
 from app.email import get_email_provider
-from app.email.base import EmailSendError, PermanentEmailSendError, TransientEmailSendError
+from app.email.base import (
+    AcceptanceUnknownEmailSendError,
+    EmailSendError,
+    PermanentEmailSendError,
+    TransientEmailSendError,
+)
 from app.modules.jobs import service as jobs_service
 from app.modules.jobs.execution import DurableJobContext, run_claimed
 from app.modules.jobs.models import Job
@@ -61,6 +68,7 @@ HANDLER_QUEUE = "emails"
 
 # Permanent error code the email-delivery job records on the durable row.
 ERROR_CODE_EMAIL_DELIVERY_FAILED = "email_delivery_failed"
+ERROR_CODE_EMAIL_DELIVERY_ATTENTION_REQUIRED = "email_delivery_acceptance_unknown"
 ERROR_CODE_INVALID_JOB_CONTEXT = "invalid_notification_job_context"
 
 logger = structlog.get_logger()
@@ -126,17 +134,14 @@ async def _send_notification_email_attempt(
         )
 
     if notifications_service.is_delivery_terminal(delivery.status):
-        # A re-delivered message for an already-finished delivery: terminal
-        # deliveries are never re-sent (Scope §6.4 idempotency rule), so
-        # close the durable job without sending a second email.
-        await jobs_service.succeed(
-            session,
-            job_id=context.job_id,
-            result_reference=str(delivery.id),
-            owner_token=context.owner_token,
-        )
-        logger.info("notification.email.skipped", reason="delivery_terminal")
+        await _settle_job_for_terminal_delivery(session, context=context, delivery=delivery)
         return
+
+    if delivery.status is notifications_service.NotificationDeliveryStatus.RUNNING:
+        # A newer attempt finding RUNNING means the prior worker crossed the
+        # durable pre-send boundary but never recorded a definite outcome. It
+        # may have died after provider acceptance, so automatic resend is unsafe.
+        await _settle_acceptance_unknown(session, context=context, delivery_id=delivery.id)
 
     # The durable reference context is complete and owned before the delivery
     # row moves to running or an external provider can be called.
@@ -153,6 +158,7 @@ async def _send_notification_email_attempt(
     provider = get_email_provider()
     try:
         result = await provider.send_email(
+            delivery_identity=delivery.delivery_identity,
             from_address=settings.email_from,
             to_address=delivery.recipient,
             subject=notification.title,
@@ -164,12 +170,35 @@ async def _send_notification_email_attempt(
         )
         logger.warning("notification.email.retrying", error_code="email_delivery_transient")
         raise
-    except (PermanentEmailSendError, EmailSendError) as exc:
+    except AcceptanceUnknownEmailSendError as exc:
+        await _settle_acceptance_unknown(
+            session, context=context, delivery_id=delivery.id, cause=exc
+        )
+    except PermanentEmailSendError as exc:
         await notifications_service.mark_delivery_failed(
             session,
             delivery_id=delivery.id,
             organisation_id=context.organisation_id,
-            error_message=str(exc),
+            error_code=notifications_service.DELIVERY_ERROR_PERMANENTLY_REJECTED,
+            commit=False,
+            ownership=context.ownership,
+        )
+        await jobs_service.fail(
+            session,
+            job_id=context.job_id,
+            error_code=ERROR_CODE_EMAIL_DELIVERY_FAILED,
+            error_message="The notification email could not be sent.",
+            owner_token=context.owner_token,
+        )
+        logger.warning("notification.email.failed", error_code=ERROR_CODE_EMAIL_DELIVERY_FAILED)
+        raise jobs_service.JobPermanentError("the notification email could not be sent") from exc
+    except EmailSendError as exc:
+        await notifications_service.mark_delivery_failed(
+            session,
+            delivery_id=delivery.id,
+            organisation_id=context.organisation_id,
+            error_code=notifications_service.DELIVERY_ERROR_UNCLASSIFIED_PROVIDER,
+            commit=False,
             ownership=context.ownership,
         )
         await jobs_service.fail(
@@ -186,6 +215,7 @@ async def _send_notification_email_attempt(
         session,
         delivery_id=delivery.id,
         provider_message_id=result.provider_message_id,
+        commit=False,
         ownership=context.ownership,
     )
     await jobs_service.succeed(
@@ -198,6 +228,72 @@ async def _send_notification_email_attempt(
         "notification.email.succeeded",
         provider_message_id=result.provider_message_id,
     )
+
+
+async def _settle_job_for_terminal_delivery(
+    session: AsyncSession,
+    *,
+    context: DurableJobContext,
+    delivery: notifications_service.NotificationDelivery,
+) -> None:
+    """Make a recovered job match its already-terminal delivery outcome."""
+    if delivery.status is notifications_service.NotificationDeliveryStatus.SUCCEEDED:
+        await jobs_service.succeed(
+            session,
+            job_id=context.job_id,
+            result_reference=delivery.provider_message_id or delivery.delivery_identity,
+            owner_token=context.owner_token,
+        )
+        logger.info("notification.email.skipped", reason="delivery_succeeded")
+        return
+
+    if delivery.status is notifications_service.NotificationDeliveryStatus.ATTENTION_REQUIRED:
+        error_code = ERROR_CODE_EMAIL_DELIVERY_ATTENTION_REQUIRED
+        error_message = "The notification email requires operator attention."
+    else:
+        error_code = ERROR_CODE_EMAIL_DELIVERY_FAILED
+        error_message = "The notification email could not be sent."
+    await jobs_service.fail(
+        session,
+        job_id=context.job_id,
+        error_code=error_code,
+        error_message=error_message,
+        owner_token=context.owner_token,
+    )
+    logger.warning("notification.email.skipped", reason="delivery_terminal", error_code=error_code)
+    raise jobs_service.JobPermanentError("the notification delivery is already terminal")
+
+
+async def _settle_acceptance_unknown(
+    session: AsyncSession,
+    *,
+    context: DurableJobContext,
+    delivery_id: uuid.UUID,
+    cause: BaseException | None = None,
+) -> NoReturn:
+    """Atomically terminally settle an outcome that must not be auto-retried."""
+    await notifications_service.mark_delivery_attention_required(
+        session,
+        delivery_id=delivery_id,
+        organisation_id=context.organisation_id,
+        commit=False,
+        ownership=context.ownership,
+    )
+    await jobs_service.fail(
+        session,
+        job_id=context.job_id,
+        error_code=ERROR_CODE_EMAIL_DELIVERY_ATTENTION_REQUIRED,
+        error_message="The notification email acceptance could not be determined.",
+        owner_token=context.owner_token,
+    )
+    logger.warning(
+        "notification.email.attention_required",
+        error_code=ERROR_CODE_EMAIL_DELIVERY_ATTENTION_REQUIRED,
+    )
+    error = jobs_service.JobPermanentError("the notification email requires operator attention")
+    if cause is not None:
+        raise error from cause
+    raise error
 
 
 async def _fail_invalid_context(
@@ -226,7 +322,7 @@ async def _fail_invalid_context(
 async def _on_notification_email_exhausted(
     session: AsyncSession, *, job_id: uuid.UUID, failure_code: str
 ) -> None:
-    """Finalize the delivery with the job's exact terminal cause.
+    """Finalize the delivery with a delivery-specific terminal cause.
 
     The exhaustion hook runs inside the owner-checked job-settlement
     transaction (``jobs_service._fail_locked`` is only reached after the
@@ -240,16 +336,19 @@ async def _on_notification_email_exhausted(
         delivery_id = uuid.UUID(job.input_reference)
     except ValueError:
         return
-    error_message = (
-        "The notification email could not be dispatched."
-        if failure_code == jobs_service.ERROR_CODE_DISPATCH_INVALID
-        else "The notification email could not be sent after all retries."
-    )
+    delivery_error_code = {
+        jobs_service.ERROR_CODE_RETRIES_EXHAUSTED: (
+            notifications_service.DELIVERY_ERROR_SAFE_RETRIES_EXHAUSTED
+        ),
+        jobs_service.ERROR_CODE_DISPATCH_INVALID: (
+            notifications_service.DELIVERY_ERROR_DISPATCH_FAILED
+        ),
+    }.get(failure_code, notifications_service.DELIVERY_ERROR_UNCLASSIFIED_PROVIDER)
     await notifications_service.mark_delivery_failed(
         session,
         delivery_id=delivery_id,
         organisation_id=job.organisation_id,
-        error_message=error_message,
+        error_code=delivery_error_code,
         commit=False,
     )
 

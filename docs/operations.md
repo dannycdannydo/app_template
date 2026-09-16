@@ -193,6 +193,40 @@ older than 30 days each UTC cleanup interval (settings:
 cadence safe across coordinator replicas and restarts. Pending, publishing and
 dead rows are retained.
 
+### Acceptance-unknown email
+
+An email delivery with `status = 'attention_required'` crossed the durable
+submission boundary, but the worker could not prove whether the SMTP relay
+accepted it. The worker terminally fails the associated job with
+`email_delivery_acceptance_unknown`; it never resends the delivery
+automatically. The delivery's stable `delivery_identity` maps to the SMTP
+`Message-ID` as `<delivery_identity@configured-smtp-host>`.
+
+When this alert occurs:
+
+1. Find affected rows with a privacy-safe query (run through your normal
+   read-only database access):
+
+   ```sql
+   SELECT id, delivery_identity
+   FROM notification_deliveries
+   WHERE status = 'attention_required'
+   ORDER BY id;
+   ```
+
+   Record only the opaque delivery id and `delivery_identity`; do not copy the
+   recipient, subject, body, provider response or credentials into tickets.
+2. Search the relay's delivery/activity log for that exact Message-ID. Treat a
+   matching accepted event as sent; absence is not proof of non-acceptance
+   until the provider's documented log-retention and ingestion delay have been
+   checked.
+3. Do not update the row or enqueue the job directly. This release deliberately
+   has no generic replay/resolution API. Resolution or resend requires a
+   separately reviewed, authenticated operator workflow that records who
+   verified the provider evidence and preserves the original delivery row.
+4. If provider evidence is unavailable, leave the row attention-required and
+   communicate the uncertainty through the application-specific support path.
+
 ## Redis
 
 Redis in this profile is a private service: no published port, password
