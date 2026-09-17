@@ -3,6 +3,7 @@ import { LoaderCircleIcon, ShieldXIcon, Trash2Icon } from '@lucide/vue'
 import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
+import { isApiError } from '@/api/errors'
 import type { ApiError } from '@/api/errors'
 import RecordForm from '@/components/application/RecordForm.vue'
 import { Button } from '@/components/ui/button'
@@ -29,9 +30,11 @@ const props = defineProps<{ recordId: string }>()
 const router = useRouter()
 const { permissions, mePending } = useRecordPermissions()
 
-const { data: record, isPending, isError, error } = useRecordQuery(() => props.recordId)
+const { data: record, isPending, isError, error, refetch } = useRecordQuery(() => props.recordId)
 
 const confirmDeleteOpen = ref(false)
+
+const recordVersion = computed(() => record.value?.version)
 
 const initialValues = computed<{ title: string; body: string } | undefined>(() => {
   if (!record.value) return undefined
@@ -58,10 +61,17 @@ function cancelDelete(): void {
 }
 
 async function confirmDelete(): Promise<void> {
+  const version = recordVersion.value
+  if (version === undefined) return
   try {
-    await deleteMutation.mutateAsync(props.recordId)
+    await deleteMutation.mutateAsync({ recordId: props.recordId, version })
   } catch (deleteError) {
-    showApiErrorToast(deleteError, { title: 'Could not delete record' })
+    if (isApiError(deleteError) && deleteError.code === 'record_version_conflict') {
+      showApiErrorToast(deleteError, { title: 'Record changed' })
+      void refetch()
+    } else {
+      showApiErrorToast(deleteError, { title: 'Could not delete record' })
+    }
   } finally {
     confirmDeleteOpen.value = false
   }
@@ -162,8 +172,10 @@ async function confirmDelete(): Promise<void> {
           v-else
           mode="edit"
           :record-id="recordId"
+          :version="recordVersion"
           :initial-values="initialValues"
           list-route-name="records"
+          @conflict="refetch()"
         />
       </CardContent>
     </Card>

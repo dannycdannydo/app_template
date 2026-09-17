@@ -320,6 +320,34 @@ The API fails closed when Redis is unavailable (`rate_limiter_unavailable`, 503)
   publication fails visibly and the pending PostgreSQL outbox row retries.
   Rate-limit counter loss does not affect broker state.
 
+## Records, revisions and audit integrity (plan P8)
+
+- **A `409 record_version_conflict` is expected behaviour**, not an incident. It
+  means two users edited the same record; the UI reloads and the user retries.
+  No operator action is needed. A spike is useful product signal, not a fault.
+- **`audit_events` and `record_revisions` are append-only.** Row-level
+  `BEFORE UPDATE OR DELETE` triggers plus statement-level `BEFORE TRUNCATE`
+  triggers reject any mutation with an
+  `... is append-only and cannot be modified` database error (ADR-0020). Never
+  try to correct history in place, and do not `TRUNCATE` these tables; the
+  ledger is the provenance.
+- **Record deletion is permanent and has no restore operation.** The immutable
+  revisions are reconstruction evidence, not a programmatic restore: a deleted
+  record stays 404 and `service.restore_record` rejects restoration with
+  `record_restore_unsupported`. Re-creating content produces a new record id at
+  version 1; never re-insert a deleted record id by hand.
+- **Actor/organisation ids on these rows are opaque UUIDs** and may reference a
+  user or organisation that was hard-deleted. That is intended: the identity
+  survives the referent. A missing join row is not corruption.
+- **Tenant or actor erasure is a reviewed purge**, not a cascade. Deleting an
+  organisation does not touch these tables; erasing business history requires
+  deliberately disabling the trigger under the retention decision in ADR-0020
+  and `docs/backup-and-recovery.md`.
+- Useful read-only checks:
+  `SELECT count(*) FROM record_revisions;`
+  `SELECT max(created_at) FROM audit_events;`
+  `SELECT action, count(*) FROM audit_events GROUP BY action ORDER BY 2 DESC;`
+
 ## Trusted proxy and client-IP handling
 
 Caddy is the single TLS-terminating edge. Requests reach the API with the

@@ -237,6 +237,50 @@ invitation marked accepted, audit invitation.accepted + membership.role_changed
 - `POST /api/v1/webhooks/workos` (signature-verified, HMAC-SHA256, 300s tolerance) refreshes best-effort invitation state only; it never grants membership.
 - WorkOS invitations are sent into the mapped WorkOS org; `organisations.workos_organisation_id` is created eagerly at platform org creation and lazily backfilled at first invite. The mapping is never client-writable.
 
+## Auditable records, conflict-safe edits and append-only audit (plan P8)
+
+The representative records module is the template's proof that an editable
+business record has optimistic concurrency, history and durable provenance
+(ADR-0020, blueprint §10, §11, §29).
+
+```text
+PATCH /api/v1/records/{id} { version, title?, body? }
+        │   lock the org-scoped row FOR UPDATE
+        │   stored version != body.version          → 409 record_version_conflict
+        ▼
+version += 1; snapshot a record_revisions row; audit record.updated {version}
+        │
+DELETE /api/v1/records/{id}?version=N
+        │   same lock + version check; stale        → 409 record_version_conflict
+        ▼
+snapshot a `deleted` record_revisions row, then hard-delete the row
+```
+
+- **Optimistic concurrency**: `records.version` starts at 1; the update body and
+  the delete query parameter carry the version the caller last read. The service
+  locks the row `FOR UPDATE`, compares, and only then writes, so two concurrent
+  writers serialise and the stale one gets a `409 record_version_conflict`.
+  `RecordDetail`/`RecordListItem` expose the current version, and the generated
+  frontend types drive the conditional payload/parameter.
+- **Immutable history**: every accepted create/update/delete writes one
+  `record_revisions` snapshot (bounded `title`/`body`, the version, the actor and
+  a closed `created`/`updated`/`deleted` action) in the same transaction. There
+  is no public revision endpoint; the ledger is internal provenance, and the
+  audit event carries only the safe version number — never record content.
+- **Provenance survives deletion**: `record_revisions.record_id`/`actor_user_id`
+  and `audit_events.organisation_id`/`actor_user_id` are opaque non-foreign-key
+  UUIDs. Deleting a record or user does not erase who changed what; tenant
+  erasure is an explicitly reviewed purge (ADR-0020).
+- **Hard delete, no restore**: deletion is permanent. There is no record-level
+  restore operation or endpoint; the immutable revisions are reconstruction
+  evidence for a human/operator, and `service.restore_record` exists only to
+  reject restoration with `record_restore_unsupported`.
+- **Database-enforced append-only**: a row-level `BEFORE UPDATE OR DELETE` and a
+  statement-level `BEFORE TRUNCATE` trigger on each of `audit_events` and
+  `record_revisions` reject mutation at the database boundary, so the guarantee
+  does not depend only on the absence of API write paths and cannot be bypassed
+  by `TRUNCATE` as the table-owning role.
+
 ## Frontend structure
 
 Vue 3 + TypeScript SPA. Directory layout, conventions, and state-management split follow blueprint §14; UI follows the design system in blueprint §16 (reusable application components above shadcn-vue primitives). API types are generated, never hand-written (blueprint §15).

@@ -144,6 +144,33 @@ pg_restore --no-owner --role=app -d app_template_production_restore \
 Because the dump is taken nightly, its RPO is up to 24 h: use it only when
 PITR is unavailable, and expect to re-apply anything written after the dump.
 
+### Record revisions and append-only audit after a restore
+
+`audit_events` and `record_revisions` are append-only at the database boundary
+(row-level `BEFORE UPDATE OR DELETE` plus statement-level `BEFORE TRUNCATE`
+triggers, ADR-0020), and `records` carries an optimistic-concurrency `version`.
+A restore restores them exactly as they were; PITR moves the whole ledger to
+the restore point and cannot leave a revision inconsistent with its record row
+in a way the API would accept, because every write was transactional.
+
+A logical restore is the **only** restore path: there is no record-level
+restore operation and no API/endpoint that resurrects a deleted record. After a
+restore, a record that was already hard-deleted stays deleted; reconstruct its
+content from `record_revisions` and re-create it as a new record (new id,
+version 1) if a human decides that is warranted.
+
+- Verify continuity with read-only queries, e.g.
+  `SELECT count(*), max(created_at) FROM record_revisions;` and the same for
+  `audit_events`; compare against the restore point.
+- Do **not** attempt to repair or prune these tables with `UPDATE`/`DELETE`:
+  the trigger rejects it (an `audit_events is append-only` database error). The
+  same applies to `pg_restore --clean` on a live database.
+- `actor_user_id`/`organisation_id` are opaque UUIDs and may legitimately
+  reference a user or organisation that has since been hard-deleted; a restore
+  must not "repair" those references.
+- Tenant/actor erasure is **not** part of a restore or rollback. It requires the
+  separately reviewed purge that deliberately disables the trigger (ADR-0020).
+
 This procedure was executed against scratch infrastructure — see
 [Tested run A](#tested-run-a-database-logical-restore-on-scratch-postgresql).
 

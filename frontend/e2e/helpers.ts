@@ -120,6 +120,7 @@ export function createRecordFixture() {
     id: string
     title: string
     body: string
+    version: number
     created_at: string
     updated_at: string
   }> = [
@@ -127,6 +128,7 @@ export function createRecordFixture() {
       id: '11111111-1111-4111-8111-111111111111',
       title: 'Welcome note',
       body: 'The first record in this organisation.',
+      version: 1,
       created_at: '2026-01-01T00:00:00Z',
       updated_at: '2026-01-02T00:00:00Z',
     },
@@ -718,12 +720,24 @@ export async function mockBackendApi(
         Object.assign(record, {
           title: body.title ?? record.title,
           body: body.body ?? record.body,
+          version: record.version + 1,
           updated_at: '2026-03-01T00:00:00Z',
         })
         return json(record)
       }
       if (method === 'DELETE' && record) {
         capturedHeaders.push({ authorization, orgId })
+        const expectedVersion = Number(url.searchParams.get('version'))
+        if (expectedVersion !== record.version) {
+          return json(
+            {
+              code: 'record_version_conflict',
+              message: 'The record was changed by someone else. Reload it and try again.',
+              request_id: 'mock-409',
+            },
+            409,
+          )
+        }
         fixture.records.splice(fixture.records.indexOf(record), 1)
         return route.fulfill({ status: 204 })
       }
@@ -737,6 +751,7 @@ export async function mockBackendApi(
         id: fixture.nextId(),
         title: body.title,
         body: body.body ?? '',
+        version: 1,
         created_at: '2026-04-01T00:00:00Z',
         updated_at: '2026-04-01T00:00:00Z',
       }

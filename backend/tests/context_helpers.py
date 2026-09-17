@@ -214,8 +214,9 @@ def make_record(
     *,
     title: str = "First record",
     body: str = "Record body",
+    version: int = 1,
 ) -> Record:
-    record = Record(organisation_id=organisation_id, title=title, body=body)
+    record = Record(organisation_id=organisation_id, title=title, body=body, version=version)
     record.id = uuid.uuid4()
     record.created_at = datetime.now(UTC)
     record.updated_at = datetime.now(UTC)

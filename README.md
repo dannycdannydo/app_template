@@ -24,7 +24,7 @@ The authoritative design standard is `Internal_Custom_Application_Starter_Archit
 backend/                 FastAPI application (app/, alembic/, pyproject.toml)
 frontend/                Vue 3 + Vite application (src/, Dockerfile, nginx.conf)
 deploy/compose/          Compose files (compose.local.yml = local development)
-docs/decisions/          Architecture decision records (ADR 0001-0018)
+docs/decisions/          Architecture decision records (ADR 0001-0020)
 .github/workflows/       CI pipeline
 Makefile                 Command surface for development and quality gates
 .env.example             Documented environment variables

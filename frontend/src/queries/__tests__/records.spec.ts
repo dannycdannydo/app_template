@@ -42,6 +42,7 @@ const deleteMock = vi.mocked(client.DELETE)
 const listItem: RecordListItem = {
   id: RECORD_ID,
   title: 'First record',
+  version: 1,
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
 }
@@ -174,13 +175,16 @@ describe('records query composables', () => {
     await flushPromises()
     await flushPromises()
 
-    captured.update.mutate({ recordId: RECORD_ID, payload: { title: 'Renamed' } })
+    captured.update.mutate({
+      recordId: RECORD_ID,
+      payload: { version: 1, title: 'Renamed' },
+    })
     await flushPromises()
     await flushPromises()
 
     expect(patchMock).toHaveBeenCalledWith('/api/v1/records/{record_id}', {
       params: { path: { record_id: RECORD_ID } },
-      body: { title: 'Renamed' },
+      body: { version: 1, title: 'Renamed' },
     })
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: recordsQueryKeys.lists(ORG_A) })
     expect(invalidateSpy).toHaveBeenCalledWith({
@@ -198,12 +202,12 @@ describe('records query composables', () => {
     await flushPromises()
     await flushPromises()
 
-    captured.remove.mutate(RECORD_ID)
+    captured.remove.mutate({ recordId: RECORD_ID, version: 1 })
     await flushPromises()
     await flushPromises()
 
     expect(deleteMock).toHaveBeenCalledWith('/api/v1/records/{record_id}', {
-      params: { path: { record_id: RECORD_ID } },
+      params: { path: { record_id: RECORD_ID }, query: { version: 1 } },
     })
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: recordsQueryKeys.lists(ORG_A) })
     expect(invalidateSpy).toHaveBeenCalledWith({

@@ -221,6 +221,7 @@ async def test_delete_record_blocked_when_flag_is_off() -> None:
             session,
             organisation_id=org_id,
             record_id=record.id,
+            expected_version=1,
         )
     assert excinfo.value.code == "feature_disabled"
 
@@ -240,6 +241,7 @@ async def test_delete_record_allowed_once_platform_enables_flag() -> None:
         session,
         organisation_id=org_id,
         record_id=record.id,
+        expected_version=1,
     )
     assert state.records == []
 
@@ -545,6 +547,7 @@ async def test_delete_record_endpoint_blocked_by_default() -> None:
     async with context_client(app) as client:
         response = await client.delete(
             f"/api/v1/records/{record.id}",
+            params={"version": 1},
             headers={
                 "Authorization": f"Bearer {make_token(private_key)}",
                 "X-Org-Id": str(org_id),

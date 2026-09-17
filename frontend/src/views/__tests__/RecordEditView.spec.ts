@@ -69,6 +69,7 @@ const record: RecordDetail = {
   id: RECORD_ID,
   title: 'Existing record',
   body: 'Existing body',
+  version: 2,
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-02T00:00:00Z',
 }
@@ -111,6 +112,7 @@ describe('RecordEditView', () => {
       isPending: ref(false),
       isError: ref(false),
       error: ref(null),
+      refetch: vi.fn<() => Promise<unknown>>(),
     })
     mockUseCreateRecordMutation.mockReturnValue({
       mutateAsync: vi.fn<() => Promise<unknown>>(),
@@ -168,8 +170,8 @@ describe('RecordEditView', () => {
   it('requires confirmation before deleting and deletes on the second click', async () => {
     const deleteRecordId = vi.fn<(recordId: string) => void>()
     const mutateAsync = vi
-      .fn<(recordId: string) => Promise<void>>()
-      .mockImplementation(async (recordId: string) => {
+      .fn<(input: { recordId: string; version: number }) => Promise<void>>()
+      .mockImplementation(async ({ recordId }) => {
         deleteRecordId(recordId)
         const calls = mockUseDeleteRecordMutation.mock.calls
         calls[calls.length - 1]?.[0]?.onSuccess?.(recordId)
@@ -192,6 +194,7 @@ describe('RecordEditView', () => {
     await flushPromises()
 
     expect(deleteRecordId).toHaveBeenCalledWith(RECORD_ID)
+    expect(mutateAsync).toHaveBeenCalledWith({ recordId: RECORD_ID, version: 2 })
     await flushPromises()
     expect(router.currentRoute.value.name).toBe('records')
   })

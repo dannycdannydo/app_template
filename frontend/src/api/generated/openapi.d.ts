@@ -348,14 +348,18 @@ export interface paths {
     post?: never
     /**
      * Delete Record Endpoint
-     * @description Delete a record inside the caller's organisation.
+     * @description Conditionally delete a record; a stale version is a 409 conflict.
+     *
+     *     The expected version travels as a required query parameter because HTTP
+     *     DELETE has no request body convention; the generated client sends it from
+     *     the loaded record.
      */
     delete: operations['delete_record_endpoint_api_v1_records__record_id__delete']
     options?: never
     head?: never
     /**
      * Update Record Endpoint
-     * @description Partially update a record inside the caller's organisation.
+     * @description Conditionally update a record; a stale version is a 409 conflict.
      */
     patch: operations['update_record_endpoint_api_v1_records__record_id__patch']
     trace?: never
@@ -2044,6 +2048,8 @@ export interface components {
        * Format: date-time
        */
       updated_at: string
+      /** Version */
+      version: number
       /** Body */
       body: string
     }
@@ -2069,6 +2075,8 @@ export interface components {
        * Format: date-time
        */
       updated_at: string
+      /** Version */
+      version: number
     }
     /**
      * RecordListResponse
@@ -2086,9 +2094,15 @@ export interface components {
     }
     /**
      * RecordUpdate
-     * @description Request payload for updating a record (PATCH semantics: all optional).
+     * @description Request payload for a conditional update (PATCH semantics: all optional).
+     *
+     *     ``version`` is required: it is the version the caller last read from a
+     *     detail/list response. The service compares it against the locked row and a
+     *     stale value is a 409 ``record_version_conflict`` (BP §10).
      */
     RecordUpdate: {
+      /** Version */
+      version: number
       /** Title */
       title?: string | null
       /** Body */
@@ -2882,7 +2896,9 @@ export interface operations {
   }
   delete_record_endpoint_api_v1_records__record_id__delete: {
     parameters: {
-      query?: never
+      query: {
+        version: number
+      }
       header?: {
         'x-org-id'?: string | null
         authorization?: string | null

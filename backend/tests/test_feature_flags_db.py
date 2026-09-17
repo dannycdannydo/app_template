@@ -274,6 +274,7 @@ async def test_delete_record_enforced_against_real_rows(migrated_database: str) 
                     session,
                     organisation_id=organisation.id,
                     record_id=record.id,
+                    expected_version=1,
                 )
             assert excinfo.value.code == "feature_disabled"
             assert (
@@ -300,6 +301,7 @@ async def test_delete_record_enforced_against_real_rows(migrated_database: str) 
                 session,
                 organisation_id=organisation.id,
                 record_id=record.id,
+                expected_version=1,
             )
             assert (
                 await session.scalar(
