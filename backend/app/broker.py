@@ -51,4 +51,4 @@ def build_broker() -> Broker:
     middleware = worker_middleware()
     if settings.app_env == "test":
         return StubBroker(middleware=middleware)
-    return RedisBroker(url=settings.redis_url, middleware=middleware)
+    return RedisBroker(url=settings.broker_redis_url, middleware=middleware)

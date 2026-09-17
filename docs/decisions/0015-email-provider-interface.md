@@ -65,6 +65,14 @@ server-side secrets.
 **Email is only ever sent from Dramatiq tasks, never from an HTTP handler**
 (blueprint §20, ADR-0004) — proven by test.
 
+**Acceptance ambiguity is terminal, not retryable** (2026-09 amendment): the
+caller persists one stable delivery identity before the first provider call.
+SMTP maps it to a stable Message-ID. A definite pre-submission failure may
+retry, an explicit rejection fails, and a timeout/disconnect after submission
+starts becomes `attention_required`. Operators verify that identity in the
+provider activity log; the system never automatically resends an unknown
+acceptance outcome.
+
 ## Consequences
 
 - One adapter covers every transactional provider's SMTP relay in production

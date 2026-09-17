@@ -23,13 +23,14 @@
 #                      caddy-ratelimit module)
 #
 # The API and worker read the same environment file (the v0.6 setting
-# surface: DATABASE_URL, REDIS_URL, WorkOS, STORAGE_*, EMAIL_*/SMTP_*,
+# surface: DATABASE_URL, BROKER_REDIS_URL, RATE_LIMIT_REDIS_URL, WorkOS,
+# STORAGE_*, EMAIL_*/SMTP_*,
 # SENTRY_*, CORS/TRUSTED_HOSTS for the production domain). Redis is created
 # by this profile but never published; it is password-protected and its
 # configuration is documented in docs/operations.md.
 #
 # Validation: `docker compose -f deploy/compose/compose.hybrid-vps.yml
-# config` requires REDIS_PASSWORD and ACME_EMAIL (secrets/settings,
+# config` requires both Redis passwords and ACME_EMAIL (secrets/settings,
 # deliberately fail-fast) and an existing environment file; CI exports
 # placeholder values and passes ENV_FILE=/dev/null.
 
@@ -100,7 +101,9 @@ services:
     env_file:
       - ${ENV_FILE:-.env.production}
     depends_on:
-      redis:
+      redis-broker:
+        condition: service_healthy
+      redis-rate-limit:
         condition: service_healthy
     healthcheck:
       test:
@@ -146,7 +149,7 @@ services:
     env_file:
       - ${ENV_FILE:-.env.production}
     depends_on:
-      redis:
+      redis-broker:
         condition: service_healthy
       api:
         condition: service_started
@@ -191,7 +194,7 @@ services:
     env_file:
       - ${ENV_FILE:-.env.production}
     depends_on:
-      redis:
+      redis-broker:
         condition: service_healthy
     stop_grace_period: 30s
     # The coordinator has no HTTP endpoint; the health check verifies the
@@ -222,37 +225,30 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  # Private Redis: broker for Dramatiq and backing store for the distributed
-  # API rate limit. Not published — only the compose network can reach it.
-  # Password, persistence (append-only file) and the memory/eviction policy
-  # are set here and documented in docs/operations.md; REDIS_URL in the
-  # environment file must carry the same password.
-  redis:
+  # Private, durable Dramatiq broker. It rejects writes at the memory ceiling
+  # instead of evicting queue state; PostgreSQL retains the outbox intent.
+  redis-broker:
     image: redis:7-alpine
     environment:
-      # The healthcheck and the command below both need the password; the
-      # `:?` form fails `docker compose config` (and any `up`) until it is
-      # set, so a production host can never start with an empty or default
-      # Redis password.
-      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in the environment file}
+      REDIS_PASSWORD: ${BROKER_REDIS_PASSWORD:?set BROKER_REDIS_PASSWORD in the environment file}
     command:
       [
         "redis-server",
         "--requirepass",
-        "${REDIS_PASSWORD:?set REDIS_PASSWORD in the environment file}",
+        "${BROKER_REDIS_PASSWORD:?set BROKER_REDIS_PASSWORD in the environment file}",
         "--appendonly",
         "yes",
         "--maxmemory",
         "200mb",
         "--maxmemory-policy",
-        "allkeys-lru",
+        "noeviction",
         "--save",
         "60",
         "1000",
       ]
     restart: unless-stopped
     volumes:
-      - redis_data:/data
+      - redis_broker_data:/data
     healthcheck:
       test: ["CMD-SHELL", "REDISCLI_AUTH=$$REDIS_PASSWORD redis-cli ping | grep PONG"]
       interval: 10s
@@ -269,7 +265,44 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # Disposable counter store for distributed API rate limiting. Eviction is
+  # acceptable here and cannot remove Dramatiq messages because this service
+  # has a separate process, endpoint and volume.
+  redis-rate-limit:
+    image: redis:7-alpine
+    environment:
+      REDIS_PASSWORD: ${RATE_LIMIT_REDIS_PASSWORD:?set RATE_LIMIT_REDIS_PASSWORD in the environment file}
+    command:
+      [
+        "redis-server",
+        "--requirepass",
+        "${RATE_LIMIT_REDIS_PASSWORD:?set RATE_LIMIT_REDIS_PASSWORD in the environment file}",
+        "--maxmemory",
+        "64mb",
+        "--maxmemory-policy",
+        "allkeys-lru",
+      ]
+    restart: unless-stopped
+    volumes:
+      - redis_rate_limit_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=$$REDIS_PASSWORD redis-cli ping | grep PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 96M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   caddy_data:
   caddy_config:
-  redis_data:
+  redis_broker_data:
+  redis_rate_limit_data:

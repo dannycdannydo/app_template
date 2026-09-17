@@ -52,6 +52,7 @@ from app.modules.webhooks.router import router as webhooks_router
 from app.observability.metrics import (
     metrics_middleware,
     refresh_outbox_metrics,
+    refresh_reliability_metrics,
     update_queue_depths,
 )
 from app.observability.metrics import router as metrics_router
@@ -220,6 +221,7 @@ async def _queue_depth_refresh_loop() -> None:
             reconciliation_threshold_seconds=settings.job_reconcile_threshold_seconds,
             reconciliation_cooldown_seconds=settings.job_reconcile_cooldown_seconds,
         )
+        await refresh_reliability_metrics(async_session_factory)
         await asyncio.sleep(30)
 
 

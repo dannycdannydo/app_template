@@ -22,7 +22,7 @@ def test_development_profile_builds_redis_broker(monkeypatch: pytest.MonkeyPatch
     settings = type(
         "DevelopmentSettings",
         (),
-        {"app_env": "development", "redis_url": "redis://localhost:6379/0"},
+        {"app_env": "development", "broker_redis_url": "redis://localhost:6379/0"},
     )()
     monkeypatch.setattr(broker_module, "get_settings", lambda: settings)
 

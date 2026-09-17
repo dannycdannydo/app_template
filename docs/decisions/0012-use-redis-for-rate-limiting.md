@@ -26,3 +26,12 @@ from outside the host, so TLS there adds cost without reducing exposure.
 Redis is now a required production dependency. The test profile deliberately
 uses a no-op adapter so deterministic endpoint tests do not require a network
 service; the real local stack includes Redis through Compose.
+
+## 2026-09 isolation amendment
+
+Rate-limit counters use `RATE_LIMIT_REDIS_URL`, physically separate from the
+Dramatiq `BROKER_REDIS_URL`. The counter service may use `allkeys-lru`; broker
+queue state is AOF-backed and `noeviction`. Production rejects endpoints that
+normalise to the same host/port because logical database numbers do not
+isolate memory or eviction policy. `REDIS_URL` remains only as a
+non-production compatibility fallback.

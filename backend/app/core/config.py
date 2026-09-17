@@ -83,9 +83,20 @@ class Settings(BaseSettings):
         default="",
         description="Async SQLAlchemy database URL, e.g. postgresql+asyncpg://user:pass@host:5432/db",
     )
+    broker_redis_url: str = Field(
+        default="",
+        description="Dedicated Redis endpoint for Dramatiq broker state",
+    )
+    rate_limit_redis_url: str = Field(
+        default="",
+        description="Dedicated Redis endpoint for distributed API rate limiting",
+    )
     redis_url: str = Field(
         default="redis://localhost:6379/0",
-        description="Redis URL for distributed API rate limiting",
+        description=(
+            "Deprecated non-production fallback for BROKER_REDIS_URL and "
+            "RATE_LIMIT_REDIS_URL; production must configure both dedicated endpoints"
+        ),
     )
     workos_api_key: str = Field(
         default="",
@@ -787,6 +798,12 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_config(self) -> Settings:
+        if self.app_env != "production":
+            # Preserve the historical REDIS_URL development/test surface while
+            # production requires physically separate endpoints. This fallback
+            # is intentionally unavailable in production.
+            self.broker_redis_url = self.broker_redis_url or self.redis_url
+            self.rate_limit_redis_url = self.rate_limit_redis_url or self.redis_url
         if not self.database_url.startswith(("postgresql", "postgres")):
             raise ValueError("database_url must be a PostgreSQL URL")
         # The execution lease must outlive the standard task time limit by at
@@ -823,11 +840,28 @@ class Settings(BaseSettings):
             raise ValueError(
                 "trusted_hosts must be explicitly configured in the production environment"
             )
-        if self.app_env == "production" and not self._redis_url_is_production_safe():
-            raise ValueError(
-                "redis_url must use rediss in the production environment unless "
-                "Redis is on loopback or a private compose-network host"
-            )
+        if self.app_env == "production":
+            if not self.broker_redis_url or not self.rate_limit_redis_url:
+                raise ValueError(
+                    "broker_redis_url and rate_limit_redis_url are both required "
+                    "in the production environment"
+                )
+            for field_name, value in (
+                ("broker_redis_url", self.broker_redis_url),
+                ("rate_limit_redis_url", self.rate_limit_redis_url),
+            ):
+                if not self._redis_url_is_production_safe(value):
+                    raise ValueError(
+                        f"{field_name} must use rediss in the production environment unless "
+                        "Redis is on loopback or a private compose-network host"
+                    )
+            if self._normalised_redis_endpoint(
+                self.broker_redis_url
+            ) == self._normalised_redis_endpoint(self.rate_limit_redis_url):
+                raise ValueError(
+                    "broker_redis_url and rate_limit_redis_url must use distinct "
+                    "Redis endpoints in the production environment"
+                )
         if self.app_env == "production" and any(
             not origin.startswith("https://") for origin in self.cors_allowed_origins
         ):
@@ -936,7 +970,21 @@ class Settings(BaseSettings):
             )
         return self
 
-    def _redis_url_is_production_safe(self) -> bool:
+    @staticmethod
+    def _normalised_redis_endpoint(redis_url: str) -> tuple[str, int]:
+        """Return the physical Redis endpoint, excluding credentials and DB.
+
+        Different logical databases on one server do not provide memory,
+        persistence or eviction isolation, so they deliberately compare equal.
+        """
+        parsed = urlsplit(redis_url)
+        scheme = parsed.scheme.lower()
+        if scheme not in {"redis", "rediss"} or not parsed.hostname:
+            raise ValueError("Redis URLs must use redis:// or rediss:// with a hostname")
+        return (parsed.hostname.lower().rstrip("."), parsed.port or 6379)
+
+    @staticmethod
+    def _redis_url_is_production_safe(redis_url: str) -> bool:
         """TLS is required for production Redis unless it is unreachable from
         the public network.
 
@@ -948,9 +996,9 @@ class Settings(BaseSettings):
         reachable over a network an attacker may observe, so plaintext
         ``redis://`` is rejected there.
         """
-        if self.redis_url.startswith("rediss://"):
+        if redis_url.startswith("rediss://"):
             return True
-        host = (urlsplit(self.redis_url).hostname or "").lower()
+        host = (urlsplit(redis_url).hostname or "").lower()
         if host in {"localhost", "127.0.0.1", "::1"}:
             return True
         try:

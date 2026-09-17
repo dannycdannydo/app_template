@@ -53,7 +53,10 @@ Responsibilities:
   job + event scheduling, execution ownership (dispatch identity and lease),
   reconciliation and retention.
 - **Redis**: transient message transport only. Broker messages remain
-  reference-only (durable jobs carry `job_id` only).
+  reference-only (durable jobs carry `job_id` only). Production gives the
+  broker its own AOF-backed, `noeviction` Redis process and volume, separate
+  from disposable rate-limit counters. Broker pressure therefore fails a
+  publish visibly and leaves the outbox intent available for retry.
 - **Coordinator**: claims due outbox rows in bounded batches, publishes them,
   settles publication state, retries temporary failures with capped backoff,
   and reconciles stranded `queued` jobs.
@@ -107,6 +110,9 @@ and the guarded recovery command republishes them after roll-forward.
   existing provider/delivery idempotency rules; the plan does not claim
   globally exactly-once effects.
 - No new third-party runtime dependency is required.
+- Queue state is observed through payload-blind Redis cardinalities validated
+  against the deliberately constrained Dramatiq 2.2.x line. Ready, delayed,
+  in-flight and dead-letter signals never inspect message content.
 
 This decision amends ADR-0004 (retain the Dramatiq stack) rather than
 replacing it.

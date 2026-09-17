@@ -128,11 +128,14 @@ There is no hidden universal bypass.
 
 ## Hybrid VPS production profile (Scope §6.6, blueprint §35.1)
 
-The generic Linux VPS / container-host profile (`deploy/compose/compose.hybrid-vps.yml`, `deploy/caddy/`, `.github/workflows/deploy-vps.yml`) is the portable production baseline. It runs Caddy, the static Vue artifact, the FastAPI backend, the Dramatiq worker and a private Redis on the host; PostgreSQL, object storage, WorkOS, transactional email and monitoring stay external (ADR-0007). The following controls are mandatory for any deployment built from this profile:
+The generic Linux VPS / container-host profile (`deploy/compose/compose.hybrid-vps.yml`, `deploy/caddy/`, `.github/workflows/deploy-vps.yml`) is the portable production baseline. It runs Caddy, the static Vue artifact, the FastAPI backend, the Dramatiq worker and isolated private broker/rate-limit Redis services on the host; PostgreSQL, object storage, WorkOS, transactional email and monitoring stay external (ADR-0007). The following controls are mandatory for any deployment built from this profile:
 
 - **Firewall**: the host firewall allows only 22/TCP (SSH), 80/TCP and 443/TCP from the public internet, plus the egress ports the external services need. Configure it at the provider or host level (ufw/firewalld/nftables); never expose PostgreSQL, Redis, MinIO or the API port directly.
 - **SSH keys only**: password and root SSH login are disabled (`PasswordAuthentication no`, `PermitRootLogin no`); the deploy workflow authenticates with a dedicated deploy key (GitHub secret `DEPLOY_SSH_KEY`) that has no password and is restricted to the release directory and docker group on the host.
-- **Non-public Redis**: the Redis container binds only to the internal compose network (no `ports:` mapping in `compose.hybrid-vps.yml`), requires a strong password (`REDIS_PASSWORD`, fail-fast at compose level), and enforces a memory cap and eviction policy (docs/operations.md — Redis authentication, persistence, memory/eviction policy, loss consequences).
+- **Non-public isolated Redis**: both Redis containers bind only to the internal
+  compose network, use separate strong passwords and fail fast when either is
+  absent. Broker Redis is AOF-backed/`noeviction`; rate-limit Redis uses a
+  separate process and volume with counter-oriented eviction.
 - **Automatic security updates**: unattended-upgrades for the host OS and a documented weekly patch cadence; the application images are rebuilt from pinned bases (`python:3.13-slim`, `node:24-alpine`, `redis:7-alpine`, Caddy `v2.11.4`) and scanned by the CI container-scan job.
 - **Monitoring and alerting**: external uptime checks against `/health` and `/ready`, metrics scraping of `GET /metrics`, and alerts for readiness/API failures, worker/job failures, disk pressure, certificate expiry and backup failures (docs/operations.md).
 - **Disk alerts**: the host disk and the Caddy/Redis log volumes are monitored with thresholds (default alert at 80% usage).

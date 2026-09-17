@@ -1639,7 +1639,8 @@ Example settings:
 ```text
 APP_ENV
 DATABASE_URL
-REDIS_URL
+BROKER_REDIS_URL
+RATE_LIMIT_REDIS_URL
 WORKOS_API_KEY
 STORAGE_BACKEND
 EMAIL_BACKEND
@@ -1716,6 +1717,20 @@ Use:
 - uptime monitoring;
 - worker failure visibility;
 - coordinator liveness and durable outbox delivery visibility.
+
+The production Dramatiq broker and distributed rate limiter use distinct
+Redis endpoints. Broker Redis is authenticated, AOF-backed and configured
+with `noeviction`: memory pressure rejects publication visibly while the
+PostgreSQL outbox retains the intent. Rate-limit Redis is a disposable counter
+store and may use bounded eviction. Production startup rejects endpoints that
+normalise to the same Redis server, including different logical database
+numbers on one host/port.
+
+Queue metrics must be tested against the locked Dramatiq/Redis implementation,
+not a fake-only broker method. Expose ready, delayed, in-flight and dead-letter
+cardinalities using only Redis count commands; never read or export message
+identifiers or payloads. A compatibility mismatch or refresh outage is itself
+an alertable metric.
 
 ## Standard endpoints
 
@@ -2181,6 +2196,10 @@ Dramatiq worker
 Outbox coordinator
 Redis
 ```
+
+The hybrid profile runs two private Redis services: a durable/noeviction
+Dramatiq broker and a separately bounded rate-limit counter store. They have
+independent credentials, endpoints, processes and volumes.
 
 External services provide:
 

@@ -1,0 +1,86 @@
+groups:
+  - name: app-template-durable-delivery
+    rules:
+      - alert: DurableJobExecutionLeaseExpired
+        expr: stale_running_jobs > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: Durable jobs have expired execution leases
+      - alert: DurableJobRetryOrExhaustionObserved
+        expr: delta(job_attempts{status=~"retry_scheduled|exhausted"}[15m]) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: Durable job retries or exhaustion increased
+      - alert: EmailDeliveryNeedsAttention
+        expr: attention_required_email_deliveries > 0
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: An ambiguous email delivery requires provider-side verification
+      - alert: MaintenanceRunFailed
+        expr: delta(maintenance_runs{status="failed",stale="false"}[15m]) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: A durable maintenance run failed
+      - alert: MaintenanceRunLeaseExpired
+        expr: maintenance_runs{status="running",stale="true"} > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: A durable maintenance run lease has expired
+      - alert: CurrentJobDispatchDead
+        expr: dead_current_job_dispatches > 0
+        labels: { severity: critical }
+        annotations:
+          summary: A queued job still points at a permanently dead dispatch
+      - alert: OutboxOldestDueWarning
+        expr: outbox_oldest_due_age_seconds > 300
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: A due outbox event is more than five minutes old
+      - alert: OutboxOldestDueCritical
+        expr: outbox_oldest_due_age_seconds > 900
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: A due outbox event is more than fifteen minutes old
+
+  - name: app-template-broker
+    rules:
+      - alert: DramatiqQueueBacklog
+        expr: dramatiq_queue_messages{state="ready"} > 100
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: A Dramatiq ready queue remains above 100 messages
+      - alert: DramatiqDeadLettersPresent
+        expr: dramatiq_queue_messages{state="dead"} > 0
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: The Dramatiq broker contains dead-lettered messages
+      - alert: BrokerRedisMemoryPressure
+        expr: broker_redis_maxmemory_bytes > 0 and broker_redis_used_memory_bytes / broker_redis_maxmemory_bytes > 0.8
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: The dedicated broker Redis is above 80% of maxmemory
+      - alert: BrokerRedisRejectedWrite
+        expr: delta(broker_redis_oom_error_replies[5m]) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: Broker Redis rejected a command at its memory ceiling
+      - alert: DramatiqQueueMetricsRefreshFailed
+        expr: absent(dramatiq_queue_metrics_refresh_success) or dramatiq_queue_metrics_refresh_success == 0 or time() - dramatiq_queue_metrics_last_success_timestamp_seconds > 90
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: Dramatiq Redis queue metrics are stale or failing
+      - alert: PostgreSQLMetricsRefreshFailed
+        expr: absent(outbox_metrics_refresh_success) or outbox_metrics_refresh_success == 0 or time() - outbox_metrics_last_success_timestamp_seconds > 90 or absent(reliability_metrics_refresh_success) or reliability_metrics_refresh_success == 0 or time() - reliability_metrics_last_success_timestamp_seconds > 90
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: PostgreSQL-backed operational metrics are stale or failing
