@@ -129,6 +129,21 @@ Services raise domain exceptions; central FastAPI exception handlers translate t
 - Every endpoint declares an explicit response schema; nothing is returned as an ad-hoc dict.
 - ORM models are never API request models (blueprint §7).
 
+## Optimistic concurrency
+
+Collaboratively edited records carry an integer `version` (blueprint §10). The
+update request body (and, where the verb has no body, a required `version` query
+parameter) carries the version the caller last read; every response exposes the
+current version so the next write can be conditional.
+
+- The service locks the row `FOR UPDATE`, compares the stored and supplied
+  versions, then writes, so concurrent writers serialise.
+- A stale version is `409` with a resource-specific code (e.g.
+  `record_version_conflict`); the caller reloads and retries rather than
+  overwriting a later writer.
+- The version is server-controlled: it is never accepted on create and cannot be
+  smuggled in through `extra="forbid"`.
+
 ## Authn/authz
 
 WorkOS owns login and sessions; the application resolves a validated identity to an internal user and an organisation context (v0.2). Conventions:

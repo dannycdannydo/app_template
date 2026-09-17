@@ -1,4 +1,4 @@
-"""Record API schemas (v0.2 Scope §6.5, blueprint §7, §12).
+"""Record API schemas (v0.2 Scope §6.5, plan P8, blueprint §7, §10, §12).
 
 ORM models are never API request models. The create and update schemas are the
 only client-supplied inputs; every other schema is an explicit response shape
@@ -6,6 +6,11 @@ whose server-controlled fields (identifiers, timestamps) can never come from a
 request body. ``extra="forbid"`` rejects identity fields a client might try to
 smuggle in — in particular an ``organisation_id``, which is always derived
 from the validated ``X-Org-Id`` context instead.
+
+Plan P8 adds optimistic concurrency (BP §10): the update request carries the
+``version`` the caller last read, and every response exposes the current
+version so the next write can be conditional. The value is always
+server-controlled and is never accepted on create.
 """
 
 from __future__ import annotations
@@ -32,10 +37,16 @@ class RecordCreate(BaseModel):
 
 
 class RecordUpdate(BaseModel):
-    """Request payload for updating a record (PATCH semantics: all optional)."""
+    """Request payload for a conditional update (PATCH semantics: all optional).
+
+    ``version`` is required: it is the version the caller last read from a
+    detail/list response. The service compares it against the locked row and a
+    stale value is a 409 ``record_version_conflict`` (BP §10).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
+    version: int = Field(ge=1)
     title: str | None = Field(default=None, min_length=1, max_length=255)
     body: str | None = Field(default=None, max_length=BODY_MAX_LENGTH)
 
@@ -49,6 +60,7 @@ class RecordListItem(BaseModel):
     title: str
     created_at: datetime
     updated_at: datetime
+    version: int
 
 
 class RecordDetail(RecordListItem):

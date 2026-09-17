@@ -6,6 +6,7 @@ import { useRouter } from 'vue-router'
 import { useForm } from 'vee-validate'
 import { z } from 'zod'
 
+import { ApiError } from '@/api/errors'
 import { Button } from '@/components/ui/button'
 import { FormControl, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
@@ -50,11 +51,14 @@ const props = withDefaults(
   defineProps<{
     mode: 'create' | 'edit'
     recordId?: string
+    /** The version last read, required in edit mode for the conditional PATCH. */
+    version?: number
     initialValues?: RecordFormValues
     listRouteName?: string
   }>(),
   {
     recordId: undefined,
+    version: undefined,
     initialValues: undefined,
     listRouteName: undefined,
   },
@@ -63,8 +67,14 @@ const props = withDefaults(
 const emit = defineEmits<{
   (e: 'created', record: RecordDetail): void
   (e: 'updated', record: RecordDetail): void
+  (e: 'conflict'): void
   (e: 'cancel'): void
 }>()
+
+/** Plan P8: a stale optimistic-concurrency version is a 409. */
+function isVersionConflict(error: unknown): boolean {
+  return error instanceof ApiError && error.code === 'record_version_conflict'
+}
 
 const router = useRouter()
 
@@ -117,9 +127,22 @@ const onSubmit = handleSubmit(async (values) => {
       if (!props.recordId) {
         throw new Error('Cannot edit a record without an id')
       }
-      await updateMutation.mutateAsync({ recordId: props.recordId, payload: values })
+      if (props.version === undefined) {
+        throw new Error('Cannot edit a record without its version')
+      }
+      await updateMutation.mutateAsync({
+        recordId: props.recordId,
+        payload: { ...values, version: props.version },
+      })
     }
   } catch (error) {
+    if (isVersionConflict(error)) {
+      // The parent refetches, which hydrates fresh initial values and resets
+      // the form, so the user retries against the latest version.
+      showApiErrorToast(error, { title: 'Record changed' })
+      emit('conflict')
+      return
+    }
     showApiErrorToast(error, {
       title: props.mode === 'create' ? 'Could not create record' : 'Could not update record',
     })

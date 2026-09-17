@@ -627,19 +627,19 @@ tenant isolation, provider reconciliation and break-glass secret handling.
 
 Dependencies: none; share audit retention decisions with P6-P7
 
-- [ ] Add a version/conditional-update contract to the representative records
+- [x] Add a version/conditional-update contract to the representative records
       module. Stale update/delete returns 409; retries do not lose a later
       writer's work. Keep ORM objects out of request schemas and regenerate
       frontend API types for reviewed additive response fields.
-- [ ] Design a bounded immutable revision record or redacted field-diff that
+- [x] Design a bounded immutable revision record or redacted field-diff that
       can reconstruct business changes without copying secrets or sensitive
       document contents into generic audit metadata. Review actor/org stable
       identity on user/organisation deletion and retention/erasure tradeoffs.
-- [ ] Enforce audit append-only at the database privilege/trigger boundary, or
+- [x] Enforce audit append-only at the database privilege/trigger boundary, or
       document and test an equivalent separately held immutable export. Make
       hard delete/restore semantics explicit and protect revision history from
       normal API callers.
-- [ ] Add migrations and two-session tests for stale writes/deletes, revision
+- [x] Add migrations and two-session tests for stale writes/deletes, revision
       reconstruction, actor deletion, tenant scope, append-only denial and
       restoration. Add security-suite route coverage for any new protected API.
 

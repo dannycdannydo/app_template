@@ -58,12 +58,14 @@ const records: RecordListItem[] = [
   {
     id: '11111111-1111-4111-8111-111111111111',
     title: 'First record',
+    version: 1,
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-02T00:00:00Z',
   },
   {
     id: '22222222-2222-4222-8222-222222222222',
     title: 'Second record',
+    version: 1,
     created_at: '2026-01-03T00:00:00Z',
     updated_at: '2026-01-03T00:00:00Z',
   },
@@ -83,6 +85,7 @@ function manyRecords(): RecordListItem[] {
   return Array.from({ length: 26 }, (_, index) => ({
     id: `record-${index}`,
     title: `Record ${index + 1}`,
+    version: 1,
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
   }))

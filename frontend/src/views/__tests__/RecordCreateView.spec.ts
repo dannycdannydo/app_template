@@ -57,6 +57,7 @@ const createdRecord: RecordDetail = {
   id: '33333333-3333-4333-8333-333333333333',
   title: 'Created record',
   body: '',
+  version: 1,
   created_at: '2026-02-01T00:00:00Z',
   updated_at: '2026-02-01T00:00:00Z',
 }

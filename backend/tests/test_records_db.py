@@ -114,16 +114,19 @@ async def test_records_crud_within_org(migrated_database: str) -> None:
             )
             assert fetched.title == "First"
             assert fetched.body == "Seeded body"
+            assert fetched.version == 1
 
             updated = await service.update_record(
                 session,
                 organisation_id=organisation.id,
                 record_id=record.id,
+                expected_version=1,
                 title="Second",
                 body=None,  # untouched fields keep their values
             )
             assert updated.title == "Second"
             assert updated.body == "Seeded body"
+            assert updated.version == 2
 
             records, total = await service.list_records(
                 session,
@@ -138,6 +141,7 @@ async def test_records_crud_within_org(migrated_database: str) -> None:
                 session,
                 organisation_id=organisation.id,
                 record_id=record.id,
+                expected_version=2,
             )
             org_count = await session.scalar(
                 select(func.count())
@@ -174,6 +178,7 @@ async def test_cross_org_access_is_not_found(migrated_database: str) -> None:
                     session,
                     organisation_id=org_b.id,
                     record_id=record_a.id,
+                    expected_version=1,
                     title="Hijacked",
                     body=None,
                 )
@@ -182,6 +187,7 @@ async def test_cross_org_access_is_not_found(migrated_database: str) -> None:
                     session,
                     organisation_id=org_b.id,
                     record_id=record_a.id,
+                    expected_version=1,
                 )
 
             # The record is untouched and the other org's list stays empty.
@@ -250,6 +256,7 @@ async def test_delete_outside_org_leaves_record_intact(migrated_database: str) -
                     session,
                     organisation_id=org_b.id,
                     record_id=record_a.id,
+                    expected_version=1,
                 )
             org_a_count = await session.scalar(
                 select(func.count()).select_from(Record).where(Record.organisation_id == org_a.id)

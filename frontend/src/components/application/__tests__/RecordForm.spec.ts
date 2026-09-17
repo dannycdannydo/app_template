@@ -37,6 +37,7 @@ const recordDetail: RecordDetail = {
   id: RECORD_ID,
   title: 'Existing record',
   body: 'Existing body',
+  version: 2,
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
 }
@@ -54,6 +55,7 @@ const Harness = defineComponent({
   props: {
     mode: { type: String, required: true },
     recordId: { type: String, default: undefined },
+    version: { type: Number, default: undefined },
     initialValues: { type: Object, default: undefined },
     listRouteName: { type: String, default: undefined },
   },
@@ -62,6 +64,7 @@ const Harness = defineComponent({
       <RecordForm
         :mode="mode"
         :record-id="recordId"
+        :version="version"
         :initial-values="initialValues"
         :list-route-name="listRouteName"
       />
@@ -83,6 +86,7 @@ async function submitForm(wrapper: ReturnType<typeof mount>): Promise<void> {
 interface MountOptions {
   mode?: 'create' | 'edit'
   recordId?: string
+  version?: number
   initialValues?: RecordFormValues
   listRouteName?: string
 }
@@ -107,6 +111,7 @@ function mountForm(options: MountOptions = {}): ReturnType<typeof mount> {
     props: {
       mode: options.mode ?? 'create',
       recordId: options.recordId,
+      version: options.version,
       initialValues: options.initialValues,
       listRouteName: options.listRouteName,
     },
@@ -119,7 +124,10 @@ function mountForm(options: MountOptions = {}): ReturnType<typeof mount> {
   return wrapper
 }
 
-function formEmits(wrapper: ReturnType<typeof mount>, event: 'created' | 'updated' | 'cancel') {
+function formEmits(
+  wrapper: ReturnType<typeof mount>,
+  event: 'created' | 'updated' | 'conflict' | 'cancel',
+) {
   return wrapper.findComponent(RecordForm).emitted(event)
 }
 
@@ -169,6 +177,7 @@ describe('RecordForm (v0.3 Scope §6.6 standard form + toast)', () => {
     const wrapper = mountForm({
       mode: 'edit',
       recordId: RECORD_ID,
+      version: 2,
       initialValues: { title: 'Existing record', body: 'Existing body' },
     })
 
@@ -177,7 +186,7 @@ describe('RecordForm (v0.3 Scope §6.6 standard form + toast)', () => {
     await vi.waitFor(() =>
       expect(patchMock).toHaveBeenCalledWith('/api/v1/records/{record_id}', {
         params: { path: { record_id: RECORD_ID } },
-        body: { title: 'Existing record', body: 'Existing body' },
+        body: { title: 'Existing record', body: 'Existing body', version: 2 },
       }),
     )
     expect(formEmits(wrapper, 'updated')?.[0]?.[0]).toEqual(recordDetail)
@@ -203,6 +212,29 @@ describe('RecordForm (v0.3 Scope §6.6 standard form + toast)', () => {
     expect(router.currentRoute.value.name).toBe('home')
     expect(document.body.textContent).toContain('A record with this title already exists.')
     expect(document.body.textContent).toContain('req-123')
+  })
+
+  it('surfaces a stale-version conflict and emits conflict so the parent reloads', async () => {
+    const conflictError = new ApiError(409, {
+      code: 'record_version_conflict',
+      message: 'The record was changed by someone else. Reload it and try again.',
+      details: null,
+      request_id: 'req-409',
+    })
+    patchMock.mockRejectedValue(conflictError)
+    const wrapper = mountForm({
+      mode: 'edit',
+      recordId: RECORD_ID,
+      version: 2,
+      initialValues: { title: 'Existing record', body: 'Existing body' },
+    })
+
+    await submitForm(wrapper)
+
+    await vi.waitFor(() => expect(document.body.textContent).toContain('Record changed'))
+    expect(formEmits(wrapper, 'conflict')).toBeDefined()
+    expect(formEmits(wrapper, 'updated')).toBeUndefined()
+    expect(document.body.textContent).toContain('changed by someone else')
   })
 
   it('emits cancel without touching the API', async () => {

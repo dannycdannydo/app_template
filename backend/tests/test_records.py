@@ -14,7 +14,7 @@ from typing import cast as typing_cast
 
 import pytest
 from httpx import AsyncClient, Response
-from sqlalchemy import Table
+from sqlalchemy import CheckConstraint, Table
 from sqlalchemy.ext.asyncio import AsyncSession
 from tests.auth_helpers import make_token
 from tests.context_helpers import (
@@ -31,7 +31,7 @@ from tests.context_helpers import (
 from app.core.exceptions import NotFoundError
 from app.db.base import Base
 from app.modules.records import service
-from app.modules.records.models import Record
+from app.modules.records.models import Record, RecordRevision
 
 
 @pytest.fixture
@@ -62,6 +62,44 @@ def test_record_has_org_foreign_key_and_composite_index() -> None:
         "organisation_id",
         "created_at",
     ]
+
+
+def test_record_has_the_optimistic_concurrency_version_column() -> None:
+    """Plan P8 / BP §10: the version is non-null, positive and server-defaulted."""
+    table = typing_cast(Table, Record.__table__)
+    assert table.c.version.nullable is False
+    assert table.c.version.server_default is not None
+    check_names = {
+        constraint.name
+        for constraint in table.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+    assert "ck_records_positive_version" in check_names
+
+
+def test_record_revisions_table_is_a_bounded_immutable_history() -> None:
+    """Plan P8: snapshots carry no foreign keys, no updated_at and a closed action."""
+    assert "record_revisions" in Base.metadata.tables
+    table = typing_cast(Table, RecordRevision.__table__)
+    assert table.foreign_key_constraints == set()  # opaque UUIDs survive deletion
+    assert "updated_at" not in table.c
+    assert table.c.body.nullable is False
+    assert table.c.version.nullable is False
+    check_names = {
+        constraint.name
+        for constraint in table.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+    assert {
+        "ck_record_revisions_positive_version",
+        "ck_record_revisions_record_revision_action",
+    } <= check_names
+    index_names = {index.name for index in table.indexes}
+    assert index_names == {
+        "ix_record_revisions_record_id_created_at",
+        "ix_record_revisions_organisation_id_created_at",
+        "ix_record_revisions_actor_user_id",
+    }
 
 
 # --- Request flow (acceptance §5.4, §5.5, §5.7) ---
@@ -291,7 +329,7 @@ async def test_update_record_changes_fields(context_app: ContextApp) -> None:
     async with context_client(app) as client:
         response = await client.patch(
             f"/api/v1/records/{record.id}",
-            json={"title": "New"},
+            json={"version": 1, "title": "New"},
             headers={
                 "Authorization": f"Bearer {make_token(private_key)}",
                 "X-Org-Id": str(org_id),
@@ -302,7 +340,58 @@ async def test_update_record_changes_fields(context_app: ContextApp) -> None:
     body = response.json()
     assert body["title"] == "New"
     assert body["body"] == "Old body"  # untouched fields keep their values
+    assert body["version"] == 2  # optimistic concurrency increments on success
     assert state.records[0].title == "New"
+
+
+async def test_stale_update_is_a_conflict(context_app: ContextApp) -> None:
+    """Plan P8: a version that no longer matches is a 409, never an overwrite."""
+    app, state, private_key = context_app
+    user = make_user()
+    state.users[user.workos_user_id] = user
+    org_id = uuid.uuid4()
+    membership = make_membership(user, org_id)
+    record = make_record(org_id, title="Already changed", version=3)
+    state.records = [record]
+    state.lookup_queue = [user, membership, record]
+    state.granted_permissions = {"records.read", "records.update"}
+
+    async with context_client(app) as client:
+        response = await client.patch(
+            f"/api/v1/records/{record.id}",
+            json={"version": 2, "title": "Clobber"},
+            headers={
+                "Authorization": f"Bearer {make_token(private_key)}",
+                "X-Org-Id": str(org_id),
+            },
+        )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "record_version_conflict"
+    assert record.title == "Already changed"  # the stale write changed nothing
+
+
+async def test_update_requires_a_version(context_app: ContextApp) -> None:
+    """The conditional contract is mandatory: no version, no update."""
+    app, state, private_key = context_app
+    user = make_user()
+    state.users[user.workos_user_id] = user
+    org_id = uuid.uuid4()
+    membership = make_membership(user, org_id)
+    state.lookup_queue = [user, membership]
+    state.granted_permissions = {"records.read", "records.update"}
+
+    async with context_client(app) as client:
+        response = await client.patch(
+            f"/api/v1/records/{uuid.uuid4()}",
+            json={"title": "No version"},
+            headers={
+                "Authorization": f"Bearer {make_token(private_key)}",
+                "X-Org-Id": str(org_id),
+            },
+        )
+
+    assert response.status_code == 422
 
 
 async def test_delete_record_removes_it(context_app: ContextApp) -> None:
@@ -323,6 +412,7 @@ async def test_delete_record_removes_it(context_app: ContextApp) -> None:
     async with context_client(app) as client:
         response = await client.delete(
             f"/api/v1/records/{record.id}",
+            params={"version": 1},
             headers={
                 "Authorization": f"Bearer {make_token(private_key)}",
                 "X-Org-Id": str(org_id),
@@ -331,6 +421,34 @@ async def test_delete_record_removes_it(context_app: ContextApp) -> None:
 
     assert response.status_code == 204
     assert state.records == []
+
+
+async def test_stale_delete_is_a_conflict(context_app: ContextApp) -> None:
+    """Plan P8: a conditional delete with an old version is a 409."""
+    app, state, private_key = context_app
+    user = make_user()
+    state.users[user.workos_user_id] = user
+    org_id = uuid.uuid4()
+    membership = make_membership(user, org_id)
+    record = make_record(org_id, version=2)
+    state.records = [record]
+    state.feature_flags = [make_organisation_feature(org_id)]
+    state.lookup_queue = [user, membership, record]
+    state.granted_permissions = {"records.read", "records.delete"}
+
+    async with context_client(app) as client:
+        response = await client.delete(
+            f"/api/v1/records/{record.id}",
+            params={"version": 1},
+            headers={
+                "Authorization": f"Bearer {make_token(private_key)}",
+                "X-Org-Id": str(org_id),
+            },
+        )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "record_version_conflict"
+    assert state.records == [record]
 
 
 # --- Service layer (BP §11) ---
@@ -358,4 +476,5 @@ async def test_delete_record_outside_org_raises_not_found(context_app: ContextAp
             typing_cast(AsyncSession, FakeSession(state)),
             organisation_id=uuid.uuid4(),
             record_id=uuid.uuid4(),
+            expected_version=1,
         )

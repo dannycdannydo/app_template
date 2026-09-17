@@ -87,13 +87,15 @@ def test_audit_event_columns_follow_blueprint_shape() -> None:
     assert isinstance(table.c.metadata.type, postgresql.JSONB)
 
 
-def test_audit_event_foreign_keys_and_indexes() -> None:
+def test_audit_event_identity_columns_are_opaque_and_indexed() -> None:
+    """Plan P8: no foreign key, so deleting an actor/org retains the identity.
+
+    A referential action is itself an UPDATE/DELETE that the append-only
+    trigger rejects, and ``ON DELETE SET NULL`` destroyed the very provenance
+    the trail must keep (ADR-0020). The filter indexes stay.
+    """
     table = _table_of(AuditEvent)
-    fk_names = {constraint.name for constraint in table.foreign_key_constraints}
-    assert fk_names == {
-        "fk_audit_events_organisation_id_organisations",
-        "fk_audit_events_actor_user_id_users",
-    }
+    assert table.foreign_key_constraints == set()
     index_names = {index.name for index in table.indexes}
     assert index_names == {
         "ix_audit_events_organisation_id",
@@ -415,6 +417,7 @@ async def test_record_mutations_write_audit_events() -> None:
         session,
         organisation_id=org_id,
         record_id=record.id,
+        expected_version=1,
         title="Second",
         body=None,
         actor_user_id=actor_id,
@@ -426,6 +429,7 @@ async def test_record_mutations_write_audit_events() -> None:
         session,
         organisation_id=org_id,
         record_id=record.id,
+        expected_version=2,
         actor_user_id=actor_id,
     )
     assert state.audit_events[-1].action == "record.deleted"

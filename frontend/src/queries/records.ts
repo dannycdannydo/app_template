@@ -152,7 +152,11 @@ export function useCreateRecordMutation(options?: { onSuccess?: (record: RecordD
 
 /**
  * Update mutation invalidating both the list and the updated record's detail
- * (v0.3 Scope §6.4).
+ * (v0.3 Scope §6.4, plan P8).
+ *
+ * The payload carries the optimistic-concurrency `version` the caller last
+ * read (required by the generated `RecordUpdate` type); a stale version is a
+ * 409 `record_version_conflict` the caller must resolve by reloading.
  */
 export function useUpdateRecordMutation(options?: { onSuccess?: (record: RecordDetail) => void }) {
   const queryClient = useQueryClient()
@@ -186,20 +190,24 @@ export function useUpdateRecordMutation(options?: { onSuccess?: (record: RecordD
 
 /**
  * Delete mutation invalidating the list and the deleted record's detail
- * (v0.3 Scope §6.4).
+ * (v0.3 Scope §6.4, plan P8).
+ *
+ * The caller passes the version it last read; the generated client sends it as
+ * the required `version` query parameter, and a stale value is a 409
+ * `record_version_conflict` rather than an unconditional delete.
  */
 export function useDeleteRecordMutation(options?: { onSuccess?: (recordId: string) => void }) {
   const queryClient = useQueryClient()
   const organisation = useOrganisationStore()
 
   return useMutation({
-    mutationFn: async (recordId: string) => {
+    mutationFn: async ({ recordId, version }: { recordId: string; version: number }) => {
       const organisationId = organisation.selectedOrganisationId
       if (!organisationId) {
         throw new Error('Cannot delete a record without a selected organisation')
       }
       const { error } = await client.DELETE('/api/v1/records/{record_id}', {
-        params: { path: { record_id: recordId } },
+        params: { path: { record_id: recordId }, query: { version } },
       })
       if (error) throw error
       return { organisationId, recordId }

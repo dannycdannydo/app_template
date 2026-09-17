@@ -9,6 +9,10 @@ membership — never from the request body (acceptance §5.4).
 Permission map: list/get need ``records.read``; create ``records.create``;
 update ``records.update``; delete ``records.delete``. A viewer therefore lists
 and reads records but every write returns 403 (acceptance §5.5).
+
+Plan P8 makes update/delete conditional: the update body and the delete query
+parameter carry the version the caller last read, and a stale value is a 409
+``record_version_conflict`` rather than a silent overwrite (blueprint §10).
 """
 
 from __future__ import annotations
@@ -94,11 +98,12 @@ async def update_record_endpoint(
     session: Annotated[AsyncSession, Depends(get_db)],
     membership: Annotated[OrganisationMembership, Depends(require_permission("records.update"))],
 ) -> RecordDetail:
-    """Partially update a record inside the caller's organisation."""
+    """Conditionally update a record; a stale version is a 409 conflict."""
     record = await service.update_record(
         session,
         organisation_id=membership.organisation_id,
         record_id=record_id,
+        expected_version=payload.version,
         title=payload.title,
         body=payload.body,
         actor_user_id=membership.user_id,
@@ -111,11 +116,18 @@ async def delete_record_endpoint(
     record_id: uuid.UUID,
     session: Annotated[AsyncSession, Depends(get_db)],
     membership: Annotated[OrganisationMembership, Depends(require_permission("records.delete"))],
+    version: Annotated[int, Query(ge=1)],
 ) -> None:
-    """Delete a record inside the caller's organisation."""
+    """Conditionally delete a record; a stale version is a 409 conflict.
+
+    The expected version travels as a required query parameter because HTTP
+    DELETE has no request body convention; the generated client sends it from
+    the loaded record.
+    """
     await service.delete_record(
         session,
         organisation_id=membership.organisation_id,
         record_id=record_id,
+        expected_version=version,
         actor_user_id=membership.user_id,
     )

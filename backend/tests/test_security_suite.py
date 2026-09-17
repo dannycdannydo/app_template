@@ -87,6 +87,7 @@ class RouteSpec:
     org_scoped: bool  # requires the X-Org-Id header
     request_body: dict[str, object] | None = None  # valid body if the route reads one
     path_values: dict[str, str] = field(default_factory=dict[str, str])  # concrete path params
+    query: dict[str, str] | None = None  # valid query params if the route requires any
 
 
 def _route(
@@ -96,6 +97,7 @@ def _route(
     org_scoped: bool,
     request_body: dict[str, object] | None = None,
     path_values: dict[str, str] | None = None,
+    query: dict[str, str] | None = None,
 ) -> RouteSpec:
     values = {"record_id": _RECORD_ID}
     if path_values:
@@ -106,6 +108,7 @@ def _route(
         org_scoped=org_scoped,
         request_body=request_body,
         path_values=values,
+        query=query,
     )
 
 
@@ -129,9 +132,16 @@ PROTECTED_ROUTES: list[RouteSpec] = [
         "PATCH",
         "/api/v1/records/{record_id}",
         org_scoped=True,
-        request_body={"title": "Renamed"},
+        # Plan P8: update/delete are conditional on the version the caller
+        # last read; the security matrix sends a syntactically valid value.
+        request_body={"version": 1, "title": "Renamed"},
     ),
-    _route("DELETE", "/api/v1/records/{record_id}", org_scoped=True),
+    _route(
+        "DELETE",
+        "/api/v1/records/{record_id}",
+        org_scoped=True,
+        query={"version": "1"},
+    ),
     # Files (Scope §6.3): the direct-upload surface. Intent and completion are
     # gated by documents.upload, list/detail/download-url by documents.read and
     # delete by documents.delete; every route is org-scoped (X-Org-Id).
@@ -467,6 +477,7 @@ async def _request(
     return await client.request(
         spec.method,
         _url(spec),
+        params=spec.query,
         json=spec.request_body,
         headers=_headers(token, org_id),
     )
@@ -598,6 +609,7 @@ async def test_malformed_org_context_rejected(
         response = await client.request(
             spec.method,
             _url(spec),
+            params=spec.query,
             json=spec.request_body,
             headers=_headers(make_token(_PRIVATE_KEY)) | {"X-Org-Id": "not-a-uuid"},
         )
