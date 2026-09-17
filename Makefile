@@ -29,7 +29,7 @@ define load_env
 	set -a; [ -f .env ] && . ./.env; set +a;
 endef
 
-.PHONY: dev dev-docker dev-infra-check dev-down dev-reset worker coordinator jobs-reconcile jobs-reconcile-apply migrate provision-admin provision-admin-delete lint typecheck test test-ai-contracts e2e format generate-client validate-ai-registries validate-execution-contracts check
+.PHONY: dev dev-docker dev-infra-check dev-down dev-reset worker coordinator jobs-reconcile jobs-reconcile-apply migrate provision-admin provision-admin-delete recover-admin lint typecheck test test-ai-contracts e2e format generate-client validate-ai-registries validate-execution-contracts check
 
 ## Start PostgreSQL + Redis + MinIO + Mailhog in Docker, then run the API,
 ## Dramatiq worker, outbox coordinator and frontend natively with live reload
@@ -113,6 +113,13 @@ provision-admin:
 ## override with EMAIL=someone@example.com. Needs the database reachable.
 provision-admin-delete:
 	@$(load_env) cd backend && uv run python -m scripts.provision_bootstrap_admin --delete $(if $(EMAIL),--email $(EMAIL),)
+
+## Break-glass recovery: re-grant platform_admin to an existing enabled user when
+## the platform plane is locked out (zero enabled administrators). Refuses while
+## an active administrator exists. Override EMAIL and pass REASON.
+recover-admin:
+	@$(load_env) cd backend && uv run python -m scripts.recover_platform_admin \
+		$(if $(EMAIL),--email $(EMAIL),) $(if $(REASON),--reason "$(REASON)",)
 
 ## Ruff (backend) + ESLint/oxlint (frontend).
 lint:

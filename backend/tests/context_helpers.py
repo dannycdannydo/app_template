@@ -406,6 +406,21 @@ class _ScalarsResult:
         return self._rows
 
 
+class _FakeConnection:
+    """Stand-in for the session connection the advisory-lock helper uses.
+
+    The platform-admin invariant takes ``pg_advisory_xact_lock`` through
+    ``session.connection()``; the fake has no real locking, so the no-op keeps
+    the service flow identical without a database.
+    """
+
+    async def execute(self, statement: object) -> None:
+        return None
+
+    async def scalar(self, statement: object) -> None:
+        return None
+
+
 class FakeSession:
     """Minimal session stand-in for the request-context and creation flows."""
 
@@ -421,6 +436,35 @@ class FakeSession:
         self._last_committed_statuses: dict[uuid.UUID, InvitationStatus] = {
             invitation.id: invitation.status for invitation in state.invitations
         }
+
+    async def connection(self) -> _FakeConnection:
+        return _FakeConnection()
+
+    async def get(self, entity: Any, ident: Any, options: Any = None) -> Any:
+        """Answer ``session.get`` from the staged rows by primary key.
+
+        The login-time acceptance retry re-resolves the user (and, for the
+        real-database path, the invitation rows) after a rollback expires the
+        ORM instances; the fake mirrors that by matching the staged rows.
+        """
+        if entity is User:
+            candidates: list[Any] = list(self._state.users.values())
+        elif entity is Invitation:
+            candidates = list(self._state.invitations)
+        elif entity is OrganisationMembership:
+            candidates = list(self._state.memberships)
+        elif entity is PlatformMembership:
+            candidates = list(self._state.platform_memberships)
+        elif entity is PlatformRole:
+            candidates = list(self._state.platform_roles)
+        elif entity is Organisation:
+            candidates = list(self._state.organisations)
+        else:
+            return None
+        for candidate in candidates:
+            if getattr(candidate, "id", None) == ident:
+                return candidate
+        return None
 
     async def scalar(self, statement: object) -> Any:
         self._state.scalar_calls += 1

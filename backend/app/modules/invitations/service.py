@@ -23,6 +23,20 @@ service-owned transaction (BP §11 — routers never commit).
   against a concurrent login (unique ``(user_id, organisation_id)``
   constraint) is recovered by rollback-and-re-run, so a double first login
   can never double-grant (mirroring the bootstrap hook, Scope §6.4).
+
+Transition precedence (plan P7). An invitation is a state machine over
+``sent -> accepted | revoked | expired``; ``accepted``, ``revoked`` and
+``expired`` are terminal. The local database row is the authority for granting:
+acceptance requires a locked, still-``sent`` row and commits the membership
+grant in the same transaction. Acceptance, local revoke and webhook revoke all
+take the invitation row ``FOR UPDATE`` (the ``pending_invitations_statement``
+lock and the single-row locked reads), so exactly one of them moves the row out
+of ``sent`` and the losers observe the terminal state and no-op. The provider
+(WorkOS) owns email delivery and its own revocation; when WorkOS revokes and
+the local commit then fails, the ``invitation.revoked`` webhook (Scope §6.8)
+re-mirrors the revocation locally, so a committed local revoke is never
+reopened and a provider-side revoke is not lost. A WorkOS failure during a
+local revoke rolls the local row back, leaving it ``sent`` and retryable.
 """
 
 from __future__ import annotations
@@ -205,16 +219,24 @@ async def revoke_invitation(
 
     The invitation is looked up scoped to its organisation (a platform admin
     revokes through the organisation's own endpoint), so an id from another
-    organisation is a 404. Only ``sent`` invitations can be revoked: an
-    accepted, revoked or expired invitation is terminal (409). The WorkOS
-    revocation happens before the local status flip, and the audit row
-    commits in the same transaction as the status change.
+    organisation is a 404. The row is read ``FOR UPDATE`` (plan P7) so the
+    ``SENT -> REVOKED`` flip serialises against login-time acceptance and a
+    webhook revocation on the same row. Only ``sent`` invitations can be
+    revoked: an accepted, revoked or expired invitation is terminal (409). The
+    WorkOS revocation happens before the local status flip while the row is
+    locked; a WorkOS failure rolls the transaction back and leaves the row
+    ``sent`` and retryable, and a local commit failure after a successful
+    WorkOS revoke is re-mirrored by the ``invitation.revoked`` webhook
+    (Scope §6.8). The audit row commits in the same transaction as the status
+    change.
     """
     invitation = await session.scalar(
-        select(Invitation).where(
+        select(Invitation)
+        .where(
             Invitation.id == invitation_id,
             Invitation.organisation_id == organisation_id,
         )
+        .with_for_update()
     )
     if invitation is None:
         raise NotFoundError(
@@ -228,7 +250,15 @@ async def revoke_invitation(
         )
 
     if invitation.workos_invitation_id is not None:
-        await workos.revoke_invitation(invitation.workos_invitation_id)
+        try:
+            await workos.revoke_invitation(invitation.workos_invitation_id)
+        except Exception:
+            # The provider call is not transactional: roll the caller's session
+            # back explicitly (mirroring ``send_invitation``) so the invitation
+            # row lock is released and the row stays ``sent`` and retryable,
+            # rather than leaving the request transaction holding the lock.
+            await session.rollback()
+            raise
 
     invitation.status = InvitationStatus.REVOKED
     await record_event(
@@ -323,17 +353,38 @@ async def link_invitation_on_login(
     if not matched:
         return []
 
+    user_id = user.id
+    profile_email = profile.email
     try:
-        accepted = await _accept_invitations(session, user, profile.email, matched)
+        accepted = await _accept_invitations(session, user, profile_email, matched)
         await session.commit()
     except IntegrityError:
         await session.rollback()
         # A concurrent first login linked one of these invitations first and
         # committed its membership; our insert lost the unique-constraint
-        # race. Re-run once: the second pass sees the membership and marks
-        # the invitation accepted without creating a duplicate.
+        # race. Rollback released every ``FOR UPDATE`` lock and expired the
+        # ORM instances, so the retry must re-resolve the user and re-run the
+        # pending-invitation query (which re-acquires the row lock and reads
+        # authoritative state) rather than reuse the pre-rollback rows: a
+        # revoke or webhook may have committed in the meantime.
+        retry_user = await session.get(User, user_id)
+        if retry_user is None:
+            raise ServiceUnavailableError(
+                code="invitation_link_failed",
+                message="The invitation could not be linked. Please try again.",
+            ) from None
+        retry_candidates = (
+            await session.scalars(pending_invitations_statement(profile_email))
+        ).all()
+        retry_matched = [
+            invitation
+            for invitation in retry_candidates
+            if invitation.email.strip().lower() == profile_email.strip().lower()
+        ]
+        if not retry_matched:
+            return []
         try:
-            accepted = await _accept_invitations(session, user, profile.email, matched)
+            accepted = await _accept_invitations(session, retry_user, profile_email, retry_matched)
             await session.commit()
         except IntegrityError:
             await session.rollback()
@@ -352,10 +403,13 @@ async def _accept_invitations(
 ) -> list[Invitation]:
     """Grant one active membership per grantable invitation (no commit).
 
-    Re-checks the grantable conditions in Python: between the SELECT and this
-    insert a webhook refresh (Scope §6.8) or a concurrent login may have
-    revoked the invitation or created the membership, and the SQL WHERE clause
-    of the pending statement cannot see those in-transaction changes.
+    The caller's candidate query already holds each invitation row ``FOR
+    UPDATE`` (plan P7), so no concurrent revoke or webhook can move a row out
+    of ``sent`` between that read and this transition; the Python re-check
+    below is the in-transaction confirmation of the locked state. Between the
+    candidate read and this insert a webhook refresh (Scope §6.8) may still
+    have run before the lock was acquired, hence the status/expiry/email
+    re-check.
     """
     accepted: list[Invitation] = []
     for invitation in invitations:

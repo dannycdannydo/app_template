@@ -32,13 +32,18 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.persistence.service import create_default_settings
 from app.core.config import get_settings
-from app.core.exceptions import BadRequestError, NotFoundError, ServiceUnavailableError
+from app.core.exceptions import (
+    BadRequestError,
+    ConflictError,
+    NotFoundError,
+    ServiceUnavailableError,
+)
 from app.core.security import UserProfileClient
 from app.integrations.workos.invitations import WorkOSInvitationsProvider
 from app.integrations.workos.organizations import WorkOSOrganizationsProvider
@@ -51,6 +56,8 @@ from app.modules.audit.service import (
     ACTION_ORGANISATION_CREATED,
     ACTION_ORGANISATION_UPDATED,
     ACTION_PLATFORM_ADMIN_GRANTED,
+    ACTION_PLATFORM_ADMIN_LOCKOUT,
+    ACTION_PLATFORM_ADMIN_RECOVERY_GRANTED,
     ACTION_PLATFORM_ADMIN_REVOKED,
     ACTION_PLATFORM_BOOTSTRAP_GRANTED,
     record_event,
@@ -70,6 +77,8 @@ from app.modules.platform_admin.models import (
     PlatformRole,
 )
 from app.modules.platform_admin.queries import (
+    acquire_platform_admin_lock,
+    count_active_platform_admins,
     membership_roles_for_membership_ids_statement,
     memberships_count_statement,
     memberships_statement,
@@ -491,6 +500,10 @@ async def grant_platform_admin(
     session: AsyncSession, *, actor: User, user_id: uuid.UUID
 ) -> PlatformAdminDetail:
     """Grant platform_admin once to an enabled provisioned user and audit it."""
+    role = await _platform_admin_role_or_503(session)
+    # Serialise with revocation and webhook deactivation on the same invariant
+    # lock (plan P7) so a grant racing a removal cannot observe a stale set.
+    await acquire_platform_admin_lock(session)
     user = await session.scalar(select(User).where(User.id == user_id))
     if user is None:
         raise NotFoundError(code="user_not_found", message="The user could not be found.")
@@ -498,7 +511,6 @@ async def grant_platform_admin(
         raise BadRequestError(
             code="user_disabled", message="A disabled user cannot be a platform administrator."
         )
-    role = await _platform_admin_role_or_503(session)
     membership = await session.scalar(
         select(PlatformMembership).where(
             PlatformMembership.user_id == user.id,
@@ -538,8 +550,17 @@ async def grant_platform_admin(
 async def revoke_platform_admin(
     session: AsyncSession, *, actor: User, platform_membership_id: uuid.UUID
 ) -> PlatformAdminDetail:
-    """Revoke platform_admin while preserving at least one recovery administrator."""
+    """Revoke platform_admin while preserving one enabled recovery administrator.
+
+    The invariant counts only *enabled* users holding the platform role: a
+    disabled member's membership cannot be used to log in, so it is not a
+    recovery principal (plan P7). The transaction-scoped advisory lock is held
+    across the read-count-write so two concurrent revocations cannot each
+    observe the other admin and both remove one. Revoking an inactive user's
+    membership is always allowed because it cannot reduce the enabled count.
+    """
     role = await _platform_admin_role_or_503(session)
+    await acquire_platform_admin_lock(session)
     membership = await session.scalar(
         select(PlatformMembership).where(
             PlatformMembership.id == platform_membership_id,
@@ -551,12 +572,9 @@ async def revoke_platform_admin(
             code="platform_membership_not_found",
             message="The platform administrator could not be found.",
         )
-    total = await session.scalar(
-        select(func.count())
-        .select_from(PlatformMembership)
-        .where(PlatformMembership.platform_role_id == role.id)
-    )
-    if (total or 0) <= 1:
+    target = await session.scalar(select(User).where(User.id == membership.user_id))
+    active_admins = await count_active_platform_admins(session, role_id=role.id)
+    if target is not None and target.is_active and active_admins <= 1:
         raise BadRequestError(
             code="last_platform_admin",
             message="At least one platform administrator must remain.",
@@ -573,6 +591,155 @@ async def revoke_platform_admin(
     await session.delete(membership)
     await session.commit()
     return detail
+
+
+async def platform_admin_deactivation_locks_out(session: AsyncSession, user: User) -> bool:
+    """Return True when deactivating ``user`` removes the last enabled admin.
+
+    Called by the webhook consumer (Scope §6.8) *after* it has taken the
+    platform-admin advisory lock and before it flips ``user.is_active``. A
+    provider-driven deactivation cannot be refused — the WorkOS account is
+    already gone — so the caller records the resulting lockout in the audit
+    trail and operators use the break-glass recovery path. A user who does not
+    hold the platform role never triggers the condition; a missing platform
+    role (an unseeded database) is a safe no-op rather than an error.
+    """
+    role = await session.scalar(
+        select(PlatformRole).where(PlatformRole.code == PLATFORM_ADMIN_ROLE_CODE)
+    )
+    if role is None:
+        return False
+    held = await session.scalar(
+        select(func.count())
+        .select_from(PlatformMembership)
+        .where(
+            PlatformMembership.user_id == user.id,
+            PlatformMembership.platform_role_id == role.id,
+        )
+    )
+    if not held:
+        return False
+    remaining = await count_active_platform_admins(
+        session, role_id=role.id, exclude_user_id=user.id
+    )
+    return remaining == 0
+
+
+async def recover_platform_admin(session: AsyncSession, *, email: str, reason: str) -> User:
+    """Break-glass grant for an already locked-out platform plane (plan P7).
+
+    Tightly scoped: it only acts when there are zero enabled platform
+    administrators, so it cannot be used as an ordinary grant route or to
+    manufacture an extra admin. It is invoked by the operator CLI
+    (``scripts.recover_platform_admin``), takes the same advisory lock as the
+    ordinary grant/revoke paths, targets an already provisioned and enabled
+    internal user, and writes a null-actor
+    ``platform.admin_recovery_granted`` audit row carrying the operator's
+    bounded reason. Raises a conflict when an active administrator still
+    exists, which keeps every ordinary action unable to reach this path.
+    """
+    normalised_reason = reason.strip()
+    if not normalised_reason:
+        raise BadRequestError(
+            code="recovery_reason_required",
+            message="A break-glass recovery reason is required.",
+        )
+    normalised_email = email.strip().lower()
+    role = await _platform_admin_role_or_503(session)
+    await acquire_platform_admin_lock(session)
+    user = await session.scalar(
+        select(User).where(func.lower(User.email) == normalised_email).with_for_update()
+    )
+    if user is None:
+        raise NotFoundError(code="user_not_found", message="The user could not be found.")
+    if not user.is_active:
+        raise BadRequestError(
+            code="user_disabled", message="A disabled user cannot be a platform administrator."
+        )
+    active_admins = await count_active_platform_admins(session, role_id=role.id)
+    if active_admins > 0:
+        raise ConflictError(
+            code="platform_admin_not_locked_out",
+            message="The platform plane still has an active administrator.",
+        )
+    membership = await session.scalar(
+        select(PlatformMembership).where(
+            PlatformMembership.user_id == user.id,
+            PlatformMembership.platform_role_id == role.id,
+        )
+    )
+    if membership is None:
+        session.add(PlatformMembership(user_id=user.id, platform_role_id=role.id))
+    await record_event(
+        session,
+        actor_user_id=None,
+        action=ACTION_PLATFORM_ADMIN_RECOVERY_GRANTED,
+        resource_type="user",
+        resource_id=str(user.id),
+        metadata={
+            "source": "break_glass",
+            "email": normalised_email,
+            "role": role.code,
+            "reason": normalised_reason[:500],
+        },
+    )
+    await session.commit()
+    await session.refresh(user)
+    return user
+
+
+async def delete_provisioned_user(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    source: str,
+) -> bool:
+    """Hard-delete a provisioned user under the platform-admin invariant lock.
+
+    Operator/teardown helper used only by the development bootstrap CLI
+    (``scripts.provision_bootstrap_admin --delete``). Deleting a user is a
+    user-removal pathway, so it takes the same transaction-scoped advisory lock
+    as grant/revoke/webhook deactivation and holds it across the enabled-admin
+    check and the delete, so it cannot race an ordinary revocation or a
+    provider deactivation. A teardown cannot meaningfully refuse to remove the
+    last administrator (resetting the one-time bootstrap is its purpose), so a
+    deletion that empties the enabled set records ``platform.admin_lockout`` for
+    operator attention — mirroring the webhook deactivation path — rather than
+    leaving the lockout silent. The caller is responsible for bounding the
+    command to a development/test context. The user's organisation memberships
+    and their role grants are removed explicitly first; ``platform_memberships``
+    and ``bootstrap_states`` cascade from the ``users`` row.
+    """
+    await acquire_platform_admin_lock(session)
+    user = await session.scalar(select(User).where(User.id == user_id).with_for_update())
+    if user is None:
+        return False
+
+    locks_out_platform_admin = await platform_admin_deactivation_locks_out(session, user)
+    membership_ids = (
+        await session.scalars(
+            select(OrganisationMembership.id).where(OrganisationMembership.user_id == user.id)
+        )
+    ).all()
+    if membership_ids:
+        await session.execute(
+            delete(MembershipRole).where(MembershipRole.membership_id.in_(membership_ids))
+        )
+        await session.execute(
+            delete(OrganisationMembership).where(OrganisationMembership.user_id == user.id)
+        )
+    await session.delete(user)
+    if locks_out_platform_admin:
+        await record_event(
+            session,
+            actor_user_id=None,
+            action=ACTION_PLATFORM_ADMIN_LOCKOUT,
+            resource_type="user",
+            resource_id=str(user.id),
+            metadata={"source": source},
+        )
+    await session.commit()
+    return True
 
 
 @dataclass
@@ -754,15 +921,19 @@ async def _revoke_pending_invitations(
     grantable conditions are re-checked in Python after the SELECT because the
     in-memory test session cannot apply the SQL WHERE clause and because, like
     ``_accept_invitations``, a concurrent webhook refresh (Scope §6.8) may
-    have revoked one between the SELECT and this pass.
+    have revoked one between the SELECT and this pass. The candidate rows are
+    read ``FOR UPDATE`` so the flip serialises against login-time acceptance on
+    the same invitation row (plan P7).
     """
     candidates = (
         await session.scalars(
-            select(Invitation).where(
+            select(Invitation)
+            .where(
                 Invitation.organisation_id == organisation_id,
                 Invitation.status == InvitationStatus.SENT,
                 func.lower(Invitation.email) == user_email.strip().lower(),
             )
+            .with_for_update()
         )
     ).all()
     revoked = 0

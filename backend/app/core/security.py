@@ -227,6 +227,33 @@ class WorkOSUserProfileClient:
 _WEBHOOK_TOLERANCE_SECONDS = 300
 
 
+class CachingUserProfileClient:
+    """Request-scoped memoising wrapper around a ``UserProfileClient`` (plan P7).
+
+    One successful authentication resolves the same validated identity several
+    times: provisioning, the one-time bootstrap check and login-time invitation
+    linking each read the WorkOS profile. The profile cannot change within a
+    single request, so the first fetch is reused and the later callers share it.
+    Every caller still performs its own fail-closed ``email_verified`` and
+    membership checks; only the redundant provider round trips are removed.
+
+    The wrapper is created per request (never cached process-wide) so a stale
+    profile can never leak between requests.
+    """
+
+    def __init__(self, inner: UserProfileClient) -> None:
+        self._inner = inner
+        self._profiles: dict[str, UserProfile] = {}
+
+    async def get_profile(self, workos_user_id: str) -> UserProfile:
+        cached = self._profiles.get(workos_user_id)
+        if cached is not None:
+            return cached
+        profile = await self._inner.get_profile(workos_user_id)
+        self._profiles[workos_user_id] = profile
+        return profile
+
+
 def _normalise_timestamp_ms(timestamp: int) -> int:
     """Return a millisecond timestamp, accepting seconds or milliseconds.
 

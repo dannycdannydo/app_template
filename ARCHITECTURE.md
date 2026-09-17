@@ -211,6 +211,7 @@ service call — platform routes operate across organisations
 - The two planes never grant across each other: an organisation `owner` without a platform membership gets `403 platform_admin_required` on platform routes, and a platform admin without an organisation membership gets `403 not_a_member` on organisation routes. No `is_admin`/superuser boolean exists anywhere.
 - `GET /api/v1/me` returns `platform_roles` (empty for non-admins); the frontend uses it only for UI gating — the backend remains the enforcement point.
 - Every platform mutation is audited through the append-only `record_event` service (`platform.bootstrap_granted`, `organisation.created`, `invitation.sent`, `membership.role_changed`, `feature_flag.changed`, ...).
+- The last-administrator invariant counts only *enabled* users holding `platform_admin` (a disabled membership cannot log in and is not a recovery principal). Grant, revoke and the `user.deleted` webhook deactivation all take one transaction-scoped PostgreSQL advisory lock, so two removals cannot each observe the other administrator and both succeed. A provider-driven deactivation that removes the last enabled administrator is allowed (WorkOS already deleted the account) but writes a `platform.admin_lockout` audit event; the tightly scoped break-glass path `make recover-admin EMAIL=... REASON=...` (`scripts.recover_platform_admin`) can then re-grant the role to an already provisioned enabled user, only while zero enabled administrators remain, and audits `platform.admin_recovery_granted`.
 
 ## Invitation flow (v0.4)
 
@@ -232,6 +233,7 @@ invitation marked accepted, audit invitation.accepted + membership.role_changed
 ```
 
 - Acceptance is authoritative and happens at login time: revoked or expired invitations never grant, an email mismatch never grants, and a login without any webhook delivery still links the invitation.
+- Invitation transitions are a closed state machine (`sent → accepted | revoked | expired`; terminal states never move). Acceptance, local revoke and the webhook revocation all take the invitation row `FOR UPDATE`, so exactly one of them moves a row out of `sent`: a committed revoke can never later be accepted, and a committed acceptance can never be overwritten by a stale revoke. The local row is the granting authority; WorkOS remains the delivery/revocation owner, and a WorkOS revoke whose local commit fails is re-mirrored by the `invitation.revoked` webhook.
 - `POST /api/v1/webhooks/workos` (signature-verified, HMAC-SHA256, 300s tolerance) refreshes best-effort invitation state only; it never grants membership.
 - WorkOS invitations are sent into the mapped WorkOS org; `organisations.workos_organisation_id` is created eagerly at platform org creation and lazily backfilled at first invite. The mapping is never client-writable.
 
