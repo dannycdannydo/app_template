@@ -32,6 +32,7 @@ from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from app.ai import scratch as ai_scratch
 from app.ai.errors import BudgetExceededError
 from app.ai.execution import JOB_TYPE_AI_EXECUTE, execute_ai_task
 from app.ai.persistence import service as ai_persistence
@@ -1725,11 +1726,20 @@ async def test_paused_ai_worker_cannot_reserve_after_cross_session_takeover(
             settings_row = await _seed_settings(session, organisation.id)
             settings_row.enabled = True
             await session.commit()
-            storage_key = (
-                f"organisations/{organisation.id}/ai/scratch/doc-{uuid.uuid4().hex[:8]}.txt"
+            content = b"a non-sensitive fixture"
+            intent = await ai_scratch.create_scratch_intent(
+                session,
+                organisation_id=organisation.id,
+                content_type="text/plain",
+                size_bytes=len(content),
             )
+            storage_key = intent.object_key
             fake_storage: Any = get_storage()
-            await fake_storage.put(storage_key, b"a non-sensitive fixture", "text/plain")
+            await fake_storage.put(storage_key, content, "text/plain")
+            await ai_scratch.complete_scratch_intent(
+                session, organisation_id=organisation.id, upload_id=intent.upload_id
+            )
+            await session.commit()
             job = await jobs_service.schedule_job(
                 session,
                 organisation_id=organisation.id,

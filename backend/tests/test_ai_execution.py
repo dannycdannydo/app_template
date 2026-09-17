@@ -141,13 +141,47 @@ async def _seed_user(session: AsyncSession) -> User:
     return user
 
 
-async def _put_text_document(
-    organisation_id: uuid.UUID, content: str = "A non-sensitive lease fixture."
+async def _put_authorized_object(
+    session: AsyncSession,
+    organisation_id: uuid.UUID,
+    *,
+    content: bytes,
+    content_type: str,
 ) -> str:
-    """Put a text object in the organisation's AI scratch namespace; return its key."""
-    key = f"organisations/{organisation_id}/ai/scratch/doc-{uuid.uuid4().hex[:8]}.txt"
-    await _fake_storage().put(key, content.encode("utf-8"), content_type="text/plain")
+    """Mint a durable scratch intent, PUT the bytes and complete it (plan P6).
+
+    Plan P6 requires a live scratch intent for the AI source authority to
+    accept the reference; the worker path uses the production-wired service.
+    """
+    from app.ai import scratch as ai_scratch
+
+    intent = await ai_scratch.create_scratch_intent(
+        session,
+        organisation_id=organisation_id,
+        content_type=content_type,
+        size_bytes=len(content),
+    )
+    await _fake_storage().put(intent.object_key, content, content_type=content_type)
+    key = await ai_scratch.complete_scratch_intent(
+        session, organisation_id=organisation_id, upload_id=intent.upload_id
+    )
+    await session.commit()
+    assert key is not None
     return key
+
+
+async def _put_text_document(
+    session: AsyncSession,
+    organisation_id: uuid.UUID,
+    content: str = "A non-sensitive lease fixture.",
+) -> str:
+    """Put an authorised text object in the AI scratch namespace; return its key."""
+    return await _put_authorized_object(
+        session,
+        organisation_id,
+        content=content.encode("utf-8"),
+        content_type="text/plain",
+    )
 
 
 async def _enqueue(
@@ -264,7 +298,7 @@ async def test_worker_classifies_text_document_and_records_request(
         organisation = await _seed_organisation(session)
         await _enable_ai(session, organisation.id)
         user = await _seed_user(session)
-        storage_key = await _put_text_document(organisation.id)
+        storage_key = await _put_text_document(session, organisation.id)
 
     job = await _enqueue(
         session_factory,
@@ -342,7 +376,7 @@ async def test_redelivered_message_does_not_redispatch(
         organisation = await _seed_organisation(session)
         await _enable_ai(session, organisation.id)
         user = await _seed_user(session)
-        storage_key = await _put_text_document(organisation.id)
+        storage_key = await _put_text_document(session, organisation.id)
 
     job = await _enqueue(
         session_factory,
@@ -390,7 +424,7 @@ async def test_worker_re_reads_storage_each_attempt(migrated_database: str) -> N
         organisation = await _seed_organisation(session)
         await _enable_ai(session, organisation.id)
         user = await _seed_user(session)
-        storage_key = await _put_text_document(organisation.id)
+        storage_key = await _put_text_document(session, organisation.id)
 
     # Enqueue with no worker running, then delete the object before the worker
     # starts. The worker re-reads on its attempt, so the missing object fails
@@ -430,8 +464,12 @@ async def test_worker_classifies_binary_document(
         organisation = await _seed_organisation(session)
         await _enable_ai(session, organisation.id)
         user = await _seed_user(session)
-        key = f"organisations/{organisation.id}/ai/scratch/doc-{uuid.uuid4().hex[:8]}.pdf"
-        await _fake_storage().put(key, b"%PDF-1.4 fixture", content_type="application/pdf")
+        key = await _put_authorized_object(
+            session,
+            organisation.id,
+            content=b"%PDF-1.4 fixture",
+            content_type="application/pdf",
+        )
 
     job = await _enqueue(
         session_factory,
@@ -458,7 +496,7 @@ async def test_request_row_is_org_scoped(
         organisation = await _seed_organisation(session)
         await _enable_ai(session, organisation.id)
         user = await _seed_user(session)
-        storage_key = await _put_text_document(organisation.id)
+        storage_key = await _put_text_document(session, organisation.id)
 
     job = await _enqueue(
         session_factory,
@@ -497,7 +535,7 @@ async def test_crash_window_reconciles_winning_attempt(
         organisation = await _seed_organisation(session)
         await _enable_ai(session, organisation.id)
         user = await _seed_user(session)
-        storage_key = await _put_text_document(organisation.id)
+        storage_key = await _put_text_document(session, organisation.id)
 
     # Enqueue with no worker running so we can set up the crash-window state
     # before the message is consumed.

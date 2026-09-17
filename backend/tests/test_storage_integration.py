@@ -146,3 +146,49 @@ async def test_delete_missing_object_is_idempotent(storage: S3Storage) -> None:
     never_uploaded = f"organisations/org-integration/never-uploaded/{uuid.uuid4()}/none.txt"
     await storage.delete_object(never_uploaded)
     await storage.delete_object(never_uploaded)
+
+
+async def test_server_side_promotion_and_staging_replay_immutability(
+    storage: S3Storage,
+) -> None:
+    """Plan P6: promotion copies staging to a final key a PUT cannot mutate.
+
+    The browser capability targets the staging key; replaying it with different
+    bytes of the same size leaves the promoted final object unchanged, and the
+    final object's checksum matches the pinned value.
+    """
+    content = b"%PDF-1.7 immutable promotion " + uuid.uuid4().hex.encode()
+    file_id = uuid.uuid4()
+    staging_key = f"organisations/org-integration/documents/{file_id}/staging/{uuid.uuid4()}"
+    final_key = f"organisations/org-integration/documents/{file_id}/original"
+    upload = await storage.create_upload_url(
+        file_id=file_id,
+        object_key=staging_key,
+        content_type="application/pdf",
+        size_bytes=len(content),
+    )
+    async with httpx.AsyncClient() as client:
+        staged = await client.put(
+            upload.url, content=content, headers={"Content-Type": "application/pdf"}
+        )
+    assert staged.status_code in (200, 201, 204)
+
+    await storage.copy_object(source_key=staging_key, destination_key=final_key)
+    promoted = await storage.head_object(final_key)
+    assert isinstance(promoted, ObjectInfo)
+    assert promoted.size_bytes == len(content)
+    assert promoted.checksum is not None
+
+    # Replay the staging capability with different same-size bytes.
+    replay = content[:-1] + b"X"
+    async with httpx.AsyncClient() as client:
+        replayed = await client.put(
+            upload.url, content=replay, headers={"Content-Type": "application/pdf"}
+        )
+    assert replayed.status_code in (200, 201, 204)
+    after = await storage.head_object(final_key)
+    assert isinstance(after, ObjectInfo)
+    assert after.checksum == promoted.checksum
+
+    await storage.delete_object(staging_key)
+    await storage.delete_object(final_key)

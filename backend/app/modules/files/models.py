@@ -87,8 +87,15 @@ class File(Base, TimestampMixin):
     content_type: Mapped[str] = mapped_column(String(255), nullable=False)
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
     # Provider checksum (S3 ETag, fake SHA-256); opaque to application code,
-    # which only ever compares it for equality (Scope §6.3).
+    # which only ever compares it for equality (v0.2 Scope §6.3).
     checksum: Mapped[str | None] = mapped_column(String(255), nullable=True, default=None)
+    # The immutable content identity pinned at completion (plan P6): the
+    # provider checksum of the promoted final object. AI reads and downloads
+    # require this value and re-verify the object against it, so a same-key
+    # overwrite after approval is detected and fails closed. NULL means the
+    # provider exposed no stable identity; such a file is never treated as
+    # trusted input.
+    content_identity: Mapped[str | None] = mapped_column(String(255), nullable=True, default=None)
     status: Mapped[FileStatus] = mapped_column(
         Enum(
             FileStatus,

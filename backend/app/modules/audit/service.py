@@ -86,6 +86,7 @@ ACTION_FILE_UPLOADED = "file.uploaded"
 ACTION_FILE_UPLOAD_FAILED = "file.upload_failed"
 ACTION_FILE_PROCESSING = "file.processing"
 ACTION_FILE_READY = "file.ready"
+ACTION_FILE_QUARANTINED = "file.quarantined"
 ACTION_FILE_DELETED = "document.deleted"
 
 # Durable job lifecycle (Scope §6.4, blueprint §18): ``job.succeeded`` on

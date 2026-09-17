@@ -24,7 +24,7 @@ from typing import cast as typing_cast
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -33,6 +33,7 @@ from app.modules.files import service
 from app.modules.files.models import File, FileStatus
 from app.modules.organisations.models import Organisation
 from app.storage import FakeObjectStorage, get_storage
+from app.storage.types import ObjectInfo
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 
@@ -153,8 +154,31 @@ async def test_files_crud_round_trip_within_org(migrated_database: str) -> None:
             )
             assert fetched.status == FileStatus.UPLOADED
             assert fetched.original_filename == "report.pdf"
+            # Plan P6: completion pins the immutable content identity.
+            assert fetched.content_identity is not None
+            # Promotion moved the served key from the staging key to the final,
+            # non-presigned key.
+            assert fetched.object_key == (
+                f"organisations/{organisation.id}/documents/{fetched.id}/original"
+            )
+            assert "staging" not in fetched.object_key
 
-            # A signed download URL is issued for a verified file.
+            # Download is gated until the file reaches ``ready`` (the worker's
+            # post-verification, post-scan state).
+            with pytest.raises(ConflictError):
+                await service.create_download_url(
+                    session,
+                    organisation_id=organisation.id,
+                    file_id=uploaded.id,
+                )
+            await service.mark_file_processing(
+                session, organisation_id=organisation.id, file_id=uploaded.id
+            )
+            await service.mark_file_ready(
+                session, organisation_id=organisation.id, file_id=uploaded.id
+            )
+
+            # A signed download URL is issued for a verified, ready file.
             download = await service.create_download_url(
                 session,
                 organisation_id=organisation.id,
@@ -319,19 +343,207 @@ async def test_complete_failure_paths_persist_failed_status(migrated_database: s
         await engine.dispose()
 
 
-async def test_complete_rejects_already_completed_file(migrated_database: str) -> None:
-    """A file that is no longer pending cannot be completed twice (409)."""
+async def test_promotion_requires_stable_identity(
+    migrated_database: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan P6 should-fix: a promoted object without a stable identity fails.
+
+    A provider that exposes no checksum for the final object cannot back a
+    pinned content identity, so completion must fail the file rather than
+    create a ``ready``-capable row the authority would always reject.
+    """
+    engine = create_async_engine(migrated_database, poolclass=NullPool)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    storage = _fake_storage()
+    original_head = storage.head_object
+    try:
+        async with session_factory() as session:
+            organisation = await _create_org(session, "Promotion Identity Ltd")
+            content = b"promoted identity bytes"
+            file, _url = await service.create_upload_intent(
+                session,
+                organisation_id=organisation.id,
+                original_filename="report.pdf",
+                content_type="application/pdf",
+                size_bytes=len(content),
+            )
+            await storage.put(file.object_key, content)
+            final_key = service.object_key_for(organisation.id, file.id)
+
+            async def _head_without_final_checksum(object_key: str) -> ObjectInfo | None:
+                info = await original_head(object_key)
+                if info is not None and object_key == final_key:
+                    return ObjectInfo(
+                        object_key=info.object_key,
+                        size_bytes=info.size_bytes,
+                        content_type=info.content_type,
+                        checksum=None,
+                    )
+                return info
+
+            monkeypatch.setattr(storage, "head_object", _head_without_final_checksum)
+            with pytest.raises(ValidationError):
+                await service.complete_upload(
+                    session, organisation_id=organisation.id, file_id=file.id
+                )
+            await session.refresh(file)
+            assert file.status == FileStatus.FAILED
+    finally:
+        await engine.dispose()
+
+
+async def test_promotion_detects_same_size_overwrite_during_copy(
+    migrated_database: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan P6 should-fix: a staging overwrite between head and copy fails.
+
+    The completed object's pinned identity must equal the bytes that passed the
+    pre-copy verification; a same-size overwrite of the staging key landing in
+    that window must fail completion instead of promoting unverified bytes.
+    """
+    engine = create_async_engine(migrated_database, poolclass=NullPool)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    storage = _fake_storage()
+    original_copy = storage.copy_object
+    try:
+        async with session_factory() as session:
+            organisation = await _create_org(session, "Promotion Race Ltd")
+            content = b"original staging bytes"
+            file, _url = await service.create_upload_intent(
+                session,
+                organisation_id=organisation.id,
+                original_filename="report.pdf",
+                content_type="application/pdf",
+                size_bytes=len(content),
+            )
+            staging_key = file.object_key
+            await storage.put(staging_key, content)
+
+            async def _copy_after_tamper(*, source_key: str, destination_key: str) -> None:
+                # A replay of the still-live staging PUT lands between the
+                # pre-copy head and the provider copy.
+                await storage.put(source_key, b"tampered staging bytes")
+                await original_copy(source_key=source_key, destination_key=destination_key)
+
+            monkeypatch.setattr(storage, "copy_object", _copy_after_tamper)
+            with pytest.raises(ValidationError):
+                await service.complete_upload(
+                    session,
+                    organisation_id=organisation.id,
+                    file_id=file.id,
+                    checksum=hashlib.sha256(content).hexdigest(),
+                )
+            await session.refresh(file)
+            assert file.status == FileStatus.FAILED
+    finally:
+        await engine.dispose()
+
+
+async def test_complete_replay_is_idempotent(migrated_database: str) -> None:
+    """A replayed completion returns the same job and schedules no duplicate.
+
+    Plan P6: completion is idempotent under retry/parallel calls — the first
+    call leaves one ``uploaded`` file with exactly one processing job, and the
+    replay returns that same job id.
+    """
+    from app.modules.jobs.models import Job
+
     engine = create_async_engine(migrated_database, poolclass=NullPool)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         async with session_factory() as session:
             organisation = await _create_org(session, "Double Complete Ltd")
             content = b"double complete bytes"
-            uploaded = await _upload_and_complete(session, organisation.id, content=content)
+            file, _signed_url = await service.create_upload_intent(
+                session,
+                organisation_id=organisation.id,
+                original_filename="report.pdf",
+                content_type="application/pdf",
+                size_bytes=len(content),
+            )
+            await _fake_storage().put(file.object_key, content)
+            first, first_job_id = await service.complete_upload(
+                session, organisation_id=organisation.id, file_id=file.id
+            )
+            assert first.status == FileStatus.UPLOADED
+            assert first_job_id is not None
 
-            with pytest.raises(ConflictError):
-                await service.complete_upload(
-                    session, organisation_id=organisation.id, file_id=uploaded.id
+            replay, replay_job_id = await service.complete_upload(
+                session, organisation_id=organisation.id, file_id=file.id
+            )
+            assert replay.id == first.id
+            assert replay.status == FileStatus.UPLOADED
+            assert replay_job_id == first_job_id
+
+            # A retry after the worker advanced the row to ``processing`` (and
+            # then ``ready``) must still resolve to that same job rather than
+            # erroring or scheduling a duplicate (plan P6: replay is idempotent
+            # across every valid post-completion lifecycle state).
+            await service.mark_file_processing(
+                session, organisation_id=organisation.id, file_id=file.id
+            )
+            processing_replay, processing_job_id = await service.complete_upload(
+                session, organisation_id=organisation.id, file_id=file.id
+            )
+            assert processing_replay.status == FileStatus.PROCESSING
+            assert processing_job_id == first_job_id
+
+            await service.mark_file_ready(session, organisation_id=organisation.id, file_id=file.id)
+            ready_replay, ready_job_id = await service.complete_upload(
+                session, organisation_id=organisation.id, file_id=file.id
+            )
+            assert ready_replay.status == FileStatus.READY
+            assert ready_job_id == first_job_id
+
+            job_count = await session.scalar(
+                select(func.count()).select_from(Job).where(Job.input_reference == str(file.id))
+            )
+            assert job_count == 1
+    finally:
+        await engine.dispose()
+
+
+async def test_concurrent_completion_produces_one_job(migrated_database: str) -> None:
+    """Plan P6: two parallel completions leave one uploaded file and one job.
+
+    The completion path locks the file row ``FOR UPDATE``, so the second
+    transaction blocks, observes the first's ``uploaded`` status and returns the
+    same processing job instead of scheduling a duplicate.
+    """
+    from app.modules.jobs.models import Job
+
+    engine = create_async_engine(migrated_database, poolclass=NullPool)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            organisation = await _create_org(session, "Concurrent Complete Ltd")
+            content = b"concurrent completion bytes"
+            file, _signed_url = await service.create_upload_intent(
+                session,
+                organisation_id=organisation.id,
+                original_filename="report.pdf",
+                content_type="application/pdf",
+                size_bytes=len(content),
+            )
+            file_id = file.id
+            await _fake_storage().put(file.object_key, content)
+
+        async def _complete() -> tuple[File, uuid.UUID | None]:
+            async with session_factory() as session:
+                return await service.complete_upload(
+                    session, organisation_id=organisation.id, file_id=file_id
                 )
+
+        first, second = await asyncio.gather(_complete(), _complete())
+        assert first[0].status == FileStatus.UPLOADED
+        assert second[0].status == FileStatus.UPLOADED
+        assert first[1] is not None
+        assert first[1] == second[1]
+
+        async with session_factory() as session:
+            job_count = await session.scalar(
+                select(func.count()).select_from(Job).where(Job.input_reference == str(file_id))
+            )
+        assert job_count == 1
     finally:
         await engine.dispose()

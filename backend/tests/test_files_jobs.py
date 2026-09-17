@@ -67,6 +67,7 @@ from app.modules.notifications.models import (
 from app.modules.organisations.models import Organisation
 from app.modules.outbox.models import OutboxEvent, OutboxEventStatus
 from app.modules.users.models import User
+from app.scanning import ScannerUnavailableError, ScanVerdict
 from app.storage import FakeObjectStorage, get_storage
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -385,6 +386,51 @@ async def test_processing_size_mismatch_fails_file(
         )
         assert failed_event is not None
         assert failed_event.event_metadata["reason"] == "size_mismatch"
+
+
+async def test_processing_same_size_overwrite_fails_file(
+    migrated_database: str, broker_and_worker: tuple[StubBroker, Worker, Any]
+) -> None:
+    """AC14: a same-size overwrite between completion and processing fails closed.
+
+    The pinned ``content_identity`` is re-verified by the worker, so replacing
+    the final object with different same-size bytes never reaches ``ready``:
+    the file is failed with ``identity_mismatch`` and the job fails permanently.
+    """
+    _broker, _worker, process_task = broker_and_worker
+    session_factory = _session_factory(migrated_database)
+    async with session_factory() as session:
+        organisation = await _create_org(session, "File Jobs Overwrite Ltd")
+        content = b"original bytes"
+        file, job_id = await _upload_round_trip(session, organisation.id, content=content)
+        # Same size, different bytes: the fake's declared-size check passes,
+        # but the provider checksum changes, which the worker now detects.
+        replacement = content[:-1] + b"S"
+        assert len(replacement) == len(content)
+        await _fake_storage().put(file.object_key, replacement)
+
+    process_task.send(job_id=str(job_id))
+    await _wait_for_status(session_factory, job_id, JobStatus.FAILED)
+
+    async with session_factory() as session:
+        failed_file = await files_service.get_file(
+            session, organisation_id=organisation.id, file_id=file.id
+        )
+        assert failed_file.status == FileStatus.FAILED
+        job = await session.get(Job, job_id)
+        assert job is not None
+        assert job.status == JobStatus.FAILED
+        assert job.error_code == files_tasks.ERROR_CODE_VERIFICATION_FAILED
+
+    async with session_factory() as session:
+        failed_event = await session.scalar(
+            select(AuditEvent).where(
+                AuditEvent.action == "file.upload_failed",
+                AuditEvent.resource_id == str(file.id),
+            )
+        )
+        assert failed_event is not None
+        assert failed_event.event_metadata["reason"] == "identity_mismatch"
 
 
 async def test_redelivered_message_of_finished_job_is_a_noop(
@@ -990,3 +1036,105 @@ async def test_paused_file_worker_is_fenced_after_cross_session_takeover(
     assert (
         await _audit_count(session_factory, action="file.processing", resource_id=str(file.id)) == 0
     )
+
+
+class _QuarantiningScanner:
+    """A scanner stub that rejects every object (plan P6 quarantine path)."""
+
+    async def scan(self, **kwargs: Any) -> ScanVerdict:
+        return ScanVerdict.QUARANTINED
+
+
+class _UnavailableScanner:
+    """A scanner stub that cannot produce a verdict (plan P6 outage path)."""
+
+    async def scan(self, **kwargs: Any) -> ScanVerdict:
+        raise ScannerUnavailableError("scanner down")
+
+
+async def test_scanner_rejection_quarantines_file_and_fails_job(
+    migrated_database: str,
+    broker_and_worker: tuple[StubBroker, Worker, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plan P6: a scanner rejection quarantines the file and fails the job.
+
+    The file never reaches ``ready`` (so it is never downloadable or
+    AI-readable) and the job records the permanent ``file_quarantined`` error.
+    """
+    _broker, _worker, process_task = broker_and_worker
+    monkeypatch.setattr(files_service, "get_scanner", lambda: _QuarantiningScanner())
+    session_factory = _session_factory(migrated_database)
+    async with session_factory() as session:
+        organisation = await _create_org(session, "File Quarantine Ltd")
+        file, job_id = await _upload_round_trip(session, organisation.id)
+
+    process_task.send(job_id=str(job_id))
+    await _wait_for_status(session_factory, job_id, JobStatus.FAILED)
+
+    async with session_factory() as session:
+        quarantined = await files_service.get_file(
+            session, organisation_id=organisation.id, file_id=file.id
+        )
+        assert quarantined.status == FileStatus.QUARANTINED
+        job = await session.get(Job, job_id)
+        assert job is not None
+        assert job.error_code == files_tasks.ERROR_CODE_QUARANTINED
+
+    assert (
+        await _audit_count(session_factory, action="file.quarantined", resource_id=str(file.id))
+        == 1
+    )
+    assert await _audit_count(session_factory, action="file.ready", resource_id=str(file.id)) == 0
+
+    # A quarantined file is never downloadable; the download endpoint raises.
+    from app.core.exceptions import ConflictError
+
+    async with session_factory() as session:
+        with pytest.raises(ConflictError):
+            await files_service.create_download_url(
+                session, organisation_id=organisation.id, file_id=file.id
+            )
+
+
+async def test_scanner_outage_never_promotes_file_to_ready(
+    migrated_database: str,
+    broker_and_worker: tuple[StubBroker, Worker, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plan P6: while the scanner is unavailable the file is never trusted.
+
+    The attempt retries and eventually exhausts, but the file never becomes
+    ``ready`` and no ``file.ready`` audit is written — an outage cannot turn
+    unscanned content into trusted content.
+    """
+    _broker, _worker, process_task = broker_and_worker
+    monkeypatch.setattr(files_service, "get_scanner", lambda: _UnavailableScanner())
+    session_factory = _session_factory(migrated_database)
+    async with session_factory() as session:
+        organisation = await _create_org(session, "File Scanner Outage Ltd")
+        file, job_id = await _upload_round_trip(session, organisation.id)
+
+    process_task.send(job_id=str(job_id))
+    # The first attempt fails transiently at the scanner gate and the
+    # PostgreSQL-owned retry decision re-queues the job; no coordinator runs in
+    # this harness to publish that retry, so wait for the attempt to settle
+    # rather than for terminal exhaustion.
+    deadline = time.monotonic() + 20.0
+    while time.monotonic() < deadline:
+        async with session_factory() as session:
+            row = await session.get(Job, job_id)
+            if row is not None and row.attempt_count >= 1:
+                break
+        await asyncio.sleep(0.1)
+
+    async with session_factory() as session:
+        file_row = await files_service.get_file(
+            session, organisation_id=organisation.id, file_id=file.id
+        )
+        assert file_row.status != FileStatus.READY
+        assert file_row.status in (FileStatus.UPLOADED, FileStatus.PROCESSING)
+        job_row = await session.get(Job, job_id)
+        assert job_row is not None
+        assert job_row.status != JobStatus.SUCCEEDED
+    assert await _audit_count(session_factory, action="file.ready", resource_id=str(file.id)) == 0

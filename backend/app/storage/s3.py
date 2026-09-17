@@ -308,6 +308,33 @@ class S3Storage(ObjectStorage):
         finally:
             await asyncio.to_thread(body.close)
 
+    async def copy_object(
+        self,
+        *,
+        source_key: str,
+        destination_key: str,
+    ) -> None:
+        """Promote a staged object onto its non-presigned final key (plan P6).
+
+        ``MetadataDirective=COPY`` keeps the source's declared content type, so
+        the promoted object presents exactly the verified declaration. A
+        missing source is reported as :class:`KeyError` (mirroring
+        :meth:`read_object`), so a promotion whose staging object was lost
+        fails closed rather than creating an empty final object.
+        """
+        try:
+            await asyncio.to_thread(
+                self._client.copy_object,
+                Bucket=self._bucket,
+                CopySource={"Bucket": self._bucket, "Key": source_key},
+                Key=destination_key,
+                MetadataDirective="COPY",
+            )
+        except ClientError as exc:
+            if _error_code(exc) in _MISSING_OBJECT_CODES:
+                raise KeyError(f"object not found: {source_key}") from exc
+            raise
+
     async def delete_object(self, object_key: str) -> None:
         try:
             await asyncio.to_thread(

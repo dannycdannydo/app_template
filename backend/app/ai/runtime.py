@@ -200,12 +200,19 @@ def get_ai_service() -> AIService:
     providers = {
         provider_id: factory.create(provider_id) for provider_id in factory.enabled_provider_ids
     }
+    # Plan P6: the durable-source authority is the composition root's link from
+    # the provider-neutral AI layer to application state. Imported lazily so the
+    # AI package stays importable without the files feature module (and to avoid
+    # a cycle: the files authority imports ``app.ai.scratch``).
+    from app.modules.files.authority import DocumentSourceAuthority
+
     return AIService(
         task_registry=bundle.tasks,
         prompt_registry=bundle.prompts,
         model_registry=bundle.models,
         providers=providers,
         attachment_resolver=StorageAttachmentResolver(get_storage()),
+        source_authorizer=DocumentSourceAuthority(),
         transfer_deployment=_transfer_deployment_policy(),
         storage=get_storage(),
         transfer_stores=_transfer_stores(),

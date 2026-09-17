@@ -50,6 +50,7 @@ from app.modules.jobs import service as jobs_service
 from app.modules.jobs.execution import DurableJobContext, run_claimed
 from app.modules.notifications import service as notifications_service
 from app.modules.users.models import User
+from app.scanning import ScanVerdict
 from app.storage import get_storage
 
 # The durable ``job_type`` this task produces (Scope §6.5). The files service
@@ -72,6 +73,7 @@ _PROGRESS_PROCESSING = 80
 ERROR_CODE_FILE_NOT_FOUND = "file_not_found"
 ERROR_CODE_VERIFICATION_FAILED = "file_verification_failed"
 ERROR_CODE_INVALID_JOB_CONTEXT = "invalid_file_job_context"
+ERROR_CODE_QUARANTINED = "file_quarantined"
 
 logger = structlog.get_logger()
 
@@ -83,8 +85,9 @@ async def process_file(job_id: str) -> None:
     terminal job (terminal states are never re-run, acceptance §5.7), reject
     a foreign job type permanently, then run the attempt through the shared
     execution wrapper (plan P2), which claims the dispatch and re-verifies
-    the stored object against the file record's declaration (existence and
-    size, mirroring the completion-time check). On success the file advances
+    the stored object against the file record's declaration (existence, size
+    and the pinned ``content_identity``, mirroring the completion-time check).
+    On success the file advances
     to ``ready`` and the job to ``succeeded`` with progress 100; on a
     permanent failure the file is marked ``failed`` and the job ``failed``
     with the matching ``error_code`` before :class:`JobPermanentError` is
@@ -155,9 +158,23 @@ async def _process_file_attempt(context: DurableJobContext, session: AsyncSessio
         owner_token=context.owner_token,
     )
     object_info = await get_storage().head_object(file.object_key)
-    verified = object_info is not None and object_info.size_bytes == file.size_bytes
+    # Plan P6 immutable uploads (AC14): the worker re-verifies the pinned
+    # content identity through processing, not just existence and size. The
+    # final key is never presigned for a PUT, but a same-key overwrite or a
+    # provider-side change between completion and processing must still fail
+    # closed here — before the scanning gate and before ``ready``.
+    if object_info is None:
+        reason = "object_missing"
+    elif object_info.size_bytes != file.size_bytes:
+        reason = "size_mismatch"
+    elif file.content_identity is None:
+        reason = "identity_missing"
+    elif object_info.checksum is None or object_info.checksum != file.content_identity:
+        reason = "identity_mismatch"
+    else:
+        reason = ""
+    verified = reason == ""
     if not verified:
-        reason = "object_missing" if object_info is None else "size_mismatch"
         await files_service.mark_file_failed(
             session,
             organisation_id=context.organisation_id,
@@ -206,6 +223,41 @@ async def _process_file_attempt(context: DurableJobContext, session: AsyncSessio
         progress=_PROGRESS_PROCESSING,
         owner_token=context.owner_token,
     )
+    # Plan P6 scanning gate: the file may become ``ready`` (and therefore
+    # downloadable/AI-readable) only after the configured scanner returns a
+    # clean verdict. A definite rejection quarantines the file and fails the
+    # job permanently; a scanner outage raises transiently, so the attempt
+    # retries and the file never becomes trusted while the verdict is unknown.
+    verdict = await files_service.scan_file_object(
+        object_key=file.object_key,
+        content_type=file.content_type,
+    )
+    if verdict is ScanVerdict.QUARANTINED:
+        await files_service.mark_file_quarantined(
+            session,
+            organisation_id=context.organisation_id,
+            file_id=file.id,
+            reason="scanner_rejected",
+            ownership=context.ownership,
+        )
+        await _notify_uploader(
+            session,
+            ownership=context.ownership,
+            organisation_id=context.organisation_id,
+            file=file,
+            notification_type=notifications_service.NOTIFICATION_TYPE_FILE_FAILED,
+            title=notifications_service.FILE_FAILED_TITLE,
+            body=notifications_service.FILE_FAILED_BODY.format(filename=file.original_filename),
+        )
+        await jobs_service.fail(
+            session,
+            job_id=context.job_id,
+            error_code=ERROR_CODE_QUARANTINED,
+            error_message="The stored object was rejected by the upload scanner.",
+            owner_token=context.owner_token,
+        )
+        logger.warning("file.processing.failed", error_code=ERROR_CODE_QUARANTINED)
+        raise jobs_service.JobPermanentError("the stored object was quarantined")
     await files_service.mark_file_ready(
         session,
         organisation_id=context.organisation_id,

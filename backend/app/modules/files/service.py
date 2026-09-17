@@ -24,37 +24,49 @@ so a retried message re-running the job converges instead of erroring.
 
 from __future__ import annotations
 
+import contextlib
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai.errors import AIInputValidationError
 from app.core.config import get_settings
 from app.core.exceptions import ConflictError, ErrorDetail, NotFoundError, ValidationError
 from app.db.conventions import uuid7
 from app.modules.audit.service import (
     ACTION_FILE_DELETED,
     ACTION_FILE_PROCESSING,
+    ACTION_FILE_QUARANTINED,
     ACTION_FILE_READY,
     ACTION_FILE_UPLOAD_FAILED,
     ACTION_FILE_UPLOAD_STARTED,
     ACTION_FILE_UPLOADED,
     record_event,
 )
+from app.modules.files.authority import DocumentSourceAuthority
 from app.modules.files.models import File, FileStatus
 from app.modules.files.queries import (
     org_files_count_statement,
     org_scoped_files_statement,
 )
 from app.modules.jobs import service as jobs_service
+from app.scanning import ScanVerdict, get_scanner
 from app.storage import SignedUrl, get_storage
 
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 100
 
-# The server-generated object key format (Scope §6.3): the file id is embedded
-# so keys are unique and traceable; the client never supplies a path.
+# The server-generated final object key format (Scope §6.3): the file id is
+# embedded so keys are unique and traceable; the client never supplies a path.
 OBJECT_KEY_TEMPLATE = "organisations/{organisation_id}/documents/{file_id}/original"
+
+# The unique staging key the browser's signed PUT targets (plan P6 immutable
+# uploads). The final key above is never signed for a PUT: the API promotes the
+# verified staging object onto it with a server-side copy, so replaying an old
+# upload capability can only recreate a staging object nothing references and
+# can never mutate an approved file's bytes.
+STAGING_KEY_TEMPLATE = "organisations/{organisation_id}/documents/{file_id}/staging/{token}"
 
 # Allowed filename extensions per allowed content type (BP §30: MIME and
 # extension validation). Keyed by the same MIME types as
@@ -70,16 +82,41 @@ _EXTENSIONS_BY_CONTENT_TYPE: dict[str, frozenset[str]] = {
     "image/jpeg": frozenset({"jpg", "jpeg"}),
 }
 
-# The file exists in storage once the browser has PUT it; download is only
-# offered once completion has verified the object.
-_DOWNLOADABLE_STATUSES = frozenset({FileStatus.UPLOADED, FileStatus.PROCESSING, FileStatus.READY})
+# Downloads require the scan/verification verdict: only a ``ready`` file (the
+# state the worker establishes after verification and the scanning gate) is
+# downloadable. The lifecycle/identity decision is owned by the one source
+# authority (``DocumentSourceAuthority``) so download, inline AI, streamed AI
+# and job retries can never drift; this service only translates its denial
+# into the download-appropriate 409.
+_DOCUMENT_AUTHORITY = DocumentSourceAuthority()
+
+# Valid post-completion lifecycle states for a replayed completion: the first
+# call moved the row out of ``pending`` and scheduled exactly one processing
+# job, so any of these resolves to that existing job rather than erroring or
+# scheduling a duplicate. Failure/terminal states are deliberately excluded.
+_POST_COMPLETION_STATUSES = frozenset(
+    {FileStatus.UPLOADED, FileStatus.PROCESSING, FileStatus.READY}
+)
 
 
 def object_key_for(organisation_id: uuid.UUID, file_id: uuid.UUID) -> str:
-    """Return the server-generated object key for one file (Scope §6.3)."""
+    """Return the final, non-presigned object key for one file (Scope §6.3)."""
     return OBJECT_KEY_TEMPLATE.format(
         organisation_id=organisation_id,
         file_id=file_id,
+    )
+
+
+def _staging_key_for(
+    organisation_id: uuid.UUID,
+    file_id: uuid.UUID,
+    token: uuid.UUID,
+) -> str:
+    """Return the unique staging key the browser PUT capability targets."""
+    return STAGING_KEY_TEMPLATE.format(
+        organisation_id=organisation_id,
+        file_id=file_id,
+        token=token,
     )
 
 
@@ -88,6 +125,35 @@ def _not_found() -> NotFoundError:
         code="file_not_found",
         message="The file could not be found.",
     )
+
+
+async def _fail_completion(
+    session: AsyncSession,
+    *,
+    organisation_id: uuid.UUID,
+    actor_user_id: uuid.UUID | None,
+    file: File,
+    object_key: str,
+    reason: str,
+    actual_size_bytes: int | None,
+) -> None:
+    """Persist the ``failed`` upload outcome and its audit row in one commit."""
+    file.status = FileStatus.FAILED
+    await record_event(
+        session,
+        organisation_id=organisation_id,
+        actor_user_id=actor_user_id,
+        action=ACTION_FILE_UPLOAD_FAILED,
+        resource_type="file",
+        resource_id=str(file.id),
+        metadata={
+            "object_key": object_key,
+            "expected_size_bytes": file.size_bytes,
+            "actual_size_bytes": actual_size_bytes,
+            "reason": reason,
+        },
+    )
+    await session.commit()
 
 
 def _validate_declared_upload(
@@ -184,12 +250,19 @@ async def create_upload_intent(
     )
     settings = get_settings()
     file_id = uuid7()
+    final_key = object_key_for(organisation_id, file_id)
+    # Plan P6: the browser's capability targets a unique staging key, never the
+    # final key the rest of the system reads. The final key is deterministic
+    # from the file id (the router returns it as the storage reference), and
+    # ``object_key`` starts at staging and is switched to the final key on
+    # successful promotion.
+    staging_key = _staging_key_for(organisation_id, file_id, uuid7())
     file = File(
         id=file_id,
         organisation_id=organisation_id,
         storage_provider=settings.storage_provider,
         storage_bucket=settings.storage_bucket,
-        object_key=object_key_for(organisation_id, file_id),
+        object_key=staging_key,
         original_filename=original_filename,
         content_type=content_type,
         size_bytes=size_bytes,
@@ -203,6 +276,9 @@ async def create_upload_intent(
         object_key=file.object_key,
         content_type=content_type,
         size_bytes=size_bytes,
+        # Bound the capability: an old signed PUT can never outlive the
+        # reviewed window and can only target staging.
+        expires_in=timedelta(seconds=settings.storage_upload_url_ttl_seconds),
     )
     await record_event(
         session,
@@ -212,7 +288,8 @@ async def create_upload_intent(
         resource_type="file",
         resource_id=str(file_id),
         metadata={
-            "object_key": file.object_key,
+            "staging_object_key": file.object_key,
+            "final_object_key": final_key,
             "original_filename": original_filename,
             "content_type": content_type,
             "size_bytes": size_bytes,
@@ -221,6 +298,28 @@ async def create_upload_intent(
     await session.commit()
     await session.refresh(file)
     return file, signed_url
+
+
+async def _get_file_locked(
+    session: AsyncSession,
+    *,
+    organisation_id: uuid.UUID,
+    file_id: uuid.UUID,
+) -> File:
+    """Return one file row locked ``FOR UPDATE`` for a completion mutation.
+
+    ``FOR UPDATE`` serialises concurrent completion/replay calls on the same
+    file: the second transaction blocks, then observes the first's ``uploaded``
+    status and returns its existing processing job instead of scheduling a
+    duplicate. The org-scoped (and not-deleted) filter is the same isolation
+    boundary as :func:`get_file`.
+    """
+    file = await session.scalar(
+        org_scoped_files_statement(organisation_id).where(File.id == file_id).with_for_update()
+    )
+    if file is None:
+        raise _not_found()
+    return file
 
 
 async def complete_upload(
@@ -247,46 +346,129 @@ async def complete_upload(
     The returned job id is what the client polls via ``GET /api/v1/jobs/
     {job_id}`` (the response schema carries it as ``processing_job_id``).
     """
-    file = await get_file(session, organisation_id=organisation_id, file_id=file_id)
+    # Imported lazily: the task module imports this service, so a module-level
+    # import would be circular. The task module is the single source of truth
+    # for the ``job_type`` identity.
+    from app.modules.files import tasks as files_tasks
+
+    file = await _get_file_locked(session, organisation_id=organisation_id, file_id=file_id)
+    if file.status in _POST_COMPLETION_STATUSES:
+        # Idempotent replay (plan P6): a retried completion returns the same
+        # processing job for every valid post-completion lifecycle state —
+        # ``uploaded`` (the worker has not started), ``processing`` and
+        # ``ready`` (the worker advanced the row after the first completion)
+        # all resolve to the job the first call scheduled. A missing job is
+        # only possible for files created before this contract; return the
+        # file without one. Terminal failure states (failed/quarantined/
+        # deleted) are handled below and are never resurrected.
+        existing = await jobs_service.find_job_by_input_reference(
+            session,
+            organisation_id=organisation_id,
+            job_type=files_tasks.JOB_TYPE_FILE_PROCESSING,
+            input_reference=str(file.id),
+        )
+        return file, existing.id if existing is not None else None
     if file.status != FileStatus.PENDING:
         raise ConflictError(
             code="file_not_pending",
             message="Only a pending file can be completed.",
         )
-    object_info = await get_storage().head_object(file.object_key)
+    staging_key = file.object_key
+    object_info = await get_storage().head_object(staging_key)
     verified = object_info is not None and object_info.size_bytes == file.size_bytes
     if verified and checksum is not None:
         verified = object_info is not None and object_info.checksum == checksum
     if not verified:
-        file.status = FileStatus.FAILED
-        await record_event(
+        await _fail_completion(
             session,
             organisation_id=organisation_id,
             actor_user_id=actor_user_id,
-            action=ACTION_FILE_UPLOAD_FAILED,
-            resource_type="file",
-            resource_id=str(file.id),
-            metadata={
-                "object_key": file.object_key,
-                "expected_size_bytes": file.size_bytes,
-                "actual_size_bytes": object_info.size_bytes if object_info else None,
-                "reason": (
-                    "object_missing"
-                    if object_info is None
-                    else "size_mismatch"
-                    if object_info.size_bytes != file.size_bytes
-                    else "checksum_mismatch"
-                ),
-            },
+            file=file,
+            object_key=staging_key,
+            reason=(
+                "object_missing"
+                if object_info is None
+                else "size_mismatch"
+                if object_info.size_bytes != file.size_bytes
+                else "checksum_mismatch"
+            ),
+            actual_size_bytes=object_info.size_bytes if object_info else None,
         )
-        await session.commit()
         raise ValidationError(
             code="upload_verification_failed",
             message="The uploaded object could not be verified; the file has been marked failed.",
         )
+    # Plan P6 promotion: copy the verified staging object onto the
+    # deterministic final key the rest of the system reads. The final key is
+    # never signed for a PUT, so an old capability cannot mutate approved bytes.
+    final_key = object_key_for(organisation_id, file.id)
+    try:
+        await get_storage().copy_object(source_key=staging_key, destination_key=final_key)
+    except KeyError:
+        # Staging vanished between the head and the copy (a racing cleanup):
+        # fail the file rather than promote a missing object.
+        await _fail_completion(
+            session,
+            organisation_id=organisation_id,
+            actor_user_id=actor_user_id,
+            file=file,
+            object_key=staging_key,
+            reason="object_missing",
+            actual_size_bytes=None,
+        )
+        raise ValidationError(
+            code="upload_verification_failed",
+            message="The uploaded object could not be verified; the file has been marked failed.",
+        ) from None
+    promoted = await get_storage().head_object(final_key)
+    if promoted is None or promoted.size_bytes != file.size_bytes or not promoted.checksum:
+        await _fail_completion(
+            session,
+            organisation_id=organisation_id,
+            actor_user_id=actor_user_id,
+            file=file,
+            object_key=final_key,
+            reason=(
+                "promotion_failed"
+                if promoted is None or promoted.size_bytes != file.size_bytes
+                else "promotion_identity_missing"
+            ),
+            actual_size_bytes=promoted.size_bytes if promoted else None,
+        )
+        raise ValidationError(
+            code="upload_verification_failed",
+            message="The uploaded object could not be promoted; the file has been marked failed.",
+        )
+    # Plan P6 immutable uploads (AC14): the promoted bytes must be exactly the
+    # bytes that passed the pre-copy check. A same-size overwrite of the
+    # staging key landing between the head and the copy would otherwise
+    # promote different bytes than the ones verified (and than the caller's
+    # checksum); re-verify the promoted identity against the verified staging
+    # identity, and against the caller's checksum when one was supplied.
+    verified_identity = object_info.checksum if object_info is not None else None
+    if (verified_identity is not None and promoted.checksum != verified_identity) or (
+        checksum is not None and promoted.checksum != checksum
+    ):
+        await _fail_completion(
+            session,
+            organisation_id=organisation_id,
+            actor_user_id=actor_user_id,
+            file=file,
+            object_key=final_key,
+            reason="promotion_identity_mismatch",
+            actual_size_bytes=promoted.size_bytes,
+        )
+        raise ValidationError(
+            code="upload_verification_failed",
+            message="The uploaded object could not be promoted; the file has been marked failed.",
+        )
+    file.object_key = final_key
     file.status = FileStatus.UPLOADED
-    if object_info is not None and object_info.checksum:
-        file.checksum = object_info.checksum
+    # The immutable content identity is pinned from the promoted object (whose
+    # stable identity was just verified), so a later same-key overwrite is
+    # detected by the source authority/download.
+    file.checksum = promoted.checksum
+    file.content_identity = promoted.checksum
     await record_event(
         session,
         organisation_id=organisation_id,
@@ -295,26 +477,35 @@ async def complete_upload(
         resource_type="file",
         resource_id=str(file.id),
         metadata={
-            "object_key": file.object_key,
+            "object_key": final_key,
             "size_bytes": file.size_bytes,
             "checksum": file.checksum,
+            "content_identity": file.content_identity,
         },
     )
-    await session.commit()
-    await session.refresh(file)
-    # Imported lazily: the task module imports this service, so a module-level
-    # import would be circular. By the time the completion flow runs the module
-    # is cached, so the import is a dict lookup. The task module is the single
-    # source of truth for the ``job_type`` identity.
-    from app.modules.files import tasks as files_tasks
-
+    # Plan P6 atomic completion: the file transition, audit row, durable
+    # processing job and its dispatch outbox event commit in one transaction
+    # (``commit=False``), so a failed schedule leaves no ``uploaded`` file
+    # without a processable job.
     job = await jobs_service.schedule_job(
         session,
         organisation_id=organisation_id,
         job_type=files_tasks.JOB_TYPE_FILE_PROCESSING,
         input_reference=str(file.id),
         actor_user_id=actor_user_id,
+        commit=False,
     )
+    await session.commit()
+    # The composed transaction is durable: record the enqueue metric now (the
+    # ``commit=False`` schedule deliberately does not, so a rollback cannot
+    # report a job that was never committed).
+    jobs_service.record_job_enqueued(job)
+    await session.refresh(file)
+    # Best-effort staging cleanup after the durable commit. A failure leaves an
+    # orphaned staging object (the retention/lifecycle backstop owns it); the
+    # final bytes are unaffected.
+    with contextlib.suppress(Exception):
+        await get_storage().delete_object(staging_key)
     return file, job.id
 
 
@@ -371,17 +562,28 @@ async def create_download_url(
     organisation_id: uuid.UUID,
     file_id: uuid.UUID,
 ) -> SignedUrl:
-    """Return a short-lived signed GET URL for one stored object.
+    """Return a short-lived signed GET URL for one verified, trusted object.
 
-    Only files whose object has been verified are downloadable; a pending
-    (never uploaded), failed or quarantined file is a 409, never a signed URL.
+    Only a file whose object has reached ``ready`` — verification plus the
+    scanning verdict — with a pinned identity still matching the stored object
+    is downloadable. The document lifecycle/identity decision is delegated to
+    the one source authority (:class:`DocumentSourceAuthority`) that inline AI,
+    streamed AI and job retries also use, so the download boundary can never
+    drift; its denial is translated here into the download-appropriate 409. A
+    pending, uploaded, processing, failed, quarantined or deleted file, or a
+    file whose bytes changed after approval, is a 409, never a signed URL.
     """
     file = await get_file(session, organisation_id=organisation_id, file_id=file_id)
-    if file.status not in _DOWNLOADABLE_STATUSES:
+    try:
+        await _DOCUMENT_AUTHORITY.authorize_file(
+            organisation_id=organisation_id,
+            file=file,
+        )
+    except AIInputValidationError as exc:
         raise ConflictError(
             code="file_not_downloadable",
             message="The file is not ready to download.",
-        )
+        ) from exc
     return await get_storage().create_download_url(object_key=file.object_key)
 
 
@@ -536,6 +738,65 @@ async def mark_file_failed(
         session,
         organisation_id=organisation_id,
         action=ACTION_FILE_UPLOAD_FAILED,
+        resource_type="file",
+        resource_id=str(file.id),
+        metadata={
+            "object_key": file.object_key,
+            "reason": reason,
+        },
+    )
+    await session.commit()
+    await session.refresh(file)
+    return file
+
+
+async def scan_file_object(
+    *,
+    object_key: str,
+    content_type: str | None,
+) -> ScanVerdict:
+    """Run the configured upload scanner against one verified stored object.
+
+    Plan P6: the worker calls this before a file may become ``ready``. The
+    scanner reads through the provider-neutral storage interface, bounded by
+    the template upload ceiling. A scanner outage raises
+    :class:`~app.scanning.ScannerUnavailableError`, which the worker lets
+    propagate as a transient failure so the file never becomes trusted while
+    the verdict is unknown.
+    """
+    return await get_scanner().scan(
+        storage=get_storage(),
+        object_key=object_key,
+        content_type=content_type,
+        max_bytes=get_settings().storage_max_upload_size,
+    )
+
+
+async def mark_file_quarantined(
+    session: AsyncSession,
+    *,
+    organisation_id: uuid.UUID,
+    file_id: uuid.UUID,
+    reason: str,
+    ownership: jobs_service.JobOwnership | None = None,
+) -> File:
+    """Mark a file ``quarantined`` after the scanner rejects it (plan P6).
+
+    Idempotent: an already-quarantined/failed/deleted file is returned
+    untouched, so a retried message cannot double-audit. When ``ownership`` is
+    supplied the owning job is locked and re-verified in this transaction
+    before the transition commits (plan P2, AC5).
+    """
+    if ownership is not None:
+        await jobs_service.verify_ownership(session, ownership)
+    file = await get_file(session, organisation_id=organisation_id, file_id=file_id)
+    if file.status in (FileStatus.QUARANTINED, FileStatus.FAILED, FileStatus.DELETED):
+        return file
+    file.status = FileStatus.QUARANTINED
+    await record_event(
+        session,
+        organisation_id=organisation_id,
+        action=ACTION_FILE_QUARANTINED,
         resource_type="file",
         resource_id=str(file.id),
         metadata={

@@ -81,6 +81,12 @@ AIService.execute(task=...)          app/ai/service.py
   remain feature-owned; temporary analyse-only objects use the
   organisation-scoped AI scratch namespace governed by the v0.7 retention job;
   `ai_requests`/`ai_outputs` persist references and digests, never bytes.
+  Plan P6: a scratch upload issues a signed capability only when the
+  organisation's AI policy is enabled and persists a durable
+  `ai_scratch_uploads` intent with a bounded global expiry
+  (`AI_SCRATCH_MAX_LIFETIME_SECONDS`, independent of optional per-organisation
+  retention); the source authority accepts a scratch key only while that
+  intent is `ready` and unexpired.
 - **Regional configuration truthfulness** (v0.7 Scope §6.1/§6.3): OpenAI
   region and Anthropic inference geography are typed settings, Azure's region
   is its configured endpoint, Vertex is pinned by location, DeepSeek documents
@@ -273,20 +279,25 @@ Files are org-scoped records in the `files` table. Object keys are always server
 ```text
 POST /api/v1/files                      intent: validate filename/content-type/size
                                         (documents.upload), create `pending` file
-                                        record, return {file_id, upload_url, expires_at}
-        │   browser PUTs bytes straight to the signed URL (object storage)
+                                        record with a unique staging key,
+                                        return {file_id, upload_url, expires_at}
+        │   browser PUTs bytes straight to the signed staging URL (object storage)
         ▼
-POST /api/v1/files/{file_id}/complete   documents.upload: head the object, verify
-                                        existence + size (+ checksum when supplied);
-                                        `uploaded` + enqueue the processing job
-        │   worker runs process_file (job_type "file.processing")
+POST /api/v1/files/{file_id}/complete   documents.upload: head staging, verify
+                                        existence + size (+ checksum when supplied),
+                                        server-side copy staging → final key, pin
+                                        `content_identity`; `uploaded` + enqueue the
+                                        processing job in the same transaction
+        │   worker runs process_file (job_type "file.processing"): verify, scan
         ▼
 file ready → GET /api/v1/files/{file_id}/download-url returns a short-lived signed
 GET URL; DELETE /api/v1/files/{file_id} soft-deletes (deleted_at) and removes the
 object from storage (document.deleted audit)
 ```
 
-File lifecycle statuses: `pending → uploaded → processing → ready` with the failure states `failed` / `quarantined` and the soft-delete state `deleted`. Every transition is audited append-only (`file.upload_started`, `file.uploaded`, `file.upload_failed`, `file.processing`, `file.ready`, `document.deleted`). A stored object whose size does not match the declared `size_bytes` fails the file at completion.
+File lifecycle statuses: `pending → uploaded → processing → ready` with the failure states `failed` / `quarantined` and the soft-delete state `deleted`. Every transition is audited append-only (`file.upload_started`, `file.uploaded`, `file.upload_failed`, `file.processing`, `file.ready`, `file.quarantined`, `document.deleted`). A stored object whose size does not match the declared `size_bytes` fails the file at completion.
+
+Plan P6 immutable uploads: the signed PUT targets a unique staging key (bounded lifetime) and the final key is only ever written by a server-side promotion copy, so a completed file's bytes cannot be changed by replaying an old capability. `files.content_identity` pins the promoted checksum; the worker's scanning gate resolves the configured `ContentScanner` before `ready`, and download/AI reads require `ready` plus a matching identity. `app/ai/runtime.get_ai_service()` wires that durable authority into `AIService`, so every `documents/` reference is re-resolved against the live org-scoped `files` row and every scratch reference against a durable `ai_scratch_uploads` intent.
 
 ## Durable jobs, outbox and coordinator
 

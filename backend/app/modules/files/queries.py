@@ -37,6 +37,29 @@ def org_scoped_files_statement(
     return statement
 
 
+def file_by_object_key_statement(
+    organisation_id: uuid.UUID,
+    object_key: str,
+    *,
+    include_deleted: bool = False,
+) -> Select[tuple[File]]:
+    """Return the org-scoped File that owns one server-generated object key.
+
+    Used by the document source-authorisation service (plan P6) to resolve a
+    private storage reference back to its durable ``files`` row: the reference
+    is never itself an authorisation. The filter is org-scoped and excludes
+    soft-deleted rows, so a cross-organisation or deleted key is
+    indistinguishable from a missing one.
+    """
+    statement = select(File).where(
+        File.organisation_id == organisation_id,
+        File.object_key == object_key,
+    )
+    if not include_deleted:
+        statement = statement.where(File.deleted_at.is_(None))
+    return statement
+
+
 def org_files_count_statement(
     organisation_id: uuid.UUID,
     *,

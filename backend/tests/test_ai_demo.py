@@ -21,12 +21,14 @@ import asyncio
 import os
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 from alembic import command
 from alembic.config import Config
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 from tests.auth_helpers import make_token
@@ -38,13 +40,15 @@ from tests.context_helpers import (
     make_user,
 )
 
-from app.ai.persistence.models import AIRequestRecord, AIRequestStatus
+from app.ai import scratch as ai_scratch
+from app.ai.persistence.models import AIRequestRecord, AIRequestStatus, AIScratchUpload
 from app.ai.persistence.service import create_default_settings
 from app.core.exceptions import NotFoundError, ServiceUnavailableError
 from app.modules.ai_demo import service as demo_service
 from app.modules.jobs.models import JobStatus
 from app.modules.organisations.models import Organisation
 from app.modules.users.models import User
+from app.scanning import ScanVerdict
 from app.storage import FakeObjectStorage, get_storage
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -59,8 +63,35 @@ def _fake_storage() -> FakeObjectStorage:
 async def _put_document(
     organisation_id: uuid.UUID, content: str = "A non-sensitive lease fixture."
 ) -> str:
+    """Put a raw scratch object without a durable intent (disabled-AI tests).
+
+    Enabled-AI service tests must use :func:`_put_authorized_document` so the
+    plan P6 source authority finds a live scratch intent.
+    """
     key = f"organisations/{organisation_id}/ai/scratch/doc-{uuid.uuid4().hex[:8]}.txt"
     await _fake_storage().put(key, content.encode("utf-8"), content_type="text/plain")
+    return key
+
+
+async def _put_authorized_document(
+    session: AsyncSession,
+    organisation_id: uuid.UUID,
+    content: str = "A non-sensitive lease fixture.",
+) -> str:
+    """Mint a durable scratch intent, PUT the bytes and complete it (plan P6)."""
+    encoded = content.encode("utf-8")
+    intent = await ai_scratch.create_scratch_intent(
+        session,
+        organisation_id=organisation_id,
+        content_type="text/plain",
+        size_bytes=len(encoded),
+    )
+    await _fake_storage().put(intent.object_key, encoded, content_type="text/plain")
+    key = await ai_scratch.complete_scratch_intent(
+        session, organisation_id=organisation_id, upload_id=intent.upload_id
+    )
+    await session.commit()
+    assert key is not None
     return key
 
 
@@ -135,7 +166,7 @@ async def test_classify_sync_returns_result_and_records_request(migrated_databas
     try:
         async with session_factory() as session:
             organisation, user = await _seed_org_user_and_enable_ai(session)
-            storage_key = await _put_document(organisation.id)
+            storage_key = await _put_authorized_document(session, organisation.id)
             result = await demo_service.classify_sync(
                 session,
                 organisation_id=organisation.id,
@@ -163,7 +194,7 @@ async def test_ask_sync_returns_answer_and_records_request(migrated_database: st
     try:
         async with session_factory() as session:
             organisation, user = await _seed_org_user_and_enable_ai(session)
-            storage_key = await _put_document(organisation.id)
+            storage_key = await _put_authorized_document(session, organisation.id)
             result = await demo_service.ask_sync(
                 session,
                 organisation_id=organisation.id,
@@ -249,7 +280,7 @@ async def test_enqueue_creates_job_and_queued_request(migrated_database: str) ->
     try:
         async with session_factory() as session:
             organisation, user = await _seed_org_user_and_enable_ai(session)
-            storage_key = f"organisations/{organisation.id}/ai/scratch/doc.txt"
+            storage_key = await _put_authorized_document(session, organisation.id)
             accepted = await demo_service.enqueue_classify(
                 session,
                 organisation_id=organisation.id,
@@ -285,7 +316,7 @@ async def test_queued_result_available_immediately_after_enqueue(
     try:
         async with session_factory() as session:
             organisation, user = await _seed_org_user_and_enable_ai(session)
-            storage_key = f"organisations/{organisation.id}/ai/scratch/doc.txt"
+            storage_key = await _put_authorized_document(session, organisation.id)
             accepted = await demo_service.enqueue_classify(
                 session,
                 organisation_id=organisation.id,
@@ -375,12 +406,182 @@ async def test_enqueue_rejects_foreign_storage_reference(migrated_database: str)
         await _dispose_engine(engine)
 
 
+async def test_enqueue_denies_unauthorised_sources_at_request_time(
+    migrated_database: str,
+) -> None:
+    """AC13 request-path boundary: the async enqueue denies an unauthorised
+    source before it persists a queued request/job.
+
+    Unknown, pending and expired scratch keys all fail closed at the request
+    boundary (not only when a worker later executes), and no job or queued AI
+    request row is written for a denied source.
+    """
+    from app.core.exceptions import ValidationError
+    from app.modules.jobs.models import Job
+
+    engine, session_factory = _session_factory(migrated_database)
+    try:
+        async with session_factory() as session:
+            organisation, user = await _seed_org_user_and_enable_ai(session)
+            organisation_id = organisation.id
+            unknown = f"organisations/{organisation.id}/ai/scratch/{uuid.uuid4()}.pdf"
+            with pytest.raises(ValidationError):
+                await demo_service.enqueue_classify(
+                    session,
+                    organisation_id=organisation.id,
+                    user=user,
+                    storage_reference=unknown,
+                )
+
+            # Pending scratch intent: bytes exist but the intent is not ready.
+            pending = await ai_scratch.create_scratch_intent(
+                session,
+                organisation_id=organisation.id,
+                content_type="text/plain",
+                size_bytes=4,
+            )
+            await _fake_storage().put(pending.object_key, b"data", content_type="text/plain")
+            with pytest.raises(ValidationError):
+                await demo_service.enqueue_classify(
+                    session,
+                    organisation_id=organisation.id,
+                    user=user,
+                    storage_reference=pending.object_key,
+                )
+
+            # Expired ready scratch intent.
+            await ai_scratch.complete_scratch_intent(
+                session,
+                organisation_id=organisation.id,
+                upload_id=pending.upload_id,
+            )
+            await session.commit()
+            row = await session.scalar(
+                select(AIScratchUpload).where(AIScratchUpload.object_key == pending.object_key)
+            )
+            assert row is not None
+            row.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            await session.commit()
+            with pytest.raises(ValidationError):
+                await demo_service.enqueue_classify(
+                    session,
+                    organisation_id=organisation.id,
+                    user=user,
+                    storage_reference=pending.object_key,
+                )
+
+        async with session_factory() as session:
+            job_id = await session.scalar(
+                select(Job.id).where(Job.organisation_id == organisation_id)
+            )
+        assert job_id is None
+    finally:
+        await _dispose_engine(engine)
+
+
+async def test_scratch_completion_rejects_expired_quarantined_and_outage(
+    migrated_database: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC19: scratch completion enforces expiry and the scanner boundary.
+
+    An expired intent is refused; a quarantine verdict and a scanner outage
+    both fail closed, leaving the intent pending so the bytes never become
+    AI-readable.
+    """
+    from app.core.exceptions import ValidationError
+    from app.scanning import ScannerUnavailableError
+
+    class _QuarantiningScanner:
+        async def scan(self, **kwargs: Any) -> ScanVerdict:
+            return ScanVerdict.QUARANTINED
+
+    class _UnavailableScanner:
+        async def scan(self, **kwargs: Any) -> ScanVerdict:
+            raise ScannerUnavailableError("scanner down")
+
+    engine, session_factory = _session_factory(migrated_database)
+    try:
+        async with session_factory() as session:
+            organisation, _user = await _seed_org_user_and_enable_ai(session)
+
+            # Expired intent: completion is refused even though the object exists.
+            expired_id, _url, _expires = await demo_service.create_scratch_upload_intent(
+                session,
+                organisation_id=organisation.id,
+                original_filename="lease.pdf",
+                content_type="application/pdf",
+                size_bytes=5,
+            )
+            await _fake_storage().put(
+                demo_service.scratch_object_key(organisation.id, uuid.UUID(expired_id)),
+                b"%PDF-",
+            )
+            row = await session.scalar(
+                select(AIScratchUpload).where(AIScratchUpload.upload_id == uuid.UUID(expired_id))
+            )
+            assert row is not None
+            row.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            await session.commit()
+            with pytest.raises(ValidationError):
+                await demo_service.complete_scratch_upload(
+                    session, organisation_id=organisation.id, upload_id=expired_id
+                )
+
+            # Quarantine verdict: the intent stays pending.
+            quarantined_id, _url2, _expires2 = await demo_service.create_scratch_upload_intent(
+                session,
+                organisation_id=organisation.id,
+                original_filename="lease.pdf",
+                content_type="application/pdf",
+                size_bytes=5,
+            )
+            await _fake_storage().put(
+                demo_service.scratch_object_key(organisation.id, uuid.UUID(quarantined_id)),
+                b"%PDF-",
+            )
+            monkeypatch.setattr(demo_service, "get_scanner", lambda: _QuarantiningScanner())
+            with pytest.raises(ValidationError):
+                await demo_service.complete_scratch_upload(
+                    session, organisation_id=organisation.id, upload_id=quarantined_id
+                )
+
+            # Scanner outage: fail closed, intent still pending.
+            outage_id, _url3, _expires3 = await demo_service.create_scratch_upload_intent(
+                session,
+                organisation_id=organisation.id,
+                original_filename="lease.pdf",
+                content_type="application/pdf",
+                size_bytes=5,
+            )
+            await _fake_storage().put(
+                demo_service.scratch_object_key(organisation.id, uuid.UUID(outage_id)),
+                b"%PDF-",
+            )
+            monkeypatch.setattr(demo_service, "get_scanner", lambda: _UnavailableScanner())
+            with pytest.raises(ServiceUnavailableError):
+                await demo_service.complete_scratch_upload(
+                    session, organisation_id=organisation.id, upload_id=outage_id
+                )
+
+        async with session_factory() as session:
+            for upload_id in (quarantined_id, outage_id):
+                intent_row = await session.scalar(
+                    select(AIScratchUpload).where(AIScratchUpload.upload_id == uuid.UUID(upload_id))
+                )
+                assert intent_row is not None
+                assert intent_row.status.value == "pending"
+    finally:
+        await _dispose_engine(engine)
+
+
 async def test_get_classify_result_is_org_scoped(migrated_database: str) -> None:
     engine, session_factory = _session_factory(migrated_database)
     try:
         async with session_factory() as session:
             organisation, user = await _seed_org_user_and_enable_ai(session)
-            storage_key = await _put_document(organisation.id, "Another non-sensitive fixture.")
+            storage_key = await _put_authorized_document(
+                session, organisation.id, "Another non-sensitive fixture."
+            )
             result = await demo_service.classify_sync(
                 session,
                 organisation_id=organisation.id,
@@ -487,107 +688,101 @@ async def test_scratch_upload_intent_requires_documents_upload(context_app: Cont
     assert response.json()["code"] == "permission_denied"
 
 
-async def test_scratch_upload_intent_and_complete_flow(context_app: ContextApp) -> None:
-    """The transient upload journey signs a PUT URL into ``ai/scratch/`` and the
-    completion returns the verified storage reference; a never-stored upload is
-    rejected and a non-PDF intent is a 422."""
-    app, state, private_key = context_app
-    org_id = uuid.uuid4()
+async def test_scratch_upload_flow_persists_intent_and_reference(
+    migrated_database: str,
+) -> None:
+    """Plan P6: the scratch journey persists a durable intent and returns the
+    verified reference; a non-PDF declaration and a never-stored upload are
+    rejected before a reference is issued."""
+    engine, session_factory = _session_factory(migrated_database)
+    try:
+        async with session_factory() as session:
+            organisation, _user = await _seed_org_user_and_enable_ai(session)
+            from app.core.exceptions import ValidationError
 
-    def _stage() -> str:
-        # Dependencies resolve per request: stage a valid member each time.
-        user = make_user()
-        state.users[user.workos_user_id] = user
-        membership = make_membership(user, org_id)
-        state.lookup_queue = [user, membership]
-        state.granted_permissions = {"documents.upload"}
-        return make_token(private_key)
+            with pytest.raises(ValidationError):
+                await demo_service.create_scratch_upload_intent(
+                    session,
+                    organisation_id=organisation.id,
+                    original_filename="notes.txt",
+                    content_type="text/plain",
+                    size_bytes=1024,
+                )
+            size = 4096
+            upload_id, upload_url, _expires_at = await demo_service.create_scratch_upload_intent(
+                session,
+                organisation_id=organisation.id,
+                original_filename="lease.pdf",
+                content_type="application/pdf",
+                size_bytes=size,
+            )
+            assert upload_url.startswith("http")
+            # Completing before the bytes exist is rejected and the intent
+            # stays pending (never promoted to trusted ready).
+            with pytest.raises(ValidationError):
+                await demo_service.complete_scratch_upload(
+                    session, organisation_id=organisation.id, upload_id=upload_id
+                )
+            key = demo_service.scratch_object_key(organisation.id, uuid.UUID(upload_id))
+            await _fake_storage().put(key, b"%PDF-1.4" + b"x" * (size - len(b"%PDF-1.4")))
+            reference = await demo_service.complete_scratch_upload(
+                session, organisation_id=organisation.id, upload_id=upload_id
+            )
+        assert reference == key
+    finally:
+        await _dispose_engine(engine)
 
-    async with context_client(app) as client:
-        # A non-PDF declaration is rejected before any URL is signed.
-        rejected = await client.post(
-            "/api/v1/ai/scratch/uploads",
-            json={
-                "original_filename": "notes.txt",
-                "content_type": "text/plain",
-                "size_bytes": 1024,
-            },
-            headers=_auth_headers(_stage(), org_id),
-        )
-        assert rejected.status_code == 422
 
-        size = 4096
-        intent = await client.post(
-            "/api/v1/ai/scratch/uploads",
-            json={
-                "original_filename": "lease.pdf",
-                "content_type": "application/pdf",
-                "size_bytes": size,
-            },
-            headers=_auth_headers(_stage(), org_id),
-        )
-        assert intent.status_code == 201
-        body = intent.json()
-        assert body["upload_id"]
-        assert body["upload_url"].startswith("http")
-
-        # Completing before the bytes exist is rejected.
-        missing = await client.post(
-            f"/api/v1/ai/scratch/uploads/{body['upload_id']}/complete",
-            headers=_auth_headers(_stage(), org_id),
-        )
-        assert missing.status_code == 422
-
-        # Simulate the browser PUT, then complete.
-        key = f"organisations/{org_id}/ai/scratch/{body['upload_id']}.pdf"
-        await _fake_storage().put(key, b"%PDF-1.4" + b"x" * (size - len(b"%PDF-1.4")))
-        completed = await client.post(
-            f"/api/v1/ai/scratch/uploads/{body['upload_id']}/complete",
-            headers=_auth_headers(_stage(), org_id),
-        )
-        assert completed.status_code == 200
-        assert completed.json()["storage_reference"] == key
+async def test_scratch_upload_intent_requires_ai_enabled(migrated_database: str) -> None:
+    """Plan P6: obtaining a scratch capability requires the AI policy enabled."""
+    engine, session_factory = _session_factory(migrated_database)
+    try:
+        async with session_factory() as session:
+            organisation = Organisation(name=f"Scratch Disabled {uuid.uuid4().hex[:8]}")
+            session.add(organisation)
+            await session.flush()
+            await create_default_settings(session, organisation_id=organisation.id)
+            await session.commit()
+            with pytest.raises(ServiceUnavailableError):
+                await demo_service.create_scratch_upload_intent(
+                    session,
+                    organisation_id=organisation.id,
+                    original_filename="lease.pdf",
+                    content_type="application/pdf",
+                    size_bytes=1024,
+                )
+    finally:
+        await _dispose_engine(engine)
 
 
 async def test_scratch_upload_complete_rejects_stored_objects_outside_the_contract(
-    context_app: ContextApp,
+    migrated_database: str,
 ) -> None:
     """Completion validates the *stored* object against the same PDF/ceiling
     contract the intent declared, so a wrong-MIME object is never returned as
     a "verified" reference that the next AI read would immediately reject."""
-    app, state, private_key = context_app
-    org_id = uuid.uuid4()
+    engine, session_factory = _session_factory(migrated_database)
+    try:
+        async with session_factory() as session:
+            organisation, _user = await _seed_org_user_and_enable_ai(session)
+            from app.core.exceptions import ValidationError
 
-    def _stage() -> str:
-        user = make_user()
-        state.users[user.workos_user_id] = user
-        membership = make_membership(user, org_id)
-        state.lookup_queue = [user, membership]
-        state.granted_permissions = {"documents.upload"}
-        return make_token(private_key)
-
-    async with context_client(app) as client:
-        size = 5
-        intent = await client.post(
-            "/api/v1/ai/scratch/uploads",
-            json={
-                "original_filename": "lease.pdf",
-                "content_type": "application/pdf",
-                "size_bytes": size,
-            },
-            headers=_auth_headers(_stage(), org_id),
-        )
-        assert intent.status_code == 201
-        body = intent.json()
-
-        # The browser PUTs a wrong-MIME object: completion must reject it.
-        key = f"organisations/{org_id}/ai/scratch/{body['upload_id']}.pdf"
-        await _fake_storage().put(key, b"hello", content_type="text/plain")
-        rejected = await client.post(
-            f"/api/v1/ai/scratch/uploads/{body['upload_id']}/complete",
-            headers=_auth_headers(_stage(), org_id),
-        )
-        assert rejected.status_code == 422
+            size = 5
+            upload_id, _url, _expires_at = await demo_service.create_scratch_upload_intent(
+                session,
+                organisation_id=organisation.id,
+                original_filename="lease.pdf",
+                content_type="application/pdf",
+                size_bytes=size,
+            )
+            key = demo_service.scratch_object_key(organisation.id, uuid.UUID(upload_id))
+            await _fake_storage().put(key, b"hello", content_type="text/plain")
+            with pytest.raises(ValidationError):
+                await demo_service.complete_scratch_upload(
+                    session, organisation_id=organisation.id, upload_id=upload_id
+                )
+    finally:
+        await _dispose_engine(engine)
 
 
 async def test_get_result_requires_documents_read(context_app: ContextApp) -> None:
