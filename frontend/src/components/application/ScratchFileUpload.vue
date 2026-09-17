@@ -18,10 +18,13 @@ import { useScratchUploadMutation } from '@/queries/ai'
  *
  * The same direct-upload journey as the files module — intent → signed PUT →
  * complete — but targeting the organisation-scoped ``ai/scratch/`` namespace,
- * where the AI layer classifies the source as transient and routes a >5 MB
- * PDF through the provider-upload mode. There is no durable file record and
- * no processing job: the mutation resolves with the storage reference the
- * parent sends to the ask endpoint.
+ * where the AI layer classifies the source as transient. The upload contract
+ * permits up to the 50 MB large-file ceiling, but the synchronous ask endpoint
+ * that consumes the reference is bounded by ``AI_ASK_MAX_SYNCHRONOUS_BYTES``
+ * (5 MB by default, plan P9), and this release exposes no asynchronous ask
+ * path, so only a document within that bound can be asked about. There is no
+ * durable file record and no processing job: the mutation resolves with the
+ * storage reference the parent sends to the ask endpoint.
  */
 const props = withDefaults(
   defineProps<{

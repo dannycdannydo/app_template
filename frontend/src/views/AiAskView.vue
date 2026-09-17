@@ -19,11 +19,13 @@ import { useAskMutation } from '@/queries/ai'
  * The minimal intelligence-layer harness: upload a PDF, ask one bounded
  * question about it and read the validated answer. The upload mode selects
  * which namespace the file lands in and therefore which source lifecycle the
- * AI layer classifies — ``transient`` uploads into ``ai/scratch/`` so a >5 MB
- * PDF routes through the provider-upload mode (OpenAI Files API), while
- * ``permanent`` uploads through the files module into ``documents/`` so the
- * source is retained and a >5 MB PDF routes through the just-in-time
- * managed-URL mode. The backend decides the exact transfer path and this view
+ * AI layer classifies — ``transient`` uploads into ``ai/scratch/`` while
+ * ``permanent`` uploads through the files module into ``documents/``. The
+ * synchronous ask endpoint is bounded (``AI_ASK_MAX_SYNCHRONOUS_BYTES``,
+ * default 5 MB), so a larger document is rejected with a documented error
+ * rather than starting a long transfer inside the request. This release
+ * exposes no durable asynchronous ask operation, so the supported remedy is a
+ * smaller document. The backend decides the exact transfer path and this view
  * never names a provider; the backend re-validates ownership on every request.
  *
  * The upload/ask affordances are gated by the documents.upload role bundle
@@ -64,8 +66,9 @@ async function submitQuestion(): Promise<void> {
     <div>
       <h1 class="text-2xl font-semibold">AI test</h1>
       <p class="text-muted-foreground mt-1 text-sm">
-        Upload a PDF, ask a question about it, and read the answer. Small files travel inline;
-        larger ones stage through a private transfer path before the provider processes them.
+        Upload a PDF, ask a question about it, and read the answer. Synchronous asks are bounded (5
+        MB by default); there is no asynchronous ask path in this release, so a larger document must
+        be reduced in size.
       </p>
     </div>
 

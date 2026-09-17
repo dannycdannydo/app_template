@@ -803,13 +803,15 @@ export interface paths {
     put?: never
     /**
      * Ask Document
-     * @description Answer one question about a stored document (inline or staged).
+     * @description Answer one question about a stored document.
      *
      *     The private storage reference and bounded question are passed to the
-     *     ``document.ask`` task; ``AIService`` resolves the reference (inline at or
-     *     below the 5 MB threshold, Vertex private GCS staging or the OpenAI Files
-     *     API upload path above it) and the validated answer is returned inline with
-     *     safe routing/usage metadata.
+     *     ``document.ask`` task; ``AIService`` checks the organisation policy and the
+     *     durable source authority, then enforces the synchronous bound — a source
+     *     above ``AI_ASK_MAX_SYNCHRONOUS_BYTES`` (5 MB by default) is rejected with
+     *     ``ai_ask_attachment_too_large`` before any provider call. The validated
+     *     answer is returned inline with safe routing/usage metadata. This release
+     *     exposes no durable asynchronous ask operation.
      */
     post: operations['ask_document_api_v1_ai_ask_post']
     delete?: never
@@ -977,9 +979,12 @@ export interface components {
      * DocumentAskRequest
      * @description One QA submission: a private storage reference plus a bounded question.
      *
-     *     ``sync=true`` is the only path for the demonstration: the reference is
-     *     resolved to a bounded attachment (or, above the inline threshold, staged
-     *     through the Vertex private GCS path) and the answer is returned inline.
+     *     The synchronous endpoint is the only ask path in this release: the source
+     *     is checked in the common execution boundary against
+     *     ``AI_ASK_MAX_SYNCHRONOUS_BYTES`` (5 MB by default, and never above the
+     *     inline aggregate threshold) after organisation policy and source authority,
+     *     and a larger source is rejected with ``ai_ask_attachment_too_large``. The
+     *     answer is returned inline; there is no durable asynchronous ask operation.
      *     The question is bounded to the AI metadata value limit (v0.8 Scope §2.2).
      */
     DocumentAskRequest: {
@@ -2122,9 +2127,12 @@ export interface components {
      *
      *     The demo's transient path lands bytes in the organisation-scoped
      *     ``ai/scratch/`` namespace so the AI layer classifies the source as
-     *     transient and routes a >5 MB PDF through the provider-upload mode. The
-     *     declaration mirrors the files module's signed-upload flow: the browser
-     *     PUTs the bytes directly to the signed URL, then completes the upload.
+     *     transient. The declaration mirrors the files module's signed-upload flow:
+     *     the browser PUTs the bytes directly to the signed URL, then completes the
+     *     upload. The declaration may be up to the large-file ceiling, but the
+     *     synchronous ask endpoint that consumes the reference is bounded by
+     *     ``AI_ASK_MAX_SYNCHRONOUS_BYTES`` and this release exposes no asynchronous
+     *     ask path, so only a document within that bound can be asked about.
      */
     ScratchUploadIntentRequest: {
       /** Original Filename */

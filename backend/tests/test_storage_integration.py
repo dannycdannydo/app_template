@@ -148,6 +148,83 @@ async def test_delete_missing_object_is_idempotent(storage: S3Storage) -> None:
     await storage.delete_object(never_uploaded)
 
 
+#: The exact frontend origin the browser uploads from, matching the storage
+#: server's configured CORS allowlist (``MINIO_API_CORS_ALLOW_ORIGIN`` for
+#: MinIO, the bucket CORS policy for a managed S3 provider). The dedicated CI
+#: job sets it; without it these cases skip so an unconfigured local MinIO does
+#: not fail an opt-in run.
+BROWSER_ORIGIN = os.environ.get("STORAGE_CORS_ALLOWED_ORIGIN")
+FORBIDDEN_ORIGIN = "https://evil.example.com"
+
+
+async def test_browser_put_from_the_authorised_origin_succeeds(storage: S3Storage) -> None:
+    """The external-origin browser journey (AC20): the CORS preflight and the
+    direct signed PUT from the configured frontend origin both succeed.
+
+    MinIO configures CORS server-wide (``MINIO_API_CORS_ALLOW_ORIGIN``) rather
+    than through the per-bucket S3 CORS API, so this asserts the running
+    storage server's configuration rather than writing it.
+    """
+    if BROWSER_ORIGIN is None:
+        pytest.skip("STORAGE_CORS_ALLOWED_ORIGIN is not configured")
+    content = b"%PDF-1.7 browser cors " + uuid.uuid4().hex.encode()
+    key = f"organisations/org-integration/cors/{uuid.uuid4()}/original.pdf"
+    upload = await storage.create_upload_url(
+        file_id=uuid.uuid4(),
+        object_key=key,
+        content_type="application/pdf",
+        size_bytes=len(content),
+    )
+
+    object_url = f"{_ENDPOINT.rstrip('/')}/{_BUCKET}/{key}"
+    async with httpx.AsyncClient() as client:
+        preflight = await client.options(
+            object_url,
+            headers={
+                "Origin": BROWSER_ORIGIN,
+                "Access-Control-Request-Method": "PUT",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+        put = await client.put(
+            upload.url,
+            content=content,
+            headers={"Content-Type": "application/pdf", "Origin": BROWSER_ORIGIN},
+        )
+
+    assert preflight.status_code in (200, 204)
+    assert preflight.headers.get("access-control-allow-origin") == BROWSER_ORIGIN
+    assert "PUT" in preflight.headers.get("access-control-allow-methods", "")
+    # A preflight response may not echo allow-headers; the follow-up PUT proves
+    # the browser would have been permitted to send Content-Type.
+    assert put.status_code in (200, 201, 204)
+    assert await storage.head_object(key) is not None
+    await storage.delete_object(key)
+
+
+async def test_browser_preflight_from_a_forbidden_origin_is_refused(
+    storage: S3Storage,
+) -> None:
+    """A browser on an unauthorised origin gets no CORS grant, so it cannot
+    drive an upload to the storage origin."""
+    if BROWSER_ORIGIN is None:
+        pytest.skip("STORAGE_CORS_ALLOWED_ORIGIN is not configured")
+    key = f"organisations/org-integration/cors/{uuid.uuid4()}/original.pdf"
+    object_url = f"{_ENDPOINT.rstrip('/')}/{_BUCKET}/{key}"
+    async with httpx.AsyncClient() as client:
+        preflight = await client.options(
+            object_url,
+            headers={
+                "Origin": FORBIDDEN_ORIGIN,
+                "Access-Control-Request-Method": "PUT",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+    allowed_origin = preflight.headers.get("access-control-allow-origin")
+    assert allowed_origin != FORBIDDEN_ORIGIN
+    assert allowed_origin != "*", "the storage CORS must never allow every origin"
+
+
 async def test_server_side_promotion_and_staging_replay_immutability(
     storage: S3Storage,
 ) -> None:

@@ -20,19 +20,22 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import pytest
 from prometheus_client import REGISTRY
+from sqlalchemy.ext.asyncio import AsyncSession
 from tests.ai_test_helpers import InMemoryTaskRegistry
 
 from app.ai.anthropic_staging import FakeAnthropicUploadStore
 from app.ai.attachments import MAX_ATTACHMENT_BYTES
 from app.ai.errors import (
     AIInputValidationError,
+    AIUnavailableError,
     ProviderResponseError,
     ProviderTimeoutError,
+    SynchronousSourceTooLargeError,
     TransferExecutionUnavailableError,
     TransferModeUnavailableError,
     TransferStagingError,
@@ -280,7 +283,10 @@ class _ManagedUrlRecorder:
 
 
 def _service(
-    *, storage: FakeObjectStorage, enabled_transfer_modes: set[TransferMode] | None = None
+    *,
+    storage: FakeObjectStorage,
+    enabled_transfer_modes: set[TransferMode] | None = None,
+    source_authorizer: Any = None,
 ) -> tuple[AIService, FakeLLMProvider, FakeTransferStore, _InMemoryReferenceStore]:
     bundle = load_registry_bundle()
     fake_provider = FakeLLMProvider()
@@ -292,6 +298,7 @@ def _service(
         model_registry=bundle.models,
         providers={"fake": fake_provider},
         attachment_resolver=StorageAttachmentResolver(storage),
+        source_authorizer=source_authorizer,
         transfer_deployment=TransferDeploymentPolicy(
             inline_aggregate_threshold_bytes=_INLINE_THRESHOLD,
             max_large_attachment_bytes=50_000_000,
@@ -303,6 +310,48 @@ def _service(
         transfer_stores={"fake": store},
     )
     return service, fake_provider, store, references
+
+
+class _HeadSpyStorage(FakeObjectStorage):
+    """A fake source store that records every ``head_object`` call (plan P9)."""
+
+    def __init__(self, *, bucket: str) -> None:
+        super().__init__(bucket=bucket)
+        self.head_calls: list[str] = []
+
+    async def head_object(self, object_key: str):  # type: ignore[no-untyped-def]
+        self.head_calls.append(object_key)
+        return await super().head_object(object_key)
+
+
+class _AuthorizedSourceAuthorizer:
+    """A source authority that allows every reference (plan P6 seam)."""
+
+    async def authorize(
+        self,
+        *,
+        session: object,
+        organisation_id: UUID,
+        storage_reference: str,
+    ) -> None:
+        return None
+
+
+class _DenyingSourceAuthorizer:
+    """A source authority that denies, like a quarantined/foreign key."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def authorize(
+        self,
+        *,
+        session: object,
+        organisation_id: UUID,
+        storage_reference: str,
+    ) -> None:
+        self.calls.append(storage_reference)
+        raise AIInputValidationError("the storage reference is not authorised")
 
 
 def _ask_request(
@@ -1150,3 +1199,86 @@ async def test_provider_upload_timeout_exhausts_retries_still_runs_terminal_clea
     assert references.records[0].status is ExternalReferenceStatus.DELETED
     assert len(store.deleted) == 1
     assert await storage.head_object(key) is not None
+
+
+# --- Plan P9: the synchronous bound runs after policy + source authority ------
+
+
+class _DisabledRecorder(_StorageReferenceRecorder):
+    """A persistence port whose organisation has AI disabled."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.policy = OrganisationAIPolicy(enabled=False)
+
+
+def _session() -> AsyncSession:
+    return cast(AsyncSession, object())
+
+
+async def test_synchronous_bound_rejects_an_authorised_oversized_source() -> None:
+    """An authorised source above the synchronous bound is rejected in the
+    common boundary before any provider dispatch, from the same head the
+    large-file decision uses (Plan P9/AC21)."""
+    storage = _HeadSpyStorage(bucket="seam-test")
+    service, provider, store, references = _service(
+        storage=storage, source_authorizer=_AuthorizedSourceAuthorizer()
+    )
+    key = await _put_pdf(storage, size=_BIG_PDF_BYTES)
+
+    with pytest.raises(SynchronousSourceTooLargeError):
+        await service.execute(
+            _ask_request(key),
+            recorder=_StorageReferenceRecorder(),
+            transfer_references=references,
+            execution_session=_session(),
+            max_synchronous_source_bytes=_INLINE_THRESHOLD,
+        )
+
+    assert provider.requests == []
+    assert store.records == []
+    assert storage.head_calls == [key]
+
+
+async def test_disabled_policy_precedes_the_synchronous_bound_without_a_head() -> None:
+    """A disabled organisation is rejected before the synchronous bound, and no
+    storage I/O happens for the source (Plan P9: authority before metadata)."""
+    storage = _HeadSpyStorage(bucket="seam-test")
+    service, provider, _, references = _service(
+        storage=storage, source_authorizer=_AuthorizedSourceAuthorizer()
+    )
+    key = await _put_pdf(storage, size=_BIG_PDF_BYTES)
+
+    with pytest.raises(AIUnavailableError):
+        await service.execute(
+            _ask_request(key),
+            recorder=_DisabledRecorder(),
+            transfer_references=references,
+            execution_session=_session(),
+            max_synchronous_source_bytes=_INLINE_THRESHOLD,
+        )
+
+    assert provider.requests == []
+    assert storage.head_calls == []
+
+
+async def test_source_authority_precedes_the_synchronous_bound_without_a_head() -> None:
+    """An unauthorised source is denied with its own precedence-preserving error
+    and no pre-authorisation HEAD, even when it is oversized (Plan P9/P6)."""
+    storage = _HeadSpyStorage(bucket="seam-test")
+    authorizer = _DenyingSourceAuthorizer()
+    service, provider, _, references = _service(storage=storage, source_authorizer=authorizer)
+    key = await _put_pdf(storage, size=_BIG_PDF_BYTES)
+
+    with pytest.raises(AIInputValidationError, match="not authorised"):
+        await service.execute(
+            _ask_request(key),
+            recorder=_StorageReferenceRecorder(),
+            transfer_references=references,
+            execution_session=_session(),
+            max_synchronous_source_bytes=_INLINE_THRESHOLD,
+        )
+
+    assert authorizer.calls == [key]
+    assert provider.requests == []
+    assert storage.head_calls == []

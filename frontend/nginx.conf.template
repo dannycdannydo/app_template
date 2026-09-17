@@ -2,6 +2,12 @@
 # (blueprint §36). Mirrors the dev-server proxy in vite.config.ts so the
 # frontend behaves identically under `make dev` (Vite proxy) and
 # `make dev-docker` (nginx proxy).
+#
+# This file is an entrypoint template: the official nginx image runs envsubst
+# over /etc/nginx/templates/*.template at container start. Only
+# STORAGE_PUBLIC_ORIGIN is substituted (NGINX_ENVSUBST_FILTER), so nginx's own
+# $host / $remote_addr variables are preserved. It defaults to empty, which
+# leaves the CSP at 'self' + WorkOS.
 
 server {
     listen 80;
@@ -12,8 +18,10 @@ server {
 
     # Browser-facing defence in depth. TLS is terminated by the deployment
     # edge in production, so HSTS belongs there rather than this HTTP-only
-    # local-development container.
-    add_header Content-Security-Policy "default-src 'self'; base-uri 'self'; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' https://api.workos.com; frame-ancestors 'none'; form-action 'self'" always;
+    # local-development container. The browser uploads straight to the private
+    # object store through a short-lived signed URL, so connect-src must name
+    # that exact origin (STORAGE_PUBLIC_ORIGIN).
+    add_header Content-Security-Policy "default-src 'self'; base-uri 'self'; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' https://api.workos.com ${STORAGE_PUBLIC_ORIGIN}; frame-ancestors 'none'; form-action 'self'" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
     add_header X-Frame-Options "DENY" always;

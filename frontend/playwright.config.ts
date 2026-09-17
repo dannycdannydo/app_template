@@ -105,15 +105,27 @@ export default defineConfig({
   // outputDir: 'test-results/',
 
   /* Run your local dev server before starting the tests */
-  webServer: {
-    /**
-     * Exercise a production build in every environment. Vite's development
-     * dependency optimiser can answer a first dynamic-route import with 504
-     * while rebuilding its cache, which makes browser tests flaky. Preview
-     * avoids that transient development-server behaviour and matches CI.
-     */
-    command: 'pnpm build && pnpm preview',
-    port: 4173,
-    reuseExistingServer: !process.env.CI,
-  },
+  webServer: [
+    {
+      /**
+       * Exercise a production build in every environment. Vite's development
+       * dependency optimiser can answer a first dynamic-route import with 504
+       * while rebuilding its cache, which makes browser tests flaky. Preview
+       * avoids that transient development-server behaviour and matches CI.
+       */
+      command: 'pnpm build && pnpm preview',
+      port: 4173,
+      reuseExistingServer: !process.env.CI,
+    },
+    {
+      /**
+       * A real external storage origin so the browser (not a Playwright route
+       * fulfilment) enforces the storage CORS policy in the AI journey
+       * (plan P9). `/allowed/**` grants the app origin, `/denied/**` does not.
+       */
+      command: 'node e2e/storage-server.mjs',
+      url: 'http://127.0.0.1:4180/health',
+      reuseExistingServer: !process.env.CI,
+    },
+  ],
 })

@@ -650,18 +650,18 @@ isolation, destructive migration/retention, backup/recovery and audit privacy.
 
 Dependencies: P6 for document trust; P5 for production topology verification
 
-- [ ] Set the production CSP `connect-src` to exact configured public storage
+- [x] Set the production CSP `connect-src` to exact configured public storage
       origins without signed query strings or broad wildcard origins. Configure
       storage CORS for the actual browser PUT method/headers and authorised
       frontend origin. Keep WorkOS and other existing restrictions intact.
-- [ ] Establish the precise Caddy-to-Uvicorn trusted-proxy boundary for client
+- [x] Establish the precise Caddy-to-Uvicorn trusted-proxy boundary for client
       IP extraction and rate limiting. Reject client-supplied forwarded headers
       from untrusted peers; verify separate real users have separate quotas.
-- [ ] Move large `/ai/ask` work behind the durable job path with an explicit
+- [x] Move large `/ai/ask` work behind the durable job path with an explicit
       accepted/result contract, or cap synchronous attachments below a tested
       latency/size limit and reject larger requests. Keep provider calls behind
       AI adapters and avoid public provider-accounting leakage.
-- [ ] Add external-S3-origin browser E2E, CSP/CORS negative cases, Compose
+- [x] Add external-S3-origin browser E2E, CSP/CORS negative cases, Compose
       forwarded-IP/spoofing tests, rate-limit separation and large-ask timeout/
       duplicate/job recovery tests. Update production examples and runbooks.
 

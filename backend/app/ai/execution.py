@@ -141,6 +141,7 @@ async def execute_managed_ai(
     *,
     request_id: str | None = None,
     ownership: jobs_service.JobOwnership | None = None,
+    max_synchronous_source_bytes: int | None = None,
 ) -> AIResult:
     """Execute through ``AIService`` with the platform persistence boundary.
 
@@ -155,6 +156,12 @@ async def execute_managed_ai(
     port re-verifies the owning job before reserving and before settling, so a
     superseded attempt cannot commit AI request state over a newer owner
     (plan P2, AC5). The synchronously invoked demo path passes ``None``.
+
+    ``max_synchronous_source_bytes`` (plan P9) is forwarded to the service's
+    common execution boundary: the synchronous ``document.ask`` path passes the
+    deployment's ``AI_ASK_MAX_SYNCHRONOUS_BYTES`` so the bound is enforced after
+    organisation policy and source authority, never with a pre-authorisation
+    object read. The durable job path leaves it ``None``.
     """
     return await runtime.get_ai_service().execute(
         request,
@@ -162,6 +169,7 @@ async def execute_managed_ai(
         request_id=request_id,
         transfer_references=SQLTransferReferenceStore(session),
         execution_session=session,
+        max_synchronous_source_bytes=max_synchronous_source_bytes,
     )
 
 

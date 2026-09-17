@@ -143,6 +143,26 @@ class TransferSourceError(AIError):
         super().__init__(message, retryable=False)
 
 
+class SynchronousSourceTooLargeError(AIError):
+    """A synchronous request's source exceeds the deployment's synchronous bound.
+
+    Plan P9: the synchronous ``document.ask`` demonstration is bounded so a
+    large document can never occupy an HTTP handler with a long provider
+    transfer (BP §18). The check runs in the common execution boundary *after*
+    the organisation AI-enabled policy and the durable source authority, so an
+    oversized disabled, unknown, expired or quarantined source still fails with
+    its own precedence-preserving error and without a pre-authorisation read.
+    Permanent for the same request: the caller must supply a smaller source; no
+    durable asynchronous ask operation exists in this release, so the safe
+    message must not advertise one.
+    """
+
+    error_code = "ai_ask_attachment_too_large"
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, retryable=False)
+
+
 class AIUnavailableError(AIError):
     """AI is disabled for the organisation (default-off, Scope §6.5)."""
 

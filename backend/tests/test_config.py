@@ -1209,6 +1209,61 @@ def test_ai_transfer_deployment_defaults_are_default_deny() -> None:
     assert settings.ai_vertex_temp_gcs_bucket == ""
 
 
+def test_ai_ask_synchronous_bound_defaults_and_bounds() -> None:
+    """Plan P9: the synchronous ask bound defaults to the inline threshold and
+    can never exceed it, so no source above the large-file boundary can reach
+    the synchronous path."""
+    settings = Settings(app_env="test", database_url="postgresql+asyncpg://x")
+    assert settings.ai_ask_max_synchronous_bytes == 5_000_000
+    # The upper boundary itself is valid (exactly the reviewed inline threshold).
+    assert (
+        Settings(
+            app_env="test",
+            database_url="postgresql+asyncpg://x",
+            ai_ask_max_synchronous_bytes=5_000_000,
+        ).ai_ask_max_synchronous_bytes
+        == 5_000_000
+    )
+    # A lower deliberate bound is valid.
+    assert (
+        Settings(
+            app_env="test",
+            database_url="postgresql+asyncpg://x",
+            ai_ask_max_synchronous_bytes=1_000_000,
+        ).ai_ask_max_synchronous_bytes
+        == 1_000_000
+    )
+    for invalid in (0, 5_000_001):
+        with pytest.raises(ValidationError, match="ai_ask_max_synchronous_bytes"):
+            Settings(
+                app_env="test",
+                database_url="postgresql+asyncpg://x",
+                ai_ask_max_synchronous_bytes=invalid,
+            )
+
+
+def test_ai_ask_synchronous_bound_cannot_exceed_the_inline_threshold() -> None:
+    """The cross-field rule: a synchronous bound above the deployment's inline
+    aggregate threshold would admit large-file work to the HTTP path."""
+    with pytest.raises(ValidationError, match="must not exceed"):
+        Settings(
+            app_env="test",
+            database_url="postgresql+asyncpg://x",
+            ai_inline_aggregate_threshold_bytes=2_000_000,
+            ai_ask_max_synchronous_bytes=3_000_000,
+        )
+    # Exactly the configured threshold is allowed.
+    assert (
+        Settings(
+            app_env="test",
+            database_url="postgresql+asyncpg://x",
+            ai_inline_aggregate_threshold_bytes=2_000_000,
+            ai_ask_max_synchronous_bytes=2_000_000,
+        ).ai_ask_max_synchronous_bytes
+        == 2_000_000
+    )
+
+
 def test_ai_transfer_deployment_rejects_unknown_and_duplicate_modes() -> None:
     with pytest.raises(ValidationError, match="unknown non-inline transfer modes"):
         Settings(

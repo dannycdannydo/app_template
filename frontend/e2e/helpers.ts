@@ -25,6 +25,12 @@ import type { Page } from '@playwright/test'
 export const TEST_ORG_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 export const TEST_USER_ID = 'user_01_test_profile'
 
+/**
+ * The real external storage server the AI journey uploads to (see
+ * `e2e/storage-server.mjs`); the browser enforces its CORS policy.
+ */
+export const E2E_STORAGE_ORIGIN = 'http://127.0.0.1:4180'
+
 export function makeFakeJwt(payload: Record<string, unknown>): string {
   const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url')
   return `${encode({ alg: 'RS256', typ: 'JWT' })}.${encode(payload)}.mock-signature`
@@ -357,6 +363,41 @@ export function createFileFixture() {
 }
 
 /**
+ * In-memory AI scratch/ask fixture (v0.8 Scope §2.2/§6.4/§6.5, plan P9)
+ * served over the mocked `/api/v1/**` surface. The scratch intent hands back
+ * a signed URL on the external storage host; completion returns the
+ * organisation-scoped storage reference; the ask endpoint returns a validated
+ * answer. The direct PUT itself is intercepted separately by
+ * {@link setupAiJourney} so the browser enforces the storage-origin CORS.
+ */
+export function createAiFixture(options: { storagePath?: 'allowed' | 'denied' } = {}) {
+  const uploadId = 'aaaaaaaa-aaaa-4aaa-8aaa-777777777777'
+  const scratchReference = `organisations/${TEST_ORG_ID}/ai/scratch/${uploadId}.pdf`
+  const storagePath = options.storagePath ?? 'allowed'
+
+  return {
+    uploadId,
+    scratchReference,
+    uploadUrlFor: (id: string) => `${E2E_STORAGE_ORIGIN}/${storagePath}/${id}`,
+    answer: {
+      request_id: 'ai-request-1',
+      output: 'The renewal term is five years.',
+      routing: {
+        provider: 'fake',
+        model: 'fake-model-document.ask',
+        prompt_name: 'document.ask',
+        prompt_version: 1,
+        fallback_used: false,
+        region: 'us',
+      },
+      usage: { input_tokens: 12, output_tokens: 8 },
+      cost: { amount: '0.0001', currency: 'USD' },
+      completed_at: '2026-04-01T00:00:02Z',
+    },
+  }
+}
+
+/**
  * In-memory notifications fixture (Scope §6.5) served over the mocked
  * `/api/v1/**` surface. The fixture is stateful the way the real backend is:
  * marking a notification read flips its `read_at` and drops the unread count,
@@ -463,6 +504,7 @@ export async function mockBackendApi(
     platformFixture?: ReturnType<typeof createPlatformFixture>
     files?: ReturnType<typeof createFileFixture>
     notifications?: ReturnType<typeof createNotificationsFixture>
+    ai?: ReturnType<typeof createAiFixture>
   } = {},
 ): Promise<{ capturedHeaders: Array<{ authorization: string | null; orgId: string | null }> }> {
   const capturedHeaders: Array<{ authorization: string | null; orgId: string | null }> = []
@@ -695,6 +737,36 @@ export async function mockBackendApi(
       }
     }
 
+    // AI scratch/ask surface (v0.8 §2.2/§6.4/§6.5, plan P9): answered only for
+    // the AI journey. The scratch intent returns a signed URL on the external
+    // storage host, completion returns the storage reference, and ask returns
+    // a validated answer.
+    const ai = options.ai
+    if (ai) {
+      const completeMatch = url.pathname.match(
+        /^\/api\/v1\/ai\/scratch\/uploads\/([^/]+)\/complete$/,
+      )
+      if (method === 'POST' && url.pathname === '/api/v1/ai/scratch/uploads') {
+        capturedHeaders.push({ authorization, orgId })
+        return json(
+          {
+            upload_id: ai.uploadId,
+            upload_url: ai.uploadUrlFor(ai.uploadId),
+            expires_at: '2026-04-01T00:10:00Z',
+          },
+          201,
+        )
+      }
+      if (method === 'POST' && completeMatch) {
+        capturedHeaders.push({ authorization, orgId })
+        return json({ storage_reference: ai.scratchReference })
+      }
+      if (method === 'POST' && url.pathname === '/api/v1/ai/ask') {
+        capturedHeaders.push({ authorization, orgId })
+        return json(ai.answer)
+      }
+    }
+
     if (method === 'GET' && url.pathname === '/api/v1/records') {
       capturedHeaders.push({ authorization, orgId })
       const pageNumber = Number(url.searchParams.get('page') ?? '1')
@@ -828,6 +900,28 @@ export async function setupFilesJourney(page: Page, clientId: string) {
   })
 
   return { fixture, filesFixture, capturedHeaders: api.capturedHeaders }
+}
+
+/**
+ * AI scratch/ask journey setup (v0.8 §2.2/§6.4/§6.5, plan P9): the
+ * authenticated shell and the AI scratch/ask surface, uploading to the real
+ * external storage server started by Playwright (`e2e/storage-server.mjs`).
+ * `storagePath: 'allowed'` returns the CORS headers for the app origin so the
+ * preflight and signed PUT succeed; `storagePath: 'denied'` omits them, so the
+ * browser itself blocks the cross-origin upload — proving the storage-origin
+ * CORS control is enforced by the browser.
+ */
+export async function setupAiJourney(
+  page: Page,
+  clientId: string,
+  options: { storagePath?: 'allowed' | 'denied' } = {},
+) {
+  const fixture = createRecordFixture()
+  const aiFixture = createAiFixture({ storagePath: options.storagePath })
+  await injectSession(page, clientId)
+  await mockWorkOsTokenEndpoint(page)
+  const api = await mockBackendApi(page, fixture, { ai: aiFixture })
+  return { fixture, aiFixture, capturedHeaders: api.capturedHeaders }
 }
 
 /**

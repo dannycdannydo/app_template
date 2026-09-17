@@ -29,7 +29,14 @@
 # headers, plus HSTS which only a TLS-terminating edge may set).
 (security_headers) {
 	header {
-		Content-Security-Policy "default-src 'self'; base-uri 'self'; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' https://api.workos.com; frame-ancestors 'none'; form-action 'self'"
+		# Browser uploads PUT directly to the private object store through a
+		# short-lived signed URL, so connect-src must name that exact origin.
+		# STORAGE_PUBLIC_ORIGIN is the bare scheme://host[:port] origin of the
+		# deployment's STORAGE_PUBLIC_ENDPOINT_URL (no path, query or wildcard);
+		# the production environment file sets it and the deploy fails fast when
+		# it is missing. It is empty only for local Caddy validation, where no
+		# storage origin is configured and the CSP keeps 'self' + WorkOS.
+		Content-Security-Policy "default-src 'self'; base-uri 'self'; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' https://api.workos.com {$STORAGE_PUBLIC_ORIGIN}; frame-ancestors 'none'; form-action 'self'"
 		X-Content-Type-Options "nosniff"
 		Referrer-Policy "strict-origin-when-cross-origin"
 		X-Frame-Options "DENY"

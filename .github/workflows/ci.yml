@@ -155,6 +155,9 @@ jobs:
       STORAGE_REGION: us-east-1
       STORAGE_ACCESS_KEY_ID: minioadmin
       STORAGE_SECRET_ACCESS_KEY: minioadmin
+      # Plan P9 external-origin browser uploads: the storage server must allow
+      # the frontend origin, and the CORS journey asserts it does.
+      STORAGE_CORS_ALLOWED_ORIGIN: https://app.example.com
     defaults:
       run:
         working-directory: backend
@@ -166,6 +169,7 @@ jobs:
             --publish 9000:9000 \
             --env MINIO_ROOT_USER=minioadmin \
             --env MINIO_ROOT_PASSWORD=minioadmin \
+            --env MINIO_API_CORS_ALLOW_ORIGIN=https://app.example.com \
             quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z \
             server /data
           for attempt in {1..10}; do
@@ -415,17 +419,23 @@ jobs:
           BROKER_REDIS_PASSWORD: ci-broker-validation-placeholder
           RATE_LIMIT_REDIS_PASSWORD: ci-rate-validation-placeholder
           ACME_EMAIL: ci-validation@example.com
+          STORAGE_PUBLIC_ORIGIN: https://storage.ci.example.com
+          STORAGE_PUBLIC_ENDPOINT_URL: https://storage.ci.example.com
           ENV_FILE: /dev/null
         run: |
           docker compose -f deploy/compose/compose.hybrid-vps.yml config --quiet
           docker compose -f deploy/compose/compose.hybrid-vps.yml config --format json |
             python scripts/assert_redis_compose_policy.py --profile production
+          docker compose -f deploy/compose/compose.hybrid-vps.yml config --format json |
+            python scripts/assert_deployment_boundaries.py --profile production
 
       - name: Validate the local two-Redis policy
         run: |
           docker compose -f deploy/compose/compose.local.yml --profile fullstack config --quiet
           docker compose -f deploy/compose/compose.local.yml --profile fullstack config --format json |
             python scripts/assert_redis_compose_policy.py --profile local
+          docker compose -f deploy/compose/compose.local.yml --profile fullstack config --format json |
+            python scripts/assert_deployment_boundaries.py --profile local
 
   # Edge validation (Scope §6.6, blueprint §35.1): the pinned Caddy image
   # (v2.11.4 + caddy-ratelimit v0.1.0) builds, the Caddyfile parses and is
@@ -444,6 +454,7 @@ jobs:
           docker run --rm
           -e DOMAIN=app.example.com
           -e ACME_EMAIL=ops@example.com
+          -e STORAGE_PUBLIC_ORIGIN=https://storage.ci.example.com
           -v "$PWD/deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro"
           app-template-caddy:ci
           caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile

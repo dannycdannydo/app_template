@@ -59,11 +59,20 @@ services:
       # required like REDIS_PASSWORD: a host can never start with an empty
       # Let's Encrypt contact.
       ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in the environment file}
+      # Exact browser-facing storage origin for the CSP connect-src (no path,
+      # query or wildcard). Required so a production deployment never ships a
+      # CSP that blocks browser uploads. STORAGE_PUBLIC_ENDPOINT_URL (the same
+      # deployment input the API reads) is passed here too so CI can prove the
+      # two are the same origin before either reaches a browser.
+      STORAGE_PUBLIC_ORIGIN: ${STORAGE_PUBLIC_ORIGIN:?set STORAGE_PUBLIC_ORIGIN in the environment file}
+      STORAGE_PUBLIC_ENDPOINT_URL: ${STORAGE_PUBLIC_ENDPOINT_URL:?set STORAGE_PUBLIC_ENDPOINT_URL in the environment file}
     volumes:
       - ${DEPLOY_ROOT:-.}/Caddyfile:/etc/caddy/Caddyfile:ro
       - ${FRONTEND_DIR:-./releases/current/frontend}:/srv/frontend:ro
       - caddy_data:/data
       - caddy_config:/config
+    networks:
+      - edge
     healthcheck:
       # Automatic HTTPS makes Caddy answer every :80 request with a 308
       # redirect to https, so a plain `wget --spider` (which follows the
@@ -96,10 +105,29 @@ services:
   # commit-pinned image, and the compose environment file never defines it.
   api:
     image: ${BACKEND_IMAGE:-ghcr.io/example/app-template-backend:local}
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    # --forwarded-allow-ips trusts only the edge network (Caddy), so a
+    # browser-supplied X-Forwarded-For is ignored and the client IP Caddy
+    # appends is the one the API rate-limits. EDGE_SUBNET is overridable so a
+    # host can avoid a 172.30.0.0/24 collision; it must stay in sync with the
+    # `edge` network below (asserted in CI).
+    command:
+      [
+        "uvicorn",
+        "app.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--proxy-headers",
+        "--forwarded-allow-ips",
+        "${EDGE_SUBNET:-172.30.0.0/24}",
+      ]
     restart: unless-stopped
     env_file:
       - ${ENV_FILE:-.env.production}
+    networks:
+      - edge
+      - backend
     depends_on:
       redis-broker:
         condition: service_healthy
@@ -153,6 +181,8 @@ services:
         condition: service_healthy
       api:
         condition: service_started
+    networks:
+      - backend
     # The worker has no HTTP endpoint, so the health check verifies the
     # dramatiq process is alive via /proc (the slim base image has neither
     # pgrep nor ps).
@@ -196,6 +226,8 @@ services:
     depends_on:
       redis-broker:
         condition: service_healthy
+    networks:
+      - backend
     stop_grace_period: 30s
     # The coordinator has no HTTP endpoint; the health check verifies the
     # process is alive via /proc (same pattern as the worker). PostgreSQL is
@@ -249,6 +281,8 @@ services:
     restart: unless-stopped
     volumes:
       - redis_broker_data:/data
+    networks:
+      - backend
     healthcheck:
       test: ["CMD-SHELL", "REDISCLI_AUTH=$$REDIS_PASSWORD redis-cli ping | grep PONG"]
       interval: 10s
@@ -285,6 +319,8 @@ services:
     restart: unless-stopped
     volumes:
       - redis_rate_limit_data:/data
+    networks:
+      - backend
     healthcheck:
       test: ["CMD-SHELL", "REDISCLI_AUTH=$$REDIS_PASSWORD redis-cli ping | grep PONG"]
       interval: 10s
@@ -306,3 +342,17 @@ volumes:
   caddy_config:
   redis_broker_data:
   redis_rate_limit_data:
+
+networks:
+  # Browser-facing edge network: Caddy (TLS/static) and the API only. The
+  # API's --forwarded-allow-ips trusts exactly this subnet, so a browser
+  # cannot spoof X-Forwarded-For and distinct clients keep distinct rate-limit
+  # quotas. Override EDGE_SUBNET together with the API command if 172.30.0.0/24
+  # collides with a host network.
+  edge:
+    ipam:
+      config:
+        - subnet: ${EDGE_SUBNET:-172.30.0.0/24}
+  # Private application network for the API, worker, coordinator and the two
+  # Redis instances. Never published beyond the host.
+  backend:
