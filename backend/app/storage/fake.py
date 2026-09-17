@@ -156,6 +156,29 @@ class FakeObjectStorage(ObjectStorage):
             raise ValueError(f"object exceeds the {max_bytes} byte read limit")
         destination.write(stored.content)
 
+    async def copy_object(
+        self,
+        *,
+        source_key: str,
+        destination_key: str,
+    ) -> None:
+        """Copy one stored object onto another key (promotion, plan P6).
+
+        Mirrors the S3 adapter's contract: a missing source raises
+        :class:`KeyError`, and the destination inherits the source's bytes and
+        declared content type. The destination's declaration is dropped so a
+        stale staging declaration can never drive a later ``put``.
+        """
+        stored = self._objects.get(source_key)
+        if stored is None:
+            raise KeyError(f"object not found: {source_key}")
+        self._objects[destination_key] = _StoredObject(
+            content=stored.content,
+            content_type=stored.content_type,
+            created_at=datetime.now(UTC),
+        )
+        self._declared.pop(destination_key, None)
+
     async def delete_object(self, object_key: str) -> None:
         self._objects.pop(object_key, None)
         self._declared.pop(object_key, None)

@@ -47,6 +47,7 @@ ceilings (v0.7 Scope §6.2/§6.4).
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -64,6 +65,8 @@ from app.ai.persistence.models import (
     AIOutputRecord,
     AIRequestRecord,
     AIRequestStatus,
+    AIScratchUpload,
+    AIScratchUploadStatus,
     OrganisationAISettings,
 )
 from app.ai.persistence.port import AIRequestReservation, OrganisationAIPolicy
@@ -72,9 +75,12 @@ from app.ai.persistence.queries import (
     ai_request_by_request_id_statement,
     ai_request_record_statement,
     expired_ai_outputs_statement,
+    expired_scratch_uploads_statement,
     organisation_ai_settings_for_update_statement,
     organisation_ai_settings_statement,
     organisations_with_retention_policy_statement,
+    scratch_upload_by_object_key_statement,
+    scratch_upload_by_upload_id_statement,
     stale_running_requests_statement,
 )
 from app.ai.registry import CapabilityCostModelRegistry, ModelDefinition, load_registry_bundle
@@ -862,6 +868,169 @@ class AIPersistencePortImpl:
         await session.commit()
 
 
+# --- Durable AI scratch intents (plan P6) -----------------------------------
+
+
+async def is_ai_enabled(session: AsyncSession, *, organisation_id: uuid.UUID) -> bool:
+    """Return whether the organisation's AI policy is enabled (fail-safe off)."""
+    settings_row = await session.scalar(organisation_ai_settings_statement(organisation_id))
+    return settings_row is not None and settings_row.enabled
+
+
+async def scratch_retention_days(
+    session: AsyncSession, *, organisation_id: uuid.UUID
+) -> int | None:
+    """Return the organisation's optional scratch retention policy, if any."""
+    settings_row = await session.scalar(organisation_ai_settings_statement(organisation_id))
+    if settings_row is None:
+        return None
+    return settings_row.retention_policy_days
+
+
+async def create_scratch_upload(
+    session: AsyncSession,
+    *,
+    organisation_id: uuid.UUID,
+    upload_id: uuid.UUID,
+    object_key: str,
+    content_type: str,
+    size_bytes: int,
+    expires_at: datetime,
+) -> AIScratchUpload:
+    """Persist one scratch-upload intent (caller owns the commit).
+
+    Plan P6: the intent is created only after the organisation's AI policy has
+    been confirmed, so obtaining a scratch PUT capability cannot bypass
+    default-deny AI enablement. The bounded ``expires_at`` is computed by the
+    caller from the global ceiling and any tighter organisation policy.
+    """
+    row = AIScratchUpload(
+        organisation_id=organisation_id,
+        upload_id=upload_id,
+        object_key=object_key,
+        content_type=content_type,
+        size_bytes=size_bytes,
+        status=AIScratchUploadStatus.PENDING,
+        expires_at=expires_at,
+    )
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def get_scratch_upload(
+    session: AsyncSession,
+    *,
+    organisation_id: uuid.UUID,
+    upload_id: uuid.UUID,
+) -> AIScratchUpload | None:
+    """Return the org-scoped scratch intent for one caller-visible upload id."""
+    return await session.scalar(scratch_upload_by_upload_id_statement(organisation_id, upload_id))
+
+
+async def complete_scratch_upload(
+    session: AsyncSession,
+    *,
+    organisation_id: uuid.UUID,
+    upload_id: uuid.UUID,
+    now: datetime | None = None,
+) -> AIScratchUpload | None:
+    """Mark a pending scratch intent ``ready``; idempotent on replay.
+
+    The row is locked ``FOR UPDATE`` so a concurrent completion cannot promote
+    it twice. Returns ``None`` when the intent is not ``pending`` (already
+    terminal, deleted) or the bounded lifetime has passed, so a caller can
+    never resurrect a terminal or expired intent. A still-live ``ready`` row
+    is returned for an idempotent replay; an expired ``ready`` row is not.
+    """
+    completed_at = now or datetime.now(UTC)
+    row = await session.scalar(
+        scratch_upload_by_upload_id_statement(organisation_id, upload_id).with_for_update()
+    )
+    if row is None:
+        return None
+    if row.status == AIScratchUploadStatus.READY:
+        if row.expires_at <= completed_at:
+            return None
+        return row
+    if row.status != AIScratchUploadStatus.PENDING:
+        return None
+    if row.expires_at <= completed_at:
+        # Completion after the bounded lifetime is refused; the global expiry
+        # sweep owns the terminal transition (the bytes are already
+        # unauthorised by ``authorize_scratch_object``'s expiry check).
+        return None
+    row.status = AIScratchUploadStatus.READY
+    row.completed_at = completed_at
+    await session.flush()
+    return row
+
+
+async def authorize_scratch_object(
+    session: AsyncSession,
+    *,
+    organisation_id: uuid.UUID,
+    object_key: str,
+    now: datetime | None = None,
+) -> AIScratchUpload | None:
+    """Return the live scratch intent that authorises one scratch object key.
+
+    Plan P6: a scratch key is trusted only when a durable intent exists, is
+    ``ready`` and has not expired. ``None`` means the reference must fail
+    closed — an unknown, pending, expired or cross-organisation scratch key is
+    never treated as an authorised AI source.
+    """
+    row = await session.scalar(scratch_upload_by_object_key_statement(organisation_id, object_key))
+    if row is None or row.status != AIScratchUploadStatus.READY:
+        return None
+    if row.expires_at <= (now or datetime.now(UTC)):
+        return None
+    return row
+
+
+#: Bounded batch size for the global expired-scratch sweep (plan P6).
+SCRATCH_EXPIRY_BATCH_SIZE = 200
+
+
+async def expire_scratch_uploads(
+    session: AsyncSession,
+    storage: ObjectStorage,
+    *,
+    now: datetime | None = None,
+) -> int:
+    """Delete every expired scratch object and mark its intent expired.
+
+    Plan P6: runs globally, independent of any per-organisation retention
+    policy, so the global maximum lifetime is enforced even for organisations
+    with no retention policy configured. Object deletion is best-effort (a
+    provider failure leaves the object for the object-store lifecycle backstop)
+    while the row still moves to a terminal ``expired`` state. Returns the
+    number of intents expired.
+    """
+    expired_at = now or datetime.now(UTC)
+    expired = 0
+    while True:
+        batch = (
+            await session.scalars(
+                expired_scratch_uploads_statement(
+                    expired_before=expired_at,
+                    batch_size=SCRATCH_EXPIRY_BATCH_SIZE,
+                )
+            )
+        ).all()
+        if not batch:
+            break
+        for row in batch:
+            # Best-effort: never log the key (BP §28); the object-store
+            # lifecycle rule is the asynchronous backstop.
+            with contextlib.suppress(Exception):
+                await storage.delete_object(row.object_key)
+            row.status = AIScratchUploadStatus.EXPIRED
+            expired += 1
+        await session.commit()
+    return expired
+
+
 async def enforce_ai_retention(
     session: AsyncSession,
     storage: ObjectStorage,
@@ -903,6 +1072,11 @@ async def enforce_ai_retention(
         stale_by_org.setdefault(record.organisation_id, []).append(record)
     stale_reconciled = len(stale_candidates)
     await session.commit()
+
+    # 1b. Global scratch-intent expiry (plan P6): independent of any
+    # per-organisation retention policy, so every scratch object has a bounded
+    # global maximum lifetime even when no policy is configured.
+    scratch_intents_expired = await expire_scratch_uploads(session, storage, now=now)
 
     # 2. Per-organisation output retention and scratch sweep.
     rows = (await session.scalars(organisations_with_retention_policy_statement())).all()
@@ -1001,5 +1175,6 @@ async def enforce_ai_retention(
         "organisations_purged": organisations_purged,
         "outputs_deleted": outputs_deleted,
         "scratch_objects_deleted": scratch_objects_deleted,
+        "scratch_intents_expired": scratch_intents_expired,
         "stale_requests_reconciled": stale_reconciled,
     }

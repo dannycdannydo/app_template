@@ -32,6 +32,7 @@ def test_production_requires_distinct_explicit_redis_endpoints() -> None:
     with pytest.raises(ValidationError, match="both required"):
         Settings(
             app_env="production",
+            file_scan_acknowledge_unscanned=True,
             database_url="postgresql+asyncpg://x",
             workos_api_key="key",
             workos_client_id="client",
@@ -41,6 +42,7 @@ def test_production_requires_distinct_explicit_redis_endpoints() -> None:
     with pytest.raises(ValidationError, match="distinct Redis endpoints"):
         Settings(
             app_env="production",
+            file_scan_acknowledge_unscanned=True,
             database_url="postgresql+asyncpg://x",
             workos_api_key="key",
             workos_client_id="client",
@@ -52,7 +54,12 @@ def test_production_requires_distinct_explicit_redis_endpoints() -> None:
 
 def test_production_rejects_debug() -> None:
     with pytest.raises(ValidationError, match="debug"):
-        Settings(app_env="production", debug=True, database_url="postgresql+asyncpg://x")
+        Settings(
+            app_env="production",
+            file_scan_acknowledge_unscanned=True,
+            debug=True,
+            database_url="postgresql+asyncpg://x",
+        )
 
 
 def test_rejects_non_postgres_database_url() -> None:
@@ -69,17 +76,20 @@ def test_production_requires_workos_credentials() -> None:
     with pytest.raises(ValidationError, match="workos_api_key"):
         Settings(
             app_env="production",
+            file_scan_acknowledge_unscanned=True,
             database_url="postgresql+asyncpg://x",
             workos_client_id="client_1",
         )
     with pytest.raises(ValidationError, match="workos_client_id"):
         Settings(
             app_env="production",
+            file_scan_acknowledge_unscanned=True,
             database_url="postgresql+asyncpg://x",
             workos_api_key="sk_test",
         )
     settings = Settings(
         app_env="production",
+        file_scan_acknowledge_unscanned=True,
         database_url="postgresql+asyncpg://x",
         workos_api_key="sk_test",
         workos_client_id="client_1",
@@ -125,6 +135,7 @@ def test_cors_requires_explicit_non_wildcard_origins() -> None:
     with pytest.raises(ValidationError, match="must use https"):
         Settings(
             app_env="production",
+            file_scan_acknowledge_unscanned=True,
             database_url="postgresql+asyncpg://x",
             workos_api_key="sk_test",
             workos_client_id="client_1",
@@ -155,6 +166,7 @@ def test_trusted_hosts_are_explicit_and_non_wildcard() -> None:
     with pytest.raises(ValidationError, match="explicitly configured"):
         Settings(
             app_env="production",
+            file_scan_acknowledge_unscanned=True,
             database_url="postgresql+asyncpg://x",
             workos_api_key="sk_test",
             workos_client_id="client_1",
@@ -208,6 +220,7 @@ def test_bootstrap_email_rejects_malformed_values(email: str) -> None:
 def test_production_accepts_a_valid_bootstrap_email() -> None:
     settings = Settings(
         app_env="production",
+        file_scan_acknowledge_unscanned=True,
         database_url="postgresql+asyncpg://x",
         workos_api_key="sk_test",
         workos_client_id="client_1",
@@ -248,6 +261,7 @@ def test_webhook_secret_loads_from_environment() -> None:
 def test_production_accepts_a_webhook_secret() -> None:
     settings = Settings(
         app_env="production",
+        file_scan_acknowledge_unscanned=True,
         database_url="postgresql+asyncpg://x",
         workos_api_key="sk_test",
         workos_client_id="client_1",
@@ -496,6 +510,7 @@ def test_production_rejects_fake_provider() -> None:
     with pytest.raises(ValidationError, match="'fake'"):
         Settings(
             app_env="production",
+            file_scan_acknowledge_unscanned=True,
             database_url="postgresql+asyncpg://x",
             workos_api_key="sk_test",
             workos_client_id="client_1",
@@ -523,6 +538,7 @@ def test_production_requires_explicit_s3_configuration(
     with pytest.raises(ValidationError, match="storage_access_key_id"):
         Settings(
             app_env="production",
+            file_scan_acknowledge_unscanned=True,
             database_url="postgresql+asyncpg://x",
             workos_api_key="sk_test",
             workos_client_id="client_1",
@@ -540,6 +556,7 @@ def test_production_requires_explicit_s3_configuration(
     with pytest.raises(ValidationError, match="storage_endpoint_url"):
         Settings(
             app_env="production",
+            file_scan_acknowledge_unscanned=True,
             database_url="postgresql+asyncpg://x",
             workos_api_key="sk_test",
             workos_client_id="client_1",
@@ -558,6 +575,7 @@ def test_production_requires_explicit_s3_configuration(
 def test_production_accepts_complete_s3_configuration() -> None:
     settings = Settings(
         app_env="production",
+        file_scan_acknowledge_unscanned=True,
         database_url="postgresql+asyncpg://x",
         workos_api_key="sk_test",
         workos_client_id="client_1",
@@ -588,6 +606,7 @@ def test_production_accepts_private_compose_network_redis_without_tls() -> None:
     in production."""
     settings = Settings(
         app_env="production",
+        file_scan_acknowledge_unscanned=True,
         database_url="postgresql+asyncpg://x",
         workos_api_key="sk_test",
         workos_client_id="client_1",
@@ -613,6 +632,7 @@ def test_production_accepts_private_compose_network_redis_without_tls() -> None:
 def test_production_accepts_loopback_redis_without_tls() -> None:
     settings = Settings(
         app_env="production",
+        file_scan_acknowledge_unscanned=True,
         database_url="postgresql+asyncpg://x",
         workos_api_key="sk_test",
         workos_client_id="client_1",
@@ -641,6 +661,7 @@ def test_production_requires_tls_for_external_redis() -> None:
     with pytest.raises(ValidationError, match="rediss"):
         Settings(
             app_env="production",
+            file_scan_acknowledge_unscanned=True,
             database_url="postgresql+asyncpg://x",
             workos_api_key="sk_test",
             workos_client_id="client_1",
@@ -668,6 +689,7 @@ def test_production_requires_tls_for_public_ipv6_redis() -> None:
     with pytest.raises(ValidationError, match="rediss"):
         Settings(
             app_env="production",
+            file_scan_acknowledge_unscanned=True,
             database_url="postgresql+asyncpg://x",
             workos_api_key="sk_test",
             workos_client_id="client_1",
@@ -746,6 +768,7 @@ def test_production_rejects_fake_email_provider() -> None:
     with pytest.raises(ValidationError, match="email_provider must not be 'fake'"):
         Settings(
             app_env="production",
+            file_scan_acknowledge_unscanned=True,
             database_url="postgresql+asyncpg://x",
             workos_api_key="sk_test",
             workos_client_id="client_1",
@@ -780,6 +803,7 @@ def test_production_requires_explicit_smtp_configuration(
     with pytest.raises(ValidationError, match="smtp_host"):
         Settings(
             app_env="production",
+            file_scan_acknowledge_unscanned=True,
             database_url="postgresql+asyncpg://x",
             workos_api_key="sk_test",
             workos_client_id="client_1",
@@ -801,6 +825,7 @@ def test_production_requires_explicit_smtp_configuration(
     with pytest.raises(ValidationError, match="smtp_port"):
         Settings(
             app_env="production",
+            file_scan_acknowledge_unscanned=True,
             database_url="postgresql+asyncpg://x",
             workos_api_key="sk_test",
             workos_client_id="client_1",
@@ -822,6 +847,7 @@ def test_production_requires_explicit_smtp_configuration(
     with pytest.raises(ValidationError, match="email_from"):
         Settings(
             app_env="production",
+            file_scan_acknowledge_unscanned=True,
             database_url="postgresql+asyncpg://x",
             workos_api_key="sk_test",
             workos_client_id="client_1",
@@ -844,6 +870,7 @@ def test_production_requires_explicit_smtp_configuration(
 def test_production_accepts_complete_smtp_configuration() -> None:
     settings = Settings(
         app_env="production",
+        file_scan_acknowledge_unscanned=True,
         database_url="postgresql+asyncpg://x",
         workos_api_key="sk_test",
         workos_client_id="client_1",
@@ -882,6 +909,7 @@ def _prod_ai(**overrides: Any) -> Settings:
     Callers must pass ``ai_enabled_providers`` explicitly."""
     return Settings(
         app_env="production",
+        file_scan_acknowledge_unscanned=True,
         database_url="postgresql+asyncpg://x",
         workos_api_key="sk_test",
         workos_client_id="client_1",
@@ -1436,3 +1464,80 @@ def test_ai_transfer_deployment_rejects_ttl_outside_provider_contract_bounds() -
         ai_managed_url_ttl_seconds=1_000,
     )
     assert settings.ai_managed_url_ttl_seconds == 1_000
+
+
+# --- Upload scanning and bounded upload capabilities (plan P6) ---
+
+
+def _prod_scan(**overrides: Any) -> Settings:
+    """A fully valid production Settings with storage/scanning configurable."""
+    values: dict[str, Any] = {
+        "app_env": "production",
+        "database_url": "postgresql+asyncpg://x",
+        "workos_api_key": "sk_test",
+        "workos_client_id": "client_1",
+        "cors_allowed_origins": ["https://app.example.test"],
+        "trusted_hosts": ["api.example.test"],
+        "broker_redis_url": "rediss://broker.example.test:6380/0",
+        "rate_limit_redis_url": "rediss://rate-limit.example.test:6380/0",
+        "storage_provider": "s3",
+        "storage_access_key_id": "ak_test",
+        "storage_secret_access_key": "sk_storage_test",
+        "storage_bucket": "files",
+        "storage_endpoint_url": "https://s3.example.test",
+        "email_provider": "smtp",
+        "email_from": "no-reply@example.com",
+        "smtp_host": "smtp.example.test",
+        "smtp_port": 587,
+        "ai_enabled_providers": [],
+    }
+    values.update(overrides)
+    return Settings(**values)
+
+
+def test_upload_url_ttl_is_bounded() -> None:
+    """The signed PUT capability lifetime is bounded to the reviewed window."""
+    valid = Settings(
+        app_env="test",
+        database_url="postgresql+asyncpg://x",
+        storage_upload_url_ttl_seconds=600,
+    )
+    assert valid.storage_upload_url_ttl_seconds == 600
+    with pytest.raises(ValidationError):
+        Settings(
+            app_env="test",
+            database_url="postgresql+asyncpg://x",
+            storage_upload_url_ttl_seconds=9,
+        )
+
+
+def test_production_requires_unscanned_acknowledgement() -> None:
+    """An unscanned production deployment must be an explicit decision."""
+    with pytest.raises(ValidationError, match="file_scan_acknowledge_unscanned"):
+        _prod_scan()
+    acknowledged = _prod_scan(file_scan_acknowledge_unscanned=True)
+    assert acknowledged.file_scan_provider == "none"
+
+
+def test_file_scan_provider_rejects_unknown_names() -> None:
+    with pytest.raises(ValidationError, match="file_scan_provider"):
+        Settings(
+            app_env="test",
+            database_url="postgresql+asyncpg://x",
+            file_scan_provider="clamav",
+        )
+
+
+def test_ai_scratch_max_lifetime_is_bounded() -> None:
+    valid = Settings(
+        app_env="test",
+        database_url="postgresql+asyncpg://x",
+        ai_scratch_max_lifetime_seconds=3_600,
+    )
+    assert valid.ai_scratch_max_lifetime_seconds == 3_600
+    with pytest.raises(ValidationError):
+        Settings(
+            app_env="test",
+            database_url="postgresql+asyncpg://x",
+            ai_scratch_max_lifetime_seconds=1,
+        )

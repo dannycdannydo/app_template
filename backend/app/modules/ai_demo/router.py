@@ -136,6 +136,7 @@ async def create_scratch_upload_intent_endpoint(
 ) -> ScratchUploadIntentResponse:
     """Start a transient upload into the AI scratch namespace (signed PUT URL)."""
     upload_id, upload_url, expires_at = await service.create_scratch_upload_intent(
+        session,
         organisation_id=membership.organisation_id,
         original_filename=payload.original_filename,
         content_type=payload.content_type,
@@ -156,6 +157,7 @@ async def complete_scratch_upload_endpoint(
 ) -> ScratchUploadCompleteResponse:
     """Verify the stored transient object and return its storage reference."""
     storage_reference = await service.complete_scratch_upload(
+        session,
         organisation_id=membership.organisation_id,
         upload_id=upload_id,
     )

@@ -84,6 +84,7 @@ from app.ai.registry import (
     resolve_output_schema,
 )
 from app.ai.schemas import AIRequest, AIResult, CostEstimate, RoutingMetadata, TokenUsage
+from app.ai.source_authority import SourceAuthorizer
 from app.ai.staging import ExternalFileReference, StagedFile, TransferStore
 from app.ai.storage_resolver import (
     EXTENSION_MIME_TYPES,
@@ -362,6 +363,7 @@ class AIService:
         providers: Mapping[str, LLMProvider] | None = None,
         schema_resolver: SchemaResolver = import_schema,
         attachment_resolver: AttachmentResolver | None = None,
+        source_authorizer: SourceAuthorizer | None = None,
         redactor: Redactor | None = None,
         transfer_deployment: TransferDeploymentPolicy | None = None,
         storage: ObjectStorage | None = None,
@@ -384,6 +386,13 @@ class AIService:
         self._model_registry = model_registry
         self._schema_resolver = schema_resolver
         self._attachment_resolver = attachment_resolver
+        # Plan P6: the durable-source authority seam. ``None`` keeps hermetic
+        # service tests unchanged; the checked-in wiring
+        # (``app.ai.runtime.get_ai_service``) always supplies the files-backed
+        # authority, so the sync and worker execution paths re-resolve a
+        # ``documents/`` or scratch reference against live application state
+        # before any bytes are read.
+        self._source_authorizer = source_authorizer
         self._redactor = redactor
         # v0.8 Scope §2.2/§6.2: the deployment-level transfer policy the
         # selector closes over. Default-deny: ``None`` is the template
@@ -588,6 +597,34 @@ class AIService:
             )
         return selected
 
+    async def authorize_source(
+        self,
+        *,
+        session: AsyncSession,
+        organisation_id: UUID,
+        storage_reference: str,
+    ) -> None:
+        """Authorise one private storage reference without dispatching AI work.
+
+        Plan P6 request-time boundary: the durable enqueue path must deny an
+        unauthorised document or scratch key *before* it persists a queued
+        request/job, rather than accepting it and discovering the denial only
+        when a worker later executes. The worker keeps its own re-authorisation
+        (retries re-run it), so the request and execution boundaries share the
+        one durable source-authority decision. A service built without an
+        authorizer fails closed rather than accepting an unverified reference.
+        """
+        if self._source_authorizer is None:
+            raise RuntimeError(
+                "AIService.authorize_source requires a source authorizer; refusing to "
+                "accept a private storage reference without durable authorisation (plan P6)"
+            )
+        await self._source_authorizer.authorize(
+            session=session,
+            organisation_id=organisation_id,
+            storage_reference=storage_reference,
+        )
+
     async def execute(
         self,
         request: AIRequest,
@@ -715,6 +752,36 @@ class AIService:
             # prompt declares ``text`` must receive text input — a storage
             # reference can never silently satisfy it — and vice versa.
             self._validate_input_form(prompt, request)
+            # Organisation controls first (v0.7 Scope §6.5): the enabled-state
+            # check is the cheapest, strongest gate, so a disabled organisation
+            # is rejected before any source authorisation or byte read. The
+            # policy's allowlists are merged with the caller's before routing.
+            if recorder is not None:
+                policy = await recorder.load_policy(organisation_id=request.organisation_id)
+                if not policy.enabled:
+                    raise AIUnavailableError("AI is not enabled for this organisation")
+                allowed_providers, allowed_model_ids, model_override = _merge_organisation_policy(
+                    policy, allowed_providers, allowed_model_ids, model_override
+                )
+                retain_output_content = (
+                    task.retains_output_content and policy.retention_policy_days is not None
+                )
+            # Plan P6 source authority: a private storage reference is a name,
+            # not an authorisation. Re-resolve it against durable application
+            # state (files row / scratch intent) before any metadata or bytes
+            # are read, so pending, failed, quarantined, deleted, expired,
+            # unknown and cross-organisation keys fail closed at both the
+            # synchronous and worker execution boundaries.
+            if (
+                self._source_authorizer is not None
+                and request.storage_reference
+                and execution_session is not None
+            ):
+                await self._source_authorizer.authorize(
+                    session=execution_session,
+                    organisation_id=request.organisation_id,
+                    storage_reference=request.storage_reference,
+                )
             # v0.8 Scope §2.3: a storage-referenced object is headed first. A
             # head size above the deployment's inline threshold routes the
             # request to the streaming/staging seam (the inline resolver caps
@@ -749,25 +816,6 @@ class AIService:
             excluded_model_ids: list[str] = []
             last_transient: ProviderError | None = None
 
-            # Organisation controls (v0.7 Scope §6.5): the organisation's
-            # effective policy is enforced *here* — never in a router or UI
-            # (BP §27) — and its restrictions are merged with the caller's
-            # before routing. The task-level retention opt-in only takes
-            # effect together with a configured organisation retention policy
-            # (v0.7 Scope §2). A disabled organisation is a safe pre-dispatch
-            # failure: it raises here so the terminal tail below emits
-            # ``ai.request.failed`` for the started request (v0.7 Scope §6.7 —
-            # the synchronous path has no worker failure log to compensate).
-            if recorder is not None:
-                policy = await recorder.load_policy(organisation_id=request.organisation_id)
-                if not policy.enabled:
-                    raise AIUnavailableError("AI is not enabled for this organisation")
-                allowed_providers, allowed_model_ids, model_override = _merge_organisation_policy(
-                    policy, allowed_providers, allowed_model_ids, model_override
-                )
-                retain_output_content = (
-                    task.retains_output_content and policy.retention_policy_days is not None
-                )
             # The provider map is authoritative for routing: when the caller
             # and the organisation policy impose no provider restriction, the
             # router only ever considers models whose adapter is configured in

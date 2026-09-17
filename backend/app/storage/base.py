@@ -127,6 +127,25 @@ class ObjectStorage(ABC):
         """
 
     @abstractmethod
+    async def copy_object(
+        self,
+        *,
+        source_key: str,
+        destination_key: str,
+    ) -> None:
+        """Server-side copy one object onto another key (plan P6 promotion).
+
+        The direct-upload flow signs a PUT against a unique staging key and
+        promotes the verified object to the non-presigned final key through the
+        provider's own copy operation, so the final key is never writable by a
+        browser capability. The copy is an overwrite when the destination
+        exists, and the caller verifies the promoted object's identity
+        afterwards. A missing source raises :class:`KeyError` so a promotion
+        after an interrupted upload fails closed instead of creating an empty
+        object.
+        """
+
+    @abstractmethod
     async def delete_object(self, object_key: str) -> None:
         """Permanently remove one object from the provider; idempotent."""
 

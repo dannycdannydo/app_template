@@ -569,27 +569,27 @@ credentials/configuration, backup/recovery changes and deployment/rollback order
 
 Dependencies: P1-P2 for worker fencing; security design may be reviewed earlier
 
-- [ ] Define one source-authorisation service for document keys used by inline
+- [x] Define one source-authorisation service for document keys used by inline
       AI, streamed/provider AI, job retries and download. Resolve the File from
       validated organisation context; require an allowed lifecycle status and
       pinned content identity. Do not treat a prefix, object HEAD, MIME or size
       as authorisation. Scratch keys use a distinct durable intent/expiry guard.
-- [ ] Choose and review a provider-neutral immutable upload strategy: unique
+- [x] Choose and review a provider-neutral immutable upload strategy: unique
       staging key plus verified promotion, or object-version/digest pinning with
       a proven S3-compatible adapter. Bound signed PUT lifetime, prevent old
       capabilities from mutating approved bytes, and reconcile DB/object-store
       partial failures without exposing unverified content.
-- [ ] Move File completion transition, audit, durable processing job and
+- [x] Move File completion transition, audit, durable processing job and
       dispatch outbox into one transaction. Lock the File, make completion
       replay idempotent, and preserve one processable job under parallel calls.
-- [ ] Define untrusted-file quarantine/scanning policy and adapter boundary.
+- [x] Define untrusted-file quarantine/scanning policy and adapter boundary.
       `READY`, AI and download must be gated until the approved verdict; a
       scanner outage must not turn unscanned content into trusted content.
-- [ ] Require AI-enabled policy before scratch upload capability issuance;
+- [x] Require AI-enabled policy before scratch upload capability issuance;
       persist scratch expiry/usage state, apply a global maximum independent of
       optional per-org retention, and configure storage lifecycle as a backstop.
       Reconcile aborted uploads, failed cleanup and in-use provider transfers.
-- [ ] Add real-DB, concurrent-session, fake-storage and MinIO tests: unknown/
+- [x] Add real-DB, concurrent-session, fake-storage and MinIO tests: unknown/
       pending/failed/quarantined/deleted/cross-org keys; AI inline and streamed
       reads; PUT reuse and same-size overwrite; completion rollback/parallel
       replay; scanner unavailable; disabled AI and null-retention expiry.

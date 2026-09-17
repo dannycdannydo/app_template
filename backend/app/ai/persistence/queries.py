@@ -21,6 +21,7 @@ from app.ai.persistence.models import (
     AIAttachmentReference,
     AIOutputRecord,
     AIRequestRecord,
+    AIScratchUpload,
     OrganisationAISettings,
 )
 
@@ -176,6 +177,55 @@ def organisations_with_retention_policy_statement() -> Select[tuple[Organisation
     """
     return select(OrganisationAISettings).where(
         OrganisationAISettings.retention_policy_days.is_not(None)
+    )
+
+
+def scratch_upload_by_upload_id_statement(
+    organisation_id: uuid.UUID,
+    upload_id: uuid.UUID,
+) -> Select[tuple[AIScratchUpload]]:
+    """Return one scratch-upload intent by its org-scoped caller-visible id."""
+    return select(AIScratchUpload).where(
+        AIScratchUpload.organisation_id == organisation_id,
+        AIScratchUpload.upload_id == upload_id,
+    )
+
+
+def scratch_upload_by_object_key_statement(
+    organisation_id: uuid.UUID,
+    object_key: str,
+) -> Select[tuple[AIScratchUpload]]:
+    """Return the org-scoped scratch intent that owns one scratch object key.
+
+    Plan P6: a scratch storage reference is only authoritative when a live
+    durable intent backs it; this lookup is the scratch half of the source
+    authority.
+    """
+    return select(AIScratchUpload).where(
+        AIScratchUpload.organisation_id == organisation_id,
+        AIScratchUpload.object_key == object_key,
+    )
+
+
+def expired_scratch_uploads_statement(
+    *,
+    expired_before: datetime,
+    batch_size: int,
+) -> Select[tuple[AIScratchUpload]]:
+    """Return the bounded next batch of scratch intents past their expiry.
+
+    Plan P6: this sweep runs globally, independent of any per-organisation
+    retention policy, so a global maximum lifetime applies to every scratch
+    object. Only non-terminal rows are candidates.
+    """
+    return (
+        select(AIScratchUpload)
+        .where(
+            AIScratchUpload.expires_at <= expired_before,
+            AIScratchUpload.status.in_(("pending", "ready")),
+        )
+        .order_by(AIScratchUpload.expires_at.asc())
+        .limit(batch_size)
     )
 
 

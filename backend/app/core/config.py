@@ -210,6 +210,41 @@ class Settings(BaseSettings):
         ],
         description="Content types accepted for uploads (blueprint §30)",
     )
+    storage_upload_url_ttl_seconds: int = Field(
+        default=900,
+        ge=60,
+        le=3_600,
+        description=(
+            "Lifetime in seconds of a signed browser PUT capability (plan P6). "
+            "Bounded so an upload capability can never be replayed against a "
+            "completed file; the direct-upload flow signs a unique staging key, "
+            "never the final object."
+        ),
+    )
+    # Upload quarantine/scanning boundary (plan P6). Providers are default-off:
+    # ``none`` explicitly records "no scanner deployed" (the reviewed template
+    # position — the quarantine state and adapter seam ship, the scanner does
+    # not). A configured provider gates ``ready`` (and therefore AI and
+    # download) on a clean verdict, and a scanner outage keeps content
+    # quarantined instead of trusted.
+    file_scan_provider: str = Field(
+        default="none",
+        description=(
+            "Untrusted-upload scanner adapter: 'none' (no scanner deployed; the "
+            "verdict is recorded as not-required) or the name of a reviewed "
+            "adapter added behind app/scanning/. Production requires an explicit "
+            "choice: the default 'none' must be acknowledged with "
+            "FILE_SCAN_ACKNOWLEDGE_UNSCANNED=true."
+        ),
+    )
+    file_scan_acknowledge_unscanned: bool = Field(
+        default=False,
+        description=(
+            "Explicit acknowledgement that uploaded content is not scanned. "
+            "Required in production when file_scan_provider=none so an unscanned "
+            "deployment is a deliberate, reviewed decision (plan P6)."
+        ),
+    )
     worker_concurrency: int = Field(
         default=8,
         description=(
@@ -622,6 +657,21 @@ class Settings(BaseSettings):
             "(bounded backoff, v0.8 Scope §2.5/§6.7)"
         ),
     )
+    # AI scratch lifecycle (plan P6). A scratch object is a throwaway AI input
+    # whose durable intent row carries its own expiry; this global ceiling
+    # bounds every scratch intent even when an organisation configures no
+    # retention policy, so no scratch object can live forever.
+    ai_scratch_max_lifetime_seconds: int = Field(
+        default=7 * 24 * 3_600,
+        ge=60,
+        le=30 * 24 * 3_600,
+        description=(
+            "Global maximum lifetime in seconds of an AI scratch upload intent, "
+            "independent of any optional per-organisation retention policy "
+            "(plan P6). The retention sweep deletes expired scratch rows and "
+            "their objects; object-store lifecycle rules are the backstop."
+        ),
+    )
 
     @field_validator("cors_allowed_origins")
     @classmethod
@@ -691,6 +741,22 @@ class Settings(BaseSettings):
         if not 0 <= port <= 65535:
             raise ValueError("smtp_port must be between 0 and 65535")
         return port
+
+    @field_validator("file_scan_provider")
+    @classmethod
+    def _validate_file_scan_provider(cls, provider: str) -> str:
+        """Only the reviewed adapter names are accepted.
+
+        The template ships the ``none`` position only; a real malware scanner
+        is a separate, provider-selected review (plan P6 out-of-scope table).
+        An unknown name fails fast so a typo cannot silently disable scanning.
+        """
+        value = provider.strip().lower()
+        if value not in {"none"}:
+            raise ValueError(
+                "file_scan_provider must be 'none' (no reviewed scanner adapter is shipped)"
+            )
+        return value
 
     @field_validator("ai_enabled_providers")
     @classmethod
@@ -895,6 +961,18 @@ class Settings(BaseSettings):
                         "storage_provider=s3 requires explicit storage configuration "
                         f"in the production environment: {', '.join(missing)}"
                     )
+        if (
+            self.app_env == "production"
+            and self.file_scan_provider == "none"
+            and not self.file_scan_acknowledge_unscanned
+        ):
+            # Plan P6: an unscanned deployment must be an explicit, reviewed
+            # decision, never a silent default. The quarantine state and adapter
+            # seam ship; selecting a real scanner is separate work.
+            raise ValueError(
+                "file_scan_provider=none requires file_scan_acknowledge_unscanned=true "
+                "in the production environment (uploaded content is not scanned)"
+            )
         if self.app_env == "production" and self.email_provider == "fake":
             raise ValueError("email_provider must not be 'fake' in the production environment")
         if self.app_env == "production" and self.email_provider == "smtp":

@@ -27,10 +27,11 @@ message, never embedding provider output, prompts or document content.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai import scratch as ai_scratch
 from app.ai.errors import AIError
 from app.ai.execution import (
     enqueue_document_classification,
@@ -47,7 +48,6 @@ from app.core.exceptions import (
     ServiceUnavailableError,
     ValidationError,
 )
-from app.db.conventions import uuid7
 from app.modules.ai_demo.schemas import (
     ClassifyCost,
     ClassifyRouting,
@@ -58,6 +58,7 @@ from app.modules.ai_demo.schemas import (
     DocumentClassifySyncResponse,
 )
 from app.modules.users.models import User
+from app.scanning import ScannerUnavailableError, ScanVerdict, get_scanner
 from app.storage import get_storage
 
 #: The single demonstrated task (kept in sync with ``app.ai.execution``).
@@ -213,12 +214,15 @@ async def enqueue_classify(
     id, and the result endpoint is coherent immediately after the ``202``.
     """
     _validate_storage_reference(storage_reference, organisation_id)
-    queued = await enqueue_document_classification(
-        session,
-        organisation_id=organisation_id,
-        user_id=user.id,
-        storage_reference=storage_reference,
-    )
+    try:
+        queued = await enqueue_document_classification(
+            session,
+            organisation_id=organisation_id,
+            user_id=user.id,
+            storage_reference=storage_reference,
+        )
+    except AIError as exc:
+        raise _translate_ai_error(exc) from exc
     return DocumentClassifyAcceptedResponse(
         job_id=str(queued.job_id),
         request_id=queued.request_id,
@@ -333,16 +337,11 @@ async def ask_sync(
 #: The transient upload ceiling mirrors the AI large-file template ceiling
 #: (v0.8 Scope §2.2): the demo's scratch path carries exactly one PDF of at
 #: most the 50,000,000-byte large-file ceiling, so an intent never signs a
-#: PUT URL for bytes the AI layer would then refuse.
-#:
-#: The organisation-scoped AI scratch namespace is re-declared here rather
-#: than imported from ``app.ai.transfer`` (v0.8 Scope §6.1 checkbox 3 import
-#: boundary — feature modules never import the transfer contract module). It
-#: mirrors the AI layer's own ``SCRATCH_KEY_TEMPLATE`` classifier: objects
-#: under this prefix are classified as transient sources, so a >5 MB PDF
-#: uploaded here routes through the provider-upload mode. The demo test suite
-#: pins this exact format against the ask flow.
-SCRATCH_KEY_TEMPLATE = "organisations/{organisation_id}/ai/scratch/"
+#: PUT URL for bytes the AI layer would then refuse. The organisation-scoped
+#: AI scratch namespace and its durable intent lifecycle live in
+#: ``app.ai.scratch`` (plan P6): a feature module never names the transfer
+#: contract module (v0.8 Scope §6.1 checkbox 3 import boundary).
+SCRATCH_KEY_TEMPLATE = ai_scratch.SCRATCH_KEY_PREFIX
 
 
 def _validate_scratch_upload(*, content_type: str, size_bytes: int) -> None:
@@ -363,53 +362,61 @@ def _validate_scratch_upload(*, content_type: str, size_bytes: int) -> None:
 
 def scratch_object_key(organisation_id: uuid.UUID, upload_id: uuid.UUID) -> str:
     """The server-generated object key for one transient scratch upload."""
-    return SCRATCH_KEY_TEMPLATE.format(organisation_id=organisation_id) + f"{upload_id}.pdf"
+    return ai_scratch.scratch_object_key(organisation_id, upload_id)
 
 
 async def create_scratch_upload_intent(
+    session: AsyncSession,
     *,
     organisation_id: uuid.UUID,
     original_filename: str,
     content_type: str,
     size_bytes: int,
 ) -> tuple[str, str, datetime]:
-    """Start the demo's transient upload: validate, generate the key, sign a PUT URL.
+    """Start the demo's transient upload: validate, persist an intent, sign a PUT.
 
-    The scratch namespace carries no durable file record — the object is a
-    throwaway AI input whose lifecycle the AI retention sweep owns (v0.7 Scope
-    §6.5) — so only the declared PDF/ceiling contract is validated here and
-    the browser PUTs the bytes directly to the signed URL. The AI layer
-    re-verifies ownership, size, MIME and digest when the reference is used.
-    ``original_filename`` is metadata-only for the demo contract: the server
-    always generates the object key from the upload id, so the client-provided
-    name never influences storage or routing.
+    Plan P6: the capability is issued only when the organisation's AI policy is
+    enabled, and the durable scratch intent (with its bounded global lifetime)
+    is persisted before the URL is signed. ``original_filename`` is
+    metadata-only for the demo contract: the server always generates the object
+    key from the upload id, so the client-provided name never influences
+    storage or routing.
     """
     _validate_scratch_upload(content_type=content_type, size_bytes=size_bytes)
-    upload_id = uuid7()
-    object_key = scratch_object_key(organisation_id, upload_id)
+    try:
+        intent = await ai_scratch.create_scratch_intent(
+            session,
+            organisation_id=organisation_id,
+            content_type=content_type,
+            size_bytes=size_bytes,
+        )
+    except AIError as exc:
+        raise _translate_ai_error(exc, subject="scratch upload") from exc
     signed_url = await get_storage().create_upload_url(
-        file_id=upload_id,
-        object_key=object_key,
+        file_id=intent.upload_id,
+        object_key=intent.object_key,
         content_type=content_type,
         size_bytes=size_bytes,
     )
-    return str(upload_id), signed_url.url, signed_url.expires_at
+    await session.commit()
+    return str(intent.upload_id), signed_url.url, signed_url.expires_at
 
 
 async def complete_scratch_upload(
+    session: AsyncSession,
     *,
     organisation_id: uuid.UUID,
     upload_id: str,
 ) -> str:
-    """Verify the browser stored the transient object and return its reference.
+    """Verify the stored transient object and mark its durable intent ``ready``.
 
-    The object key is server-generated from the validated ``upload_id``; the
-    completion re-heads the object so a client can never claim an upload that
-    was never stored, and validates the stored object against the same
-    PDF/ceiling contract the intent declared — no declared metadata is
-    persisted, so the stored object itself is the only honest source for the
-    size/MIME contract. The AI layer performs the authoritative ownership and
-    digest verification when the reference is resolved at ask time.
+    Plan P6 (AC19): the durable, org-scoped intent is loaded first and must be
+    ``pending`` (or a still-live ``ready`` replay) and unexpired. The stored
+    object's content type and size must exactly match the intent's declared
+    contract, and the configured scanner must return a non-quarantine verdict
+    before the intent is promoted, so a mismatch, an expired intent or
+    untrusted bytes can never become AI-readable. A scanner outage (or a
+    quarantine verdict) fails closed and leaves the intent pending.
     """
     try:
         parsed = uuid.UUID(upload_id)
@@ -417,9 +424,54 @@ async def complete_scratch_upload(
         raise ValidationError(
             code="invalid_upload_id", message="The upload id is not valid."
         ) from exc
-    object_key = scratch_object_key(organisation_id, parsed)
-    info = await get_storage().head_object(object_key)
+    intent = await ai_scratch.get_scratch_intent(
+        session,
+        organisation_id=organisation_id,
+        upload_id=parsed,
+    )
+    if intent is None:
+        raise ValidationError(code="upload_not_found", message="The upload could not be verified.")
+    now = datetime.now(UTC)
+    if intent.status == "ready":
+        # Idempotent replay: a still-live completed intent returns its key.
+        if intent.expires_at <= now:
+            raise ValidationError(code="upload_expired", message="The upload has expired.")
+        return intent.object_key
+    if intent.status != "pending":
+        raise ValidationError(code="upload_not_found", message="The upload could not be verified.")
+    if intent.expires_at <= now:
+        raise ValidationError(code="upload_expired", message="The upload has expired.")
+    info = await get_storage().head_object(intent.object_key)
     if info is None:
         raise ValidationError(code="upload_not_found", message="The upload could not be verified.")
-    _validate_scratch_upload(content_type=info.content_type or "", size_bytes=info.size_bytes)
-    return object_key
+    if (info.content_type or "") != intent.content_type or info.size_bytes != intent.size_bytes:
+        raise ValidationError(
+            code="upload_contract_mismatch",
+            message="The stored object does not match the declared upload contract.",
+        )
+    try:
+        verdict = await get_scanner().scan(
+            storage=get_storage(),
+            object_key=intent.object_key,
+            content_type=intent.content_type,
+            max_bytes=intent.size_bytes,
+        )
+    except ScannerUnavailableError as exc:
+        raise ServiceUnavailableError(
+            code="upload_scan_unavailable",
+            message="The upload scanner is unavailable; the upload was not accepted.",
+        ) from exc
+    if verdict is ScanVerdict.QUARANTINED:
+        raise ValidationError(
+            code="upload_quarantined",
+            message="The uploaded object was rejected by the upload scanner.",
+        )
+    ready_key = await ai_scratch.complete_scratch_intent(
+        session,
+        organisation_id=organisation_id,
+        upload_id=parsed,
+    )
+    if ready_key is None:
+        raise ValidationError(code="upload_not_found", message="The upload could not be verified.")
+    await session.commit()
+    return ready_key

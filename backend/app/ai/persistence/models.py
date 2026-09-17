@@ -519,3 +519,78 @@ class AIAttachmentReference(Base, TimestampMixin):
     deletion_attempted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+
+class AIScratchUploadStatus(enum.StrEnum):
+    """Lifecycle of one durable AI scratch-upload intent (plan P6)."""
+
+    PENDING = "pending"
+    READY = "ready"
+    EXPIRED = "expired"
+    DELETED = "deleted"
+
+
+def _scratch_status_values(enum_class: type[AIScratchUploadStatus]) -> list[str]:
+    return [member.value for member in enum_class]
+
+
+_SCRATCH_STATUS_VALUES = _scratch_status_values(AIScratchUploadStatus)
+
+
+class AIScratchUpload(Base, TimestampMixin):
+    """One durable AI scratch-upload intent (plan P6, v0.7 Scope §6.5).
+
+    Scratch objects (``organisations/{org}/ai/scratch/…``) are transient,
+    AI-owned throwaway inputs. Before this row existed the namespace had no
+    durable lifecycle record: an organisation with no retention policy left
+    its scratch objects unbounded, and a caller could obtain a signed PUT for
+    a scratch key without the organisation's AI policy allowing AI. This row
+    closes both gaps: it is created only after the AI-enabled policy is
+    confirmed, carries a bounded ``expires_at`` at or below the global ceiling
+    (independent of any optional per-organisation retention policy), and is
+    the authorisation reference for resolving a scratch key (``status=ready``
+    and not expired).
+
+    The row stores no content, only the server-generated key and the declared
+    contract; the object bytes live in private object storage and are removed
+    by the retention sweep or the object-store lifecycle backstop.
+    """
+
+    __tablename__ = "ai_scratch_uploads"
+    __table_args__ = (
+        UniqueConstraint("organisation_id", "upload_id", name="uq_ai_scratch_org_upload_id"),
+        Index("ix_ai_scratch_uploads_expires_at", "expires_at"),
+        Index("ix_ai_scratch_uploads_organisation_id", "organisation_id"),
+        CheckConstraint("size_bytes > 0 AND size_bytes <= 50000000", name="size_range"),
+        CheckConstraint(
+            f"status IN ({', '.join(repr(status) for status in _SCRATCH_STATUS_VALUES)})",
+            name="scratch_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UuidV7, primary_key=True, default=uuid7)
+    organisation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organisations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # The caller-visible upload id the completion step resolves back to this
+    # row; server-generated, unique inside the organisation.
+    upload_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    object_key: Mapped[str] = mapped_column(String(1024), unique=True, nullable=False)
+    content_type: Mapped[str] = mapped_column(String(255), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    status: Mapped[AIScratchUploadStatus] = mapped_column(
+        Enum(
+            AIScratchUploadStatus,
+            name="ai_scratch_upload_status",
+            native_enum=False,
+            length=16,
+            values_callable=_scratch_status_values,
+        ),
+        nullable=False,
+        default=AIScratchUploadStatus.PENDING,
+        server_default=AIScratchUploadStatus.PENDING.value,
+    )
+    # The bounded lifetime: the retention sweep deletes the object and marks
+    # the row expired once this passes, regardless of per-organisation policy.
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

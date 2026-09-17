@@ -510,22 +510,73 @@ capability, and fallback never changes a provider's configured region.
 
 #### Retention deletion
 
-The retention job (`ai.retention`, `ai` queue) enforces the organisation's
-`retention_policy_days`: it deletes expired `ai_outputs` rows (and the
-organisation-scoped AI scratch objects they reference), sweeps orphaned
-scratch objects older than the policy, reconciles stale `running` requests to
-`failed` (keeping their reserved cost), and writes one `ai.retention_deleted`
-audit event per purge. Keep-flow objects under
-`organisations/{org}/documents/…` are never touched.
+The retention job (`ai.retention`, `ai` queue) enforces two independent
+controls:
 
-1. **Confirm**: `ai.retention.*` worker logs report the sweep summary;
+- **Global scratch expiry (plan P6)**: every durable scratch intent past its
+  bounded `expires_at` is marked `expired` and its object deleted best-effort.
+  This runs for every organisation, independent of any per-organisation
+  `retention_policy_days`, so a scratch object can never outlive
+  `AI_SCRATCH_MAX_LIFETIME_SECONDS` (tightened by any shorter per-org policy).
+  Once the intent is terminal the bytes are already unauthorised by the source
+  authority.
+- **Per-organisation output retention**: for organisations with
+  `retention_policy_days` configured, expired `ai_outputs` rows (and the
+  organisation-scoped AI scratch objects they reference) are deleted, and the
+  scratch namespace is swept page by page for objects older than the policy.
+
+The job also reconciles stale `running` requests to `failed` (keeping their
+reserved cost) and writes one `ai.retention_deleted` audit event per purge.
+Keep-flow objects under `organisations/{org}/documents/…` are never touched.
+
+1. **Confirm**: `ai.retention.*` worker logs report the sweep summary
+   (`scratch_intents_expired` counts the global expiry sweep);
    `ai.retention_deleted` audit events record the purge.
-2. **Act**: retention is a privacy control — only an organisation with a
-   configured policy is swept. To change retention, update the platform
-   AI-settings API (audited). The sweep pages the scratch namespace
-   (`start_after` paging), so any namespace size is fully swept.
+2. **Act**: output retention is a privacy control changed through the platform
+   AI-settings API (audited). The global scratch ceiling
+   `AI_SCRATCH_MAX_LIFETIME_SECONDS` is a deployment setting, not
+   per-organisation; changing it requires a reviewed redeploy. The sweep pages
+   the scratch namespace (`start_after` paging), so any namespace size is fully
+   swept.
 3. **Verify**: spot-check that expired rows and scratch objects are gone and
-   keep-flow objects remain; the audit event per purge is the evidence trail.
+   keep-flow objects remain; the audit event per purge and the
+   `scratch_intents_expired` summary are the evidence trail.
+
+#### Scratch and orphaned object cleanup (plan P6, AC19)
+
+The application's intent sweep is the primary cleanup and runs globally; the
+object-store lifecycle rules documented in `.env.production.example` are the
+asynchronous backstop. S3-compatible lifecycle prefixes are literal, so a rule
+is configured **per organisation** with the exact
+`organisations/<organisation-id>/ai/scratch/` prefix and an expiration at
+least `AI_SCRATCH_MAX_LIFETIME_SECONDS` — never a wildcard and never shorter
+than the configured maximum.
+
+1. **Confirm**: an expired intent is `status = 'expired'` in
+   `ai_scratch_uploads`. If objects remain under a scratch prefix after their
+   intent is terminal, the best-effort provider delete failed or no lifecycle
+   rule is configured for that organisation.
+2. **Repair**: configure/verify the per-organisation lifecycle rule (see
+   `.env.production.example`) with an expiration >= the configured maximum; the
+   next sweep retries deletion. Abandoned document staging objects under
+   `organisations/<org>/documents/<file-id>/staging/` are removed best-effort
+   at completion and may additionally be aged out by a short (for example
+   1-day) staging rule — they are never served. Never age out the final
+   `documents/<file-id>/original` prefix.
+3. **Inventory promoted orphans**: list the bucket's `organisations/` prefix
+   and compare it with the live rows
+   (`SELECT id, object_key FROM files WHERE deleted_at IS NULL;`). A final
+   object with no matching live row is an orphan. Remove it only after
+   confirming the file is soft-deleted and is not required for a restore:
+   object deletion is destructive and recoverable only through object-store
+   versioning/backup, if enabled.
+
+**Retention/restore boundary.** Scratch and staging objects are transient:
+they are not backed up and are not restorable, and deletion of them is the
+reviewed cleanup boundary. Final document objects are removed only by the API
+delete path or a reviewed operator action against a confirmed orphan; a
+restore procedure must not resurrect scratch/staging objects or an orphan that
+was deliberately removed.
 
 #### Cleanup backlog (provider-file reconciliation, v0.8)
 

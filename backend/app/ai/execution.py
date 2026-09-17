@@ -178,7 +178,18 @@ async def enqueue_document_classification(
     written together with the job's ``job.dispatch_requested`` outbox event
     (blueprint §19). The coordinator publishes the reference-only broker
     message; this function never calls an actor's ``send()``.
+
+    Plan P6 request-time authority: the private storage reference is
+    re-resolved against durable application state (files row / scratch intent)
+    *before* any queued row is persisted, so an unknown, pending, failed,
+    quarantined, deleted, expired or cross-organisation key is denied here as
+    well as at worker execution (AC13).
     """
+    await runtime.get_ai_service().authorize_source(
+        session=session,
+        organisation_id=organisation_id,
+        storage_reference=storage_reference,
+    )
     job_id = uuid7()
     request_id = request_id_for_job(job_id)
     session.add(

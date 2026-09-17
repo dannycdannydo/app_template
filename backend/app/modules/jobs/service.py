@@ -440,6 +440,31 @@ async def get_job(
     return job
 
 
+async def find_job_by_input_reference(
+    session: AsyncSession,
+    *,
+    organisation_id: uuid.UUID,
+    job_type: str,
+    input_reference: str,
+) -> Job | None:
+    """Return the newest durable job for one org/type/input triple, if any.
+
+    Plan P6 completion replay: a replayed completion must return the same
+    processing job rather than schedule a duplicate, so the transition is
+    idempotent under parallel or retried calls.
+    """
+    return await session.scalar(
+        select(Job)
+        .where(
+            Job.organisation_id == organisation_id,
+            Job.job_type == job_type,
+            Job.input_reference == input_reference,
+        )
+        .order_by(Job.created_at.desc(), Job.id.desc())
+        .limit(1)
+    )
+
+
 async def list_jobs(
     session: AsyncSession,
     *,
@@ -478,6 +503,7 @@ async def schedule_job(
     input_reference: str,
     actor_user_id: uuid.UUID | None = None,
     job_id: uuid.UUID | None = None,
+    commit: bool = True,
 ) -> Job:
     """Write the durable ``queued`` row and its dispatch event in one transaction.
 
@@ -495,6 +521,11 @@ async def schedule_job(
     companion rows (e.g. a pre-schedule ``ai_requests`` linkage row) to the
     same session before this call; the single commit then makes both rows
     atomic (v0.7 Scope §5.8).
+
+    ``commit=False`` leaves the row and its outbox event pending on the
+    caller's session so a caller that must make a wider change atomic (plan P6:
+    file completion transition, audit, job and dispatch in one transaction)
+    owns the single commit. The caller then refreshes/returns the same job.
     """
     # The dispatch event id is the job's delivery identity: it is generated
     # first so both the job row and the outbox row agree on the dispatch.
@@ -517,10 +548,24 @@ async def schedule_job(
         job_id=job.id,
         event_id=dispatch_event_id,
     )
-    await session.commit()
-    await session.refresh(job)
-    JOBS_ENQUEUED_TOTAL.labels(job_type=job.job_type).inc()
+    if commit:
+        await session.commit()
+        await session.refresh(job)
+        # The metric is a committed-success signal: increment only after the
+        # job's transaction has durably committed, so a later rollback can
+        # never report a job that was never enqueued (plan P6 should-fix).
+        record_job_enqueued(job)
     return job
+
+
+def record_job_enqueued(job: Job) -> None:
+    """Record one durably-committed job enqueue on the low-cardinality metric.
+
+    Callers that compose :func:`schedule_job` with ``commit=False`` into a
+    wider transaction (the plan P6 atomic file completion) invoke this *after*
+    their own commit, so the counter reflects durable enqueues only.
+    """
+    JOBS_ENQUEUED_TOTAL.labels(job_type=job.job_type).inc()
 
 
 async def claim_dispatch(session: AsyncSession, *, job_id: uuid.UUID) -> ClaimResult:

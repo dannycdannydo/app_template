@@ -13,6 +13,7 @@ for cross-organisation files.
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from typing import cast as typing_cast
 
@@ -254,7 +255,10 @@ async def test_intent_creates_pending_file_and_signed_url(context_app: ContextAp
     assert file.size_bytes == 2048
     assert file.created_by_user_id == membership.user_id
     assert file.storage_provider == "fake"
-    assert file.object_key == f"organisations/{org_id}/documents/{file_id}/original"
+    # Plan P6: the browser capability targets a unique staging key, never the
+    # final non-presigned key.
+    assert file.object_key.startswith(f"organisations/{org_id}/documents/{file_id}/staging/")
+    assert f"organisations/{org_id}/documents/{file_id}/original" not in body["upload_url"]
     assert file.object_key in body["upload_url"]
 
     actions = [event.action for event in state.audit_events]
@@ -427,8 +431,9 @@ async def test_complete_verifies_object_and_marks_uploaded(context_app: ContextA
             },
         )
     file_id = uuid.UUID(intent.json()["file_id"])
-    object_key = f"organisations/{org_id}/documents/{file_id}/original"
-    await _fake_storage().put(object_key, b"hello world")  # the browser's direct PUT
+    staging_key = state.files[0].object_key
+    await _fake_storage().put(staging_key, b"hello world")  # the browser's direct PUT
+    final_key = f"organisations/{org_id}/documents/{file_id}/original"
 
     # The completion request re-authenticates: queue user, membership, file.
     state.lookup_queue = [_user, membership, state.files[0]]
@@ -452,7 +457,7 @@ async def test_complete_verifies_object_and_marks_uploaded(context_app: ContextA
     actions = [event.action for event in state.audit_events]
     assert actions.count("file.uploaded") == 1
     uploaded = next(event for event in state.audit_events if event.action == "file.uploaded")
-    assert uploaded.event_metadata["object_key"] == object_key
+    assert uploaded.event_metadata["object_key"] == final_key
 
     # The durable job row was written queued with the file id as its input.
     assert len(state.jobs) == 1
@@ -482,8 +487,7 @@ async def test_complete_with_checksum_verifies_equality(context_app: ContextApp)
             },
         )
     file_id = uuid.UUID(intent.json()["file_id"])
-    object_key = f"organisations/{org_id}/documents/{file_id}/original"
-    await _fake_storage().put(object_key, b"hello world")
+    await _fake_storage().put(state.files[0].object_key, b"hello world")
 
     state.lookup_queue = [user, membership, state.files[0]]
     async with context_client(app) as client:
@@ -548,17 +552,17 @@ async def test_complete_size_mismatch_fails_file(context_app: ContextApp) -> Non
             },
         )
     file_id = uuid.UUID(intent.json()["file_id"])
-    object_key = f"organisations/{org_id}/documents/{file_id}/original"
+    staging_key = state.files[0].object_key
     # The fake refuses a PUT whose size differs from the declared size; store
     # through the interface's declared-size enforcement by changing the
     # declaration first — this proves the verification seam end to end.
     await _fake_storage().create_upload_url(
         file_id=file_id,
-        object_key=object_key,
+        object_key=staging_key,
         content_type="application/pdf",
         size_bytes=6,
     )
-    await _fake_storage().put(object_key, b"six...")
+    await _fake_storage().put(staging_key, b"six...")
 
     state.lookup_queue = [user, membership, state.files[0]]
     async with context_client(app) as client:
@@ -570,20 +574,25 @@ async def test_complete_size_mismatch_fails_file(context_app: ContextApp) -> Non
     assert failed.event_metadata["reason"] == "size_mismatch"
 
 
-async def test_complete_rejects_non_pending_file(context_app: ContextApp) -> None:
-    """A file that is no longer pending cannot be completed again (409)."""
+async def test_complete_rejects_terminal_non_pending_file(context_app: ContextApp) -> None:
+    """A failed (terminal, non-uploaded) file cannot be completed (409).
+
+    Plan P6 makes completion idempotent for an ``uploaded`` file (a replay
+    returns the same job), but a failed or deleted file is not a valid
+    completion target.
+    """
     app, state, private_key = context_app
     org_id = uuid.uuid4()
     user = make_user()
     state.users[user.workos_user_id] = user
     membership = make_membership(user, org_id)
-    uploaded = make_file(org_id, status=FileStatus.UPLOADED)
-    state.files = [uploaded]
-    state.lookup_queue = [user, membership, uploaded]
+    failed = make_file(org_id, status=FileStatus.FAILED)
+    state.files = [failed]
+    state.lookup_queue = [user, membership, failed]
     state.granted_permissions = {"documents.read", "documents.upload"}
 
     async with context_client(app) as client:
-        response = await _complete(client, make_token(private_key), org_id, uploaded.id)
+        response = await _complete(client, make_token(private_key), org_id, failed.id)
 
     assert response.status_code == 409
     assert response.json()["code"] == "file_not_pending"
@@ -642,9 +651,12 @@ async def test_download_url_returns_signed_get(context_app: ContextApp) -> None:
     state.users[user.workos_user_id] = user
     membership = make_membership(user, org_id)
     file = make_file(org_id, status=FileStatus.READY)
+    content = b"x" * file.size_bytes
+    file.content_identity = hashlib.sha256(content).hexdigest()
     state.files = [file]
     state.lookup_queue = [user, membership, file]
     state.granted_permissions = {"documents.read"}
+    await _fake_storage().put(file.object_key, content)
 
     async with context_client(app) as client:
         response = await client.get(
