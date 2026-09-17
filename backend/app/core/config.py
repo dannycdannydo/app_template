@@ -320,6 +320,18 @@ class Settings(BaseSettings):
             "sweep outbox event (durable delivery plan P4)."
         ),
     )
+    maintenance_execution_lease_seconds: int = Field(
+        default=900,
+        ge=60,
+        le=86_400,
+        description=(
+            "Execution lease in seconds for a claimed durable maintenance run "
+            "(durable delivery plan P4): a worker owns a scheduled sweep only "
+            "until this bound, and an expired lease lets a duplicate message "
+            "or the coordinator's recovery sweep take the run over. Must "
+            "comfortably exceed a bounded sweep's normal duration."
+        ),
+    )
     maintenance_ai_retention_interval_hours: int = Field(
         default=24,
         ge=1,

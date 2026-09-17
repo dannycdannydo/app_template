@@ -24,9 +24,11 @@ broker is installed — the entrypoint does both in order, and a regression
 test asserts every production actor is then bound to the configured broker.
 
 Publishing stays reference-only: a durable job actor receives only its
-``job_id``, and a maintenance actor receives no arguments at all. The
-registry functions are the only production component that may call an actor's
-``send()`` (blueprint §19: Redis executes, PostgreSQL provides durability).
+``job_id``, and a maintenance actor only its ``maintenance_run_id`` (plan
+P4) — the durable row that owns the sweep's claim, lease, retry and terminal
+outcome. The registry functions are the only production component that may
+call an actor's ``send()`` (blueprint §19: Redis executes, PostgreSQL
+provides durability).
 """
 
 from __future__ import annotations
@@ -142,10 +144,23 @@ class DispatchRegistry:
         actor = self.actor_for_job_type(job_type)
         actor.send(job_id=job_id)
 
-    def publish_maintenance(self, event_type: str) -> None:
-        """Publish the argument-free message for a scheduled maintenance event."""
+    def publish_maintenance(self, event_type: str, maintenance_run_id: str | None = None) -> None:
+        """Publish the reference-only message for a scheduled maintenance event.
+
+        The message carries exactly one field: the durable maintenance-run id.
+        Task type, UTC bucket, attempt count, lease and outcome all live on
+        that PostgreSQL row, so no tenant data, object key, prompt, provider
+        id, URL or credential crosses this boundary.
+
+        ``maintenance_run_id`` is ``None`` only for a legacy version-1 row
+        still pending from the previous release; the actor then runs its
+        advisory-lock-only path rather than failing mid-deployment.
+        """
         actor = self.actor_for_maintenance_event(event_type)
-        actor.send()
+        if maintenance_run_id is None:
+            actor.send()
+            return
+        actor.send(maintenance_run_id=maintenance_run_id)
 
     def validate(self) -> None:
         """Fail when the allow-list is incomplete or contains unknown entries.

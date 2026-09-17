@@ -231,8 +231,46 @@ def test_publish_job_dispatch_builds_reference_only_message() -> None:
         dramatiq.set_broker(previous_broker)
 
 
-def test_publish_maintenance_builds_argument_free_message() -> None:
-    """A scheduled maintenance event carries no payload at all (plan P3)."""
+def test_publish_maintenance_builds_reference_only_message() -> None:
+    """A maintenance message carries the run id and nothing else (plan P4).
+
+    The durable ``maintenance_runs`` row owns the sweep's task type, UTC
+    bucket, attempts, lease and outcome, so the broker never sees more than
+    that opaque reference.
+    """
+    from dramatiq.worker import Worker
+
+    previous_broker = dramatiq.get_broker()
+    broker = StubBroker()
+    dramatiq.set_broker(broker)
+    worker = Worker(broker, worker_timeout=100, worker_threads=1)
+    worker.start()
+    try:
+        captured: list[tuple[object, ...]] = []
+
+        def _record(*args: object, **kwargs: object) -> None:
+            captured.append((args, kwargs))
+
+        actor = dramatiq.actor(queue_name="registry-maintenance-test")(_record)
+        registry = DispatchRegistry(
+            job_actors={}, maintenance_actors={EVENT_TYPE_AI_RETENTION: actor}
+        )
+        run_id = str(uuid.uuid4())
+        registry.publish_maintenance(EVENT_TYPE_AI_RETENTION, run_id)
+        broker.join("registry-maintenance-test", timeout=10000)
+        assert captured == [((), {"maintenance_run_id": run_id})]
+    finally:
+        worker.stop()
+        broker.flush_all()
+        dramatiq.set_broker(previous_broker)
+
+
+def test_publish_maintenance_builds_argument_free_legacy_message() -> None:
+    """A legacy version-1 row still publishes an argument-free message (P4).
+
+    Rolling deployments can leave pre-P4 maintenance rows pending. They must
+    drain through the old advisory-lock-only path rather than turning dead.
+    """
     from dramatiq.worker import Worker
 
     previous_broker = dramatiq.get_broker()

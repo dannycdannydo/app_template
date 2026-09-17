@@ -55,8 +55,10 @@ from app.job_coordinator.registry import (
 )
 from app.modules.jobs import service as jobs_service
 from app.modules.jobs.models import Job
+from app.modules.maintenance.queries import maintenance_run_by_id_statement
 from app.modules.outbox.contracts import (
     EVENT_TYPE_JOB_DISPATCH,
+    EVENT_VERSION_MAINTENANCE_LEGACY,
     OutboxContractError,
     validate_payload,
 )
@@ -248,6 +250,41 @@ async def _resolve_job_for_dispatch(
     return job
 
 
+async def _resolve_maintenance_run_for_dispatch(
+    session: AsyncSession, event: OutboxEvent, payload: dict[str, Any]
+) -> str | None:
+    """Return the maintenance-run id a scheduled event names (plan P4).
+
+    A version-2 maintenance row must name a durable run that still exists: a
+    published event is otherwise mistaken for a sweep that ran, which is the
+    exact failure this checkpoint closes. A missing run is permanent (dead),
+    never a silent enqueue.
+
+    Returns ``None`` for a legacy version-1 row from the previous release,
+    whose payload is empty by contract; the actor then runs its
+    advisory-lock-only path.
+    """
+    raw_run_id = payload.get("maintenance_run_id")
+    if raw_run_id is None:
+        if event.event_version == EVENT_VERSION_MAINTENANCE_LEGACY:
+            return None
+        raise OutboxContractError(f"{event.event_type} payload carries no maintenance_run_id")
+    try:
+        run_id = uuid.UUID(raw_run_id)
+    except (TypeError, ValueError) as exc:
+        raise OutboxContractError(
+            f"{event.event_type} payload has an invalid maintenance_run_id"
+        ) from exc
+    run = await session.scalar(maintenance_run_by_id_statement(run_id))
+    if run is None:
+        raise OutboxContractError(f"{event.event_type} names missing maintenance run {run_id}")
+    if run.task_type.value != event.event_type:
+        raise OutboxContractError(
+            f"{event.event_type} event does not match its maintenance run task type"
+        )
+    return str(run_id)
+
+
 async def publish_event(
     session_factory: async_sessionmaker[AsyncSession],
     *,
@@ -268,7 +305,9 @@ async def publish_event(
                 job = await _resolve_job_for_dispatch(session, event, payload)
             registry.publish_job_dispatch(job.job_type, str(job.id))
         else:
-            registry.publish_maintenance(event.event_type)
+            async with session_factory() as session:
+                run_id = await _resolve_maintenance_run_for_dispatch(session, event, payload)
+            registry.publish_maintenance(event.event_type, run_id)
     except (OutboxContractError, RegistryError) as exc:
         # Permanent: malformed event, unknown contract, unknown job/event
         # type, missing or inconsistent aggregate. The row becomes dead and

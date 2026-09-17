@@ -36,19 +36,36 @@ EVENT_TYPE_JOB_DISPATCH = "job.dispatch_requested"
 EVENT_VERSION_JOB_DISPATCH = 1
 
 # Scheduled maintenance events (durable delivery plan P4): the coordinator
-# turns these rows into enqueues of the existing AI retention and
-# provider-file reconciliation actors. Their payloads are deliberately empty
-# (see :class:`MaintenancePayload`); the UTC-bucket identity lives in
-# ``deduplication_key``.
+# turns these rows into enqueues of the AI retention and provider-file
+# reconciliation actors. Version 2 carries the durable ``maintenance_run_id``
+# and nothing else, so the broker message references a PostgreSQL row that
+# owns the sweep's claim, lease, retry and terminal outcome.
+#
+# Version 1 (an empty payload) is retained as a *legacy* contract, not as a
+# producer: rows written by the previous release may still be pending when the
+# new coordinator starts, and they must publish rather than turn ``dead``
+# mid-deployment. Producers always write
+# :data:`EVENT_VERSION_AI_RETENTION` / :data:`EVENT_VERSION_TRANSFER_RECONCILE`.
 EVENT_TYPE_AI_RETENTION = "ai.retention"
-EVENT_VERSION_AI_RETENTION = 1
+EVENT_VERSION_AI_RETENTION = 2
 EVENT_TYPE_TRANSFER_RECONCILE = "ai.transfer_reconcile"
-EVENT_VERSION_TRANSFER_RECONCILE = 1
+EVENT_VERSION_TRANSFER_RECONCILE = 2
+# The superseded, argument-free maintenance contract version.
+EVENT_VERSION_MAINTENANCE_LEGACY = 1
 
 # Internal retention-ledger event (durable delivery plan P5).  This is never
 # dispatched; it records completion of one UTC cleanup bucket.
 EVENT_TYPE_OUTBOX_CLEANUP_COMPLETED = "outbox.cleanup_completed"
 EVENT_VERSION_OUTBOX_CLEANUP_COMPLETED = 1
+
+# The current dispatch version each maintenance event type is produced at.
+# Producers read this map instead of hard-coding a version, so adding a sweep
+# (or versioning one) cannot leave a producer writing a contract the
+# coordinator no longer publishes.
+MAINTENANCE_EVENT_VERSIONS: dict[str, int] = {
+    EVENT_TYPE_AI_RETENTION: EVENT_VERSION_AI_RETENTION,
+    EVENT_TYPE_TRANSFER_RECONCILE: EVENT_VERSION_TRANSFER_RECONCILE,
+}
 
 # Aggregate names recorded on outbox rows for aggregate-history queries.
 AGGREGATE_TYPE_JOB = "job"
@@ -72,17 +89,34 @@ class JobDispatchPayload(BaseModel):
 
 
 class MaintenancePayload(BaseModel):
-    """Closed payload for a scheduled maintenance event.
+    """Closed, empty payload for an internal or legacy maintenance event.
 
     Deliberately empty: maintenance payloads carry no tenant data, object
     references, URLs, provider ids, prompts, document content or credentials
-    (plan "message/data minimisation"), and the UTC-bucket schedule identity
-    already lives in ``deduplication_key``. ``extra='forbid'`` turns any
-    extra field into a contract violation, so a maintenance row can never
-    smuggle unapproved content into the broker path.
+    (plan "message/data minimisation"). ``extra='forbid'`` turns any extra
+    field into a contract violation, so such a row can never smuggle
+    unapproved content into the broker path.
+
+    It remains the contract for the never-dispatched outbox cleanup ledger row
+    and for legacy version-1 maintenance rows written before the durable
+    maintenance-run ledger existed (plan P4).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class MaintenanceRunPayload(BaseModel):
+    """Reference-only payload for a scheduled maintenance dispatch (plan P4).
+
+    Contains exactly one field: the durable maintenance-run id. The sweep's
+    task type, UTC bucket, attempt count, lease and outcome all live on that
+    PostgreSQL row, so the broker message stays a pure reference — no tenant
+    data, object keys, prompts, provider ids, URLs or credentials.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    maintenance_run_id: uuid.UUID
 
 
 # Event type/version -> closed payload contract. Unknown pairs are rejected
@@ -90,8 +124,11 @@ class MaintenancePayload(BaseModel):
 # the actor message shapes, never with free-form payloads.
 _PAYLOAD_CONTRACTS: dict[tuple[str, int], type[BaseModel]] = {
     (EVENT_TYPE_JOB_DISPATCH, EVENT_VERSION_JOB_DISPATCH): JobDispatchPayload,
-    (EVENT_TYPE_AI_RETENTION, EVENT_VERSION_AI_RETENTION): MaintenancePayload,
-    (EVENT_TYPE_TRANSFER_RECONCILE, EVENT_VERSION_TRANSFER_RECONCILE): MaintenancePayload,
+    (EVENT_TYPE_AI_RETENTION, EVENT_VERSION_AI_RETENTION): MaintenanceRunPayload,
+    (EVENT_TYPE_TRANSFER_RECONCILE, EVENT_VERSION_TRANSFER_RECONCILE): MaintenanceRunPayload,
+    # Legacy in-flight rows from the previous release (empty payload).
+    (EVENT_TYPE_AI_RETENTION, EVENT_VERSION_MAINTENANCE_LEGACY): MaintenancePayload,
+    (EVENT_TYPE_TRANSFER_RECONCILE, EVENT_VERSION_MAINTENANCE_LEGACY): MaintenancePayload,
     (
         EVENT_TYPE_OUTBOX_CLEANUP_COMPLETED,
         EVENT_VERSION_OUTBOX_CLEANUP_COMPLETED,
@@ -106,6 +143,15 @@ def dispatch_payload(job_id: uuid.UUID) -> dict[str, Any]:
     JSONB exactly as the worker-facing contract expects.
     """
     return JobDispatchPayload(job_id=job_id).model_dump(mode="json")
+
+
+def maintenance_payload(maintenance_run_id: uuid.UUID) -> dict[str, Any]:
+    """Build the persisted JSON payload for a maintenance dispatch event.
+
+    ``maintenance_run_id`` is serialised as a string so the payload
+    round-trips through JSONB exactly as the worker-facing contract expects.
+    """
+    return MaintenanceRunPayload(maintenance_run_id=maintenance_run_id).model_dump(mode="json")
 
 
 def validate_payload(

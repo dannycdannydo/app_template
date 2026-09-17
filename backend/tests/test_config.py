@@ -327,6 +327,7 @@ def test_coordinator_settings_have_the_plan_defaults() -> None:
     assert settings.job_reconcile_cooldown_seconds == 900
     assert settings.maintenance_transfer_reconcile_interval_hours == 1
     assert settings.maintenance_ai_retention_interval_hours == 24
+    assert settings.maintenance_execution_lease_seconds == 900
     assert settings.outbox_retention_days == 30
     assert settings.outbox_cleanup_batch_size == 500
     assert settings.outbox_cleanup_interval_hours == 24
@@ -340,6 +341,16 @@ def test_coordinator_backoff_max_must_exceed_initial() -> None:
             database_url="postgresql+asyncpg://x",
             coordinator_publication_backoff_initial_seconds=60.0,
             coordinator_publication_backoff_max_seconds=1.0,
+        )
+
+
+@pytest.mark.parametrize("lease_seconds", [59, 86_401])
+def test_maintenance_execution_lease_bounds(lease_seconds: int) -> None:
+    with pytest.raises(ValidationError, match="maintenance_execution_lease_seconds"):
+        Settings(
+            app_env="development",
+            database_url="postgresql+asyncpg://x",
+            maintenance_execution_lease_seconds=lease_seconds,
         )
 
 

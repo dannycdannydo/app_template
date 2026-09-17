@@ -8,7 +8,7 @@ is missing, the same pattern as ``test_jobs_broker.py``). They prove:
 - two coordinators claim disjoint batches under ``FOR UPDATE SKIP LOCKED``;
 - one cycle publishes a dispatch event and settles it ``published``, with the
   broker message carrying only the job id;
-- a maintenance event publishes its argument-free message;
+- a maintenance event publishes only its durable maintenance-run reference;
 - a genuinely unreachable Redis broker releases the claim and a later cycle
   through a healthy broker recovers it (real broker-down retry and recovery
   publication);
@@ -70,6 +70,8 @@ from app.modules.audit.models import AuditEvent
 from app.modules.jobs import service as jobs_service
 from app.modules.jobs.models import Job, JobAttemptStatus, JobStatus
 from app.modules.jobs.queries import job_attempt_history_statement
+from app.modules.maintenance import service as maintenance_service
+from app.modules.maintenance.models import MaintenanceRun, MaintenanceTaskType
 from app.modules.notifications import service as notifications_service
 from app.modules.notifications.models import NotificationDelivery, NotificationDeliveryStatus
 from app.modules.organisations.models import Organisation
@@ -78,11 +80,12 @@ from app.modules.outbox.contracts import (
     EVENT_TYPE_JOB_DISPATCH,
     EVENT_TYPE_TRANSFER_RECONCILE,
     EVENT_VERSION_JOB_DISPATCH,
+    EVENT_VERSION_MAINTENANCE_LEGACY,
     OutboxContractError,
 )
 from app.modules.outbox.models import OutboxEvent, OutboxEventStatus
 from app.modules.outbox.queries import due_outbox_events_statement
-from app.modules.outbox.service import create_schedule_event
+from app.modules.outbox.service import create_maintenance_event, create_schedule_event
 from app.modules.users.models import User
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -167,8 +170,10 @@ async def broker_and_recording() -> AsyncIterator[
     def _record_job(job_id: str) -> None:
         received.append(job_id)
 
-    def _record_maintenance() -> None:
-        received.append("maintenance")
+    def _record_maintenance(maintenance_run_id: str | None = None) -> None:
+        # Records the reference the broker actually carried (plan P4), so a
+        # test can prove the message names the durable run and nothing else.
+        received.append(maintenance_run_id or "maintenance")
 
     job_actor = dramatiq.actor(queue_name=_QUEUE, **jobs_service.retry_policy())(_record_job)
     maintenance_actor = dramatiq.actor(queue_name=_MAINTENANCE_QUEUE)(_record_maintenance)
@@ -237,8 +242,8 @@ def _complete_test_registry(received: list[str]) -> DispatchRegistry:
         )
 
     def _make_maintenance_actor(name: str):
-        def _record_maintenance() -> None:
-            received.append("maintenance")
+        def _record_maintenance(maintenance_run_id: str | None = None) -> None:
+            received.append(maintenance_run_id or "maintenance")
 
         return dramatiq.actor(actor_name=name, queue_name=_MAINTENANCE_QUEUE)(_record_maintenance)
 
@@ -298,9 +303,9 @@ def _slow_test_registry(received: list[str], *, send_delay: float) -> DispatchRe
             received.append(job_id)
 
     class _MaintenanceTarget:
-        def send(self) -> None:
+        def send(self, maintenance_run_id: str | None = None) -> None:
             time.sleep(send_delay)
-            received.append("maintenance")
+            received.append(maintenance_run_id or "maintenance")
 
     return DispatchRegistry(
         job_actors={
@@ -430,6 +435,24 @@ async def test_maintenance_schedule_tick_is_deduplicated(migrated_database: str)
             )
             == 0
         )
+        runs = (await session.scalars(select(MaintenanceRun))).all()
+        events = (
+            await session.scalars(
+                select(OutboxEvent).where(
+                    OutboxEvent.event_type.in_(
+                        (EVENT_TYPE_AI_RETENTION, EVENT_TYPE_TRANSFER_RECONCILE)
+                    )
+                )
+            )
+        ).all()
+        assert len(runs) == len(events) == 2
+        assert {row.task_type.value for row in runs} == {
+            EVENT_TYPE_AI_RETENTION,
+            EVENT_TYPE_TRANSFER_RECONCILE,
+        }
+        assert {event.payload["maintenance_run_id"] for event in events} == {
+            str(run.id) for run in runs
+        }
 
     # Clean up so later tests remain independent.
     async with session_factory() as session:
@@ -437,6 +460,7 @@ async def test_maintenance_schedule_tick_is_deduplicated(migrated_database: str)
             text("DELETE FROM outbox_events WHERE event_type IN (:a, :t)"),
             {"a": EVENT_TYPE_AI_RETENTION, "t": EVENT_TYPE_TRANSFER_RECONCILE},
         )
+        await session.execute(text("DELETE FROM maintenance_runs"))
         await session.commit()
 
 
@@ -824,6 +848,21 @@ async def test_concurrent_maintenance_ticks_create_one_event_each(
     await asyncio.gather(_tick(), _tick())
     # The two ticks together created exactly 2 events (one per type).
     assert sum(counts) == 2
+    async with session_factory() as session:
+        runs = (await session.scalars(select(MaintenanceRun))).all()
+        events = (
+            await session.scalars(
+                select(OutboxEvent).where(
+                    OutboxEvent.event_type.in_(
+                        (EVENT_TYPE_AI_RETENTION, EVENT_TYPE_TRANSFER_RECONCILE)
+                    )
+                )
+            )
+        ).all()
+        assert len(runs) == len(events) == 2
+        assert {event.payload["maintenance_run_id"] for event in events} == {
+            str(run.id) for run in runs
+        }
 
     # Clean up the schedule events so later tests are independent.
     async with session_factory() as session:
@@ -831,6 +870,7 @@ async def test_concurrent_maintenance_ticks_create_one_event_each(
             text("DELETE FROM outbox_events WHERE event_type IN (:a, :t)"),
             {"a": EVENT_TYPE_AI_RETENTION, "t": EVENT_TYPE_TRANSFER_RECONCILE},
         )
+        await session.execute(text("DELETE FROM maintenance_runs"))
         await session.commit()
 
 
@@ -1016,18 +1056,32 @@ async def test_cycle_publishes_maintenance_event(
     migrated_database: str,
     broker_and_recording: tuple[RedisBroker, Worker, DispatchRegistry, list[str]],
 ) -> None:
-    """A maintenance event publishes its argument-free message (AC3)."""
+    """A maintenance event publishes a reference to its durable run (AC7).
+
+    The message carries the ``maintenance_run_id`` and nothing else: the
+    tenant-free outbox row and the global run row own everything the sweep
+    needs to know.
+    """
     _broker, _worker, registry, received = broker_and_recording
     session_factory = _session_factory(migrated_database)
     async with session_factory() as session:
         await _create_org(session)  # maintenance events carry no tenant context
-        event = await create_schedule_event(
+        run = await maintenance_service.create_scheduled_run(
+            session,
+            task_type=MaintenanceTaskType.AI_RETENTION,
+            schedule_key=f"ai-retention:{uuid.uuid4().hex}",
+            scheduled_for=datetime.now(UTC),
+        )
+        await session.flush()
+        event = await create_maintenance_event(
             session,
             event_type=EVENT_TYPE_AI_RETENTION,
-            schedule_key=f"ai-retention:{uuid.uuid4().hex}",
+            maintenance_run_id=run.id,
+            deduplication_key=run.schedule_key,
         )
         await session.commit()
         event_id = event.id
+        run_id = run.id
 
     stats = await run_cycle(
         session_factory, registry=registry, batch_size=50, publication_lease_seconds=60
@@ -1035,11 +1089,77 @@ async def test_cycle_publishes_maintenance_event(
     assert stats.claimed == 1
     assert stats.published == 1
     await _wait_for_received(received, 1)
-    assert "maintenance" in received
+    assert received == [str(run_id)]
 
     row = await _outbox_row(session_factory, event_id)
     assert row.status is OutboxEventStatus.PUBLISHED
     assert row.organisation_id is None
+    assert row.payload == {"maintenance_run_id": str(run_id)}
+
+
+async def test_cycle_publishes_legacy_maintenance_event_without_a_run(
+    migrated_database: str,
+    broker_and_recording: tuple[RedisBroker, Worker, DispatchRegistry, list[str]],
+) -> None:
+    """A pre-P4 version-1 row still drains as an argument-free message.
+
+    Rolling deployments leave these in flight. They must publish through the
+    legacy advisory-lock-only path rather than turning ``dead`` and alarming
+    an operator mid-deployment.
+    """
+    _broker, _worker, registry, received = broker_and_recording
+    session_factory = _session_factory(migrated_database)
+    async with session_factory() as session:
+        event = await create_schedule_event(
+            session,
+            event_type=EVENT_TYPE_AI_RETENTION,
+            schedule_key=f"ai-retention-legacy:{uuid.uuid4().hex}",
+            event_version=EVENT_VERSION_MAINTENANCE_LEGACY,
+        )
+        await session.commit()
+        event_id = event.id
+
+    stats = await run_cycle(
+        session_factory, registry=registry, batch_size=50, publication_lease_seconds=60
+    )
+    assert stats.published == 1
+    await _wait_for_received(received, 1)
+    assert received == ["maintenance"]
+    row = await _outbox_row(session_factory, event_id)
+    assert row.status is OutboxEventStatus.PUBLISHED
+
+
+async def test_maintenance_event_naming_a_missing_run_becomes_dead(
+    migrated_database: str,
+    broker_and_recording: tuple[RedisBroker, Worker, DispatchRegistry, list[str]],
+) -> None:
+    """Publish-without-run is permanent, never a silent enqueue (AC7).
+
+    A published outbox row must never be the only evidence a sweep ran, so an
+    event naming a maintenance run that does not exist is dead for operator
+    investigation rather than an untracked sweep.
+    """
+    _broker, _worker, registry, received = broker_and_recording
+    session_factory = _session_factory(migrated_database)
+    missing_run_id = uuid.uuid4()
+    async with session_factory() as session:
+        event = await create_maintenance_event(
+            session,
+            event_type=EVENT_TYPE_AI_RETENTION,
+            maintenance_run_id=missing_run_id,
+            deduplication_key=f"ai-retention-missing:{uuid.uuid4().hex}",
+        )
+        await session.commit()
+        event_id = event.id
+
+    stats = await run_cycle(
+        session_factory, registry=registry, batch_size=50, publication_lease_seconds=60
+    )
+    assert stats.dead == 1
+    row = await _outbox_row(session_factory, event_id)
+    assert row.status is OutboxEventStatus.DEAD
+    assert row.last_error == "invalid_outbox_contract"
+    assert received == []
 
 
 # --- Transient failures and permanent death ----------------------------------

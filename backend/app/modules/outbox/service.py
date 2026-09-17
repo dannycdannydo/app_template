@@ -33,9 +33,11 @@ from app.modules.outbox.contracts import (
     AGGREGATE_TYPE_JOB,
     EVENT_TYPE_JOB_DISPATCH,
     EVENT_VERSION_JOB_DISPATCH,
+    MAINTENANCE_EVENT_VERSIONS,
     MAX_PAYLOAD_CHARS,
     OutboxContractError,
     dispatch_payload,
+    maintenance_payload,
     validate_payload,
 )
 from app.modules.outbox.models import OutboxEvent, OutboxEventStatus
@@ -64,6 +66,28 @@ def reconciliation_dispatch_key(job_id: uuid.UUID, *, cooldown_bucket: int) -> s
 def retry_dispatch_key(job_id: uuid.UUID, *, attempt_number: int) -> str:
     """Return the idempotency key for a retry after ``attempt_number``."""
     return f"{EVENT_TYPE_JOB_DISPATCH}:{job_id}:retry:{attempt_number}"
+
+
+def maintenance_retry_key(run_id: uuid.UUID, *, attempt_number: int) -> str:
+    """Return the idempotency key for one maintenance retry dispatch (P4).
+
+    The scheduled bucket key belongs to the run's *first* dispatch, so every
+    durable retry needs its own key. Deriving it from the attempt number means
+    a duplicate settlement of the same attempt collides instead of enqueueing
+    the sweep twice.
+    """
+    return f"maintenance:{run_id}:retry:{attempt_number}"
+
+
+def maintenance_recovery_key(run_id: uuid.UUID, *, cooldown_bucket: int) -> str:
+    """Return the idempotency key for one recovered maintenance dispatch (P4).
+
+    Expired-lease recovery is coordinator-driven, so the cooldown bucket makes
+    concurrent replicas converge on exactly one replacement dispatch for that
+    run and window — the maintenance counterpart of
+    :func:`reconciliation_dispatch_key`.
+    """
+    return f"maintenance:{run_id}:recover:{cooldown_bucket}"
 
 
 def _check_payload_size(payload: dict[str, Any], event_type: str) -> None:
@@ -113,6 +137,39 @@ async def create_dispatch_event(
     )
     session.add(event)
     return event
+
+
+async def create_maintenance_event(
+    session: AsyncSession,
+    *,
+    event_type: str,
+    maintenance_run_id: uuid.UUID,
+    deduplication_key: str,
+    available_at: datetime | None = None,
+) -> OutboxEvent:
+    """Create a pending reference-only maintenance dispatch row (plan P4).
+
+    The row is global (``organisation_id`` is always NULL) and its payload
+    carries exactly one field: the durable maintenance-run id. Everything the
+    sweep needs — task type, UTC bucket, attempt count, lease and outcome —
+    lives on that PostgreSQL row, so no tenant data, object reference, URL,
+    provider id, prompt, document content or credential can reach the broker.
+
+    The event is added to ``session`` but not committed: scheduling writes the
+    run and this event in one transaction, and the retry/recovery paths commit
+    it together with the run's settlement.
+    """
+    version = MAINTENANCE_EVENT_VERSIONS.get(event_type)
+    if version is None:
+        raise OutboxContractError(f"unknown maintenance event type {event_type!r}")
+    return await create_schedule_event(
+        session,
+        event_type=event_type,
+        schedule_key=deduplication_key,
+        payload=maintenance_payload(maintenance_run_id),
+        event_version=version,
+        available_at=available_at,
+    )
 
 
 async def create_schedule_event(
