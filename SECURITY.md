@@ -154,11 +154,17 @@ The generic Linux VPS / container-host profile (`deploy/compose/compose.hybrid-v
 
 ### Trusted proxy and client-IP handling
 
-Caddy terminates TLS and is the only entry point, so the application must treat it as the trusted proxy:
+Caddy terminates TLS and is the only entry point, so the API treats it as the
+only trusted proxy:
 
 - Caddy sets `X-Forwarded-For` for proxied requests; the API's trusted-host allowlist (`TRUSTED_HOSTS`) contains only the real production domains, so a request cannot spoof a Host header.
-- The **edge** rate limiter keys on `{remote_host}`, which behind the edge is the real client IP — the edge limit is therefore per-client-IP and is the effective coarse DoS control.
-- The **application** limiter keys on `request.client.host`, which behind the edge is the Caddy container address. It remains the authoritative per-user/burst control in direct-connect deployments, but behind the edge it behaves as a site-wide bucket. Applications that need true per-client-IP limits behind the edge must derive the client IP from `X-Forwarded-For` while trusting only the edge (see docs/operations.md — scaling and rate-limit tuning).
+- The API and Caddy share a private `edge` network; the API starts with `--proxy-headers --forwarded-allow-ips=<edge subnet>`, so uvicorn rewrites `request.client` from `X-Forwarded-For` **only** for the Caddy peer and resolves the right-most untrusted entry (the real client Caddy appended). A browser-supplied chain is discarded, and `--forwarded-allow-ips=*` is prohibited because it would trust the forgeable left-most value. `backend/tests/test_proxy_trust.py` and `scripts/assert_deployment_boundaries.py` enforce both properties.
+- The **edge** rate limiter keys on `{remote_host}` (the real client IP) and the **application** limiter keys on the resolved `request.client.host`, so both are per-client-IP and distinct clients keep distinct quotas.
+
+### Browser storage access (CSP and CORS)
+
+- **CSP `connect-src` is scoped to the configured storage origin.** `deploy/caddy/Caddyfile` injects `{$STORAGE_PUBLIC_ORIGIN}` (the bare `scheme://host[:port]` origin of `STORAGE_PUBLIC_ENDPOINT_URL`, no path/query/wildcard) so the browser can PUT to the signed upload URL. WorkOS and `'self'` are unchanged. The hybrid edge fails fast when the origin is unset; the local nginx template substitutes the same value.
+- **Object-store CORS is a provider-side control** and must allow the browser's direct `PUT`/`GET`/`HEAD` from the exact frontend origins, with `Content-Type` (plus provider signing headers) — never `*`. See docs/operations.md → Browser storage access.
 
 ### Edge rate limiting
 
@@ -201,6 +207,7 @@ The v0.8 transfer modes (ADR-0017 amendment, `TEMPLATE_V0_8_SCOPE.md` §6.1–§
 - **AI-owned derivatives only**: provider-hosted copies and GCS staging objects are AI-owned. Their deletion never deletes the feature-owned source object or changes its lifecycle; the durable reference rows store opaque external ids and digests, never bytes, credentials, headers, raw responses or managed URLs.
 - **Default-deny enablement**: non-inline modes are disabled at deployment unless `AI_ENABLED_TRANSFER_MODES` explicitly enables them, and production fails fast on an enabled mode without its supporting provider, Vertex staging bucket, expiry/TTL bounds or same-region/location configuration. Azure OpenAI, DeepSeek and local adapters declare no non-inline mode and reject large files before any transfer.
 - **Tenant isolation and audit**: `ai_attachment_references` rows are organisation-scoped with org-scoped queries; cross-organisation source/reference access is denied. Mode selection, transfer outcome/reuse, expiry, deletion and reconciliation backlog are low-cardinality audit events and metrics that never carry content, request ids, object keys or signed URLs.
+- **Bounded synchronous work (plan P9)**: `/api/v1/ai/ask` is synchronous only and rejects a source above `AI_ASK_MAX_SYNCHRONOUS_BYTES` (default 5,000,000, never above the inline aggregate threshold) with `ai_ask_attachment_too_large`, so no large-file transfer can run inside an HTTP request. The bound is enforced in the common `AIService.execute` boundary after the organisation AI-enabled policy and the durable source authority and before any attachment byte is read, so a disabled or unauthorised source keeps its own error with no pre-authorisation object read. Non-inline transfer modes stay implemented and tested at the `AIService` layer for durable `ai.execute` jobs; this release exposes no durable asynchronous ask path.
 
 The security suite (`test_security_suite.py`, `test_ai_import_boundary.py`, `test_ai_transfer_contracts.py`, `test_ai_gcs_managed_url.py`, `test_ai_anthropic_upload.py`, `test_ai_openai_upload.py`, `test_ai_vertex_staging.py`) proves the matrix: import boundaries keep transfer/provider concepts inside `app/ai/`, redaction tests keep logs/Sentry/audit/broker rows URL- and content-free, migration validity and generated-client drift stay green in CI, and the opt-in provider contract suites run only against dedicated non-production accounts.
 

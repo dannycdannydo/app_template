@@ -135,10 +135,12 @@ export function useClassifyResultQuery(requestId: MaybeRefOrGetter<string>) {
  * §2.2/§6.4).
  *
  * Synchronous only: the reference is resolved server-side (inline at or below
- * the 5 MB threshold, Vertex private GCS staging above it) and the mutation
- * resolves with the validated text answer plus safe routing/usage metadata.
- * Like every org-scoped call it reads the selected organisation from Pinia;
- * the generated client is never imported outside this query layer (BP §15).
+ * the 5 MB threshold) and the mutation resolves with the validated text answer
+ * plus safe routing/usage metadata. The endpoint is bounded by
+ * ``AI_ASK_MAX_SYNCHRONOUS_BYTES``, so a larger document is rejected before any
+ * provider call (plan P9). Like every org-scoped call it reads the selected
+ * organisation from Pinia; the generated client is never imported outside this
+ * query layer (BP §15).
  */
 export function useAskMutation() {
   const organisation = useOrganisationStore()
@@ -162,12 +164,14 @@ export function useAskMutation() {
  * scratch intent → direct PUT → complete.
  *
  * The uploaded object lands in the organisation-scoped ``ai/scratch/``
- * namespace, which the AI layer classifies as transient — a >5 MB PDF then
- * routes through the provider-upload mode instead of the retained signed-URL
- * path. No processing job exists for scratch objects: the mutation resolves
- * with the storage reference the caller sends to the ask endpoint. The PUT
- * goes to the signed URL through `putFile` (never the generated client), the
- * same direct-upload transport the files module uses.
+ * namespace, which the AI layer classifies as transient. The upload contract
+ * permits up to the 50 MB large-file ceiling, but the synchronous ask endpoint
+ * is bounded by ``AI_ASK_MAX_SYNCHRONOUS_BYTES`` (5 MB by default, plan P9) and
+ * this release exposes no asynchronous ask path, so a larger upload cannot be
+ * asked about and must be reduced in size. No processing job exists for scratch
+ * objects: the mutation resolves with the storage reference the caller sends to
+ * the ask endpoint. The PUT goes to the signed URL through `putFile` (never the
+ * generated client), the same direct-upload transport the files module uses.
  */
 export function useScratchUploadMutation(options?: {
   onProgress?: (progress: UploadProgress) => void

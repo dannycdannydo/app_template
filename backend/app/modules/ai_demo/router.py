@@ -39,9 +39,12 @@ from app.modules.users.models import User
 
 router = APIRouter(prefix="/api/v1/ai/classify", tags=["ai"])
 
-#: ``document.ask`` QA demonstration (v0.8 Scope §2.2/§6.4): synchronous only,
-#: gated like every document action. The private reference + bounded question
-#: are forwarded unchanged; the AI layer decides inline vs Vertex GCS staging.
+#: ``document.ask`` QA demonstration (v0.8 Scope §2.2/§6.4, plan P9):
+#: synchronous only and bounded by ``AI_ASK_MAX_SYNCHRONOUS_BYTES`` (5 MB by
+#: default), gated like every document action. The private reference + bounded
+#: question are forwarded unchanged; a source above the bound is rejected with
+#: ``ai_ask_attachment_too_large`` and this release exposes no durable
+#: asynchronous ask operation.
 ask_router = APIRouter(prefix="/api/v1/ai/ask", tags=["ai"])
 
 #: Demo-scoped transient upload surface (v0.8 Scope §2.2/§6.5): the AI test
@@ -111,13 +114,15 @@ async def ask_document(
     membership: Annotated[OrganisationMembership, Depends(require_permission("documents.upload"))],
     user: Annotated[User, Depends(get_current_user)],
 ) -> DocumentAskResponse:
-    """Answer one question about a stored document (inline or staged).
+    """Answer one question about a stored document.
 
     The private storage reference and bounded question are passed to the
-    ``document.ask`` task; ``AIService`` resolves the reference (inline at or
-    below the 5 MB threshold, Vertex private GCS staging or the OpenAI Files
-    API upload path above it) and the validated answer is returned inline with
-    safe routing/usage metadata.
+    ``document.ask`` task; ``AIService`` checks the organisation policy and the
+    durable source authority, then enforces the synchronous bound — a source
+    above ``AI_ASK_MAX_SYNCHRONOUS_BYTES`` (5 MB by default) is rejected with
+    ``ai_ask_attachment_too_large`` before any provider call. The validated
+    answer is returned inline with safe routing/usage metadata. This release
+    exposes no durable asynchronous ask operation.
     """
     return await service.ask_sync(
         session,

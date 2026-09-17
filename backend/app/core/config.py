@@ -657,6 +657,26 @@ class Settings(BaseSettings):
             "(bounded backoff, v0.8 Scope §2.5/§6.7)"
         ),
     )
+    # Synchronous AI request bound (plan P9). Long-running provider work must
+    # not run inside an HTTP request (BP §18). The ``document.ask`` endpoint is
+    # synchronous only, so a source whose head size exceeds this bound is
+    # rejected before any provider call. The bound can never exceed the
+    # deployment's inline aggregate threshold (itself capped at 5,000,000
+    # bytes): a value above the inline threshold would admit large-file work to
+    # the synchronous path, defeating the control.
+    ai_ask_max_synchronous_bytes: int = Field(
+        default=5_000_000,
+        ge=1,
+        le=5_000_000,
+        description=(
+            "Maximum source size, in bytes, that a synchronous ``document.ask`` "
+            "request may process. A larger source is rejected before any "
+            "provider call; cannot be configured above the inline aggregate "
+            "threshold (plan P9, BP §18). This release exposes no durable "
+            "asynchronous ask operation, so a larger document must be reduced "
+            "or processed through a different task."
+        ),
+    )
     # AI scratch lifecycle (plan P6). A scratch object is a throwaway AI input
     # whose durable intent row carries its own expiry; this global ceiling
     # bounds every scratch intent even when an organisation configures no
@@ -1022,6 +1042,14 @@ class Settings(BaseSettings):
                     f"{base_host!r} conflicts with ai_openai_region {self.ai_openai_region!r}; "
                     f"regional requests must use https://{expected_host}/v1"
                 )
+        # Plan P9: the synchronous ask bound must stay at or below the
+        # deployment's inline aggregate threshold. A higher value would admit a
+        # source that the transfer policy classifies as a large-file transfer
+        # to the synchronous HTTP path, so the control would be ineffective.
+        if self.ai_ask_max_synchronous_bytes > self.ai_inline_aggregate_threshold_bytes:
+            raise ValueError(
+                "ai_ask_max_synchronous_bytes must not exceed ai_inline_aggregate_threshold_bytes"
+            )
         # v0.8 Scope §2.2/§6.2: deployment-level transfer-mode configuration
         # must be complete and compatible, failing fast at startup (BP §27),
         # never at request time. The cross-field checks live in the AI layer

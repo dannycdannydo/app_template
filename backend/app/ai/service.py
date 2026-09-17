@@ -59,6 +59,7 @@ from app.ai.errors import (
     ProviderResponseError,
     ProviderTimeoutError,
     ProviderUnavailableError,
+    SynchronousSourceTooLargeError,
     TaskNotFoundError,
     TransferExecutionUnavailableError,
     TransferModeUnavailableError,
@@ -639,6 +640,7 @@ class AIService:
         input_reference: str | None = None,
         transfer_references: TransferReferenceStore | None = None,
         execution_session: AsyncSession | None = None,
+        max_synchronous_source_bytes: int | None = None,
     ) -> AIResult:
         """Execute one task request and return a validated result.
 
@@ -682,6 +684,16 @@ class AIService:
         trail for hermetic service tests. The durable-job and demonstration
         flows always pass the caller-bound session, exactly like the durable
         transfer-reference store (Scope §6.3).
+
+        ``max_synchronous_source_bytes`` (plan P9) is the caller-declared bound
+        for a request that runs synchronously inside an HTTP handler. When set,
+        the source object's head size is checked in this common boundary — after
+        the organisation AI-enabled policy and the P6 durable source authority,
+        but before any attachment bytes are read — and an oversized source is
+        rejected with a permanent safe error. The deployment sets it from
+        ``AI_ASK_MAX_SYNCHRONOUS_BYTES`` for the synchronous ask path; the
+        durable job path passes ``None`` so a large source can still run as a
+        background job.
 
         v0.7 Scope §6.4 safety controls: transient provider failures
         (unavailable, rate limited, timeout) retry within the task's
@@ -787,7 +799,13 @@ class AIService:
             # request to the streaming/staging seam (the inline resolver caps
             # at MAX_ATTACHMENT_BYTES, so it can never resolve a large object);
             # everything else resolves inline exactly as before.
-            large_source = await self._head_large_source(request) if attachments is None else None
+            large_source = (
+                await self._head_large_source(
+                    request, max_synchronous_source_bytes=max_synchronous_source_bytes
+                )
+                if attachments is None
+                else None
+            )
             if large_source is not None:
                 resolved_attachments = []
             else:
@@ -1622,7 +1640,12 @@ class AIService:
                 raise AIInputValidationError(str(exc)) from exc
         return []
 
-    async def _head_large_source(self, request: AIRequest) -> _LargeSource | None:
+    async def _head_large_source(
+        self,
+        request: AIRequest,
+        *,
+        max_synchronous_source_bytes: int | None = None,
+    ) -> _LargeSource | None:
         """Head a storage-referenced object and route oversized ones to the seam.
 
         v0.8 Scope §2.3: the non-inline path is decided from head metadata
@@ -1634,12 +1657,26 @@ class AIService:
         oversized object it returns the head facts with an allowlisted MIME
         type; the verified copy and digest are streamed by the seam only after
         mode selection.
+
+        Plan P9: ``max_synchronous_source_bytes`` bounds a synchronous request.
+        The head happens here, after the caller and the P6 source authority
+        have run, so an unauthorised or policy-disabled request is denied
+        before any storage I/O; an authorised source above the bound is
+        rejected here, before any attachment byte is read or any mode is
+        selected.
         """
         if request.storage_reference is None or self._storage is None:
             return None
         info = await self._storage.head_object(request.storage_reference)
         if info is None:
             return None
+        if (
+            max_synchronous_source_bytes is not None
+            and info.size_bytes > max_synchronous_source_bytes
+        ):
+            raise SynchronousSourceTooLargeError(
+                "the document exceeds the maximum size for a synchronous request"
+            )
         if info.size_bytes <= self._transfer_deployment.inline_aggregate_threshold_bytes:
             return None
         return _LargeSource(

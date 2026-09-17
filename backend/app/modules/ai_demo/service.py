@@ -40,6 +40,7 @@ from app.ai.execution import (
 )
 from app.ai.schemas import AIRequest
 from app.ai.tasks.schemas import DocumentClassificationResult
+from app.core.config import get_settings
 from app.core.exceptions import (
     APIError,
     ExternalServiceError,
@@ -65,8 +66,12 @@ from app.storage import get_storage
 DEMO_TASK = "document.classify"
 
 #: The document QA demonstration task (v0.8 Scope §2.2, §6.4): a bounded
-#: question plus a private PDF, inline at or below the 5,000,000-byte
-#: threshold and through the Vertex private GCS staging path above it.
+#: question plus a private PDF. Plan P9 bounds the synchronous endpoint at
+#: ``AI_ASK_MAX_SYNCHRONOUS_BYTES`` (default and maximum: the 5,000,000-byte
+#: inline threshold), so the non-inline staging modes are not reachable through
+#: this endpoint; this release exposes no durable asynchronous ask operation, so
+#: a larger document is rejected with a safe "use a smaller document" error
+#: (recorded in the release docs).
 ASK_TASK = "document.ask"
 
 #: Each AI error code maps to one HTTP-shaped API error so the router never
@@ -76,6 +81,16 @@ ASK_TASK = "document.ask"
 _AI_ERROR_MAP: dict[str, APIError] = {
     "ai_unavailable": ServiceUnavailableError(
         code="ai_unavailable", message="AI is not enabled for this organisation."
+    ),
+    # Plan P9 synchronous bound. The message names the supported remedy (a
+    # smaller document) and never advertises a durable asynchronous ask
+    # operation, which this release does not expose.
+    "ai_ask_attachment_too_large": ValidationError(
+        code="ai_ask_attachment_too_large",
+        message=(
+            "The document is larger than the maximum size that can be processed "
+            "synchronously. Submit a smaller document."
+        ),
     ),
     "budget_exceeded": ValidationError(
         code="budget_exceeded", message="The organisation's AI budget is exhausted."
@@ -288,13 +303,21 @@ async def ask_sync(
     """Run one document QA request synchronously and return the answer.
 
     The private ``storage_reference`` is resolved by ``AIService`` itself: a
-    PDF at or below the inline threshold becomes a bounded inline attachment,
-    and a larger PDF is streamed bounded into a non-inline staging path — the
-    Vertex private GCS bucket or the OpenAI Files API upload — before dispatch
-    (v0.8 Scope §2.2/§2.4/§6.5). The bounded question travels as a metadata
-    variable so the feature-facing ``AIRequest`` contract stays unchanged; the
-    answer is validated text, never unvalidated provider output (v0.7 Scope
-    §6.4).
+    PDF at or below the inline threshold becomes a bounded inline attachment.
+    The bounded question travels as a metadata variable so the feature-facing
+    ``AIRequest`` contract stays unchanged; the answer is validated text, never
+    unvalidated provider output (v0.7 Scope §6.4).
+
+    Plan P9 synchronous bound: the endpoint is synchronous only, so the source
+    size is checked against ``AI_ASK_MAX_SYNCHRONOUS_BYTES`` and a larger source
+    is rejected with ``ai_ask_attachment_too_large`` instead of running a long
+    large-file transfer inside an HTTP request (BP §18). The bound is enforced
+    inside the common ``AIService.execute`` boundary, *after* the organisation
+    AI-enabled policy and the P6 source authority and *before* any attachment
+    bytes are read, so a disabled organisation or an unauthorised key keeps its
+    own error and never triggers pre-authorisation storage I/O. There is no
+    durable asynchronous ask operation in this release, so the safe error asks
+    for a smaller document rather than advertising one.
     """
     _validate_storage_reference(storage_reference, organisation_id)
     try:
@@ -307,6 +330,7 @@ async def ask_sync(
                 user_id=user.id,
                 metadata={"question": question, "source": "ai_demo"},
             ),
+            max_synchronous_source_bytes=get_settings().ai_ask_max_synchronous_bytes,
         )
     except AIError as exc:
         raise _translate_ai_error(exc, subject="question") from exc
@@ -345,8 +369,6 @@ SCRATCH_KEY_TEMPLATE = ai_scratch.SCRATCH_KEY_PREFIX
 
 
 def _validate_scratch_upload(*, content_type: str, size_bytes: int) -> None:
-    from app.core.config import get_settings
-
     if content_type != "application/pdf":
         raise ValidationError(
             code="unsupported_content_type",

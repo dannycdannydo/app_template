@@ -74,6 +74,10 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      # Plan P9: MinIO configures CORS server-wide, so the browser's direct
+      # signed PUT/GET from the local frontend origin is allowed. Match
+      # CORS_ALLOWED_ORIGINS; never a wildcard.
+      MINIO_API_CORS_ALLOW_ORIGIN: ${STORAGE_CORS_ALLOWED_ORIGIN:-http://localhost:5173}
     ports:
       - "${MINIO_PORT:-9000}:9000"
       - "${MINIO_CONSOLE_PORT:-9001}:9001"
@@ -299,6 +303,11 @@ services:
     depends_on:
       api:
         condition: service_healthy
+    environment:
+      # Browser-facing storage origin for the CSP connect-src; matches the
+      # API's STORAGE_PUBLIC_ENDPOINT_URL (the browser-reachable MinIO URL).
+      STORAGE_PUBLIC_ORIGIN: ${STORAGE_PUBLIC_ENDPOINT_URL:-http://localhost:9000}
+      NGINX_ENVSUBST_FILTER: STORAGE_PUBLIC_ORIGIN
     ports:
       - "5173:80"
 

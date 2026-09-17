@@ -244,6 +244,51 @@ async def test_ask_sync_disabled_ai_is_rejected(migrated_database: str) -> None:
         await _dispose_engine(engine)
 
 
+async def test_ask_sync_rejects_a_source_above_the_synchronous_bound(
+    migrated_database: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plan P9/AC21: a source above the synchronous bound is rejected before
+    any provider call, with no durable AI request row left behind."""
+    from app.core.config import get_settings
+    from app.core.exceptions import ValidationError
+    from app.modules.jobs.models import Job
+
+    engine, session_factory = _session_factory(migrated_database)
+    try:
+        async with session_factory() as session:
+            organisation, user = await _seed_org_user_and_enable_ai(session)
+            organisation_id = organisation.id
+            storage_key = await _put_authorized_document(session, organisation.id)
+            bound = get_settings().model_copy(update={"ai_ask_max_synchronous_bytes": 4})
+            monkeypatch.setattr(demo_service, "get_settings", lambda: bound)
+            with pytest.raises(ValidationError) as excinfo:
+                await demo_service.ask_sync(
+                    session,
+                    organisation_id=organisation.id,
+                    user=user,
+                    storage_reference=storage_key,
+                    question="Is this too large?",
+                )
+            assert excinfo.value.code == "ai_ask_attachment_too_large"
+            # The reference is never echoed in the safe error message (BP §28).
+            assert storage_key not in str(excinfo.value.message)
+            assert (
+                await session.scalar(
+                    select(AIRequestRecord).where(
+                        AIRequestRecord.organisation_id == organisation_id
+                    )
+                )
+                is None
+            )
+        async with session_factory() as session:
+            assert (
+                await session.scalar(select(Job.id).where(Job.organisation_id == organisation_id))
+                is None
+            )
+    finally:
+        await _dispose_engine(engine)
+
+
 async def test_classify_sync_disabled_ai_is_rejected(migrated_database: str) -> None:
     engine, session_factory = _session_factory(migrated_database)
     try:

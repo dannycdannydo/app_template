@@ -350,20 +350,63 @@ The API fails closed when Redis is unavailable (`rate_limiter_unavailable`, 503)
 
 ## Trusted proxy and client-IP handling
 
-Caddy is the single TLS-terminating edge. Requests reach the API with the
-real client IP in `X-Forwarded-For` and the Caddy container address as the
-TCP peer:
+Caddy is the single TLS-terminating edge. In `compose.hybrid-vps.yml` Caddy and
+the API share the private `edge` network (`EDGE_SUBNET`, default
+`172.30.0.0/24`), while the worker, coordinator and both Redis instances sit on
+the separate private `backend` network. The API starts with
+`--proxy-headers --forwarded-allow-ips=<edge subnet>`, so:
 
-- **Edge rate limits** (`deploy/caddy/Caddyfile`) key on `{remote_host}` —
-  the real client IP — so the edge control is per-client-IP.
-- **Application rate limit** (`app/core/rate_limit.py`) keys on
-  `request.client.host`, which behind the edge is the Caddy container
-  address, so it acts as a site-wide bucket in this topology. The edge
-  control is therefore the effective per-IP limit; the application limiter is
-  the authoritative control in direct-connect deployments. Applications that
-  need true per-client-IP app-level limits behind the edge must read
-  `X-Forwarded-For` while trusting only the edge (never a client-supplied
-  header), and must not weaken `TRUSTED_HOSTS`.
+- **Only Caddy is trusted for forwarded headers.** uvicorn rewrites
+  `request.client` from `X-Forwarded-For` only when the TCP peer is inside the
+  edge subnet. A browser cannot connect to the API directly (the API port is
+  never published), and if one could, its `X-Forwarded-For` would be ignored.
+- **A spoofed chain cannot move the client IP.** Caddy appends the real client
+  address, so the resolved value is the right-most untrusted entry; a
+  browser-supplied `X-Forwarded-For: 10.0.0.1` is discarded. Never set
+  `--forwarded-allow-ips=*`: uvicorn would then trust the left-most
+  (browser-supplied) value and per-client limits would be forgeable. The
+  contract is asserted by `backend/tests/test_proxy_trust.py` and
+  `scripts/assert_deployment_boundaries.py`.
+- **Both limiters are per-client-IP.** The edge limit in the Caddyfile keys on
+  `{remote_host}` and the application limiter (`app/core/rate_limit.py`) keys
+  on `request.client.host`, which is now the real client IP. Distinct clients
+  therefore keep distinct quotas.
+- **Override `EDGE_SUBNET` in one place.** If `172.30.0.0/24` collides with a
+  host network, set `EDGE_SUBNET` in `.env.production`; the API command and the
+  `edge` network both read it. CI validates that the two stay identical.
+
+## Browser storage access (CSP and CORS)
+
+Browser uploads and downloads go **directly** to the private object store via
+short-lived signed URLs, so the browser must be allowed to reach that origin:
+
+- **CSP `connect-src`.** `deploy/caddy/Caddyfile` injects
+  `{$STORAGE_PUBLIC_ORIGIN}` into the `connect-src` directive. Set
+  `STORAGE_PUBLIC_ORIGIN` in `.env.production` to the bare
+  `scheme://host[:port]` origin of `STORAGE_PUBLIC_ENDPOINT_URL` — no path,
+  query string, fragment, credentials, wildcard or trailing slash. Both values
+  are required by the hybrid compose edge (fail-fast), CI asserts
+  `STORAGE_PUBLIC_ORIGIN` is exactly the origin of `STORAGE_PUBLIC_ENDPOINT_URL`
+  (`scripts/assert_deployment_boundaries.py`), and the local `make dev-docker`
+  nginx template uses the same value via `NGINX_ENVSUBST_FILTER`.
+- **Object-store CORS.** Configure this at the provider (S3/R2/B2/Spaces): allow
+  methods `PUT`, `GET`, `HEAD`; allow the exact frontend origins from
+  `CORS_ALLOWED_ORIGINS`; allow request header `Content-Type` (plus any
+  provider signing header such as `x-amz-*`). Never use `*`. Expose `ETag` only
+  if the client verifies checksums. A wrong CORS policy is visible in the
+  browser console as a preflight failure before the API receives the request.
+  MinIO configures CORS server-wide rather than per bucket, so the local
+  `compose.local.yml` passes `STORAGE_CORS_ALLOWED_ORIGIN` as
+  `MINIO_API_CORS_ALLOW_ORIGIN` (default `http://localhost:5173`); CI starts
+  MinIO with the same setting. The MinIO-backed `storage_integration` suite
+  proves from the browser's perspective that the preflight and the direct
+  signed `PUT` from the authorised origin succeed while a forbidden origin is
+  refused (`backend/tests/test_storage_integration.py`), and the Playwright
+  `ai-ask` journey proves the browser itself enforces the storage origin's CORS
+  (positive and negative) against a real external storage server
+  (`frontend/e2e/ai-ask.spec.ts`, `frontend/e2e/storage-server.mjs`).
+- **WorkOS stays allowed.** The CSP keeps `https://api.workos.com` and `'self'`
+  unchanged; adding the storage origin must not widen or wildcard either.
 
 ## Edge rate limiting
 
@@ -696,6 +739,21 @@ hourly/daily intervals and let the coordinator schedule them.
   no non-inline mode and reject large files before any transfer. See
   `backend/app/ai/README.md` and README → Large AI attachments for the full
   contract.
+- **Synchronous ask bound (plan P9)**: `/api/v1/ai/ask` is synchronous only, so
+  it is bounded by `AI_ASK_MAX_SYNCHRONOUS_BYTES` (default 5,000,000 — the
+  inline threshold). The bound can be lowered but never raised above
+  `AI_INLINE_AGGREGATE_THRESHOLD_BYTES`, so a large-file transfer can never run
+  inside an HTTP request. The bound is enforced in the common `AIService.execute`
+  boundary *after* the organisation AI-enabled policy and the P6 durable source
+  authority and *before* any attachment bytes are read, so a disabled
+  organisation or an unauthorised/quarantined/expired/foreign source keeps its
+  own error and never triggers a pre-authorisation object read. A source above
+  the bound is rejected with `ai_ask_attachment_too_large`. The v0.8 non-inline
+  transfer modes remain implemented and tested at the `AIService` layer, but are
+  not reachable through this endpoint; this release exposes **no durable
+  asynchronous ask operation**, so the supported remedy is a smaller document.
+  Durable `document.classify` (`sync=false`) remains the supported long-running
+  AI route.
 - **Vertex large-file staging (v0.8)**: `AI_VERTEX_TEMP_GCS_BUCKET` must be a
   user-provisioned private, single-region bucket in the configured
   `AI_VERTEX_LOCATION`, owned by `AI_VERTEX_PROJECT`. The workload

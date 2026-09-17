@@ -39,7 +39,11 @@ FROM nginx:alpine AS serve
 # patched for the latest high/critical CVEs (checked by the container scan).
 RUN apk upgrade --no-cache
 
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# The nginx entrypoint runs envsubst over this template at container start so
+# the CSP `connect-src` names the deployment's exact browser-facing storage
+# origin. Only STORAGE_PUBLIC_ORIGIN is substituted (NGINX_ENVSUBST_FILTER in
+# compose.local.yml), preserving nginx's own $host / $remote_addr variables.
+COPY nginx.conf.template /etc/nginx/templates/default.conf.template
 COPY --from=build /app/dist /usr/share/nginx/html
 
 EXPOSE 80
