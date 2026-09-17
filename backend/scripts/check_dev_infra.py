@@ -50,13 +50,19 @@ def redis_endpoint_label(url: str) -> str:
     return f"{host}:{parsed.port or 6379}"
 
 
-def check_redis(url: str, *, probe_factory: RedisProbeFactory = _redis_probe) -> str:
+def check_redis(
+    url: str,
+    *,
+    setting_name: str = "REDIS_URL",
+    probe_factory: RedisProbeFactory = _redis_probe,
+) -> str:
     """Ping Redis through ``url`` and return its safe endpoint label."""
     try:
         endpoint = redis_endpoint_label(url)
     except ValueError as exc:
         raise DevInfraError(
-            "REDIS_URL does not contain a valid Redis host and port. Check the repo-root .env."
+            f"{setting_name} does not contain a valid Redis host and port. "
+            "Check the repo-root .env."
         ) from exc
     probe: RedisProbe | None = None
     try:
@@ -67,7 +73,7 @@ def check_redis(url: str, *, probe_factory: RedisProbeFactory = _redis_probe) ->
         raise
     except (RedisError, OSError, ValueError) as exc:
         raise DevInfraError(
-            f"Redis is not reachable through REDIS_URL at {endpoint}. "
+            f"Redis is not reachable through {setting_name} at {endpoint}. "
             "Container health checks do not verify the published host port. "
             "Run `make dev-down` and retry; use "
             "`CONFIRM_RESET=1 make dev-reset` only when local data is disposable."
@@ -84,11 +90,18 @@ def main() -> int:
     from app.core.config import get_settings
 
     try:
-        endpoint = check_redis(get_settings().redis_url)
+        settings = get_settings()
+        broker_endpoint = check_redis(settings.broker_redis_url, setting_name="BROKER_REDIS_URL")
+        rate_limit_endpoint = check_redis(
+            settings.rate_limit_redis_url, setting_name="RATE_LIMIT_REDIS_URL"
+        )
     except DevInfraError as exc:
         print(f"dev-infra check failed: {exc}", file=sys.stderr)
         return 1
-    print(f"dev-infra check passed: Redis reachable at {endpoint}")
+    print(
+        "dev-infra check passed: Redis endpoints reachable at "
+        f"{broker_endpoint} and {rate_limit_endpoint}"
+    )
     return 0
 
 

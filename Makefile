@@ -38,7 +38,7 @@ endef
 ## keep working; stop it with
 ## `make dev-down`.
 dev:
-	$(COMPOSE_CMD) up -d --wait postgres redis minio mailhog
+	$(COMPOSE_CMD) up -d --wait --remove-orphans postgres redis-broker redis-rate-limit minio mailhog
 	$(MAKE) dev-infra-check
 	$(MAKE) migrate
 	@echo "API on http://localhost:8000 (live reload), worker native, frontend on http://localhost:5173, MinIO console on http://localhost:9001, Mailhog UI on http://localhost:8025. Ctrl-C stops the apps; Postgres/Redis/MinIO/Mailhog stay up."
@@ -64,7 +64,7 @@ dev-reset:
 		exit 2; \
 	fi
 	$(COMPOSE_CMD) down -v --remove-orphans
-	$(COMPOSE_CMD) up -d --wait postgres redis minio mailhog
+	$(COMPOSE_CMD) up -d --wait --remove-orphans postgres redis-broker redis-rate-limit minio mailhog
 	$(MAKE) dev-infra-check
 	$(MAKE) migrate
 	@echo "Local PostgreSQL, Redis and MinIO state reset; clean infrastructure is ready. Run make dev to start the applications."

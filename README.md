@@ -9,7 +9,7 @@ This repository is a **template**, not an application. New projects start from a
 - Modular monolith backend with typed configuration, structured logging, and a standard API error format
 - Vue 3 SPA with a generated, type-safe OpenAPI client
 - Alembic migrations wired to application settings
-- Local development per ADR-0008: PostgreSQL, Redis and MinIO in Docker, app code native (`make dev`), with a full-container path for CI parity (`make dev-docker`)
+- Local development per ADR-0008: PostgreSQL, isolated broker/rate-limit Redis services and MinIO in Docker, app code native (`make dev`), with a full-container path for CI parity (`make dev-docker`)
 - A Dramatiq worker (same backend image) for durable background jobs
 - Provider-neutral object storage with signed uploads (ADR-0006)
 - A single Makefile surface for development and quality gates
@@ -58,7 +58,12 @@ cd .. && make dev
 make check
 ```
 
-If a port is already taken on your machine, override it in `.env` (e.g. `REDIS_PORT=6380` when a local Redis runs on 6379) — every variable is documented in `.env.example`.
+If a port is already taken, override `BROKER_REDIS_PORT` or
+`RATE_LIMIT_REDIS_PORT` in `.env`; every variable is documented in `.env.example`.
+Existing clones should replace `REDIS_PORT` with both new port variables and
+replace `REDIS_URL` with `BROKER_REDIS_URL` plus `RATE_LIMIT_REDIS_URL`, using
+distinct ports. For example, keep a host-native Redis on 6379 and publish the
+broker on 6381 by updating both `BROKER_REDIS_PORT` and `BROKER_REDIS_URL`.
 
 The API is served at `http://localhost:8000` (docs at `/docs`), the frontend at `http://localhost:5173` (which proxies API traffic to the backend), and the MinIO admin console at `http://localhost:9001`.
 
@@ -79,10 +84,10 @@ Redis separately is unsupported because queued Dramatiq messages carry job ids
 whose durable records live in PostgreSQL. WorkOS users are external and are
 never deleted by `make dev-reset`.
 
-Before migrations and native processes start, `make dev` also pings Redis
-through `REDIS_URL` from the host. This catches missing port publication and
-broken Docker network attachment that a container-internal health check cannot
-see.
+Before migrations and native processes start, `make dev` pings both Redis
+services through `BROKER_REDIS_URL` and `RATE_LIMIT_REDIS_URL` from the host.
+This catches missing port publication and broken Docker network attachment
+that a container-internal health check cannot see.
 
 Verification: after `cp .env.example .env`, both `make dev` and `make dev-docker` must start the services and `make check` must pass with zero lint errors, zero type errors, and green tests.
 
@@ -190,7 +195,7 @@ The backend remains the enforcement point: every `/api/v1/platform/*` endpoint r
 
 ## Deployment (hybrid VPS profile)
 
-v0.6 ships the provider-neutral production baseline (blueprint §35.1, ADR-0007): a generic Linux VPS / container-host profile in `deploy/compose/compose.hybrid-vps.yml` (Caddy edge with automatic TLS and edge rate limiting, the static Vue artifact, the FastAPI backend, the Dramatiq worker, and a private Redis) with managed PostgreSQL, object storage, WorkOS, transactional email and monitoring as external services. The deployment runs through `.github/workflows/deploy-vps.yml` (workflow dispatch or `v*` tag): it builds immutable images and a versioned frontend artifact, SSHes to a configurable host, runs exactly one deliberate `alembic upgrade head`, recreates the services, and waits for `/ready`, retaining the previous release for rollback. See `.env.production.example` for every production variable and the environment-separation rules.
+v0.6 ships the provider-neutral production baseline (blueprint §35.1, ADR-0007): a generic Linux VPS / container-host profile in `deploy/compose/compose.hybrid-vps.yml` (Caddy edge, static Vue artifact, FastAPI, Dramatiq worker, and isolated private broker/rate-limit Redis services) with managed PostgreSQL, object storage, WorkOS, transactional email and monitoring as external services. The deployment runs through `.github/workflows/deploy-vps.yml` (workflow dispatch or `v*` tag): it builds immutable images and a versioned frontend artifact, SSHes to a configurable host, runs exactly one deliberate `alembic upgrade head`, recreates the services, and waits for `/ready`, retaining the previous release for rollback. See `.env.production.example` for every production variable and the environment-separation rules.
 
 Day-to-day operations, scaling, monitoring and alerts: `docs/operations.md`. Backup and recovery (database restore, object-storage recovery, secret recovery, deployment rollback, lost VPS replacement, environment recreation — including the recorded tested runs): `docs/backup-and-recovery.md`. Production hardening: `SECURITY.md` → Hybrid VPS production profile.
 

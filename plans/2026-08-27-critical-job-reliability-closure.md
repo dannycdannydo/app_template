@@ -538,27 +538,27 @@ privacy/cleanup recovery semantics require backup-and-recovery review.
 
 Dependencies: P2, P3, P4
 
-- [ ] Introduce typed `BROKER_REDIS_URL` and `RATE_LIMIT_REDIS_URL` settings,
+- [x] Introduce typed `BROKER_REDIS_URL` and `RATE_LIMIT_REDIS_URL` settings,
       production validation requiring distinct normalised endpoints, and
       backward-compatible non-production defaults only where safe.
-- [ ] Split Redis into broker and rate-limit services/volumes in both Compose
+- [x] Split Redis into broker and rate-limit services/volumes in both Compose
       profiles. Broker Redis is authenticated, AOF-backed and `noeviction`;
       rate-limit Redis retains bounded counter-oriented memory behavior.
-- [ ] Replace `get_queue_message_counts` with an observability adapter proven
+- [x] Replace `get_queue_message_counts` with an observability adapter proven
       against the locked Dramatiq version and real Redis. Cover ready queues and
       every delayed/in-flight/dead signal that can be derived reliably without
       payload access; label only closed queue/state values.
-- [ ] Add startup compatibility validation or a failing integration test so a
+- [x] Add startup compatibility validation or a failing integration test so a
       future Dramatiq change cannot silently disable queue metrics. Pin the
       supported Dramatiq version range deliberately and record why.
-- [ ] Add alerts for expired running attempts, retry/exhaustion backlog,
+- [x] Add alerts for expired running attempts, retry/exhaustion backlog,
       attention-required email, failed/stale maintenance runs, broker memory/
       rejected writes, dead current dispatches and metric refresh failure.
-- [ ] Update the blueprint, ADR-0004/0015/0019, `ARCHITECTURE.md`, operations,
+- [x] Update the blueprint, ADR-0004/0015/0019, `ARCHITECTURE.md`, operations,
       backup/recovery, environment examples, deployment docs and task-authoring
       guidance. Remove stale instructions that operators should schedule
       maintenance by calling actor `.send()` directly.
-- [ ] Run focused validation, human-review gates and final repository commands;
+- [x] Run focused validation, human-review gates and final repository commands;
       prove generated API types remain diff-free and the mandatory security
       suite remains green.
 

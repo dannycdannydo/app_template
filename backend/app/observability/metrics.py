@@ -18,7 +18,6 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
-from typing import Any, cast
 
 import dramatiq
 import structlog
@@ -34,6 +33,8 @@ from prometheus_client import (
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.middleware.base import RequestResponseEndpoint
 
+from app.modules.jobs.models import JobAttemptStatus
+from app.modules.maintenance.models import MaintenanceRunStatus
 from app.modules.outbox.contracts import (
     EVENT_TYPE_AI_RETENTION,
     EVENT_TYPE_JOB_DISPATCH,
@@ -46,6 +47,13 @@ from app.modules.outbox.queries import (
     outbox_metric_rows_statement,
     stale_queued_job_count_statement,
     stale_running_job_count_statement,
+)
+from app.observability.dramatiq_redis import metrics_adapter_for_broker
+from app.observability.queries import (
+    attention_required_delivery_count_statement,
+    dead_current_dispatch_count_statement,
+    job_attempt_metric_rows_statement,
+    maintenance_run_metric_rows_statement,
 )
 
 router = APIRouter(tags=["metrics"])
@@ -178,6 +186,31 @@ DRAMATIQ_QUEUE_DEPTH = Gauge(
     "Undelivered messages waiting in a Dramatiq queue",
     ["queue"],
 )
+DRAMATIQ_QUEUE_MESSAGES = Gauge(
+    "dramatiq_queue_messages",
+    "Dramatiq messages by payload-blind Redis lifecycle state",
+    ["queue", "state"],
+)
+DRAMATIQ_QUEUE_METRICS_REFRESH_SUCCESS = Gauge(
+    "dramatiq_queue_metrics_refresh_success",
+    "Whether the most recent Dramatiq Redis metrics refresh succeeded",
+)
+DRAMATIQ_QUEUE_METRICS_LAST_SUCCESS_TIMESTAMP_SECONDS = Gauge(
+    "dramatiq_queue_metrics_last_success_timestamp_seconds",
+    "Unix timestamp of the most recent successful Dramatiq Redis metrics refresh",
+)
+BROKER_REDIS_USED_MEMORY_BYTES = Gauge(
+    "broker_redis_used_memory_bytes",
+    "Redis memory currently used by the dedicated Dramatiq broker",
+)
+BROKER_REDIS_MAXMEMORY_BYTES = Gauge(
+    "broker_redis_maxmemory_bytes",
+    "Configured maxmemory of the dedicated Dramatiq Redis broker",
+)
+BROKER_REDIS_OOM_ERROR_REPLIES = Gauge(
+    "broker_redis_oom_error_replies",
+    "Redis OOM error replies observed by the dedicated Dramatiq broker",
+)
 
 # These gauges are refreshed from PostgreSQL, the source of truth for durable
 # scheduling. Labels are only the finite event/status vocabulary; ids, tenant
@@ -199,10 +232,45 @@ STALE_RUNNING_JOBS = Gauge(
     "stale_running_jobs",
     "Lease-expired running jobs eligible for durable recovery",
 )
+JOB_ATTEMPTS = Gauge(
+    "job_attempts",
+    "Durable job attempts by closed lifecycle status",
+    ["status"],
+)
+ATTENTION_REQUIRED_EMAIL_DELIVERIES = Gauge(
+    "attention_required_email_deliveries",
+    "Email deliveries requiring explicit operator resolution",
+)
+MAINTENANCE_RUNS = Gauge(
+    "maintenance_runs",
+    "Durable maintenance runs by status and stale-lease flag",
+    ["status", "stale"],
+)
+DEAD_CURRENT_JOB_DISPATCHES = Gauge(
+    "dead_current_job_dispatches",
+    "Queued jobs whose current dispatch is permanently dead",
+)
+OUTBOX_METRICS_REFRESH_SUCCESS = Gauge(
+    "outbox_metrics_refresh_success",
+    "Whether the most recent PostgreSQL outbox metrics refresh succeeded",
+)
+OUTBOX_METRICS_LAST_SUCCESS_TIMESTAMP_SECONDS = Gauge(
+    "outbox_metrics_last_success_timestamp_seconds",
+    "Unix timestamp of the most recent successful PostgreSQL outbox metrics refresh",
+)
+RELIABILITY_METRICS_REFRESH_SUCCESS = Gauge(
+    "reliability_metrics_refresh_success",
+    "Whether the most recent PostgreSQL reliability metrics refresh succeeded",
+)
+RELIABILITY_METRICS_LAST_SUCCESS_TIMESTAMP_SECONDS = Gauge(
+    "reliability_metrics_last_success_timestamp_seconds",
+    "Unix timestamp of the most recent successful PostgreSQL reliability metrics refresh",
+)
 
 #: Rate-limit the refresh-failure log to one line per outage/recovery.
 _queue_depth_refresh_failed = False
 _outbox_metrics_refresh_failed = False
+_reliability_metrics_refresh_failed = False
 
 _OUTBOX_EVENT_TYPES = (
     EVENT_TYPE_JOB_DISPATCH,
@@ -367,22 +435,20 @@ def set_ai_transfer_cleanup_backlog(*, count: int) -> None:
 
 
 def update_queue_depths() -> None:
-    """Refresh the Dramatiq queue-depth gauges from the process broker.
+    """Refresh payload-blind queue-state and broker-capacity gauges.
 
-    Dramatiq stores each queue as a Redis list (``LLEN dramatiq:<queue>``);
-    ``RedisBroker.get_queue_message_counts`` reads those lengths synchronously,
-    so the API lifespan calls this through ``asyncio.to_thread`` every 30 s.
-    A Redis outage leaves the gauges stale instead of failing the scrape and is
-    logged once per outage/recovery (never every 30 s).
+    The adapter validates Dramatiq's locked 2.2 Redis layout and uses only
+    cardinality/INFO commands. A Redis outage leaves the last queue samples in
+    place, marks refresh success false and logs once per outage/recovery.
     """
     global _queue_depth_refresh_failed
     broker = dramatiq.get_broker()
     try:
-        # ``get_queue_message_counts`` is a RedisBroker method, not part of the
-        # base Broker contract (dramatiq's generic annotations do not describe
-        # it); the API and worker always install the Redis broker.
-        counts = cast(Any, broker).get_queue_message_counts(*TEMPLATE_QUEUES)
+        adapter = metrics_adapter_for_broker(broker)
+        counts = adapter.queue_counts(TEMPLATE_QUEUES)
+        resources = adapter.resource_metrics()
     except Exception:
+        DRAMATIQ_QUEUE_METRICS_REFRESH_SUCCESS.set(0)
         if not _queue_depth_refresh_failed:
             logger.warning("queue_depth.refresh_failed")
             _queue_depth_refresh_failed = True
@@ -390,8 +456,22 @@ def update_queue_depths() -> None:
     if _queue_depth_refresh_failed:
         logger.info("queue_depth.refresh_recovered")
         _queue_depth_refresh_failed = False
+    DRAMATIQ_QUEUE_METRICS_REFRESH_SUCCESS.set(1)
+    DRAMATIQ_QUEUE_METRICS_LAST_SUCCESS_TIMESTAMP_SECONDS.set(datetime.now(UTC).timestamp())
+    BROKER_REDIS_USED_MEMORY_BYTES.set(resources.used_memory_bytes)
+    BROKER_REDIS_MAXMEMORY_BYTES.set(resources.maxmemory_bytes)
+    BROKER_REDIS_OOM_ERROR_REPLIES.set(resources.oom_error_replies_total)
     for queue in TEMPLATE_QUEUES:
-        DRAMATIQ_QUEUE_DEPTH.labels(queue=queue).set(counts.get(queue, 0))
+        queue_counts = counts[queue]
+        # Preserve the established depth signal as the ready-to-run count.
+        DRAMATIQ_QUEUE_DEPTH.labels(queue=queue).set(queue_counts.ready)
+        for state, value in (
+            ("ready", queue_counts.ready),
+            ("delayed", queue_counts.delayed),
+            ("in_flight", queue_counts.in_flight),
+            ("dead", queue_counts.dead),
+        ):
+            DRAMATIQ_QUEUE_MESSAGES.labels(queue=queue, state=state).set(value)
 
 
 async def refresh_outbox_metrics(
@@ -425,6 +505,7 @@ async def refresh_outbox_metrics(
                 )
             )
     except Exception:
+        OUTBOX_METRICS_REFRESH_SUCCESS.set(0)
         if not _outbox_metrics_refresh_failed:
             logger.warning("outbox_metrics.refresh_failed")
             _outbox_metrics_refresh_failed = True
@@ -432,6 +513,8 @@ async def refresh_outbox_metrics(
     if _outbox_metrics_refresh_failed:
         logger.info("outbox_metrics.refresh_recovered")
         _outbox_metrics_refresh_failed = False
+    OUTBOX_METRICS_REFRESH_SUCCESS.set(1)
+    OUTBOX_METRICS_LAST_SUCCESS_TIMESTAMP_SECONDS.set(now.timestamp())
     counts = {
         (str(status), event_type): count
         for status, event_type, count in rows
@@ -448,3 +531,46 @@ async def refresh_outbox_metrics(
     )
     STALE_QUEUED_JOBS.set(stale_count or 0)
     STALE_RUNNING_JOBS.set(stale_running_count or 0)
+
+
+async def refresh_reliability_metrics(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Refresh durable operator-attention signals from PostgreSQL."""
+    global _reliability_metrics_refresh_failed
+    try:
+        async with session_factory() as session:
+            attempt_rows = (await session.execute(job_attempt_metric_rows_statement())).all()
+            delivery_count = await session.scalar(attention_required_delivery_count_statement())
+            maintenance_rows = (
+                await session.execute(
+                    maintenance_run_metric_rows_statement(lease_expired_before=datetime.now(UTC))
+                )
+            ).all()
+            dead_dispatch_count = await session.scalar(dead_current_dispatch_count_statement())
+    except Exception:
+        RELIABILITY_METRICS_REFRESH_SUCCESS.set(0)
+        if not _reliability_metrics_refresh_failed:
+            logger.warning("reliability_metrics.refresh_failed")
+            _reliability_metrics_refresh_failed = True
+        return
+
+    if _reliability_metrics_refresh_failed:
+        logger.info("reliability_metrics.refresh_recovered")
+        _reliability_metrics_refresh_failed = False
+    RELIABILITY_METRICS_REFRESH_SUCCESS.set(1)
+    RELIABILITY_METRICS_LAST_SUCCESS_TIMESTAMP_SECONDS.set(datetime.now(UTC).timestamp())
+
+    attempt_counts = {str(status): count for status, count in attempt_rows}
+    for status in JobAttemptStatus:
+        JOB_ATTEMPTS.labels(status=status.value).set(attempt_counts.get(status.value, 0))
+    maintenance_counts = {
+        (str(status), str(bool(stale)).lower()): count for status, stale, count in maintenance_rows
+    }
+    for status in MaintenanceRunStatus:
+        for stale in ("false", "true"):
+            MAINTENANCE_RUNS.labels(status=status.value, stale=stale).set(
+                maintenance_counts.get((status.value, stale), 0)
+            )
+    ATTENTION_REQUIRED_EMAIL_DELIVERIES.set(delivery_count or 0)
+    DEAD_CURRENT_JOB_DISPATCHES.set(dead_dispatch_count or 0)

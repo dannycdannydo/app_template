@@ -14,6 +14,40 @@ def test_settings_load_from_environment_defaults() -> None:
     assert settings.app_name == "app-template"
     assert settings.debug is False
     assert settings.log_level == "INFO"
+    assert settings.broker_redis_url == "redis://localhost:6379/0"
+    assert settings.rate_limit_redis_url == "redis://localhost:6379/0"
+
+
+def test_non_production_legacy_redis_url_remains_a_safe_fallback() -> None:
+    settings = Settings(
+        app_env="development",
+        database_url="postgresql+asyncpg://x",
+        redis_url="redis://legacy-localhost:6379/0",
+    )
+    assert settings.broker_redis_url == "redis://legacy-localhost:6379/0"
+    assert settings.rate_limit_redis_url == "redis://legacy-localhost:6379/0"
+
+
+def test_production_requires_distinct_explicit_redis_endpoints() -> None:
+    with pytest.raises(ValidationError, match="both required"):
+        Settings(
+            app_env="production",
+            database_url="postgresql+asyncpg://x",
+            workos_api_key="key",
+            workos_client_id="client",
+            trusted_hosts=["api.example.test"],
+        )
+
+    with pytest.raises(ValidationError, match="distinct Redis endpoints"):
+        Settings(
+            app_env="production",
+            database_url="postgresql+asyncpg://x",
+            workos_api_key="key",
+            workos_client_id="client",
+            trusted_hosts=["api.example.test"],
+            broker_redis_url="rediss://user:one@redis.example.test:6380/0",
+            rate_limit_redis_url="rediss://user:two@REDIS.EXAMPLE.TEST:6380/9",
+        )
 
 
 def test_production_rejects_debug() -> None:
@@ -51,7 +85,8 @@ def test_production_requires_workos_credentials() -> None:
         workos_client_id="client_1",
         cors_allowed_origins=["https://app.example.test"],
         trusted_hosts=["api.example.test"],
-        redis_url="rediss://redis.example.test:6380/0",
+        broker_redis_url="rediss://broker.example.test:6380/0",
+        rate_limit_redis_url="rediss://rate-limit.example.test:6380/0",
         storage_provider="s3",
         storage_access_key_id="ak_test",
         storage_secret_access_key="sk_storage_test",
@@ -95,7 +130,8 @@ def test_cors_requires_explicit_non_wildcard_origins() -> None:
             workos_client_id="client_1",
             cors_allowed_origins=["http://localhost:5173"],
             trusted_hosts=["api.example.test"],
-            redis_url="rediss://redis.example.test:6380/0",
+            broker_redis_url="rediss://broker.example.test:6380/0",
+            rate_limit_redis_url="rediss://rate-limit.example.test:6380/0",
         )
 
 
@@ -123,7 +159,8 @@ def test_trusted_hosts_are_explicit_and_non_wildcard() -> None:
             workos_api_key="sk_test",
             workos_client_id="client_1",
             cors_allowed_origins=["https://app.example.test"],
-            redis_url="rediss://redis.example.test:6380/0",
+            broker_redis_url="rediss://broker.example.test:6380/0",
+            rate_limit_redis_url="rediss://rate-limit.example.test:6380/0",
         )
 
 
@@ -176,7 +213,8 @@ def test_production_accepts_a_valid_bootstrap_email() -> None:
         workos_client_id="client_1",
         cors_allowed_origins=["https://app.example.test"],
         trusted_hosts=["api.example.test"],
-        redis_url="rediss://redis.example.test:6380/0",
+        broker_redis_url="rediss://broker.example.test:6380/0",
+        rate_limit_redis_url="rediss://rate-limit.example.test:6380/0",
         storage_provider="s3",
         storage_access_key_id="ak_test",
         storage_secret_access_key="sk_storage_test",
@@ -215,7 +253,8 @@ def test_production_accepts_a_webhook_secret() -> None:
         workos_client_id="client_1",
         cors_allowed_origins=["https://app.example.test"],
         trusted_hosts=["api.example.test"],
-        redis_url="rediss://redis.example.test:6380/0",
+        broker_redis_url="rediss://broker.example.test:6380/0",
+        rate_limit_redis_url="rediss://rate-limit.example.test:6380/0",
         storage_provider="s3",
         storage_access_key_id="ak_test",
         storage_secret_access_key="sk_storage_test",
@@ -462,7 +501,8 @@ def test_production_rejects_fake_provider() -> None:
             workos_client_id="client_1",
             cors_allowed_origins=["https://app.example.test"],
             trusted_hosts=["api.example.test"],
-            redis_url="rediss://redis.example.test:6380/0",
+            broker_redis_url="rediss://broker.example.test:6380/0",
+            rate_limit_redis_url="rediss://rate-limit.example.test:6380/0",
             storage_provider="fake",
         )
 
@@ -488,7 +528,8 @@ def test_production_requires_explicit_s3_configuration(
             workos_client_id="client_1",
             cors_allowed_origins=["https://app.example.test"],
             trusted_hosts=["api.example.test"],
-            redis_url="rediss://redis.example.test:6380/0",
+            broker_redis_url="rediss://broker.example.test:6380/0",
+            rate_limit_redis_url="rediss://rate-limit.example.test:6380/0",
             storage_provider="s3",
             storage_secret_access_key="sk_storage_test",
             storage_bucket="files",
@@ -504,7 +545,8 @@ def test_production_requires_explicit_s3_configuration(
             workos_client_id="client_1",
             cors_allowed_origins=["https://app.example.test"],
             trusted_hosts=["api.example.test"],
-            redis_url="rediss://redis.example.test:6380/0",
+            broker_redis_url="rediss://broker.example.test:6380/0",
+            rate_limit_redis_url="rediss://rate-limit.example.test:6380/0",
             storage_provider="s3",
             storage_access_key_id="ak_test",
             storage_secret_access_key="sk_storage_test",
@@ -521,7 +563,8 @@ def test_production_accepts_complete_s3_configuration() -> None:
         workos_client_id="client_1",
         cors_allowed_origins=["https://app.example.test"],
         trusted_hosts=["api.example.test"],
-        redis_url="rediss://redis.example.test:6380/0",
+        broker_redis_url="rediss://broker.example.test:6380/0",
+        rate_limit_redis_url="rediss://rate-limit.example.test:6380/0",
         storage_provider="s3",
         storage_access_key_id="ak_test",
         storage_secret_access_key="sk_storage_test",
@@ -550,7 +593,8 @@ def test_production_accepts_private_compose_network_redis_without_tls() -> None:
         workos_client_id="client_1",
         cors_allowed_origins=["https://app.example.test"],
         trusted_hosts=["api.example.test"],
-        redis_url="redis://:secret@redis:6379/0",
+        broker_redis_url="redis://:secret@redis-broker:6379/0",
+        rate_limit_redis_url="redis://:secret@redis-rate-limit:6379/0",
         storage_provider="s3",
         storage_access_key_id="ak_test",
         storage_secret_access_key="sk_storage_test",
@@ -562,7 +606,8 @@ def test_production_accepts_private_compose_network_redis_without_tls() -> None:
         smtp_port=587,
         ai_enabled_providers=[],
     )
-    assert settings.redis_url.startswith("redis://")
+    assert settings.broker_redis_url.startswith("redis://")
+    assert settings.rate_limit_redis_url.startswith("redis://")
 
 
 def test_production_accepts_loopback_redis_without_tls() -> None:
@@ -573,7 +618,8 @@ def test_production_accepts_loopback_redis_without_tls() -> None:
         workos_client_id="client_1",
         cors_allowed_origins=["https://app.example.test"],
         trusted_hosts=["api.example.test"],
-        redis_url="redis://localhost:6379/0",
+        broker_redis_url="redis://localhost:6379/0",
+        rate_limit_redis_url="redis://localhost:6380/0",
         storage_provider="s3",
         storage_access_key_id="ak_test",
         storage_secret_access_key="sk_storage_test",
@@ -585,7 +631,8 @@ def test_production_accepts_loopback_redis_without_tls() -> None:
         smtp_port=587,
         ai_enabled_providers=[],
     )
-    assert settings.redis_url.startswith("redis://")
+    assert settings.broker_redis_url.startswith("redis://")
+    assert settings.rate_limit_redis_url.startswith("redis://")
 
 
 def test_production_requires_tls_for_external_redis() -> None:
@@ -599,7 +646,8 @@ def test_production_requires_tls_for_external_redis() -> None:
             workos_client_id="client_1",
             cors_allowed_origins=["https://app.example.test"],
             trusted_hosts=["api.example.test"],
-            redis_url="redis://redis.example.test:6379/0",
+            broker_redis_url="redis://redis.example.test:6379/0",
+            rate_limit_redis_url="rediss://rate-limit.example.test:6380/0",
             storage_provider="s3",
             storage_access_key_id="ak_test",
             storage_secret_access_key="sk_storage_test",
@@ -625,7 +673,8 @@ def test_production_requires_tls_for_public_ipv6_redis() -> None:
             workos_client_id="client_1",
             cors_allowed_origins=["https://app.example.test"],
             trusted_hosts=["api.example.test"],
-            redis_url="redis://[2001:db8::1]:6379/0",
+            broker_redis_url="redis://[2001:db8::1]:6379/0",
+            rate_limit_redis_url="rediss://rate-limit.example.test:6380/0",
             storage_provider="s3",
             storage_access_key_id="ak_test",
             storage_secret_access_key="sk_storage_test",
@@ -702,7 +751,8 @@ def test_production_rejects_fake_email_provider() -> None:
             workos_client_id="client_1",
             cors_allowed_origins=["https://app.example.test"],
             trusted_hosts=["api.example.test"],
-            redis_url="rediss://redis.example.test:6380/0",
+            broker_redis_url="rediss://broker.example.test:6380/0",
+            rate_limit_redis_url="rediss://rate-limit.example.test:6380/0",
             storage_provider="s3",
             storage_access_key_id="ak_test",
             storage_secret_access_key="sk_storage_test",
@@ -735,7 +785,8 @@ def test_production_requires_explicit_smtp_configuration(
             workos_client_id="client_1",
             cors_allowed_origins=["https://app.example.test"],
             trusted_hosts=["api.example.test"],
-            redis_url="rediss://redis.example.test:6380/0",
+            broker_redis_url="rediss://broker.example.test:6380/0",
+            rate_limit_redis_url="rediss://rate-limit.example.test:6380/0",
             storage_provider="s3",
             storage_access_key_id="ak_test",
             storage_secret_access_key="sk_storage_test",
@@ -755,7 +806,8 @@ def test_production_requires_explicit_smtp_configuration(
             workos_client_id="client_1",
             cors_allowed_origins=["https://app.example.test"],
             trusted_hosts=["api.example.test"],
-            redis_url="rediss://redis.example.test:6380/0",
+            broker_redis_url="rediss://broker.example.test:6380/0",
+            rate_limit_redis_url="rediss://rate-limit.example.test:6380/0",
             storage_provider="s3",
             storage_access_key_id="ak_test",
             storage_secret_access_key="sk_storage_test",
@@ -775,7 +827,8 @@ def test_production_requires_explicit_smtp_configuration(
             workos_client_id="client_1",
             cors_allowed_origins=["https://app.example.test"],
             trusted_hosts=["api.example.test"],
-            redis_url="rediss://redis.example.test:6380/0",
+            broker_redis_url="rediss://broker.example.test:6380/0",
+            rate_limit_redis_url="rediss://rate-limit.example.test:6380/0",
             storage_provider="s3",
             storage_access_key_id="ak_test",
             storage_secret_access_key="sk_storage_test",
@@ -796,7 +849,8 @@ def test_production_accepts_complete_smtp_configuration() -> None:
         workos_client_id="client_1",
         cors_allowed_origins=["https://app.example.test"],
         trusted_hosts=["api.example.test"],
-        redis_url="rediss://redis.example.test:6380/0",
+        broker_redis_url="rediss://broker.example.test:6380/0",
+        rate_limit_redis_url="rediss://rate-limit.example.test:6380/0",
         storage_provider="s3",
         storage_access_key_id="ak_test",
         storage_secret_access_key="sk_storage_test",
@@ -833,7 +887,8 @@ def _prod_ai(**overrides: Any) -> Settings:
         workos_client_id="client_1",
         cors_allowed_origins=["https://app.example.test"],
         trusted_hosts=["api.example.test"],
-        redis_url="rediss://redis.example.test:6380/0",
+        broker_redis_url="rediss://broker.example.test:6380/0",
+        rate_limit_redis_url="rediss://rate-limit.example.test:6380/0",
         storage_provider="s3",
         storage_access_key_id="ak_test",
         storage_secret_access_key="sk_storage_test",

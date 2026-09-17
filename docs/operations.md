@@ -33,10 +33,11 @@ export COMPOSE="docker compose -f compose.hybrid-vps.yml --env-file .env.product
 | `api`         | backend image, `uvicorn app.main:app`                                                | replicas via `--scale api=N`                                            | Health-checked on `/ready`; Caddy load-balances across replicas                                                                      |
 | `worker`      | backend image, `dramatiq app.workers --processes 1 --threads N`                      | `WORKER_CONCURRENCY` per process, `--scale worker=N` for more processes | Durable job pipeline (ADR-0004)                                                                                                      |
 | `coordinator` | backend image, `python -m app.job_coordinator`                                       | normally 1; safe to replicate                                           | Claims PostgreSQL outbox rows, publishes reference-only broker messages, reconciles queued jobs and schedules maintenance (ADR-0019) |
-| `redis`       | `redis:7-alpine`, password + AOF persistence                                         | 1 instance                                                              | Dramatiq broker + API rate-limit store; never published                                                                              |
+| `redis-broker` | `redis:7-alpine`, password + AOF + `noeviction`                                      | 1 instance                                                              | Dedicated Dramatiq transport; never published                                                                                        |
+| `redis-rate-limit` | `redis:7-alpine`, password + `allkeys-lru`                                        | 1 instance                                                              | Disposable distributed API counters; never published                                                                                 |
 
 Initial defaults: 1 API replica, 1 worker process at `WORKER_CONCURRENCY=8`,
-1 coordinator, 1 Caddy, 1 Redis. Compose limits each service (CPU/memory) and rotates JSON
+1 coordinator, 1 Caddy, and 2 isolated Redis services. Compose limits each service (CPU/memory) and rotates JSON
 logs (`json-file` driver, `max-size`/`max-file` per service).
 
 Human review record: Daniel approved the coordinator process, liveness probe,
@@ -156,6 +157,13 @@ The AI layer adds its own families (`ai_requests_total`,
 | Certificate expiry         | Let's Encrypt renewal failures in Caddy logs; cert expiry within 14 days          | critical               |
 | Backup failure             | failed backup job / missing backup marker (docs/backup-and-recovery.md)           | critical               |
 | Redis unavailable          | API `rate_limiter_unavailable` errors; `redis-cli ping` failure                   | critical               |
+| Broker memory / rejection  | broker memory > 80% for 10 min; OOM error replies increase                        | warning / critical     |
+| Queue metric refresh       | refresh success 0 or last success older than 90 s                                 | critical               |
+| Expired running attempts   | `stale_running_jobs > 0` for 5 min                                                | warning                |
+| Retry / exhaustion event   | `job_attempts{status=~"retry_scheduled|exhausted"}` increases                    | warning                |
+| Ambiguous email            | `attention_required_email_deliveries > 0`                                         | critical               |
+| Failed / stale maintenance | failed run count increases or stale running count is non-zero                      | warning                |
+| Dead current dispatch      | `dead_current_job_dispatches > 0`                                                 | critical               |
 | Outbox publication backlog | `outbox_oldest_due_age_seconds` > 300 s (warning), > 900 s (critical)             | warning / critical     |
 | Dead outbox events         | `sum(outbox_events{status="dead"}) > 0`                                           | critical               |
 | Queued-job recovery        | `stale_queued_jobs > 0` for 15 min                                                | warning                |
@@ -166,7 +174,9 @@ The AI layer adds its own families (`ai_requests_total`,
 PostgreSQL is the scheduling source of truth; Redis is transient execution
 transport. Scrape these database-backed gauges from `/metrics`: `outbox_events`
 (`status`, `event_type` only), `outbox_oldest_due_age_seconds`, and
-`stale_queued_jobs`. They deliberately never label an organisation, job id,
+`stale_queued_jobs`, `stale_running_jobs`, `job_attempts`,
+`attention_required_email_deliveries`, `maintenance_runs`, and
+`dead_current_job_dispatches`. They deliberately never label an organisation, job id,
 payload, error or provider reference.
 
 When a delivery alert fires:
@@ -185,6 +195,36 @@ When a delivery alert fires:
 5. Escalate if the oldest due age remains critical after broker recovery, dead
    events grow, or reconciliation candidates recur after the cooldown. Preserve
    PostgreSQL/outbox rows for diagnosis; do not clear Redis to "fix" a backlog.
+
+Privacy-safe investigation queries (return only opaque ids, timestamps and
+closed operational states):
+
+```sql
+SELECT id, job_id, attempt_number, status, lease_expires_at, completed_at, error_code
+FROM job_attempts
+WHERE (status = 'running' AND lease_expires_at < now())
+   OR status = 'exhausted'
+ORDER BY started_at;
+
+SELECT id, task_type, status, scheduled_for, lease_expires_at, error_code
+FROM maintenance_runs
+WHERE status = 'failed'
+   OR (status = 'running' AND lease_expires_at < now())
+ORDER BY scheduled_for;
+
+SELECT j.id AS job_id, o.id AS dispatch_id, o.processed_at, o.error_code
+FROM jobs j JOIN outbox_events o ON o.id = j.dispatch_id
+WHERE j.status = 'queued' AND o.status = 'dead';
+```
+
+Restore database/broker connectivity and let the coordinator perform its
+owner-fenced recovery. A recurring expired lease requires worker diagnosis;
+an exhausted attempt is terminal and must not be replayed by hand. A dead
+current dispatch should normally already have settled its job; preserve both
+rows and escalate if the last query returns anything. The checked-in baseline
+rules are `deploy/monitoring/prometheus-alerts.yml`; load them into the chosen
+Prometheus-compatible monitoring service and keep environment thresholds in
+the deployment runbook.
 
 The coordinator deletes only one bounded batch of `published` outbox rows
 older than 30 days each UTC cleanup interval (settings:
@@ -229,15 +269,40 @@ When this alert occurs:
 
 ## Redis
 
-Redis in this profile is a private service: no published port, password
-authentication, AOF persistence, a 200 MB memory cap and the `allkeys-lru`
-eviction policy (all set in `compose.hybrid-vps.yml`; `REDIS_PASSWORD` comes
-from `.env.production` and must match `REDIS_URL`).
+The profile has two private, password-protected Redis processes. `redis-broker`
+has its own 200 MB volume, AOF persistence and `noeviction`; its credentials
+are `BROKER_REDIS_PASSWORD` / `BROKER_REDIS_URL`. `redis-rate-limit` has a
+separate 64 MB volume and `allkeys-lru`; its credentials are
+`RATE_LIMIT_REDIS_PASSWORD` / `RATE_LIMIT_REDIS_URL`. Production startup
+rejects the same normalised host/port for both, even if DB numbers differ.
+
+### One-time two-Redis cutover
+
+Before deploying the release that replaces the former single `redis` service,
+add `BROKER_REDIS_PASSWORD`, `RATE_LIMIT_REDIS_PASSWORD`,
+`BROKER_REDIS_URL` and `RATE_LIMIT_REDIS_URL` to `.env.production`; validate
+the Compose configuration before running `up --remove-orphans`. The deployment
+starts a fresh `redis_broker_data` volume and a separate disposable counter
+volume. It leaves the former `redis_data` volume intact but unreferenced.
+
+Drain workers when practical, then deploy the API, worker and coordinator
+together. Messages that were only in the old broker are not copied. This does
+not lose the work request: PostgreSQL retains the durable job and outbox intent,
+and the coordinator replaces stranded queued or lease-expired running
+dispatches after the configured reconciliation threshold and cooldown.
+
+To roll back, stop the coordinator, restore the previous release and its
+Compose file, restore the old `REDIS_PASSWORD` / `REDIS_URL` settings, then
+recreate the stack. The previous `redis` service reattaches its unchanged
+`redis_data` volume. Keep that volume until the new release has passed its
+normal rollback-retention window and all stranded durable jobs have been
+reconciled; only then may an operator remove it deliberately.
 
 ### Graceful shutdown
 
-`docker compose stop redis` runs SIGTERM and Redis flushes the AOF before
-exit (default `stop_grace_period`); `docker compose restart redis` is safe.
+`docker compose stop redis-broker` runs SIGTERM and flushes its AOF before
+exit; `docker compose restart redis-broker` is safe. Restarting the rate-limit
+service resets or evicts only counters.
 The API fails closed when Redis is unavailable (`rate_limiter_unavailable`, 503) rather than silently dropping the abuse control — a deliberate choice.
 
 ### Consequences of Redis loss
@@ -245,15 +310,15 @@ The API fails closed when Redis is unavailable (`rate_limiter_unavailable`, 503)
 - **Broker**: queued Dramatiq messages are lost; jobs already delivered to a
   worker continue. PostgreSQL retains each job and its outbox publication
   intent. After Redis returns, the coordinator automatically creates a
-  cooldown-limited replacement dispatch for eligible stranded `queued` jobs;
-  it does not scan or replay `running` work.
+  cooldown-limited replacement dispatch for eligible stranded `queued` jobs
+  and lease-expired `running` jobs under a rotated owner fence.
 - **Rate limiting**: API traffic fails closed with 503 until Redis returns
-  (the rate limiter is the only Redis consumer at the edge; `REDIS_URL`
+  (the rate limiter is the only Redis consumer at the edge; `RATE_LIMIT_REDIS_URL`
   connectivity is the dependency).
-- **Persistence**: the AOF (`appendonly yes`, `--save 60 1000`) survives
-  container restarts and host reboots; a wiped volume loses the queue and
-  counters, not application data. Keep `redis_data` in the off-site backup
-  picture only for continuity, not as a source of truth.
+- **Persistence and pressure**: broker AOF survives restarts, but its volume
+  is not a source of truth. At 200 MB, `noeviction` rejects new messages;
+  publication fails visibly and the pending PostgreSQL outbox row retries.
+  Rate-limit counter loss does not affect broker state.
 
 ## Trusted proxy and client-IP handling
 
@@ -314,7 +379,9 @@ labels.
 | `ai_retries_total`             | counter   | `task`, `provider`, `model`                                  | bounded retry dispatches after the first (including repair dispatches)                                                                                                                       |
 | `ai_fallbacks_total`           | counter   | `task`, `provider`, `model`                                  | reviewed provider/model fallbacks under the task's fallback policy                                                                                                                           |
 | `ai_budget_denials_total`      | counter   | `task`                                                       | monthly organisation budget denials before dispatch                                                                                                                                          |
-| `dramatiq_queue_depth`         | gauge     | `queue`                                                      | undelivered messages waiting in a Dramatiq queue (`LLEN dramatiq:<queue>` on Redis); refreshed by the API process every 30 s, so the promised backlog alert is queryable from `GET /metrics` |
+| `dramatiq_queue_depth`         | gauge     | `queue`                                                      | compatibility alias for the ready count |
+| `dramatiq_queue_messages`      | gauge     | `queue`, `state` (`ready`/`delayed`/`in_flight`/`dead`)      | payload-blind broker cardinalities from the locked Dramatiq Redis layout |
+| `dramatiq_queue_metrics_refresh_success` | gauge | none                                                | 1 for the last successful refresh, otherwise 0 |
 
 #### v0.8 large-file transfer metrics
 
@@ -349,15 +416,13 @@ families above, with a corresponding alert rule (aggregate table below).
 | Budget denials        | `sum(rate(ai_budget_denials_total[10m]))`                                                                                   | gauge (events/s) | `> 0` (warning; info if deliberate)                                    |
 | Transfer failure rate | `sum(rate(ai_transfer_outcomes_total{result="failed"}[10m])) / clamp_min(sum(rate(ai_transfer_outcomes_total[10m])), 1e-9)` | gauge (ratio)    | `> 0.05` over 10 min (warning; upload/staging/deletion health)         |
 | Cleanup backlog       | `ai_transfer_cleanup_backlog`                                                                                               | gauge            | `> 10` for `> 15 min` (warning; provider files persist until deleted)  |
-| AI queue backlog      | `dramatiq_queue_depth{queue="ai"}`                                                                                          | gauge (messages) | `> 10` for `> 5 min` (warning)                                         |
+| AI queue backlog      | `dramatiq_queue_messages{queue="ai",state="ready"}`                                                                       | gauge (messages) | `> 10` for `> 5 min` (warning)                                         |
 
-Queue-depth source: the API process reads the broker's queue lengths through
-`RedisBroker.get_queue_message_counts` (Dramatiq stores each queue as a Redis
-list `dramatiq:<queue>`; the `ai` queue carries the `ai.execute`,
-`ai.retention` and the v0.8 provider-file reconciliation jobs). The refresh
-loop runs inside the API process every 30 s, so no separate exporter is
-required — the same `/metrics` endpoint serves the gauge. A Redis outage
-leaves the gauge stale (logged once) rather than failing the scrape.
+Queue-state source: the API uses the checked-in adapter for the locked
+Dramatiq 2.2.x Redis layout. It issues only `LLEN`, `SCARD`, `ZCARD`, `SCAN`
+for acknowledgement-set names, and Redis `INFO`; it never reads message ids
+or bodies. A mismatch or outage sets the refresh-success gauge to zero and
+leaves previous state samples intact.
 
 ### AI alerts to configure
 
@@ -370,7 +435,7 @@ leaves the gauge stale (logged once) rather than failing the scrape.
 | Budget denials         | `ai_budget_denials_total` growth (users hitting the monthly cap)                                                                                              | warning (info if deliberate)                                                    |
 | Transfer failures      | `ai_transfer_outcomes_total` deletion-failure / upload-failure rate above threshold (e.g. > 5% over 10 min)                                                   | warning                                                                         |
 | Cleanup backlog        | `ai_transfer_cleanup_backlog` above threshold (e.g. > 10) for > 15 min, or `ai_transfer_reconciliation_total` deletion failures rising                        | warning (provider files persist until deleted; see the cleanup-backlog runbook) |
-| Queue backlog          | `dramatiq_queue_depth{queue="ai"}` above threshold (e.g. 10) for > 5 min (AI jobs are durable; see "Consequences of Redis loss")                              | warning                                                                         |
+| Queue backlog          | `dramatiq_queue_messages{queue="ai",state="ready"}` above threshold (e.g. 10) for > 5 min (AI jobs are durable; see "Consequences of Redis loss")       | warning                                                                         |
 
 ### AI runbooks
 
@@ -474,15 +539,11 @@ deletes only provider-hosted files whose owning request is terminal; it never
 processes managed signed URLs (no provider copy), Vertex GCS staging objects
 (deployer-owned lifecycle backstop) or feature-owned sources.
 
-The maintenance actors (`ai.retention` and the v0.8 provider-file
-reconciliation sweep) are infrastructure actors, not durable job rows: the
-deployer enqueues them on an operational schedule (host cron or any scheduler
-that can enqueue Dramatiq messages on the same Redis broker — e.g. a
-maintenance script that imports and sends
-`app.ai.persistence.tasks.enforce_ai_retention_actor` /
-`reconcile_provider_file_references_actor`). Start with hourly for the
-provider-file sweep and daily for retention, then adjust from the observed
-backlog so `ai_transfer_cleanup_backlog` stays near zero.
+The coordinator creates durable `maintenance_runs` and reference-only outbox
+events for `ai.retention` and provider-file reconciliation on their typed UTC
+schedule. Do not call actor `.send()` from cron or scripts: bypassing the run
+ledger defeats completion, retry and exhaustion visibility. Tune the typed
+hourly/daily intervals and let the coordinator schedule them.
 
 1. **Confirm**: `ai_transfer_cleanup_backlog` is above the threshold for more
    than a few sweep cycles, `ai_transfer_reconciliation_total{result="failed"}`
@@ -643,7 +704,8 @@ restore path that a schema rollback would require.
 | Coordinator replicas        | 1                    | `docker compose up -d --scale coordinator=N` |
 | API memory/CPU limits       | 512 MB / 1 CPU       | `compose.hybrid-vps.yml` `deploy.resources`  |
 | Worker memory/CPU limits    | 1 GB / 2 CPU         | `compose.hybrid-vps.yml` `deploy.resources`  |
-| Redis memory cap / eviction | 200 MB / allkeys-lru | `compose.hybrid-vps.yml`                     |
+| Broker Redis cap / eviction | 200 MB / noeviction  | `compose.hybrid-vps.yml`                     |
+| Rate Redis cap / eviction   | 64 MB / allkeys-lru  | `compose.hybrid-vps.yml`                     |
 | Edge API rate limit         | 600/min per IP       | `deploy/caddy/Caddyfile`                     |
 | App rate limit (/api/v1)    | 300/min per key      | `app/core/rate_limit.py`                     |
 | API graceful shutdown       | 30 s                 | `compose.hybrid-vps.yml` `stop_grace_period` |

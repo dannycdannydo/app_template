@@ -42,8 +42,9 @@ export COMPOSE="docker compose -f compose.hybrid-vps.yml --env-file .env.product
 ```
 
 The application's durable state lives in managed PostgreSQL (including jobs
-and `outbox_events`) and S3-compatible object storage. Redis is private,
-transient execution transport and the rate-limit store—not a source of truth.
+and `outbox_events`) and S3-compatible object storage. Two private Redis
+services isolate transient broker transport from disposable rate-limit
+counters; neither is a source of truth.
 The coordinator republishes durable intents and reconciles eligible stranded
 queued jobs after Redis loss. Backing up PostgreSQL and object storage is the
 priority; the VPS disk itself holds no application data that is not recoverable
@@ -58,7 +59,8 @@ from them plus the deployment artifacts.
 | Secrets (`.env.production`)                                               | Operator                 | Encrypted copy off the host (password manager, secret vault, or encrypted archive)     | On every change                                                                      | Indefinite (every version)                         | 0             | ≤ 30 min                                                  |
 | Deployment artifacts (compose file, Caddyfile, images, frontend artifact) | Git + container registry | Git history + immutable images in the registry; the host retains the newest 3 releases | Every release                                                                        | Images/artifacts ≥ 6 months; host releases 3       | 0             | ≤ 30 min                                                  |
 | Certificates (TLS)                                                        | Caddy (Let's Encrypt)    | Auto-renewed by Caddy; no manual backup needed                                         | Continuous                                                                           | Renewed before expiry                              | 0             | automatic                                                 |
-| Redis (`redis_data` volume)                                               | Transient                | None required (AOF only)                                                               | n/a                                                                                  | n/a                                                | n/a           | see [Redis recovery semantics](#redis-recovery-semantics) |
+| Broker Redis (`redis_broker_data` volume)                                 | Transient                | None required (AOF is continuity-only)                                                 | n/a                                                                                  | n/a                                                | n/a           | see [Redis recovery semantics](#redis-recovery-semantics) |
+| Rate-limit Redis (`redis_rate_limit_data` volume)                         | Disposable               | None                                                                                   | n/a                                                                                  | n/a                                                | n/a           | counters reset after loss                                  |
 
 RPO/RTO targets are operational defaults: the numbers above assume a
 single-region managed PostgreSQL with ≥ 24 h PITR and an object-storage bucket
@@ -199,7 +201,7 @@ configuration-backup list in `SECURITY.md`.
    into `$DEPLOY_ROOT/.env.production`, `chmod 600` it, and verify it against
    the live external services (credentials that have rotated since the backup
    must be updated — see step 3). Values that must match the live services:
-   `DATABASE_URL`, `REDIS_PASSWORD`/`REDIS_URL`, `WORKOS_*`, `STORAGE_*`,
+   `DATABASE_URL`, both `*_REDIS_PASSWORD` / `*_REDIS_URL` pairs, `WORKOS_*`, `STORAGE_*`,
    `EMAIL_*`/`SMTP_*`, `SENTRY_DSN`, `CORS_ALLOWED_ORIGINS`,
    `TRUSTED_HOSTS`.
 2. **GitHub secrets** (`DEPLOY_SSH_KEY`, `REGISTRY_PASSWORD`,
@@ -208,7 +210,7 @@ configuration-backup list in `SECURITY.md`.
    and the registry credentials before re-entering.
 3. **Rotation after a compromise or a stale backup**: for each secret, rotate
    at the provider (managed Postgres credentials, storage keys, SMTP password,
-   WorkOS API key/webhook secret, `REDIS_PASSWORD`) and update
+   WorkOS API key/webhook secret, both Redis passwords) and update
    `.env.production`, then recreate the services so the containers read the
    new values:
    `$COMPOSE up -d --remove-orphans` and wait for `/ready`.
@@ -226,6 +228,13 @@ Never log or print secrets; the BP §28 never-log list is enforced by test.
 ---
 
 ## Procedure 4 — Deployment rollback
+
+For the one-time migration from the former single `redis` service to isolated
+broker and rate-limit services, follow **One-time two-Redis cutover** in
+`docs/operations.md` before using the general rollback procedure below. In
+particular, retain the old `redis_data` volume through the rollback window;
+the previous release reattaches it, while PostgreSQL reconciliation recovers
+work stranded during a forward cutover.
 
 Releases are immutable and the frontend is served from
 `releases/current/frontend` (an atomic symlink), so rollback is a symlink
@@ -277,7 +286,7 @@ Caddyfile, `.env.production`), the container registry (immutable backend and
 Caddy images), Git (frontend artifact source), and the external services
 (database, object storage, WorkOS, email — all untouched). The host itself
 holds no non-recoverable state: Redis is transient (see Redis recovery
-semantics) and the `redis_data` volume is rebuilt empty.
+semantics) and both Redis volumes are rebuilt empty.
 
 1. **Provision a new host** (any Linux VPS or container host per the
    portability contract in Scope §3.1): install Docker Engine + Compose,
@@ -324,12 +333,11 @@ semantics) and the `redis_data` volume is rebuilt empty.
    a test notification (`POST /api/v1/notifications/test`). Re-create the
    monitoring checks and alerts per `docs/operations.md`.
 
-Redis state is not restored: the AOF is rebuilt empty, queued Dramatiq
-messages are lost, and rate-limit counters reset. Start PostgreSQL, Redis,
-workers and the coordinator in that order; the coordinator automatically
-re-dispatches eligible queued jobs from PostgreSQL after its threshold and
-cooldown. It never blindly replays `running` jobs (see Redis recovery
-semantics).
+Redis state is not restored: broker AOF is rebuilt empty, queued Dramatiq
+messages are lost, and rate-limit counters reset. Start PostgreSQL, both Redis
+services, workers and the coordinator in that order; the coordinator
+automatically re-dispatches eligible queued and lease-expired running jobs
+from PostgreSQL under cooldown and a rotated owner fence.
 
 The lost-host and environment-recreation procedures share the same core —
 this procedure was exercised against scratch infrastructure in
@@ -378,30 +386,30 @@ not recreated empty.
 
 ## Redis recovery semantics
 
-Redis in this profile is a private, non-published service (password
-authentication, AOF persistence, 200 MB memory cap, `allkeys-lru` eviction —
-`compose.hybrid-vps.yml`; see `docs/operations.md`). It is the Dramatiq
-broker and the API rate-limit store; **it is never a source of truth for
-application data.**
+Redis in this profile is two private, non-published services. The Dramatiq
+broker is password-protected, AOF-backed, capped at 200 MB and `noeviction`.
+The rate-limit store has separate credentials/process/volume, a 64 MB cap and
+`allkeys-lru`. Neither is a source of truth for application data.
 
-- **Container restart / host reboot**: the AOF (`appendonly yes`,
-  `--save 60 1000`) survives; queued messages and counters are retained.
-- **Wiped `redis_data` volume (lost host)**: the queue and counters are lost,
-  not application data. Durable jobs and outbox rows live in PostgreSQL and
+- **Container restart / host reboot**: broker AOF (`appendonly yes`,
+  `--save 60 1000`) survives; queued messages are retained independently of
+  counter eviction or reset.
+- **Wiped `redis_broker_data` volume (lost host)**: the queue is lost, not
+  application data. Durable jobs, attempts, maintenance runs and outbox rows live in PostgreSQL and
   survive. After Redis, workers and the coordinator are running, the
   coordinator automatically creates deduplicated recovery dispatch intents
-  for eligible `queued` jobs after the configured threshold/cooldown; it does
-  not scan `running` jobs or promise exactly-once external effects. Rate-limit counters reset —
+  for eligible `queued` and lease-expired `running` jobs after the configured threshold/cooldown; it does
+  not promise exactly-once external effects. Rate-limit counters reset —
   the limiter fails closed with 503 until Redis returns
   (`rate_limiter_unavailable`), so a healthy Redis is required before the API
   accepts traffic.
-- **Recovery**: start Redis, verify with
-  `docker exec <redis-container> redis-cli -a "$REDIS_PASSWORD" ping`
-  (PONG), then start workers and the coordinator before recreating the API.
-  Watch `outbox_oldest_due_age_seconds` and `stale_queued_jobs`; use the
+- **Recovery**: start both Redis services and verify each with `redis-cli`
+  using its own password, then start workers and the coordinator before the
+  API. Watch `outbox_oldest_due_age_seconds`, `stale_queued_jobs`,
+  `stale_running_jobs` and the queue-metric refresh signal; use the
   guarded `make jobs-reconcile` / `CONFIRM_RECONCILE=1 make
 jobs-reconcile-apply` procedure only after inspecting candidates. No Redis
-  restore is needed; keep `redis_data` off the backup critical path.
+  restore is needed; keep both Redis volumes off the backup critical path.
 
 ---
 

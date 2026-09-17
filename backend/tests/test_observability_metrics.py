@@ -192,63 +192,73 @@ async def test_job_counters_increment_through_the_durable_job_service() -> None:
 
 # --- Dramatiq queue depth (v0.7 Scope §6.7) ----------------------------------
 #
-# ``update_queue_depths`` reads the broker's queue-length counts (LLEN on the
-# ``dramatiq:<queue>`` Redis lists) into gauges, so the backlog alert promised
-# by the AI dashboard contract is queryable from ``GET /metrics``. The tests
-# stub ``app.observability.metrics.dramatiq`` so they need no Redis or broker.
+# ``update_queue_depths`` delegates the reviewed Redis layout to the adapter;
+# these tests cover metric publication and failure behavior without Redis.
 
 
-def _fake_dramatiq_with_counts(counts: dict[str, int]) -> Any:
-    class _FakeBroker:
-        def get_queue_message_counts(self, *queues: str) -> dict[str, int]:
-            return counts
+def _fake_metrics_adapter(counts: dict[str, int]) -> Any:
+    from app.observability.dramatiq_redis import BrokerResourceMetrics, QueueStateCounts
 
-    class _FakeDramatiq:
-        def get_broker(self) -> Any:
-            return _FakeBroker()
+    class _Adapter:
+        def queue_counts(self, queues: tuple[str, ...]) -> dict[str, QueueStateCounts]:
+            return {
+                queue: QueueStateCounts(ready=counts.get(queue, 0), delayed=2, in_flight=1, dead=0)
+                for queue in queues
+            }
 
-    return _FakeDramatiq()
+        def resource_metrics(self) -> BrokerResourceMetrics:
+            return BrokerResourceMetrics(
+                used_memory_bytes=1024, maxmemory_bytes=2048, oom_error_replies_total=0
+            )
+
+    return _Adapter()
 
 
 def test_queue_depth_gauge_exposes_broker_counts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        "app.observability.metrics.dramatiq",
-        _fake_dramatiq_with_counts({"ai": 3, "documents": 1, "emails": 0, "default": 0}),
-    )
+    adapter = _fake_metrics_adapter({"ai": 3, "documents": 1, "emails": 0, "default": 0})
+
+    def adapter_factory(_broker: object) -> Any:
+        return adapter
+
+    monkeypatch.setattr(metrics.dramatiq, "get_broker", lambda: object())
+    monkeypatch.setattr(metrics, "metrics_adapter_for_broker", adapter_factory)
     update_queue_depths()
     body = generate_latest().decode()
     assert 'dramatiq_queue_depth{queue="ai"} 3.0' in body
     assert 'dramatiq_queue_depth{queue="documents"} 1.0' in body
     assert 'dramatiq_queue_depth{queue="default"} 0.0' in body
     assert 'dramatiq_queue_depth{queue="emails"} 0.0' in body
+    assert 'dramatiq_queue_messages{queue="ai",state="delayed"} 2.0' in body
+    assert 'dramatiq_queue_messages{queue="ai",state="in_flight"} 1.0' in body
+    assert "dramatiq_queue_metrics_refresh_success 1.0" in body
+    assert "broker_redis_maxmemory_bytes 2048.0" in body
 
 
 def test_queue_depth_refresh_failure_never_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A Redis outage leaves the gauges stale instead of failing the scrape."""
-    monkeypatch.setattr(
-        "app.observability.metrics.dramatiq",
-        _fake_dramatiq_with_counts({"ai": 3}),
-    )
+    adapter = _fake_metrics_adapter({"ai": 3})
+
+    def adapter_factory(_broker: object) -> Any:
+        return adapter
+
+    monkeypatch.setattr(metrics.dramatiq, "get_broker", lambda: object())
+    monkeypatch.setattr(metrics, "metrics_adapter_for_broker", adapter_factory)
     update_queue_depths()
 
-    class _FakeBroker:
-        def get_queue_message_counts(self, *queues: str) -> dict[str, int]:
-            raise RuntimeError("redis unavailable")
+    def _fail(broker: object) -> Any:
+        raise RuntimeError("redis unavailable")
 
-    class _FakeDramatiq:
-        def get_broker(self) -> Any:
-            return _FakeBroker()
-
-    monkeypatch.setattr("app.observability.metrics.dramatiq", _FakeDramatiq())
+    monkeypatch.setattr(metrics, "metrics_adapter_for_broker", _fail)
     update_queue_depths()  # must not raise
 
     # The previous sample survives: the gauge is stale, not zeroed.
     body = generate_latest().decode()
     assert 'dramatiq_queue_depth{queue="ai"} 3.0' in body
+    assert "dramatiq_queue_metrics_refresh_success 0.0" in body
 
 
 # --- Durable outbox gauges (durable delivery plan P5) -----------------------
@@ -357,4 +367,73 @@ async def test_outbox_metric_refresh_logs_once_per_outage_and_recovery(
     assert [event["event"] for event in logs] == [
         "outbox_metrics.refresh_failed",
         "outbox_metrics.refresh_recovered",
+    ]
+    body = generate_latest().decode()
+    assert "outbox_metrics_refresh_success 1.0" in body
+    assert "outbox_metrics_last_success_timestamp_seconds " in body
+
+
+class _ReliabilitySession:
+    def __init__(self) -> None:
+        self.execute_values = [
+            [("retry_scheduled", 2), ("exhausted", 1)],
+            [("failed", False, 3), ("running", True, 1)],
+        ]
+        self.scalar_values = [4, 1]
+
+    async def __aenter__(self) -> _ReliabilitySession:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        return None
+
+    async def execute(self, statement: object) -> Any:
+        class _Result:
+            def __init__(self, rows: list[tuple[Any, ...]]) -> None:
+                self.rows = rows
+
+            def all(self) -> list[tuple[Any, ...]]:
+                return self.rows
+
+        return _Result(self.execute_values.pop(0))
+
+    async def scalar(self, statement: object) -> object:
+        return self.scalar_values.pop(0)
+
+
+async def test_reliability_metrics_zero_fill_closed_operational_labels() -> None:
+    await metrics.refresh_reliability_metrics(cast(Any, lambda: _ReliabilitySession()))
+
+    body = generate_latest().decode()
+    assert 'job_attempts{status="retry_scheduled"} 2.0' in body
+    assert 'job_attempts{status="succeeded"} 0.0' in body
+    assert "attention_required_email_deliveries 4.0" in body
+    assert 'maintenance_runs{stale="true",status="running"} 1.0' in body
+    assert 'maintenance_runs{stale="false",status="failed"} 3.0' in body
+    assert "dead_current_job_dispatches 1.0" in body
+    assert "reliability_metrics_refresh_success 1.0" in body
+    assert "reliability_metrics_last_success_timestamp_seconds " in body
+
+
+async def test_reliability_metric_refresh_logs_once_per_outage_and_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FailingSession:
+        async def __aenter__(self) -> _FailingSession:
+            raise RuntimeError("database unavailable with secret")
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    monkeypatch.setattr(metrics, "_reliability_metrics_refresh_failed", False)
+    with capture_logs() as logs:
+        await metrics.refresh_reliability_metrics(cast(Any, lambda: _FailingSession()))
+        await metrics.refresh_reliability_metrics(cast(Any, lambda: _FailingSession()))
+        failed_body = generate_latest().decode()
+        await metrics.refresh_reliability_metrics(cast(Any, lambda: _ReliabilitySession()))
+
+    assert "reliability_metrics_refresh_success 0.0" in failed_body
+    assert [event["event"] for event in logs] == [
+        "reliability_metrics.refresh_failed",
+        "reliability_metrics.refresh_recovered",
     ]

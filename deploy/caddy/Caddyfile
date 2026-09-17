@@ -16,7 +16,7 @@
 # the edge zone is deliberately looser so legitimate traffic is never cut off
 # at the edge.
 #
-# ACME_EMAIL is required by the compose file (fail-fast, like REDIS_PASSWORD):
+# ACME_EMAIL is required by the compose file (fail-fast, like the Redis passwords):
 # the global `email` option below breaks on an empty value, and the address
 # receives Let's Encrypt renewal-failure notices (backup-and-recovery.md run
 # B, defect D2).

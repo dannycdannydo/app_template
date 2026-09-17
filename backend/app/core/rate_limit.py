@@ -61,4 +61,4 @@ def get_rate_limiter() -> RateLimiter:
     settings = get_settings()
     if settings.app_env == "test":
         return NoOpRateLimiter()
-    return RedisRateLimiter(settings.redis_url)
+    return RedisRateLimiter(settings.rate_limit_redis_url)

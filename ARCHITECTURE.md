@@ -13,7 +13,8 @@ Vue SPA
 FastAPI
    │
    ├── PostgreSQL
-   ├── Redis
+   ├── Redis (dedicated Dramatiq broker: AOF + noeviction)
+   ├── Redis (separate disposable rate-limit counters)
    ├── Dramatiq workers
    ├── Object storage
    ├── WorkOS
@@ -305,6 +306,12 @@ worker → atomic dispatch claim → progress (0–100) → succeed | fail
 
 Redis publication failures are retried durably with capped backoff; malformed or unsupported events become `dead` for operator triage. A crash after Redis accepts a message but before the outbox row is settled may republish it. Delivery is therefore **at-least-once**, not exactly-once. An execution lease and owner token prevent two copies from running business work concurrently; stale owners cannot mutate progress or settle a newer attempt, and domain handlers remain idempotent for side effects.
 
+Production never shares the broker with rate-limit counters. The broker is
+AOF-backed and `noeviction`, so pressure rejects a publish and leaves its
+PostgreSQL outbox intent pending; the counter store may evict. Queue
+observability is payload-blind and version-locked to Dramatiq 2.2.x, exposing
+ready, delayed, in-flight and dead counts plus refresh/capacity signals.
+
 Transient worker errors close the attempt and atomically create a delayed PostgreSQL outbox dispatch or terminally exhaust the job; permanent errors settle immediately. Terminal states (`succeeded` / `failed` / `cancelled`) never run again. The coordinator also creates deduplicated hourly/daily maintenance events and re-dispatches only suitably old queued jobs under a cooldown. The public polling routes are unchanged: `GET /api/v1/jobs` and `GET /api/v1/jobs/{job_id}` remain org-scoped and gated by `documents.read` (ADR-0014).
 
 ### Authoring a durable actor
@@ -375,6 +382,6 @@ A completed file (`ready` or `failed`) produces a `file.ready` / `file.failed` n
 - **Errors**: one structured error format with `code`, `message`, `details`, `request_id` (see `API_CONVENTIONS.md`).
 - **Database**: SQLAlchemy 2 models + Pydantic 2 schemas, Alembic migrations, shared naming/timestamp/UUIDv7 conventions (blueprint §7, §10).
 - **Configuration**: typed `pydantic-settings` model, fail-fast on invalid production config.
-- **Abuse controls**: Redis provides a distributed, fail-closed coarse `/api/v1` rate limit (ADR-0012); production Redis is either private (the hybrid VPS profile's non-published compose-network Redis) or TLS (`rediss://` for any externally reachable Redis).
+- **Abuse controls**: a dedicated Redis provides the distributed, fail-closed coarse `/api/v1` rate limit (ADR-0012); it is separate from the broker in production. Each Redis is either private (the hybrid VPS profile's non-published compose-network services) or TLS (`rediss://` for any externally reachable endpoint).
 - **Observability**: structured JSON logging with request IDs and the full BP §28 context (user/org/job/resource ids, consistent `event` names), Sentry error tracking when `SENTRY_DSN` is set, and public `GET /metrics` (blueprint §28).
 - **Security**: baseline controls in `SECURITY.md`, aligned with OWASP ASVS Level 2.

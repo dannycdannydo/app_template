@@ -7,7 +7,10 @@ dependencies = [
     "alembic>=1.18.5",
     "asyncpg>=0.31.0",
     "boto3>=1.38.0",
-    "dramatiq[redis]>=1.18.0",
+    # Queue observability relies on the reviewed 2.2 Redis key contract.
+    # Keep upgrades inside this compatible line until its real-Redis contract
+    # test and adapter have been reviewed against the next Dramatiq release.
+    "dramatiq[redis]>=2.2,<2.3",
     "fastapi>=0.141.1",
     # v0.7 AI provider adapters (Scope §6.3, ADR-0017) are pinned HTTP REST
     # clients instead of provider SDKs: the OpenAI, Anthropic, DeepSeek,
