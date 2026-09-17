@@ -1048,8 +1048,7 @@ class Settings(BaseSettings):
         # to the synchronous HTTP path, so the control would be ineffective.
         if self.ai_ask_max_synchronous_bytes > self.ai_inline_aggregate_threshold_bytes:
             raise ValueError(
-                "ai_ask_max_synchronous_bytes must not exceed "
-                "ai_inline_aggregate_threshold_bytes"
+                "ai_ask_max_synchronous_bytes must not exceed ai_inline_aggregate_threshold_bytes"
             )
         # v0.8 Scope §2.2/§6.2: deployment-level transfer-mode configuration
         # must be complete and compatible, failing fast at startup (BP §27),
