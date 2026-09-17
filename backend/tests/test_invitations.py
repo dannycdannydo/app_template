@@ -19,6 +19,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import cast
 
+import pytest
 from httpx import AsyncClient, Response
 from sqlalchemy import Table
 from sqlalchemy.dialects import postgresql
@@ -28,6 +29,7 @@ from tests.context_helpers import (
     ContextState,
     FakeProfileClient,
     FakeSession,
+    FakeWorkOSInvitationsProvider,
     build_context_app,
     context_client,
     make_invitation,
@@ -37,6 +39,7 @@ from tests.context_helpers import (
     make_user,
 )
 
+from app.core.exceptions import ExternalServiceError
 from app.core.security import UserProfile
 from app.db.base import Base
 from app.modules.audit.service import (
@@ -433,6 +436,63 @@ async def test_revoke_unknown_invitation_is_404() -> None:
     assert state.audit_events == []
 
 
+class _FailingRevokeProvider(FakeWorkOSInvitationsProvider):
+    """A WorkOS adapter whose revoke call always fails (external outage)."""
+
+    async def revoke_invitation(self, workos_invitation_id: str) -> None:
+        raise ExternalServiceError(
+            code="workos_invitation_revoke_failed",
+            message="The invitation could not be revoked. Please try again.",
+        )
+
+
+async def test_revoke_provider_failure_leaves_invitation_grantable() -> None:
+    """Plan P7: a WorkOS revoke failure rolls back and leaves the row ``sent``.
+
+    The local row is the granting authority, so a provider outage during a
+    revoke must not move it: the transaction has nothing to commit, the row
+    stays grantable, and no revocation audit row is written.
+    """
+    state = ContextState()
+    actor = make_user(workos_user_id="revoke_actor")
+    organisation = make_organisation(workos_organisation_id="org_workos_acme")
+    invitation = make_invitation(
+        organisation.id,
+        actor.id,
+        email="invitee@example.com",
+        workos_invitation_id="inv_workos_provider_fail",
+    )
+    state.invitations = [invitation]
+    session: AsyncSession = cast(AsyncSession, FakeSession(state))
+    state.lookup_queue = [invitation]
+
+    with pytest.raises(ExternalServiceError):
+        await service.revoke_invitation(
+            session,
+            actor,
+            organisation_id=organisation.id,
+            invitation_id=invitation.id,
+            workos=_FailingRevokeProvider(),
+        )
+
+    # The service rolled the session back explicitly (matching ``send_invitation``),
+    # so the request transaction is clean and the row lock is released: the same
+    # session can retry the revoke and it succeeds.
+    assert invitation.status is InvitationStatus.SENT
+    assert state.audit_events == []
+
+    state.lookup_queue = [invitation]
+    revoked = await service.revoke_invitation(
+        session,
+        actor,
+        organisation_id=organisation.id,
+        invitation_id=invitation.id,
+        workos=FakeWorkOSInvitationsProvider(),
+    )
+    assert revoked.status is InvitationStatus.REVOKED
+    assert state.audit_events[0].action == ACTION_INVITATION_REVOKED
+
+
 # --- Login-time linking: the authoritative acceptance point ---
 
 
@@ -659,6 +719,7 @@ async def test_lost_race_recovers_without_double_grant() -> None:
     state = ContextState(owner_role=make_role("owner", "Owner"))
     session: AsyncSession = cast(AsyncSession, FakeSession(state))
     invitee = make_user(workos_user_id="user_invitee")
+    state.users[invitee.workos_user_id] = invitee
     organisation = make_organisation(workos_organisation_id="org_workos_acme")
     invitation = make_invitation(organisation.id, invitee.id, email=INVITEE_EMAIL)
     state.invitations = [invitation]

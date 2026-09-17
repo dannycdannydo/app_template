@@ -21,6 +21,7 @@ from app.core.config import get_settings
 from app.core.exceptions import BadRequestError, PermissionDenied, UnauthorizedError
 from app.core.logging import bind_identity_context, current_request_id
 from app.core.security import (
+    CachingUserProfileClient,
     InvalidSessionError,
     SessionValidator,
     UserProfileClient,
@@ -56,6 +57,20 @@ def get_request_id() -> str:
     return current_request_id()
 
 
+def get_request_profile_client(
+    profiles: Annotated[UserProfileClient, Depends(get_user_profile_client)],
+) -> UserProfileClient:
+    """Wrap the WorkOS profile client in a per-request memo (plan P7).
+
+    FastAPI caches a dependency's result for the duration of one request, so
+    the provisioning, bootstrap and invitation-linking steps in
+    ``get_current_user`` share this wrapper and fetch the WorkOS profile once
+    per validated identity instead of once per step. The wrapper is never
+    shared across requests, so no stale profile can leak.
+    """
+    return CachingUserProfileClient(profiles)
+
+
 def _bearer_token(authorization: str | None) -> str:
     """Extract and return the Bearer token; reject missing/malformed headers."""
     if not authorization or not authorization.startswith("Bearer "):
@@ -76,7 +91,7 @@ async def get_current_user(
     request: Request,
     session: Annotated[AsyncSession, Depends(get_db)],
     validator: Annotated[SessionValidator, Depends(get_session_validator)],
-    profiles: Annotated[UserProfileClient, Depends(get_user_profile_client)],
+    profiles: Annotated[UserProfileClient, Depends(get_request_profile_client)],
     authorization: Annotated[str | None, Header()] = None,
 ) -> User:
     """Resolve the Bearer token to a validated, enabled internal user (BP §8).

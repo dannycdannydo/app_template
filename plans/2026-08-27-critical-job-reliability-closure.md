@@ -603,20 +603,20 @@ needs a reviewed retention/restore boundary.
 
 Dependencies: none; coordinate authentication rollouts with existing v0.4 flow
 
-- [ ] Specify legal invitation transitions and provider/database conflict
+- [x] Specify legal invitation transitions and provider/database conflict
       precedence. Lock or conditionally update `SENT -> ACCEPTED` in the same
       transaction as membership grant; revoke, webhook and duplicate acceptance
       must use the same serialisation boundary. Reconcile provider failures
       without accepting a committed revoked invitation.
-- [ ] Make the last-platform-admin invariant count enabled users with active
+- [x] Make the last-platform-admin invariant count enabled users with active
       admin membership. Serialise grant/revoke and user disable/delete/webhook
       pathways that can remove the last active principal. Define an audited,
       tightly scoped operator recovery path for an already locked-out plane.
-- [ ] Add two-session PostgreSQL race tests for accept-vs-revoke, duplicate
+- [x] Add two-session PostgreSQL race tests for accept-vs-revoke, duplicate
       login, two concurrent admin removals, admin disable/delete and WorkOS
       revoke/deactivation webhooks. Preserve cross-plane and non-admin 403
       security-suite cases.
-- [ ] Measure and eliminate duplicate WorkOS profile retrieval during a
+- [x] Measure and eliminate duplicate WorkOS profile retrieval during a
       successful login when the same validated identity can be reused; retain
       fail-closed profile and membership checks.
 

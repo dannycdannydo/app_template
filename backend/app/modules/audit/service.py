@@ -38,6 +38,15 @@ ACTION_PLATFORM_BOOTSTRAP_GRANTED = "platform.bootstrap_granted"
 ACTION_PLATFORM_ADMIN_GRANTED = "platform.admin_granted"
 ACTION_PLATFORM_ADMIN_REVOKED = "platform.admin_revoked"
 
+# Platform recovery safety (plan P7): ``platform.admin_lockout`` is written
+# when a provider-driven user deactivation removes the last enabled platform
+# administrator (an operator must run the break-glass recovery);
+# ``platform.admin_recovery_granted`` is written by that tightly scoped
+# break-glass path when it re-grants the role to an already provisioned user.
+# Both carry a null actor (system/operator CLI) and no secret material.
+ACTION_PLATFORM_ADMIN_LOCKOUT = "platform.admin_lockout"
+ACTION_PLATFORM_ADMIN_RECOVERY_GRANTED = "platform.admin_recovery_granted"
+
 # Invitation lifecycle (Scope §6.5, blueprint §29 examples ``user.invited``):
 # sent at the platform invite endpoint, revoked at the platform revoke
 # endpoint, accepted at login-time linking — when the membership grant that

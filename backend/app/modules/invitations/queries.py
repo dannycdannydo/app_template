@@ -9,6 +9,12 @@ The pending-invitation statement drives login-time linking: it selects only
 invitations that can still grant (``sent``, not yet expired) for one email
 (case-insensitive), so a revoked, accepted, expired or mismatched invitation
 never reaches the grant step (acceptance §5.6).
+
+That statement also takes a row-level ``FOR UPDATE`` lock (plan P7): the
+``SENT -> ACCEPTED`` transition, local revocation and webhook revocation all
+serialise on the invitation row, so a committed revoke can never be
+overwritten by a stale acceptance (and vice versa). The lock is acquired after
+the external profile read, so no provider I/O happens while the row is held.
 """
 
 from __future__ import annotations
@@ -37,10 +43,12 @@ def pending_invitations_statement(email: str) -> Select[tuple[Invitation]]:
     """Return a statement selecting grantable invitations for one email.
 
     ``sent`` invitations whose expiry has not passed, matched case-insensitively
-    against the (normalised) email of the authenticated user. The Python-side
-    re-check in the linking service guards the same conditions again because
-    between this SELECT and the INSERT another transaction (e.g. a webhook
-    refresh, Scope §6.8) may have revoked the invitation.
+    against the (normalised) email of the authenticated user, locked ``FOR
+    UPDATE`` so the acceptance transition serialises against revoke and webhook
+    (plan P7). The Python-side re-check in the linking service guards the same
+    conditions again because between this SELECT and the INSERT another
+    transaction (e.g. a webhook refresh, Scope §6.8) may have revoked the
+    invitation.
     """
     return (
         select(Invitation)
@@ -50,4 +58,5 @@ def pending_invitations_statement(email: str) -> Select[tuple[Invitation]]:
             func.lower(Invitation.email) == email.strip().lower(),
         )
         .order_by(Invitation.created_at)
+        .with_for_update()
     )

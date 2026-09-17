@@ -30,10 +30,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.audit.service import (
     ACTION_INVITATION_REVOKED,
+    ACTION_PLATFORM_ADMIN_LOCKOUT,
     ACTION_USER_DEACTIVATED,
     record_event,
 )
 from app.modules.invitations.models import Invitation, InvitationStatus
+from app.modules.platform_admin.queries import acquire_platform_admin_lock
+from app.modules.platform_admin.service import platform_admin_deactivation_locks_out
 from app.modules.users.models import User
 from app.modules.webhooks.schemas import (
     InvitationEventData,
@@ -84,15 +87,18 @@ async def _refresh_revoked_invitation(session: AsyncSession, event: WorkOSWebhoo
 
     Matched by ``workos_invitation_id`` (the stable WorkOS identifier stored at
     invite time). Only a ``sent`` row is flipped — accepted, revoked or expired
-    are terminal and never rewritten by a webhook. The revocation is audited
-    with a null actor (system-driven) and the WorkOS event id in the metadata
-    so the trail says *why* the invitation was revoked.
+    are terminal and never rewritten by a webhook. The row is read ``FOR
+    UPDATE`` so the mirror serialises with login-time acceptance on the same
+    invitation row (plan P7): if acceptance has already committed, the webhook
+    observes a terminal row and no-ops. The revocation is audited with a null
+    actor (system-driven) and the WorkOS event id in the metadata so the trail
+    says *why* the invitation was revoked.
     """
     data = _lenient_data(event, InvitationEventData)
     if data is None or data.id is None:
         return False
     invitation = await session.scalar(
-        select(Invitation).where(Invitation.workos_invitation_id == data.id)
+        select(Invitation).where(Invitation.workos_invitation_id == data.id).with_for_update()
     )
     if invitation is None or invitation.status is not InvitationStatus.SENT:
         return False
@@ -115,17 +121,26 @@ async def _deactivate_deleted_user(session: AsyncSession, event: WorkOSWebhookEv
     """Deactivate the internal user whose WorkOS account was deleted.
 
     Matched by ``workos_user_id``. Already-inactive or unknown users are left
-    untouched (idempotent redeliveries change nothing). The deactivation is
-    audited with a null actor and marked ``source: webhook`` so platform
-    administrators can distinguish it from an admin action.
+    untouched (idempotent redeliveries change nothing). The platform-admin
+    advisory lock is taken *before* the user row lock (consistent lock order,
+    plan P7) so a provider-driven deactivation serialises with the ordinary
+    grant/revoke paths. A deactivation that removes the last enabled platform
+    administrator cannot be refused — the WorkOS account is already gone — so
+    a ``platform.admin_lockout`` audit row is written for operator attention
+    and the break-glass recovery path is documented. The deactivation itself is
+    audited with a null actor and marked ``source: webhook``.
     """
     data = _lenient_data(event, UserEventData)
     if data is None or data.id is None:
         return False
-    user = await session.scalar(select(User).where(User.workos_user_id == data.id))
+    await acquire_platform_admin_lock(session)
+    user = await session.scalar(
+        select(User).where(User.workos_user_id == data.id).with_for_update()
+    )
     if user is None or not user.is_active:
         return False
 
+    locks_out_platform_admin = await platform_admin_deactivation_locks_out(session, user)
     user.is_active = False
     await record_event(
         session,
@@ -138,7 +153,21 @@ async def _deactivate_deleted_user(session: AsyncSession, event: WorkOSWebhookEv
             "workos_user_id": user.workos_user_id,
         },
     )
+    if locks_out_platform_admin:
+        await record_event(
+            session,
+            action=ACTION_PLATFORM_ADMIN_LOCKOUT,
+            resource_type="user",
+            resource_id=str(user.id),
+            metadata={
+                "source": "webhook",
+                "workos_event_id": event.id,
+                "workos_user_id": user.workos_user_id,
+            },
+        )
     await session.commit()
+    if locks_out_platform_admin:
+        logger.error("webhook_platform_admin_lockout", user_id=str(user.id))
     logger.warning("webhook_user_deactivated", user_id=str(user.id))
     return True
 

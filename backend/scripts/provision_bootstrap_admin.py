@@ -13,7 +13,12 @@ in the environment (or ``--password``) and is never printed or logged.
 
 ``--delete`` tears the admin down again (WorkOS user + internal ``users`` row,
 which resets the one-time bootstrap) so a different admin can be provisioned
-and the bootstrap re-tested during development.
+and the bootstrap re-tested during development. Because that is a
+user-deletion pathway, it is deliberately bounded to a development/test
+environment and the internal deletion runs through the locked, audited
+platform-admin service (``delete_provisioned_user``): a teardown that removes
+the last enabled administrator records a ``platform.admin_lockout`` audit row
+instead of silently locking the plane out.
 
 Usage (from the repo root, with ``.env`` in place):
 
@@ -34,7 +39,7 @@ import os
 import sys
 from dataclasses import dataclass
 
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ExternalServiceError
@@ -91,16 +96,19 @@ async def delete_bootstrap_admin(
 ) -> DeleteResult:
     """Tear down one bootstrap admin on both sides (WorkOS and the app DB).
 
-    Deleting the internal ``users`` row cascades to the ``platform_memberships``
-    and ``bootstrap_states`` rows, which is what resets the one-time bootstrap:
-    the next ``make provision-admin`` + first login of a fresh email can grant
-    ``platform_admin`` again. The admin's organisation memberships do not
-    cascade, so their role grants and memberships are removed explicitly first
-    (the bootstrap organisation row itself is left in place: it is a tenant,
-    not a user-scoped record, and may already hold other members).
+    The internal deletion runs through ``delete_provisioned_user`` (plan P7),
+    which takes the platform-admin advisory lock so the teardown cannot race a
+    grant, revoke or webhook deactivation, and records
+    ``platform.admin_lockout`` when the deletion removes the last enabled
+    administrator. Deleting the internal ``users`` row cascades to the
+    ``platform_memberships`` and ``bootstrap_states`` rows, which is what resets
+    the one-time bootstrap: the next ``make provision-admin`` + first login of a
+    fresh email can grant ``platform_admin`` again. The admin's organisation
+    memberships and their role grants are removed by the service (the bootstrap
+    organisation row itself is left in place: it is a tenant, not a user-scoped
+    record, and may already hold other members).
     """
-    from app.modules.organisations.models import OrganisationMembership
-    from app.modules.permissions.models import MembershipRole
+    from app.modules.platform_admin.service import delete_provisioned_user
     from app.modules.users.models import User
 
     workos_user = provisioner.find_user_by_email(email)
@@ -109,24 +117,9 @@ async def delete_bootstrap_admin(
 
     internal_user = await session.scalar(select(User).where(User.email == email.lower()))
     if internal_user is not None:
-        membership_ids = (
-            await session.scalars(
-                select(OrganisationMembership.id).where(
-                    OrganisationMembership.user_id == internal_user.id
-                )
-            )
-        ).all()
-        if membership_ids:
-            await session.execute(
-                delete(MembershipRole).where(MembershipRole.membership_id.in_(membership_ids))
-            )
-            await session.execute(
-                delete(OrganisationMembership).where(
-                    OrganisationMembership.user_id == internal_user.id
-                )
-            )
-        await session.execute(delete(User).where(User.id == internal_user.id))
-    await session.commit()
+        await delete_provisioned_user(
+            session, user_id=internal_user.id, source="bootstrap_teardown"
+        )
 
     return DeleteResult(
         workos_deleted=workos_user is not None,
@@ -210,7 +203,7 @@ def main() -> int:
     provisioner = get_workos_user_management_client()
 
     if args.delete:
-        return _run_delete(provisioner, email=email)
+        return run_delete(provisioner, email=email)
 
     try:
         password = resolve_password(args.password)
@@ -240,9 +233,26 @@ def main() -> int:
     return 0
 
 
-def _run_delete(provisioner: WorkOSUserProvisioner, *, email: str) -> int:
-    """Run the ``--delete`` teardown: WorkOS user + internal app user row."""
+def run_delete(provisioner: WorkOSUserProvisioner, *, email: str) -> int:
+    """Run the ``--delete`` teardown: WorkOS user + internal app user row.
+
+    Hard user deletion is a development convenience for resetting the one-time
+    bootstrap, so the command is deliberately unavailable outside a
+    development/test environment: in any other profile the operator must use
+    the audited platform administration or break-glass recovery paths instead
+    of a destructive teardown.
+    """
+    from app.core.config import get_settings
     from app.db.session import async_session_factory
+
+    app_env = get_settings().app_env
+    if app_env not in {"development", "test"}:
+        print(
+            "provision-admin: --delete is a development/test-only teardown and "
+            f"refuses to run with APP_ENV={app_env!r}.",
+            file=sys.stderr,
+        )
+        return 1
 
     async def run() -> int:
         async with async_session_factory() as session:

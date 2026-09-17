@@ -245,7 +245,7 @@ async def test_me_provisions_user_on_first_login(auth_app: AuthApp) -> None:
     assert body["user"]["name"] == "Ada Lovelace"
     assert body["user"]["is_active"] is True
     assert state.users[WORKOS_USER_ID].workos_user_id == WORKOS_USER_ID
-    assert state.profile_calls == [WORKOS_USER_ID, WORKOS_USER_ID]
+    assert state.profile_calls == [WORKOS_USER_ID]  # plan P7: one fetch per request
 
 
 async def test_me_reuses_existing_user_on_second_login(auth_app: AuthApp) -> None:
@@ -262,7 +262,7 @@ async def test_me_reuses_existing_user_on_second_login(auth_app: AuthApp) -> Non
     # The existing local identity is refreshed from WorkOS before invitation
     # reconciliation uses the verified provider email, so an email change can
     # link a pending invitation without waiting for webhook delivery.
-    assert state.profile_calls == [WORKOS_USER_ID, WORKOS_USER_ID]
+    assert state.profile_calls == [WORKOS_USER_ID]  # plan P7: one fetch per request
 
 
 async def test_me_never_trusts_identity_fields_from_token(auth_app: AuthApp) -> None:
@@ -347,7 +347,7 @@ async def test_me_handles_concurrent_provisioning_race(auth_app: AuthApp) -> Non
     assert response.status_code == 200
     assert response.json()["user"]["id"] == str(winner.id)
     assert state.users[WORKOS_USER_ID].id == winner.id
-    assert state.profile_calls == [WORKOS_USER_ID, WORKOS_USER_ID]
+    assert state.profile_calls == [WORKOS_USER_ID]  # plan P7: one fetch per request
 
 
 async def test_me_surfaces_profile_provider_failure_as_safe_upstream_error() -> None:

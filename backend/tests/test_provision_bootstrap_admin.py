@@ -20,12 +20,14 @@ from app.integrations.workos.user_management import (
     ProvisionedWorkOSUser,
     WorkOSUserManagementClient,
 )
+from app.modules.platform_admin import service as platform_admin_service
 from scripts.provision_bootstrap_admin import (
     ProvisionError,
     delete_bootstrap_admin,
     provision_bootstrap_admin,
     resolve_email,
     resolve_password,
+    run_delete,
 )
 
 
@@ -220,7 +222,29 @@ def test_adapter_deletes_a_user() -> None:
     assert stub.deleted == ["user_1"]
 
 
-def test_delete_removes_the_workos_user_and_the_internal_row() -> None:
+def _patch_locked_teardown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[object, str]]:
+    """Replace the locked, audited teardown service with a recording stub.
+
+    The membership ordering, advisory locking and lockout-audit behaviour of
+    the real service are covered against PostgreSQL in
+    ``test_identity_races_db.py``; these CLI tests pin the script wiring.
+    """
+    calls: list[tuple[object, str]] = []
+
+    async def fake_delete(session: object, *, user_id: object, source: str) -> bool:
+        calls.append((user_id, source))
+        return True
+
+    monkeypatch.setattr(platform_admin_service, "delete_provisioned_user", fake_delete)
+    return calls
+
+
+def test_delete_removes_the_workos_user_and_calls_the_locked_teardown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _patch_locked_teardown(monkeypatch)
     provisioner = FakeProvisioner(
         existing={
             "admin@example.com": ProvisionedWorkOSUser(id="user_1", email="admin@example.com")
@@ -239,31 +263,13 @@ def test_delete_removes_the_workos_user_and_the_internal_row() -> None:
     assert result.workos_deleted is True
     assert result.internal_deleted is True
     assert provisioner.deleted == ["user_1"]
-    assert len(session.executed) == 1  # no memberships -> only the user delete
-    assert session.committed is True
+    assert calls == [("user_1", "bootstrap_teardown")]
 
 
-def test_delete_removes_organisation_memberships_before_the_user() -> None:
-    """The admin's org memberships do not cascade, so they are removed first."""
-    provisioner = FakeProvisioner()
-    session = FakeSession(
-        rowcount=1, internal_user=SimpleNamespace(id="user_1"), membership_ids=["membership-1"]
-    )
-
-    result = asyncio.run(
-        delete_bootstrap_admin(
-            provisioner,
-            session,  # type: ignore[arg-type]
-            email="admin@example.com",
-        )
-    )
-
-    assert result.internal_deleted is True
-    assert len(session.executed) == 3  # role grants, memberships, then the user
-    assert session.committed is True
-
-
-def test_delete_is_idempotent_when_nothing_exists() -> None:
+def test_delete_is_idempotent_when_nothing_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _patch_locked_teardown(monkeypatch)
     provisioner = FakeProvisioner()
     session = FakeSession(rowcount=0, internal_user=None)
 
@@ -278,4 +284,24 @@ def test_delete_is_idempotent_when_nothing_exists() -> None:
     assert result.workos_deleted is False
     assert result.internal_deleted is False
     assert provisioner.deleted == []
-    assert session.committed is True
+    assert calls == []
+
+
+def test_delete_refuses_outside_a_development_or_test_environment(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The destructive teardown is bounded to development/test profiles."""
+    from app.core.config import get_settings
+
+    real_settings = get_settings()
+    monkeypatch.setattr(
+        "app.core.config.get_settings",
+        lambda: real_settings.model_copy(update={"app_env": "production"}),
+    )
+    provisioner = FakeProvisioner()
+
+    exit_code = run_delete(provisioner, email="admin@example.com")
+
+    assert exit_code == 1
+    assert "development/test-only" in capsys.readouterr().err
+    assert provisioner.deleted == []
