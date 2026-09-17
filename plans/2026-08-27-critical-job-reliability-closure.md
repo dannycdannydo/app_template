@@ -515,19 +515,19 @@ new attention-required state require review. No public API break is authorised.
 
 Dependencies: P1, P2
 
-- [ ] Add an internal `maintenance_runs` model with closed task types/statuses,
+- [x] Add an internal `maintenance_runs` model with closed task types/statuses,
       UTC bucket identity, attempt/owner/lease fields, safe errors and timestamps;
       add its additive Alembic migration, constraints and indexes.
-- [ ] Make schedule creation write the maintenance run and reference-only outbox
+- [x] Make schedule creation write the maintenance run and reference-only outbox
       event atomically. Update the registry/actors so broker messages carry only
       `maintenance_run_id`.
-- [ ] Add maintenance claim, success, retry, exhaustion and expired-lease
+- [x] Add maintenance claim, success, retry, exhaustion and expired-lease
       takeover services. Retain PostgreSQL advisory locks as defence in depth,
       not as the durable execution record.
-- [ ] Apply the contract to AI retention and provider-file reconciliation while
+- [x] Apply the contract to AI retention and provider-file reconciliation while
       preserving their bounded work, provider adapters, per-item audit records
       and privacy constraints.
-- [ ] Add database and real-broker tests for duplicate schedule ticks,
+- [x] Add database and real-broker tests for duplicate schedule ticks,
       publish-without-run, worker crash, Redis loss, retry exhaustion, advisory-
       lock contention and eventual successful rerun.
 

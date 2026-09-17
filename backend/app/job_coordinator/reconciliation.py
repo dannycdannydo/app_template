@@ -18,11 +18,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.db.conventions import uuid7
 from app.modules.jobs import service as jobs_service
 from app.modules.jobs.models import Job, JobStatus
-from app.modules.outbox.contracts import (
-    EVENT_TYPE_AI_RETENTION,
-    EVENT_TYPE_OUTBOX_CLEANUP_COMPLETED,
-    EVENT_TYPE_TRANSFER_RECONCILE,
+from app.modules.maintenance import service as maintenance_service
+from app.modules.maintenance.models import (
+    MaintenanceRun,
+    MaintenanceRunStatus,
+    MaintenanceTaskType,
 )
+from app.modules.maintenance.queries import expired_running_maintenance_runs_statement
+from app.modules.outbox.contracts import EVENT_TYPE_OUTBOX_CLEANUP_COMPLETED
 from app.modules.outbox.models import OutboxEvent, OutboxEventStatus
 from app.modules.outbox.queries import (
     published_events_retention_statement,
@@ -31,7 +34,8 @@ from app.modules.outbox.queries import (
 )
 from app.modules.outbox.service import (
     create_dispatch_event,
-    create_schedule_event,
+    create_maintenance_event,
+    maintenance_recovery_key,
     reconciliation_dispatch_key,
 )
 from app.observability.metrics import JOBS_FAILED_TOTAL
@@ -44,13 +48,28 @@ class ReconciliationStats:
     reconciled_jobs: int = 0
     recovered_running_jobs: int = 0
     scheduled_events: int = 0
+    recovered_maintenance_runs: int = 0
     cleaned_events: int = 0
+
+
+def schedule_bucket(now: datetime, interval_hours: int) -> int:
+    """Return the index of the UTC schedule bucket ``now`` falls in."""
+    timestamp = int(now.astimezone(UTC).timestamp())
+    return timestamp // (interval_hours * 3600)
+
+
+def schedule_bucket_start(bucket: int, interval_hours: int) -> datetime:
+    """Return the UTC instant one schedule bucket begins at.
+
+    The durable run stores this as a real timestamp so operators can order and
+    window maintenance history without parsing the bucket key.
+    """
+    return datetime.fromtimestamp(bucket * interval_hours * 3600, tz=UTC)
 
 
 def schedule_key(event_type: str, *, now: datetime, interval_hours: int) -> str:
     """Return the unique key for one UTC schedule bucket."""
-    timestamp = int(now.astimezone(UTC).timestamp())
-    return f"{event_type}:schedule:{timestamp // (interval_hours * 3600)}"
+    return f"{event_type}:schedule:{schedule_bucket(now, interval_hours)}"
 
 
 def reconciliation_cutoff(
@@ -232,27 +251,102 @@ async def schedule_maintenance_events(
     ai_retention_interval_hours: int,
     transfer_reconcile_interval_hours: int,
 ) -> int:
-    """Persist missing global maintenance intents for this UTC schedule tick.
+    """Persist missing maintenance runs and dispatches for this UTC tick.
 
-    The unique deduplication key is the concurrency boundary.  A nested
-    transaction isolates a concurrent insert collision so one scheduler tick
-    never rolls back the other event type.
+    The durable run and its reference-only outbox event are written in **one**
+    transaction (plan P4): a published dispatch can never name a run that does
+    not exist, and a crash between the two cannot enqueue a sweep with no
+    record of its outcome.  Both rows share the UTC bucket key, whose unique
+    constraints are the concurrency boundary, and a nested transaction
+    isolates a concurrent insert collision so one scheduler tick never rolls
+    back the other task type.
     """
     created = 0
-    for event_type, interval_hours in (
-        (EVENT_TYPE_AI_RETENTION, ai_retention_interval_hours),
-        (EVENT_TYPE_TRANSFER_RECONCILE, transfer_reconcile_interval_hours),
+    for task_type, interval_hours in (
+        (MaintenanceTaskType.AI_RETENTION, ai_retention_interval_hours),
+        (MaintenanceTaskType.TRANSFER_RECONCILE, transfer_reconcile_interval_hours),
     ):
-        key = schedule_key(event_type, now=now, interval_hours=interval_hours)
+        bucket = schedule_bucket(now, interval_hours)
+        key = schedule_key(task_type.value, now=now, interval_hours=interval_hours)
         try:
             async with session.begin_nested():
-                await create_schedule_event(session, event_type=event_type, schedule_key=key)
+                run = await maintenance_service.create_scheduled_run(
+                    session,
+                    task_type=task_type,
+                    schedule_key=key,
+                    scheduled_for=schedule_bucket_start(bucket, interval_hours),
+                )
+                # Flush so ``run.id`` exists before the event references it.
+                await session.flush()
+                await create_maintenance_event(
+                    session,
+                    event_type=task_type.value,
+                    maintenance_run_id=run.id,
+                    deduplication_key=key,
+                )
                 await session.flush()
         except IntegrityError:
             continue
         created += 1
     await session.commit()
     return created
+
+
+async def recover_expired_maintenance_runs(
+    session: AsyncSession,
+    *,
+    now: datetime,
+    cooldown_seconds: int,
+    limit: int,
+) -> list[uuid.UUID]:
+    """Recover bounded, lease-expired ``running`` maintenance runs (plan P4).
+
+    A worker that died mid-sweep leaves its run ``running`` forever when Redis
+    holds no copy of the message, so this is the PostgreSQL-owned backstop
+    that makes AC7's lease-expired takeover real without a broker.  Each
+    candidate is locked with ``FOR UPDATE SKIP LOCKED``, its lease re-checked
+    under the lock, then the ownership boundary is rotated, the run returns to
+    ``queued`` and exactly one cooldown-keyed outbox intent is created in the
+    same transaction — never a direct Redis publish.  A run already at the
+    global attempt ceiling settles ``failed`` instead of receiving a fresh
+    dispatch.
+    """
+    rows = (
+        await session.scalars(
+            expired_running_maintenance_runs_statement(
+                lease_expired_before=now, limit=limit
+            ).with_for_update(skip_locked=True, of=MaintenanceRun)
+        )
+    ).all()
+    recovered: list[uuid.UUID] = []
+    bucket = int(now.timestamp()) // cooldown_seconds
+    for run in rows:
+        # The owner may have completed or renewed the lease while this
+        # coordinator waited for the row lock.
+        if maintenance_service.is_terminal(run.status):
+            continue
+        if run.lease_expires_at is None or run.lease_expires_at > now:
+            continue
+        if await maintenance_service.enforce_attempt_ceiling_locked(session, run, now=now):
+            continue
+        await create_maintenance_event(
+            session,
+            event_type=run.task_type.value,
+            maintenance_run_id=run.id,
+            deduplication_key=maintenance_recovery_key(run.id, cooldown_bucket=bucket),
+        )
+        run.status = MaintenanceRunStatus.QUEUED
+        # Sticky history: the next claim and successful completion preserve
+        # that coordinator recovery occurred.
+        run.taken_over = True
+        run.error_code = maintenance_service.ERROR_CODE_ABANDONED
+        # Rotate the ownership boundary so the dead attempt's captured token
+        # can never settle the recovered run.
+        run.owner_token = None
+        run.lease_expires_at = None
+        recovered.append(run.id)
+    await session.commit()
+    return recovered
 
 
 async def cleanup_published_events(
@@ -342,6 +436,13 @@ async def run_maintenance_pass(
             ai_retention_interval_hours=ai_retention_interval_hours,
             transfer_reconcile_interval_hours=transfer_reconcile_interval_hours,
         )
+    async with session_factory() as session:
+        recovered_runs = await recover_expired_maintenance_runs(
+            session,
+            now=now,
+            cooldown_seconds=reconciliation_cooldown_seconds,
+            limit=reconciliation_limit,
+        )
     cleaned = 0
     if (
         outbox_retention_days is not None
@@ -360,5 +461,6 @@ async def run_maintenance_pass(
         reconciled_jobs=len(jobs),
         recovered_running_jobs=len(recovered),
         scheduled_events=scheduled,
+        recovered_maintenance_runs=len(recovered_runs),
         cleaned_events=cleaned,
     )
