@@ -57,7 +57,7 @@ blast radius.
 
 | Order | Group | Tables | Policy / special handling |
 | --- | --- | --- | --- |
-| 0 | records (P3) | `records`, `record_revisions` | Group 0. Proven by P2; P3 repeats the policies as a production enablement migration separate from the prototype, with its own cross-organisation tests and reversible downgrade (plan P3, first bullet). |
+| 0 | records (P3) | `records`, `record_revisions` | **Delivered.** Group 0. Proven by P2; production enablement migration `d2e3f4a5b6c7` installs the canonical `<table>_organisation_isolation` policies, replaces the prototype policy, and ships a reversible downgrade and the `test_rls_records_enablement_db.py` cross-organisation suite. |
 | 1 | files (P3) | `files` | Organisation context. Signed download/promotion paths resolve the protected row first. |
 | 2 | notifications (P3) | `notifications`, `notification_deliveries` | User-private: policy requires both organisation context and a transaction-local user ID. `notification_deliveries` inherits the parent boundary through `notifications`. |
 | 3 | AI data (P3) | `ai_requests`, `ai_outputs`, `ai_attachment_references`, `ai_scratch_uploads` | Organisation context. Attachment resolution stays scoped by the protected row. |

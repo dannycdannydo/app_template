@@ -764,7 +764,13 @@ async def test_runtime_role_serves_non_tenant_routes_without_context(
 
 
 def test_migration_downgrade_and_reupgrade(migrated_database: str) -> None:
-    """The prototype migration reverses cleanly and re-applies with no residue.
+    """The RLS chain reverses below the prototype and re-applies with no residue.
+
+    Plan P3 adds the production records-group enablement migration above this
+    prototype. Reverting to ``b1c2d3e4f5a6`` runs both downgrades while leaving
+    the schema tables in place: the prototype role, helper and RLS disappear,
+    and re-upgrading to head re-installs the prototype and then the canonical
+    production policy.
 
     Alembic's async environment runs its own event loop, so this test is
     synchronous and inspects the schema with separate ``asyncio.run`` calls.
@@ -817,7 +823,7 @@ def test_migration_downgrade_and_reupgrade(migrated_database: str) -> None:
                         text(
                             "SELECT count(*) FROM pg_policies "
                             "WHERE tablename = 'records' "
-                            "AND policyname = 'records_tenant_isolation'"
+                            "AND policyname = 'records_organisation_isolation'"
                         )
                     )
                     == 1
@@ -825,7 +831,7 @@ def test_migration_downgrade_and_reupgrade(migrated_database: str) -> None:
         finally:
             await owner_engine.dispose()
 
-    command.downgrade(config, "-1")
+    command.downgrade(config, "b1c2d3e4f5a6")
     try:
         asyncio.run(_absent())
     finally:
@@ -869,7 +875,8 @@ def test_migration_adopts_a_preexisting_runtime_role_safely(migrated_database: s
     have pre-provisioned a login credential. The upgrade forces the safe
     attributes and removes memberships that could escalate to a privileged
     role; the downgrade leaves the adopted role (and its credential) in place
-    because it does not carry this migration's ownership marker.
+    because it does not carry the prototype migration's ownership marker (the
+    production records-group enablement above it adopts without re-marking).
     """
     config = Config(str(BACKEND_ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(BACKEND_ROOT / "alembic"))
@@ -927,9 +934,11 @@ def test_migration_adopts_a_preexisting_runtime_role_safely(migrated_database: s
             )
         )
 
-    # Start from a clean boundary with no role, then pre-provision an unsafe
-    # login role that is also a member of the protected table's owner.
-    command.downgrade(config, "-1")
+    # Start from a clean boundary with no role (reverting the prototype and the
+    # production records-group migration) while the records table still exists,
+    # then pre-provision an unsafe login role that is also a member of that
+    # table's owner.
+    command.downgrade(config, "b1c2d3e4f5a6")
     try:
         owner = asyncio.run(_table_owner())
         asyncio.run(_run(f"CREATE ROLE {RUNTIME_ROLE} LOGIN SUPERUSER BYPASSRLS"))
@@ -943,8 +952,8 @@ def test_migration_adopts_a_preexisting_runtime_role_safely(migrated_database: s
         assert membership == 0, "escalation membership must be revoked"
 
         # Ownership is explicit: an adopted role is not marked as created here,
-        # so the downgrade must not drop it (or its out-of-band credential).
-        command.downgrade(config, "-1")
+        # so the full downgrade must not drop it (or its out-of-band credential).
+        command.downgrade(config, "b1c2d3e4f5a6")
         assert asyncio.run(_role_exists(migrated_database)) is True
     finally:
         # Restore a clean, migration-created role at head for the shared fixture.
