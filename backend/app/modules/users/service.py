@@ -8,6 +8,9 @@ concurrent first login.
 
 from __future__ import annotations
 
+import uuid
+from dataclasses import dataclass
+
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,6 +22,7 @@ from app.modules.users.models import User
 from app.modules.users.queries import (
     memberships_for_user_statement,
     role_codes_for_user_statement,
+    roles_by_membership_for_user_statement,
     user_by_workos_id_statement,
 )
 
@@ -60,25 +64,57 @@ async def get_or_provision_user(
     return user
 
 
+@dataclass(frozen=True)
+class MeMembership:
+    """One membership and the role codes it grants for its organisation."""
+
+    membership: OrganisationMembership
+    organisation_name: str
+    roles: list[str]
+
+
+@dataclass(frozen=True)
+class MePayload:
+    """Assembled ``/me`` data with per-membership authority and compatibility roles."""
+
+    memberships: list[MeMembership]
+    roles: list[str]
+    platform_roles: list[str]
+
+
 async def get_me_payload(
     session: AsyncSession,
     user: User,
-) -> tuple[list[tuple[OrganisationMembership, str]], list[str], list[str]]:
-    """Return the current user's memberships, role codes and platform role codes.
+) -> MePayload:
+    """Return the current user's memberships, per-membership roles and platform roles.
 
     Memberships are an explicit ``(membership, organisation_name)`` projection
     so callers never rely on the ``organisation`` relationship being loaded.
-    Roles are the distinct role codes across all of the user's memberships,
-    ordered by code; platform roles are the distinct codes of the user's
+    ``MeMembership.roles`` is the role set the membership actually grants, which
+    is the selected-organisation authority the frontend must use. The top-level
+    ``roles`` union is retained for backward compatibility only; it spans every
+    membership and must never be treated as authority for one organisation
+    (Plan P10). Platform roles are the distinct codes of the user's
     platform memberships (empty for non-admins). A user with no roles yields
     empty lists.
     """
-    memberships = [
-        (membership, organisation_name)
-        for membership, organisation_name in (
-            await session.execute(memberships_for_user_statement(user.id))
-        ).all()
-    ]
+    membership_rows = (await session.execute(memberships_for_user_statement(user.id))).all()
+    roles_by_membership: dict[uuid.UUID, list[str]] = {}
+    for membership_id, role_code in (
+        await session.execute(roles_by_membership_for_user_statement(user.id))
+    ).all():
+        roles_by_membership.setdefault(membership_id, []).append(role_code)
     roles = (await session.scalars(role_codes_for_user_statement(user.id))).all()
     platform_roles = (await session.scalars(platform_role_codes_statement(user.id))).all()
-    return memberships, list(roles), list(platform_roles)
+    return MePayload(
+        memberships=[
+            MeMembership(
+                membership=membership,
+                organisation_name=organisation_name,
+                roles=roles_by_membership.get(membership.id, []),
+            )
+            for membership, organisation_name in membership_rows
+        ],
+        roles=list(roles),
+        platform_roles=list(platform_roles),
+    )

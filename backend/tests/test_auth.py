@@ -299,8 +299,14 @@ async def test_me_returns_memberships_and_roles(auth_app: AuthApp) -> None:
     state.lookup_queue = [user]
     membership = _make_membership(user)
     state.memberships = [membership]
-    # memberships, then org role codes, then platform role codes
-    state.scalars_queue = [[(membership, "Example Organisation")], ["owner"], []]
+    # memberships, then per-membership roles, then union role codes, then
+    # platform role codes.
+    state.scalars_queue = [
+        [(membership, "Example Organisation")],
+        [(membership.id, "owner")],
+        ["owner"],
+        [],
+    ]
 
     async with _client(app) as client:
         response = await _get_me(client, make_token(private_key))
@@ -310,6 +316,7 @@ async def test_me_returns_memberships_and_roles(auth_app: AuthApp) -> None:
     assert len(body["memberships"]) == 1
     assert body["memberships"][0]["status"] == "active"
     assert body["memberships"][0]["organisation_name"] == "Example Organisation"
+    assert body["memberships"][0]["roles"] == ["owner"]
     assert body["roles"] == ["owner"]
     assert body["platform_roles"] == []
 
@@ -320,8 +327,8 @@ async def test_me_returns_platform_roles_for_platform_admin(auth_app: AuthApp) -
     user = _make_user()
     state.users[WORKOS_USER_ID] = user
     state.lookup_queue = [user]
-    # memberships, then org role codes, then platform role codes
-    state.scalars_queue = [[], [], ["platform_admin"]]
+    # memberships, per-membership roles, union role codes, platform role codes
+    state.scalars_queue = [[], [], [], ["platform_admin"]]
 
     async with _client(app) as client:
         response = await _get_me(client, make_token(private_key))

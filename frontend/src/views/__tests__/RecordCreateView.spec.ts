@@ -28,6 +28,7 @@ import RecordCreateView from '@/views/RecordCreateView.vue'
 type MeResponse = components['schemas']['MeResponse']
 
 const ORG_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+const SELECTED_ORG_KEY = 'app-template:selected-organisation'
 
 function me(roles: string[]): MeResponse {
   return {
@@ -46,6 +47,7 @@ function me(roles: string[]): MeResponse {
         user_id: 'u1',
         status: 'active',
         created_at: '2026-01-01T00:00:00Z',
+        roles,
       },
     ],
     roles,
@@ -79,6 +81,7 @@ async function mountCreate(): Promise<{ wrapper: VueWrapper; router: Router }> {
 describe('RecordCreateView', () => {
   beforeEach(() => {
     localStorage.clear()
+    localStorage.setItem(SELECTED_ORG_KEY, ORG_ID)
     setActivePinia(createPinia())
     mockUseMeQuery.mockReset()
     mockUseCreateRecordMutation.mockReset()

@@ -1,10 +1,31 @@
 import { describe, expect, it } from 'vitest'
 
+import type { components } from '@/api/generated/openapi'
 import {
   isReadOnlyRoles,
   notificationPermissionsForRoles,
   recordPermissionsForRoles,
+  selectedOrganisationRoles,
 } from '@/lib/permissions'
+
+type MeMembershipListItem = components['schemas']['MeMembershipListItem']
+
+function membership(
+  organisationId: string,
+  roles: string[],
+  overrides: Partial<MeMembershipListItem> = {},
+): MeMembershipListItem {
+  return {
+    id: `m-${organisationId}`,
+    organisation_id: organisationId,
+    organisation_name: `Org ${organisationId}`,
+    user_id: 'u1',
+    status: 'active',
+    created_at: '2026-01-01T00:00:00Z',
+    roles,
+    ...overrides,
+  }
+}
 
 describe('recordPermissionsForRoles', () => {
   it('grants owner full record write access', () => {
@@ -47,9 +68,9 @@ describe('recordPermissionsForRoles', () => {
     })
   })
 
-  it('unions permissions across multiple roles (generous reading of /me)', () => {
-    // `/me` returns the roles across all memberships; the union is the
-    // documented approximation until the API exposes per-membership roles.
+  it('unions permissions across multiple roles within one organisation', () => {
+    // A membership may hold several roles; the union is scoped to that
+    // organisation's membership, never across organisations.
     expect(recordPermissionsForRoles(['viewer', 'manager'])).toEqual({
       canCreate: true,
       canUpdate: true,
@@ -127,7 +148,7 @@ describe('notificationPermissionsForRoles', () => {
     })
   })
 
-  it('unions permissions across multiple roles (generous reading of /me)', () => {
+  it('unions permissions across multiple roles within one membership', () => {
     expect(notificationPermissionsForRoles(['viewer', 'manager'])).toEqual({
       canRead: true,
       canManage: true,
@@ -147,5 +168,42 @@ describe('notificationPermissionsForRoles', () => {
       canRead: false,
       canManage: false,
     })
+  })
+})
+
+describe('selectedOrganisationRoles', () => {
+  const memberships = [membership('org-a', ['owner']), membership('org-b', ['viewer'])]
+
+  it('returns the roles of the selected active membership only', () => {
+    expect(selectedOrganisationRoles(memberships, 'org-a')).toEqual(['owner'])
+    expect(selectedOrganisationRoles(memberships, 'org-b')).toEqual(['viewer'])
+  })
+
+  it('never returns the union when another organisation grants a role', () => {
+    // The owner role in org-a must not leak into org-b's selected authority.
+    const viewerRoles = selectedOrganisationRoles(memberships, 'org-b')
+    expect(recordPermissionsForRoles(viewerRoles)).toEqual({
+      canCreate: false,
+      canUpdate: false,
+      canDelete: false,
+    })
+  })
+
+  it('returns undefined when no organisation is selected', () => {
+    expect(selectedOrganisationRoles(memberships, null)).toBeUndefined()
+    expect(selectedOrganisationRoles(memberships, '')).toBeUndefined()
+  })
+
+  it('returns undefined for an organisation the user does not belong to', () => {
+    expect(selectedOrganisationRoles(memberships, 'org-missing')).toBeUndefined()
+  })
+
+  it('grants nothing for a non-active membership', () => {
+    const suspended = [membership('org-a', ['owner'], { status: 'suspended' })]
+    expect(selectedOrganisationRoles(suspended, 'org-a')).toBeUndefined()
+  })
+
+  it('returns undefined when memberships are not loaded', () => {
+    expect(selectedOrganisationRoles(undefined, 'org-a')).toBeUndefined()
   })
 })

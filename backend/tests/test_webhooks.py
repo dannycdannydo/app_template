@@ -475,8 +475,14 @@ async def test_login_without_any_webhook_delivery_still_links(
     membership = make_membership(invitee, organisation.id)
     # user; the linking pass resolves the role, finds no membership, grants it
     state.lookup_queue = [invitee, member_role, None]
-    # /me payload: memberships, org role codes, platform role codes
-    state.scalars_queue = [[(membership, organisation.name)], ["member"], []]
+    # /me payload: memberships, per-membership role rows, role-code union,
+    # platform role codes
+    state.scalars_queue = [
+        [(membership, organisation.name)],
+        [(membership.id, "member")],
+        ["member"],
+        [],
+    ]
     private_key, _ = generate_key_pair()
     app = build_context_app(private_key=private_key, state=state)
 
@@ -525,7 +531,7 @@ async def test_webhook_revoked_invitation_never_grants_at_login(
 
     # Delivery 2: the invitee logs in. The revoked invitation must not grant.
     state.lookup_queue = [invitee]  # user only; the linking pass sees REVOKED
-    state.scalars_queue = [[], [], []]  # /me payload with no memberships
+    state.scalars_queue = [[], [], [], []]  # /me payload with no memberships
     async with context_client(app) as client:
         response = await client.get(
             "/api/v1/me",

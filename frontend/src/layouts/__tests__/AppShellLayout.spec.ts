@@ -51,6 +51,7 @@ const me: MeResponse = {
       user_id: 'u1',
       status: 'active',
       created_at: '2026-01-01T00:00:00Z',
+      roles: ['owner'],
     },
   ],
   roles: ['owner'],

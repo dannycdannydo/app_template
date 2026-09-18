@@ -128,7 +128,7 @@ async def test_first_login_of_configured_verified_email_grants_platform_admin(
     app = build_context_app(private_key=private_key, state=state)
     # user lookup miss -> provision; bootstrap lookup miss; platform role found
     state.lookup_queue = [None, None, make_platform_admin_role()]
-    state.scalars_queue = [[], [], ["platform_admin"]]  # memberships, roles, platform roles
+    state.scalars_queue = [[], [], [], ["platform_admin"]]  # memberships, per-membership roles, role union, platform roles
 
     async with context_client(app) as client:
         response = await _get_me(client, make_token(private_key))
@@ -162,7 +162,7 @@ async def test_repeat_login_is_a_no_op(
     app = build_context_app(private_key=private_key, state=state)
     # user found; bootstrap lookup returns the consumed record
     state.lookup_queue = [user, already_consumed]
-    state.scalars_queue = [[], [], ["platform_admin"]]
+    state.scalars_queue = [[], [], [], ["platform_admin"]]
 
     async with context_client(app) as client:
         response = await _get_me(client, make_token(private_key))
@@ -182,7 +182,7 @@ async def test_wrong_email_never_grants(bootstrap_settings: None) -> None:
     app = build_context_app(private_key=private_key, state=state)
     # user miss -> provision; bootstrap miss; the email mismatch short-circuits
     state.lookup_queue = [None, None]
-    state.scalars_queue = [[], [], []]
+    state.scalars_queue = [[], [], [], []]
 
     async with context_client(app) as client:
         response = await _get_me(client, make_token(private_key))
@@ -201,7 +201,7 @@ async def test_unverified_email_never_grants(bootstrap_settings: None) -> None:
     private_key, _ = generate_key_pair()
     app = build_context_app(private_key=private_key, state=state)
     state.lookup_queue = [None, None]
-    state.scalars_queue = [[], [], []]
+    state.scalars_queue = [[], [], [], []]
 
     async with context_client(app) as client:
         response = await _get_me(client, make_token(private_key))
@@ -224,7 +224,7 @@ async def test_configured_email_matches_case_insensitively(
     private_key, _ = generate_key_pair()
     app = build_context_app(private_key=private_key, state=state)
     state.lookup_queue = [None, None, make_platform_admin_role()]
-    state.scalars_queue = [[], [], ["platform_admin"]]
+    state.scalars_queue = [[], [], [], ["platform_admin"]]
 
     async with context_client(app) as client:
         response = await _get_me(client, make_token(private_key))
@@ -242,7 +242,7 @@ async def test_unconfigured_bootstrap_is_a_no_op() -> None:
     app = build_context_app(private_key=private_key, state=state)
     # user miss -> provision; the hook returns before any further queries
     state.lookup_queue = [None]
-    state.scalars_queue = [[], [], []]
+    state.scalars_queue = [[], [], [], []]
 
     async with context_client(app) as client:
         response = await _get_me(client, make_token(private_key))
@@ -336,7 +336,7 @@ async def test_bootstrap_grant_also_creates_configured_organisation(
         None,
         make_owner_role(),
     ]
-    state.scalars_queue = [[], [], ["platform_admin"]]
+    state.scalars_queue = [[], [], [], ["platform_admin"]]
 
     async with context_client(app) as client:
         response = await _get_me(client, make_token(private_key))

@@ -72,6 +72,28 @@ The following changes require human review before they are applied (also in `AGE
 
 `make check` must pass with zero lint errors, zero type errors, and green tests before any release. CI runs the same gate on push. Do not weaken linting, typing, or tests to make things pass.
 
+## Versioning and releases
+
+The template is released as immutable git tags named `vMAJOR.MINOR.PATCH`
+(blueprint §41). The repository tracks each post-foundation release in the
+highest-numbered `TEMPLATE_V0_N_SCOPE.md`; its `# 8. Status` block records the
+release, state, start and completion dates.
+
+- The released version is recorded in three places, which must always agree:
+  `backend/pyproject.toml` `[project].version`, `frontend/package.json`
+  `version`, and `[tool.project-template].version` in `backend/pyproject.toml`
+  (the blueprint §41 `[tool.project-template]` convention that lets clone
+  consumers infer the implemented template release).
+- A release is only `State: complete` once every scope checkpoint is checked
+  after review and package versions match the tag's `MAJOR.MINOR.PATCH`.
+- Tags are immutable. A bookkeeping mismatch (for example a scope still marked
+  planned) is corrected in a new reviewed commit; never move or rewrite a tag.
+- Each release adds an upgrade guide under `docs/upgrades/` (for example
+  `docs/upgrades/0.7-to-0.8.md`) covering changed files, new dependencies,
+  configuration, migrations, security implications and manual adoption steps.
+- `backend/tests/test_release_versions.py` enforces the version/scope
+  consistency so a release cannot drift out of step with its scope document.
+
 ## Dependency policy
 
 Do not add dependencies without documenting why. Substantial additions should be recorded in an ADR (see `docs/decisions/`).

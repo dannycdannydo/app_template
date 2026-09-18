@@ -18,7 +18,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.modules.organisations.models import (
@@ -31,8 +31,10 @@ from app.modules.users.models import User
 from app.modules.users.queries import (
     memberships_for_user_statement,
     role_codes_for_user_statement,
+    roles_by_membership_for_user_statement,
     user_by_workos_id_statement,
 )
+from app.modules.users.service import get_me_payload
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 
@@ -167,5 +169,97 @@ async def test_role_codes_for_user_statement_joins_role_graph(migrated_database:
 
             codes = (await session.scalars(role_codes_for_user_statement(user.id))).all()
             assert codes == ["administrator", "viewer"]
+    finally:
+        await engine.dispose()
+
+
+async def _seed_multi_org_user(
+    session: AsyncSession,
+    suffix: str,
+) -> tuple[User, OrganisationMembership, OrganisationMembership]:
+    """Create one user with owner in org A and viewer in org B.
+
+    Returns the user and both memberships so the /me assertions can name the
+    exact authority each organisation grants. ``suffix`` keeps the unique
+    WorkOS identity and organisation names test-specific because the migrated
+    database fixture is module-scoped and data persists across tests.
+    """
+    user = User(
+        workos_user_id=f"user_multi_org_{suffix}",
+        email=f"multi_{suffix}@example.com",
+        name="Multi Org",
+    )
+    org_a = Organisation(name=f"Owner Org {suffix}")
+    org_b = Organisation(name=f"Viewer Org {suffix}")
+    session.add_all([user, org_a, org_b])
+    await session.commit()
+
+    owner_membership = OrganisationMembership(
+        user_id=user.id, organisation_id=org_a.id, status=MembershipStatus.ACTIVE
+    )
+    viewer_membership = OrganisationMembership(
+        user_id=user.id, organisation_id=org_b.id, status=MembershipStatus.ACTIVE
+    )
+    session.add_all([owner_membership, viewer_membership])
+    await session.commit()
+
+    owner_role = await session.scalar(select(Role).where(Role.code == "owner"))
+    viewer_role = await session.scalar(select(Role).where(Role.code == "viewer"))
+    assert owner_role is not None
+    assert viewer_role is not None
+    session.add_all(
+        [
+            MembershipRole(membership_id=owner_membership.id, role_id=owner_role.id),
+            MembershipRole(membership_id=viewer_membership.id, role_id=viewer_role.id),
+        ]
+    )
+    await session.commit()
+    return user, owner_membership, viewer_membership
+
+
+async def test_roles_by_membership_statement_scopes_roles_per_organisation(
+    migrated_database: str,
+) -> None:
+    """Each role row carries the membership that grants it, not a global union."""
+    engine = create_async_engine(migrated_database, poolclass=NullPool)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            user, owner_membership, viewer_membership = await _seed_multi_org_user(session, "query")
+
+            rows = (await session.execute(roles_by_membership_for_user_statement(user.id))).all()
+            # Compare as a mapping: UUIDv7 ids generated in the same millisecond
+            # are not guaranteed to sort in insertion order.
+            assert {row[0]: row[1] for row in rows} == {
+                owner_membership.id: "owner",
+                viewer_membership.id: "viewer",
+            }
+    finally:
+        await engine.dispose()
+
+
+async def test_get_me_payload_exposes_selected_org_roles(migrated_database: str) -> None:
+    """The /me payload scopes authority to each membership, not to a union.
+
+    A user who is an owner in one organisation and a viewer in another must be
+    able to derive write affordances from the owner membership without the
+    viewer membership inheriting them (Plan P10).
+    """
+    engine = create_async_engine(migrated_database, poolclass=NullPool)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            user, _owner_membership, _viewer_membership = await _seed_multi_org_user(
+                session, "service"
+            )
+
+            me = await get_me_payload(session, user)
+            assert {entry.organisation_name: entry.roles for entry in me.memberships} == {
+                "Owner Org service": ["owner"],
+                "Viewer Org service": ["viewer"],
+            }
+            # The compatibility union still spans every membership.
+            assert me.roles == ["owner", "viewer"]
+            assert me.platform_roles == []
     finally:
         await engine.dispose()

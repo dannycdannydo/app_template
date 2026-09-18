@@ -1,10 +1,11 @@
 """Reusable user identity queries (blueprint §9).
 
 The user's organisation memberships, their distinct role codes across those
-memberships, and the lookup of an internal user by WorkOS identity are shared
-by the users service (the ``/me`` payload and provisioning). They live here so
-the join over the role graph is named in one place, matching the sibling
-``permissions`` and ``platform_admin`` query modules.
+memberships, their roles scoped to each membership, and the lookup of an
+internal user by WorkOS identity are shared by the users service (the ``/me``
+payload and provisioning). They live here so the join over the role graph is
+named in one place, matching the sibling ``permissions`` and ``platform_admin``
+query modules.
 """
 
 from __future__ import annotations
@@ -57,4 +58,27 @@ def role_codes_for_user_statement(user_id: uuid.UUID) -> Select[tuple[str]]:
         .where(OrganisationMembership.user_id == user_id)
         .distinct()
         .order_by(Role.code)
+    )
+
+
+def roles_by_membership_for_user_statement(
+    user_id: uuid.UUID,
+) -> Select[tuple[uuid.UUID, str]]:
+    """Return ``(membership_id, role_code)`` rows for every membership a user holds.
+
+    Roles are scoped to the membership that grants them, so the /me payload can
+    expose selected-organisation authority without unioning role codes across
+    tenants (Plan P10). The rows are ordered by membership and code so
+    grouping in the service is deterministic; a membership with no roles simply
+    has no rows.
+    """
+    return (
+        select(MembershipRole.membership_id, Role.code)
+        .join(Role, Role.id == MembershipRole.role_id)
+        .join(
+            OrganisationMembership,
+            OrganisationMembership.id == MembershipRole.membership_id,
+        )
+        .where(OrganisationMembership.user_id == user_id)
+        .order_by(MembershipRole.membership_id, Role.code)
     )

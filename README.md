@@ -89,7 +89,7 @@ services through `BROKER_REDIS_URL` and `RATE_LIMIT_REDIS_URL` from the host.
 This catches missing port publication and broken Docker network attachment
 that a container-internal health check cannot see.
 
-Verification: after `cp .env.example .env`, both `make dev` and `make dev-docker` must start the services and `make check` must pass with zero lint errors, zero type errors, and green tests.
+Verification: after `cp .env.example .env`, both `make dev` and `make dev-docker` must start the services and `make check` must pass with zero lint errors, zero type errors, and green tests. The complete fresh-clone and release smoke inventory (example environment, migrations, generated client, security suite, external upload, deployment Compose) is in `docs/release-checklist.md`.
 
 ## Trying the demo (login flow)
 
@@ -201,6 +201,10 @@ Day-to-day operations, scaling, monitoring and alerts: `docs/operations.md`. Bac
 
 ## Releases
 
-The template is versioned and tagged. `make check` passing is the gate for a release. Current release: v0.8 (large AI attachments and reference transfer modes). See `TEMPLATE_V0_8_SCOPE.md` §6 for the progress log.
+The template is versioned and tagged with immutable `vMAJOR.MINOR.PATCH` tags. `make check` passing is the gate for a release. Current release: **v0.8.0** (large AI attachments and reference transfer modes). See `TEMPLATE_V0_8_SCOPE.md` §6 for the progress log, `CONTRIBUTING.md` → "Versioning and releases" for the version convention, and `docs/upgrades/0.7-to-0.8.md` for the v0.7-to-v0.8 upgrade guide. The released version is recorded in `backend/pyproject.toml` (`[project].version` and `[tool.project-template].version`) and `frontend/package.json`.
 
 Development follows the branch workflow in `CONTRIBUTING.md`: work units live on `feature/*` branches and reach `main` only through reviewed pull requests, so CI runs once per merged unit rather than on every push.
+
+## Known limitations and deferred features
+
+The starter states its boundaries honestly. Notable deferred or unsupported capabilities: no malware-scanner provider is selected (`FILE_SCAN_PROVIDER=none`; the quarantine state, `ContentScanner` seam and deny-by-default gate ship, and production requires `FILE_SCAN_ACKNOWLEDGE_UNSCANNED=true`); external effects are at-least-once, never exactly-once, with ambiguous outcomes durably attention-required rather than auto-resent; Azure OpenAI, DeepSeek and local AI providers fail closed for non-inline large files; `document.ask` is bounded by `AI_ASK_MAX_SYNCHRONOUS_BYTES` with no durable asynchronous ask; and decompression-bomb/document-processing limits are post-v1. The full inventory and the fresh-clone release smoke steps are in `docs/release-checklist.md`.

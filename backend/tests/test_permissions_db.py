@@ -233,9 +233,11 @@ async def test_assign_and_remove_role_changes_grants(migrated_database: str) -> 
             # rollback expired the earlier instance.
             user_row = await session.get(User, user_id)
             assert user_row is not None
-            _memberships, me_roles, me_platform_roles = await get_me_payload(session, user_row)
-            assert me_roles == ["viewer"]
-            assert me_platform_roles == []  # no platform memberships in this flow
+            me = await get_me_payload(session, user_row)
+            assert me.roles == ["viewer"]
+            assert me.platform_roles == []  # no platform memberships in this flow
+            # Per-membership roles expose the same authority scoped to the org.
+            assert [entry.roles for entry in me.memberships] == [["viewer"]]
 
             await remove_role(
                 session,

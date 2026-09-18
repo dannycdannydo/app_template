@@ -24,21 +24,22 @@ async def me(
     session: Annotated[AsyncSession, Depends(get_db)],
     user: Annotated[User, Depends(get_current_user)],
 ) -> MeResponse:
-    """Return the current user with their memberships, roles and platform roles."""
-    memberships, roles, platform_roles = await get_me_payload(session, user)
+    """Return the current user with memberships, per-membership roles and platform roles."""
+    payload = await get_me_payload(session, user)
     return MeResponse(
         user=UserListItem.model_validate(user),
         memberships=[
             MeMembershipListItem(
-                id=membership.id,
-                organisation_id=membership.organisation_id,
-                organisation_name=organisation_name,
-                user_id=membership.user_id,
-                status=membership.status,
-                created_at=membership.created_at,
+                id=entry.membership.id,
+                organisation_id=entry.membership.organisation_id,
+                organisation_name=entry.organisation_name,
+                user_id=entry.membership.user_id,
+                status=entry.membership.status,
+                created_at=entry.membership.created_at,
+                roles=entry.roles,
             )
-            for membership, organisation_name in memberships
+            for entry in payload.memberships
         ],
-        roles=roles,
-        platform_roles=platform_roles,
+        roles=payload.roles,
+        platform_roles=payload.platform_roles,
     )
