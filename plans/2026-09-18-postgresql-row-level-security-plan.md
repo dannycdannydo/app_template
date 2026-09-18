@@ -185,55 +185,55 @@ Expected engineering effort: approximately 2–4 days, excluding review.
 
 Database roles and policy:
 
-- [ ] Add a dedicated non-owner, non-superuser, non-`BYPASSRLS` prototype
+- [x] Add a dedicated non-owner, non-superuser, non-`BYPASSRLS` prototype
       runtime role.
-- [ ] Ensure migration/schema-owner credentials are not used by the normal
+- [x] Ensure migration/schema-owner credentials are not used by the normal
       application path.
-- [ ] Add reversible migrations enabling and forcing RLS on `records` and
+- [x] Add reversible migrations enabling and forcing RLS on `records` and
       `record_revisions`.
-- [ ] Use default-deny policies based on transaction-local organisation
+- [x] Use default-deny policies based on transaction-local organisation
       context.
-- [ ] Make absent, empty or malformed context return no tenant rows or fail
+- [x] Make absent, empty or malformed context return no tenant rows or fail
       safely; it must never mean unrestricted access.
-- [ ] Apply equivalent `USING` and `WITH CHECK` constraints so inserts and
+- [x] Apply equivalent `USING` and `WITH CHECK` constraints so inserts and
       updates cannot create or move rows into another organisation.
 
 Context propagation:
 
-- [ ] Set context only after the active membership and permission path has
+- [x] Set context only after the active membership and permission path has
       validated the selected organisation.
-- [ ] Set context with a parameterised transaction-local operation; do not
+- [x] Set context with a parameterised transaction-local operation; do not
       interpolate request values into SQL.
-- [ ] Ensure the context and protected query execute in the same transaction.
-- [ ] Clear context automatically on commit and rollback.
-- [ ] Keep platform, health, authentication and public routes functional
+- [x] Ensure the context and protected query execute in the same transaction.
+- [x] Clear context automatically on commit and rollback.
+- [x] Keep platform, health, authentication and public routes functional
       without fabricating tenant context.
-- [ ] Keep existing application-level `organisation_id` predicates and
+- [x] Keep existing application-level `organisation_id` predicates and
       foreign-resource `404` behaviour.
 
 Prototype tests:
 
-- [ ] Prove organisation A can access its rows and cannot select, insert,
+- [x] Prove organisation A can access its rows and cannot select, insert,
       update or delete organisation B rows.
-- [ ] Prove an unscoped query still returns only the authorised organisation's
+- [x] Prove an unscoped query still returns only the authorised organisation's
       rows.
-- [ ] Prove missing context cannot access either organisation.
-- [ ] Prove `WITH CHECK` rejects a mismatched insert and tenant-key update.
-- [ ] Prove context cannot survive commit, rollback, exception, cancellation,
+- [x] Prove missing context cannot access either organisation.
+- [x] Prove `WITH CHECK` rejects a mismatched insert and tenant-key update.
+- [x] Prove context cannot survive commit, rollback, exception, cancellation,
       timeout or pooled-connection reuse.
-- [ ] Prove a user who is owner in A and viewer in B receives the correct
+- [x] Prove a user who is owner in A and viewer in B receives the correct
       context and application permissions in each request.
-- [ ] Prove ordinary runtime credentials cannot disable policies, alter the
+- [x] Prove ordinary runtime credentials cannot disable policies, alter the
       schema or assume the owner role.
-- [ ] Measure query plans and latency for representative list/detail/write
+- [x] Measure query plans and latency for representative list/detail/write
       operations.
 
 P2 completion evidence:
 
-- [ ] Real-PostgreSQL tests demonstrate default denial and safe pool reuse.
-- [ ] Migration upgrade, downgrade and re-upgrade pass.
-- [ ] Existing records API behaviour and security tests remain green.
-- [ ] The prototype records its performance and operational findings.
+- [x] Real-PostgreSQL tests demonstrate default denial and safe pool reuse.
+- [x] Migration upgrade, downgrade and re-upgrade pass.
+- [x] Existing records API behaviour and security tests remain green.
+- [x] The prototype records its performance and operational findings.
 
 Adoption gate (one reviewed decision after P2):
 

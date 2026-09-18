@@ -72,6 +72,77 @@ def test_rejects_missing_database_url() -> None:
         Settings(app_env="development", database_url="")
 
 
+def test_database_runtime_url_defaults_empty_for_the_owner_fallback() -> None:
+    """RLS prototype (ADR-0022): no runtime URL means the owner URL is used."""
+    settings = Settings(app_env="development", database_url="postgresql+asyncpg://owner")
+    assert settings.database_runtime_url == ""
+
+
+def test_resolve_database_url_prefers_the_runtime_credential() -> None:
+    """A configured runtime credential always wins on the normal app path."""
+    from app.db.session import resolve_database_url
+
+    settings = Settings(
+        app_env="test",
+        database_url="postgresql+asyncpg://owner",
+        database_runtime_url="postgresql+asyncpg://runtime",
+    )
+    assert resolve_database_url(settings) == "postgresql+asyncpg://runtime"
+
+
+def test_resolve_database_url_allows_the_owner_fallback_outside_production() -> None:
+    """The owner URL is the explicit local-development/test arrangement."""
+    from app.db.session import resolve_database_url
+
+    settings = Settings(app_env="test", database_url="postgresql+asyncpg://owner")
+    assert resolve_database_url(settings) == "postgresql+asyncpg://owner"
+
+
+def test_resolve_database_url_requires_the_runtime_credential_in_production() -> None:
+    """Production must never fall back to the schema-owner credential."""
+    from app.db.session import resolve_database_url
+
+    with pytest.raises(RuntimeError, match="DATABASE_RUNTIME_URL"):
+        resolve_database_url(_prod_ai(ai_enabled_providers=[]))
+
+
+def test_session_factory_binds_the_runtime_credential() -> None:
+    """The factory the app actually uses is built from the runtime URL."""
+    import asyncio
+
+    from app.db.session import build_session_factory
+
+    settings = Settings(
+        app_env="test",
+        database_url="postgresql+asyncpg://owner",
+        database_runtime_url="postgresql+asyncpg://runtime",
+    )
+    engine, factory = build_session_factory(settings)
+    try:
+        assert engine.url.render_as_string(hide_password=False) == "postgresql+asyncpg://runtime"
+        assert factory.kw["bind"] is engine
+    finally:
+        asyncio.run(engine.dispose())
+
+
+def test_database_runtime_url_accepts_a_postgres_url() -> None:
+    settings = Settings(
+        app_env="development",
+        database_url="postgresql+asyncpg://owner",
+        database_runtime_url="postgresql+asyncpg://runtime",
+    )
+    assert settings.database_runtime_url == "postgresql+asyncpg://runtime"
+
+
+def test_database_runtime_url_rejects_non_postgres() -> None:
+    with pytest.raises(ValidationError, match="database_runtime_url"):
+        Settings(
+            app_env="development",
+            database_url="postgresql+asyncpg://owner",
+            database_runtime_url="sqlite:///runtime.db",
+        )
+
+
 def test_production_requires_workos_credentials() -> None:
     with pytest.raises(ValidationError, match="workos_api_key"):
         Settings(

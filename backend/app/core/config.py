@@ -83,6 +83,19 @@ class Settings(BaseSettings):
         default="",
         description="Async SQLAlchemy database URL, e.g. postgresql+asyncpg://user:pass@host:5432/db",
     )
+    database_runtime_url: str = Field(
+        default="",
+        description=(
+            "Async SQLAlchemy URL for the restricted, non-owner application "
+            "runtime role (RLS prototype, ADR-0022). When set it is always used "
+            "by the normal application path; DATABASE_URL remains the "
+            "schema-owner/migration credential. Production requires this to be "
+            "set (see app.db.session.resolve_database_url); outside production "
+            "an empty value uses DATABASE_URL for local development and the "
+            "default test profile, where the local owner is a superuser and no "
+            "policy is enforced."
+        ),
+    )
     broker_redis_url: str = Field(
         default="",
         description="Dedicated Redis endpoint for Dramatiq broker state",
@@ -901,6 +914,10 @@ class Settings(BaseSettings):
             self.rate_limit_redis_url = self.rate_limit_redis_url or self.redis_url
         if not self.database_url.startswith(("postgresql", "postgres")):
             raise ValueError("database_url must be a PostgreSQL URL")
+        if self.database_runtime_url and not self.database_runtime_url.startswith(
+            ("postgresql", "postgres")
+        ):
+            raise ValueError("database_runtime_url must be a PostgreSQL URL")
         # The execution lease must outlive the standard task time limit by at
         # least 60 seconds (durable delivery plan P2): a lease that expires
         # while the owning message is still within its time limit would let a
