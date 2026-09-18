@@ -84,6 +84,14 @@ class Invitation(Base, TimestampMixin):
     workos_invitation_id: Mapped[str | None] = mapped_column(
         String(255), unique=True, nullable=True, default=None
     )
+    # The WorkOS organisation the invitation was issued against, captured at
+    # send time. Login-time linking revalidates the live WorkOS invitation and
+    # requires its organisation to equal this value, so a local row whose
+    # provider id was corrupted or cross-wired to another tenant's invitation
+    # cannot grant a membership (plan P1).
+    workos_organisation_id: Mapped[str | None] = mapped_column(
+        String(255), nullable=True, default=None
+    )
     invited_by_user_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
     )

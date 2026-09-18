@@ -33,6 +33,7 @@ from tests.context_helpers import FakeWorkOSInvitationsProvider
 
 from app.core.exceptions import BadRequestError, ConflictError
 from app.core.security import UserProfile, UserProfileClient
+from app.integrations.workos.invitations import WorkOSInvitation
 from app.modules.audit.models import AuditEvent
 from app.modules.audit.service import (
     ACTION_PLATFORM_ADMIN_LOCKOUT,
@@ -121,7 +122,9 @@ async def _seed_user(session: AsyncSession, *, label: str, is_active: bool = Tru
 async def _seed_invitation(
     session: AsyncSession, *, invitee: User, role_code: str = "member"
 ) -> tuple[Organisation, Invitation]:
-    organisation = Organisation(name=f"Race Org {_unique()}")
+    organisation = Organisation(
+        name=f"Race Org {_unique()}", workos_organisation_id=f"org_{_unique()}"
+    )
     session.add(organisation)
     await session.flush()
     invitation = Invitation(
@@ -129,6 +132,7 @@ async def _seed_invitation(
         email=invitee.email,
         role_code=role_code,
         workos_invitation_id=f"inv_{_unique()}",
+        workos_organisation_id=organisation.workos_organisation_id,
         invited_by_user_id=invitee.id,
         status=InvitationStatus.SENT,
         expires_at=datetime.now(UTC) + timedelta(days=7),
@@ -138,21 +142,45 @@ async def _seed_invitation(
     return organisation, invitation
 
 
+def _provider_for(invitation: Invitation) -> FakeWorkOSInvitationsProvider:
+    """Build a provider whose live view of the invitation is still pending."""
+    assert invitation.workos_invitation_id is not None
+    return FakeWorkOSInvitationsProvider(
+        catalogue={
+            invitation.workos_invitation_id: WorkOSInvitation(
+                id=invitation.workos_invitation_id,
+                email=invitation.email,
+                organisation_id=invitation.workos_organisation_id,
+                state="pending",
+                expires_at=invitation.expires_at,
+            )
+        }
+    )
+
+
 async def _accept_with_session(
-    session: AsyncSession, *, user_id: uuid.UUID, email: str
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    email: str,
+    provider: FakeWorkOSInvitationsProvider,
 ) -> list[Invitation]:
     user = await session.get(User, user_id)
     assert user is not None
     return await invitations_service.link_invitation_on_login(
-        session, user, _VerifiedProfileClient(email)
+        session, user, _VerifiedProfileClient(email), provider
     )
 
 
 async def _accept(
-    session_factory: async_sessionmaker[AsyncSession], *, user_id: uuid.UUID, email: str
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    user_id: uuid.UUID,
+    email: str,
+    provider: FakeWorkOSInvitationsProvider,
 ) -> list[Invitation]:
     async with session_factory() as session:
-        return await _accept_with_session(session, user_id=user_id, email=email)
+        return await _accept_with_session(session, user_id=user_id, email=email, provider=provider)
 
 
 async def _revoke(
@@ -254,7 +282,12 @@ async def test_accept_vs_revoke_serialises_on_the_invitation_row(
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(asyncio.shield(revoke_task), timeout=BLOCKED_TIMEOUT_SECONDS)
 
-        accepted = await _accept_with_session(session_a, user_id=invitee.id, email=invitee.email)
+        accepted = await _accept_with_session(
+            session_a,
+            user_id=invitee.id,
+            email=invitee.email,
+            provider=_provider_for(invitation),
+        )
         assert len(accepted) == 1
         await session_a.close()
 
@@ -292,7 +325,12 @@ async def test_acceptance_never_grants_after_a_committed_revoke(
         assert locked is not None
 
         accept_task = asyncio.create_task(
-            _accept(session_factory, user_id=invitee.id, email=invitee.email)
+            _accept(
+                session_factory,
+                user_id=invitee.id,
+                email=invitee.email,
+                provider=_provider_for(invitation),
+            )
         )
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(asyncio.shield(accept_task), timeout=BLOCKED_TIMEOUT_SECONDS)
@@ -331,8 +369,18 @@ async def test_duplicate_first_login_grants_one_membership(
             _organisation, invitation = await _seed_invitation(session, invitee=invitee)
 
         first, second = await asyncio.gather(
-            _accept(session_factory, user_id=invitee.id, email=invitee.email),
-            _accept(session_factory, user_id=invitee.id, email=invitee.email),
+            _accept(
+                session_factory,
+                user_id=invitee.id,
+                email=invitee.email,
+                provider=_provider_for(invitation),
+            ),
+            _accept(
+                session_factory,
+                user_id=invitee.id,
+                email=invitee.email,
+                provider=_provider_for(invitation),
+            ),
         )
         assert sorted([len(first), len(second)]) == [0, 1]
 
@@ -588,7 +636,12 @@ async def test_webhook_revoke_blocks_on_invitation_lock_and_acceptance_wins(
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(asyncio.shield(webhook_task), timeout=BLOCKED_TIMEOUT_SECONDS)
 
-        accepted = await _accept_with_session(session_a, user_id=invitee.id, email=invitee.email)
+        accepted = await _accept_with_session(
+            session_a,
+            user_id=invitee.id,
+            email=invitee.email,
+            provider=_provider_for(invitation),
+        )
         assert len(accepted) == 1
         await session_a.close()
 
@@ -618,7 +671,12 @@ async def test_acceptance_never_grants_after_committed_webhook_revoke(
         assert locked is not None
 
         accept_task = asyncio.create_task(
-            _accept(session_factory, user_id=invitee.id, email=invitee.email)
+            _accept(
+                session_factory,
+                user_id=invitee.id,
+                email=invitee.email,
+                provider=_provider_for(invitation),
+            )
         )
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(asyncio.shield(accept_task), timeout=BLOCKED_TIMEOUT_SECONDS)
@@ -692,10 +750,23 @@ async def test_retry_reacquires_lock_and_honours_webhook_after_rollback(
             user = await session.get(User, invitee_id)
             assert user is not None
             proxy = _RollbackHookSession(session, hook)
+            assert workos_invitation_id is not None
+            provider = FakeWorkOSInvitationsProvider(
+                catalogue={
+                    workos_invitation_id: WorkOSInvitation(
+                        id=workos_invitation_id,
+                        email=invitee_email,
+                        organisation_id=organisation.workos_organisation_id,
+                        state="pending",
+                        expires_at=datetime.now(UTC) + timedelta(days=7),
+                    )
+                }
+            )
             accepted = await invitations_service.link_invitation_on_login(
                 cast(AsyncSession, proxy),
                 user,
                 _VerifiedProfileClient(invitee_email),
+                provider,
             )
         assert accepted == []
         assert injected is True

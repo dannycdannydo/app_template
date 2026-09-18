@@ -29,6 +29,10 @@ from app.core.security import (
     get_session_validator,
     get_user_profile_client,
 )
+from app.integrations.workos.invitations import (
+    WorkOSInvitation,
+    get_workos_invitations_client,
+)
 from app.main import create_app
 from app.modules.invitations.models import Invitation
 from app.modules.organisations.models import MembershipStatus, Organisation, OrganisationMembership
@@ -130,6 +134,19 @@ class FailingProfileClient(UserProfileClient):
         )
 
 
+class NoInvitationsProvider:
+    """A no-op invitations adapter: these tests stage no pending invitation."""
+
+    async def send_invitation(self, *, email: str, organisation_id: str) -> WorkOSInvitation:
+        raise AssertionError("no invitation should be sent in the auth tests")
+
+    async def revoke_invitation(self, workos_invitation_id: str) -> None:
+        raise AssertionError("no invitation should be revoked in the auth tests")
+
+    async def get_invitation(self, workos_invitation_id: str) -> WorkOSInvitation | None:
+        return None
+
+
 def _make_user(*, is_active: bool = True, workos_user_id: str = WORKOS_USER_ID) -> User:
     user = User(workos_user_id=workos_user_id, email="ada@example.com", name="Ada Lovelace")
     user.id = uuid.uuid4()
@@ -164,6 +181,7 @@ def _build_app(
     app.dependency_overrides[get_db] = override_db
     app.dependency_overrides[get_session_validator] = lambda: build_validator(private_key)
     app.dependency_overrides[get_user_profile_client] = lambda: profiles or FakeProfileClient(state)
+    app.dependency_overrides[get_workos_invitations_client] = lambda: NoInvitationsProvider()
     return app
 
 

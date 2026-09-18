@@ -39,18 +39,23 @@ def invitations_count_statement(*, organisation_id: uuid.UUID) -> Select[tuple[i
     )
 
 
-def pending_invitations_statement(email: str) -> Select[tuple[Invitation]]:
+def pending_invitations_statement(
+    email: str, *, for_update: bool = True
+) -> Select[tuple[Invitation]]:
     """Return a statement selecting grantable invitations for one email.
 
     ``sent`` invitations whose expiry has not passed, matched case-insensitively
-    against the (normalised) email of the authenticated user, locked ``FOR
-    UPDATE`` so the acceptance transition serialises against revoke and webhook
-    (plan P7). The Python-side re-check in the linking service guards the same
-    conditions again because between this SELECT and the INSERT another
-    transaction (e.g. a webhook refresh, Scope §6.8) may have revoked the
-    invitation.
+    against the (normalised) email of the authenticated user. By default the
+    rows are locked ``FOR UPDATE`` so the acceptance transition serialises
+    against revoke and webhook (plan P7). The linking service first reads the
+    candidates *without* the lock (``for_update=False``) to revalidate them at
+    WorkOS, so no provider I/O is performed while a row lock is held, then
+    re-reads them locked before granting (plan P1). The Python-side re-check in
+    the linking service guards the same conditions again because between the
+    SELECT and the INSERT another transaction (e.g. a webhook refresh, Scope
+    §6.8) may have revoked the invitation.
     """
-    return (
+    statement = (
         select(Invitation)
         .where(
             Invitation.status == InvitationStatus.SENT,
@@ -58,5 +63,5 @@ def pending_invitations_statement(email: str) -> Select[tuple[Invitation]]:
             func.lower(Invitation.email) == email.strip().lower(),
         )
         .order_by(Invitation.created_at)
-        .with_for_update()
     )
+    return statement.with_for_update() if for_update else statement

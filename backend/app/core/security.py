@@ -18,6 +18,13 @@ Design notes:
   contain the client id.
 - The webhook helper accepts timestamps in seconds or milliseconds because the
   WorkOS documentation is inconsistent about the unit.
+- A validated session is a *bounded* context (plan P1): the raw claim set is
+  deliberately not exposed, so request processing can only act on the identity
+  fields the application has explicitly chosen to trust. The token's total
+  lifetime (``exp - iat``) is capped by ``WORKOS_JWT_MAX_LIFETIME_SECONDS`` and
+  a WorkOS ``act`` impersonator claim is captured for the auth boundary to
+  reject (see ``get_current_user``); the policy lives in ``app/api/dependencies``
+  where the session is consumed.
 """
 
 from __future__ import annotations
@@ -27,6 +34,7 @@ import hashlib
 import hmac
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from typing import Any, ClassVar, Protocol, cast
 
@@ -55,12 +63,28 @@ class InvalidSessionError(Exception):
 
 @dataclass(frozen=True)
 class ValidatedSession:
-    """The claims of a validated WorkOS session token."""
+    """A bounded, validated WorkOS session context (plan P1).
+
+    Only the identity fields the application acts on are retained; the raw
+    claim set is deliberately absent so a later code path cannot start trusting
+    a claim that was never reviewed. ``authentication_time`` comes from the
+    optional ``auth_time`` claim (the default WorkOS access token omits it) and
+    ``impersonator`` from the ``act`` impersonator claim; the auth boundary
+    rejects an impersonated session.
+    """
 
     workos_user_id: str
     session_id: str | None
+    issued_at: datetime
+    expires_at: datetime
     organisation_id: str | None
-    claims: dict[str, Any]
+    authentication_time: datetime | None
+    impersonator: str | None
+
+    @property
+    def is_impersonated(self) -> bool:
+        """True when the token carries a WorkOS ``act`` impersonator claim."""
+        return self.impersonator is not None
 
 
 @dataclass(frozen=True)
@@ -82,7 +106,7 @@ class SessionValidator(Protocol):
     """Validates a Bearer session token without trusting any client input."""
 
     async def validate_token(self, token: str) -> ValidatedSession:
-        """Validate the token and return its claims; raise ``InvalidSessionError``."""
+        """Validate the token and return its bounded context; raise ``InvalidSessionError``."""
         ...
 
 
@@ -92,6 +116,65 @@ class UserProfileClient(Protocol):
     async def get_profile(self, workos_user_id: str) -> UserProfile:
         """Return the profile for a WorkOS user; raise on unknown users."""
         ...
+
+
+def _claim_datetime(claims: dict[str, Any], name: str) -> datetime:
+    """Convert a required numeric JWT timestamp claim to an aware datetime.
+
+    A missing, non-numeric or malformed value is an invalid token; the claim is
+    never surfaced to the caller.
+    """
+    value = claims.get(name)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise InvalidSessionError("invalid_token")
+    try:
+        return datetime.fromtimestamp(value, tz=UTC)
+    except (OverflowError, OSError, ValueError) as exc:
+        raise InvalidSessionError("invalid_token") from exc
+
+
+def _optional_claim_datetime(claims: dict[str, Any], name: str) -> datetime | None:
+    """Convert an optional numeric JWT timestamp claim, or None when absent.
+
+    Present-but-malformed is rejected (fail closed) rather than ignored.
+    """
+    if name not in claims:
+        return None
+    return _claim_datetime(claims, name)
+
+
+def _optional_claim_string(claims: dict[str, Any], name: str) -> str | None:
+    """Convert an optional non-empty string claim, or None when absent.
+
+    Present-but-malformed is rejected (fail closed): the bounded authenticated
+    session context must never carry an arbitrary object copied straight from
+    the token, so a wrong-typed or empty value is an invalid token.
+    """
+    if name not in claims:
+        return None
+    value = claims.get(name)
+    if not isinstance(value, str) or not value:
+        raise InvalidSessionError("invalid_token")
+    return value
+
+
+def _impersonator(claims: dict[str, Any]) -> str | None:
+    """Return the WorkOS impersonator identity from the ``act`` claim, if any.
+
+    WorkOS marks an impersonated session with an ``act`` claim carrying the
+    dashboard user's ``sub``. A malformed ``act`` still marks the session as
+    impersonated so the auth boundary rejects it.
+    """
+    act = claims.get("act")
+    if act is None:
+        return None
+    if isinstance(act, dict):
+        act_claims = cast("dict[str, Any]", act)
+        sub = act_claims.get("sub")
+        return sub if isinstance(sub, str) and sub else "unknown"
+    if isinstance(act, str) and act:
+        return act
+    return "unknown"
 
 
 class WorkOSSessionValidator:
@@ -115,11 +198,13 @@ class WorkOSSessionValidator:
         api_base_url: str,
         issuer: str,
         leeway_seconds: float,
+        max_lifetime_seconds: float = 3600.0,
         jwks_client: PyJWKClient | None = None,
     ) -> None:
         self._client_id = client_id
         self._expected_issuer = issuer
         self._leeway = leeway_seconds
+        self._max_lifetime = max_lifetime_seconds
         self._jwks = jwks_client or PyJWKClient(f"{api_base_url}sso/jwks/{client_id}")
 
     async def validate_token(self, token: str) -> ValidatedSession:
@@ -179,11 +264,23 @@ class WorkOSSessionValidator:
         if not isinstance(session_id, str) or not session_id:
             raise InvalidSessionError("invalid_token")
 
+        issued_at = _claim_datetime(claims, "iat")
+        expires_at = _claim_datetime(claims, "exp")
+        # A token whose total lifetime exceeds the reviewed maximum is rejected
+        # even though ``exp`` is still in the future (plan P1 decision 2).
+        # This bounds the offline revocation window to at most the maximum.
+        lifetime = expires_at - issued_at
+        if lifetime <= timedelta(0) or lifetime > timedelta(seconds=self._max_lifetime):
+            raise InvalidSessionError("excessive_lifetime")
+
         return ValidatedSession(
             workos_user_id=sub,
             session_id=session_id,
-            organisation_id=claims.get("org_id"),
-            claims=claims,
+            issued_at=issued_at,
+            expires_at=expires_at,
+            organisation_id=_optional_claim_string(claims, "org_id"),
+            authentication_time=_optional_claim_datetime(claims, "auth_time"),
+            impersonator=_impersonator(claims),
         )
 
 
@@ -315,6 +412,7 @@ def get_session_validator() -> SessionValidator:
         api_base_url=settings.workos_api_base_url,
         issuer=settings.workos_jwt_issuer,
         leeway_seconds=settings.workos_jwt_leeway,
+        max_lifetime_seconds=settings.workos_jwt_max_lifetime_seconds,
     )
 
 

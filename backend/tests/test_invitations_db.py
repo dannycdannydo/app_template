@@ -121,6 +121,7 @@ async def test_invitations_table_shape(migrated_database: str) -> None:
             "email",
             "role_code",
             "workos_invitation_id",
+            "workos_organisation_id",
             "invited_by_user_id",
             "status",
             "expires_at",
@@ -129,6 +130,9 @@ async def test_invitations_table_shape(migrated_database: str) -> None:
         }
         assert required <= set(columns)
         assert columns["workos_invitation_id"].is_nullable == "YES"
+        # Plan P1: the issuance-time tenant binding is additive and nullable so
+        # pre-existing rows stay valid; they fail closed at acceptance.
+        assert columns["workos_organisation_id"].is_nullable == "YES"
         for name in ("organisation_id", "email", "invited_by_user_id", "expires_at"):
             assert columns[name].is_nullable == "NO"
 
@@ -174,13 +178,14 @@ async def test_invite_to_accept_journey_round_trips(migrated_database: str) -> N
             assert organisation is not None
             # The pre-existing org has no mapping; the lazy backfill runs at
             # first invite and persists with the same transaction.
+            workos_invitations = FakeWorkOSInvitationsProvider()
             invitation = await service.invite_user(
                 session,
                 actor=inviter,
                 organisation_id=organisation_id,
                 email="ada@example.com",
                 role_code="member",
-                workos_invitations=FakeWorkOSInvitationsProvider(),
+                workos_invitations=workos_invitations,
                 workos_organisations=FakeWorkOSOrganizationsProvider(),
             )
             assert organisation.workos_organisation_id is not None
@@ -204,7 +209,10 @@ async def test_invite_to_accept_journey_round_trips(migrated_database: str) -> N
             invitee = await session.get(User, invitee.id)
             assert invitee is not None
             accepted = await service.link_invitation_on_login(
-                session, invitee, _VerifiedProfileClient("ada@example.com")
+                session,
+                invitee,
+                _VerifiedProfileClient("ada@example.com"),
+                workos_invitations,
             )
             await session.commit()
             assert len(accepted) == 1
@@ -244,7 +252,10 @@ async def test_invite_to_accept_journey_round_trips(migrated_database: str) -> N
             invitee = await session.get(User, invitee.id)
             assert invitee is not None
             accepted_again = await service.link_invitation_on_login(
-                session, invitee, _VerifiedProfileClient("ada@example.com")
+                session,
+                invitee,
+                _VerifiedProfileClient("ada@example.com"),
+                workos_invitations,
             )
             await session.commit()
             assert accepted_again == []
