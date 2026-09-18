@@ -128,7 +128,12 @@ async def test_first_login_of_configured_verified_email_grants_platform_admin(
     app = build_context_app(private_key=private_key, state=state)
     # user lookup miss -> provision; bootstrap lookup miss; platform role found
     state.lookup_queue = [None, None, make_platform_admin_role()]
-    state.scalars_queue = [[], [], [], ["platform_admin"]]  # memberships, per-membership roles, role union, platform roles
+    state.scalars_queue = [
+        [],
+        [],
+        [],
+        ["platform_admin"],
+    ]  # memberships, per-membership roles, role union, platform roles
 
     async with context_client(app) as client:
         response = await _get_me(client, make_token(private_key))

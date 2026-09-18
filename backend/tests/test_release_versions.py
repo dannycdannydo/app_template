@@ -81,10 +81,7 @@ def test_release_has_an_upgrade_guide() -> None:
         version = tomllib.load(handle)["project"]["version"]
     major, minor, _patch = version.split(".")
     target = f"{major}.{minor}"
-    guides = sorted(
-        path.name for path in UPGRADES_DIR.glob(f"*-to-{target}.md") if path.is_file()
-    )
+    guides = sorted(path.name for path in UPGRADES_DIR.glob(f"*-to-{target}.md") if path.is_file())
     assert guides, (
-        f"missing upgrade guide for {target} under "
-        f"{UPGRADES_DIR.relative_to(REPOSITORY_ROOT)}"
+        f"missing upgrade guide for {target} under {UPGRADES_DIR.relative_to(REPOSITORY_ROOT)}"
     )
