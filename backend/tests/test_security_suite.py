@@ -486,12 +486,13 @@ async def _request(
 # --- Completeness guard: the table and the registered surface stay in sync ---
 
 
-def _iter_http_routes(app: FastAPI) -> Iterator[Route]:
+def iter_http_routes(app: FastAPI) -> Iterator[Route]:
     """Yield every concrete HTTP route, unwrapping FastAPI's deferred inclusion.
 
     FastAPI 0.141+ registers ``include_router`` calls as lazy ``_IncludedRouter``
     objects instead of flattening their routes into ``app.routes``, so a plain
-    walk would miss all ``/api/v1`` endpoints.
+    walk would miss all ``/api/v1`` endpoints. Shared test-support so any suite
+    can inspect the real registered route surface.
     """
     for route in app.routes:
         if isinstance(route, Route):
@@ -513,7 +514,7 @@ def test_no_protected_route_is_left_out() -> None:
     # Signature-gated webhook routes are counted too, though they are held in a
     # separate table because the session-based matrix does not apply to them.
     registered: set[tuple[str, str]] = set()
-    for route in _iter_http_routes(create_app()):
+    for route in iter_http_routes(create_app()):
         if not route.path.startswith("/api/v1"):
             continue
         for method in route.methods or ():

@@ -1,6 +1,6 @@
 # Identity and Application-Level Tenant-Isolation Hardening Plan
 
-Status: Active
+Status: Complete
 
 Relates to: `Internal_Custom_Application_Starter_Architecture_v2.md` BP
 §§8–13 and §§28–31; `plans/IDENTITY_AND_TENANT_SECURITY_HARDENING_PLAN.md`;
@@ -197,28 +197,28 @@ Dependencies: P1
 
 Human review required before application: tenant isolation.
 
-- [ ] Create a reusable real-PostgreSQL fixture containing organisation A,
+- [x] Create a reusable real-PostgreSQL fixture containing organisation A,
       organisation B, an A-only user, a B-only user, a user who is owner/admin
       in A but viewer in B, suspended membership, and a platform-only user.
-- [ ] Maintain a small checked-in registry of current organisation-owned and
+- [x] Maintain a small checked-in registry of current organisation-owned and
       user-private tables/resources and their ownership columns.
-- [ ] Test list, detail, create, update, delete and action routes, as applicable,
+- [x] Test list, detail, create, update, delete and action routes, as applicable,
       with valid foreign resource IDs.
-- [ ] Test indirect access paths that currently exist, including files/jobs,
+- [x] Test indirect access paths that currently exist, including files/jobs,
       notifications/deliveries and AI requests/references.
-- [ ] Prove pagination totals, filters, downloads and generated capabilities do
+- [x] Prove pagination totals, filters, downloads and generated capabilities do
       not reveal foreign-row existence.
-- [ ] Prove roles in organisation A grant no API or visible UI capability in B,
+- [x] Prove roles in organisation A grant no API or visible UI capability in B,
       including for the same multi-membership user.
-- [ ] Prove platform authority alone does not grant tenant-data access and
+- [x] Prove platform authority alone does not grant tenant-data access and
       organisation roles do not grant platform access.
-- [ ] Keep `PROTECTED_ROUTES` and its cross-organisation/viewer-write checks
+- [x] Keep `PROTECTED_ROUTES` and its cross-organisation/viewer-write checks
       complete for every protected route.
-- [ ] Add a lightweight structural check or review checklist requiring every
+- [x] Add a lightweight structural check or review checklist requiring every
       new tenant-owned model to state its isolation strategy.
-- [ ] Prove the registry covers every current tenant-owned table.
-- [ ] Pass the full two-organisation role matrix against real PostgreSQL.
-- [ ] Demonstrate failure when a representative organisation predicate is
+- [x] Prove the registry covers every current tenant-owned table.
+- [x] Pass the full two-organisation role matrix against real PostgreSQL.
+- [x] Demonstrate failure when a representative organisation predicate is
       deliberately omitted in test-only code.
 
 ## Reference map
