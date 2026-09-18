@@ -262,6 +262,13 @@ worker context.
 Expected engineering effort after a successful prototype: approximately 5–8
 days for core user-facing data, excluding review.
 
+Progress: **group 0 (`records`, `record_revisions`) is delivered** — production
+enablement migration `d2e3f4a5b6c7`, merged in PR #96. Groups 1–4 (files;
+notifications; AI data; jobs and organisation settings) remain, in the order
+recorded in `docs/rls-rollout.md` §3. The aggregate checkboxes below stay
+unchecked until every group lands; pick up the next group from
+`docs/rls-rollout.md` §3 rather than re-doing group 0.
+
 - [ ] Roll out policies in bounded migrations, beginning with the `records`
       group (group 0: `records`, `record_revisions`) — a production
       enablement migration separate from the P2 prototype, with its own
@@ -330,7 +337,7 @@ P4 completion evidence:
 | --- | --- | --- |
 | P1 | BP §§8–13, §§28–31 and §§37–39; `SECURITY.md`; `docs/operations.md`; `docs/backup-and-recovery.md`; `AGENTS.md`; `docs/rls-table-inventory.md`; `backend/tests/tenant_isolation_registry.py`; ORM models under `backend/app/modules/` and `backend/app/ai/persistence/` | Table classification, tenant keys and ownership paths, readers/writers and access paths, raw SQL and bulk/relationship access, connection types, role and control-plane design, threat model and prototype criteria |
 | P2 | BP §§9–11, §30 and §31; `docs/decisions/0022-postgresql-row-level-security.md`; `backend/app/db/session.py`; `backend/app/api/dependencies.py`; `backend/tests/test_org_isolation_matrix_db.py`; `backend/alembic/` | Separate runtime/owner roles, transaction-local context propagation, default-deny `USING`/`WITH CHECK` policies, pool-reuse safety, real-PostgreSQL tests, migration reversibility and performance measurement |
-| P3 | BP §§9, 11, §§17–20 and §§28–31; `docs/decisions/0022-postgresql-row-level-security.md`; `backend/app/modules/` services and `queries.py`; `backend/tests/org_isolation_helpers.py` | Bounded table-group rollout, user-private policies, worker context from durable rows, outbox/retry/reconciliation without bypass, index and plan review, error non-disclosure |
+| P3 | BP §§9, 11, §§17–20 and §§28–31; `docs/decisions/0022-postgresql-row-level-security.md`; `docs/rls-rollout.md`; `backend/app/modules/` services and `queries.py`; `backend/tests/org_isolation_helpers.py` | Bounded table-group rollout and its per-group progress, user-private policies, worker context from durable rows, outbox/retry/reconciliation without bypass, index and plan review, error non-disclosure |
 | P4 | BP §§8–10, §§28–31 and §39; `docs/decisions/0022-postgresql-row-level-security.md`; `backend/app/modules/platform_admin/`, `invitations/` and `permissions/`; `docs/backup-and-recovery.md` | Pre-tenant membership lookup, identity/control-plane classification, indirect-table tenant keys, nullable-tenant event treatment, explicit platform/operational paths, role-ownership and `BYPASSRLS` deployment checks |
 
 ## API, data and security impact
