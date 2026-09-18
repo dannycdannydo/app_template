@@ -127,8 +127,12 @@ async def create_record(
         action=RecordRevisionAction.CREATED,
         actor_user_id=actor_user_id,
     )
-    await session.commit()
+    # Refresh inside the write transaction so the database-generated timestamps
+    # are loaded while the transaction-local RLS context is still bound. A
+    # refresh after the commit would run in a new, context-free transaction and
+    # be default-denied under RLS (plan P2, ADR-0022 decision 9).
     await session.refresh(record)
+    await session.commit()
     return record
 
 
@@ -223,8 +227,9 @@ async def update_record(
         action=RecordRevisionAction.UPDATED,
         actor_user_id=actor_user_id,
     )
-    await session.commit()
+    # Refreshed inside the write transaction; see ``create_record``.
     await session.refresh(record)
+    await session.commit()
     return record
 
 

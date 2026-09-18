@@ -471,7 +471,10 @@ class _NoInvitationsProvider:
         return None
 
 
-def build_isolation_app(database_url: str, private_key: rsa.RSAPrivateKey) -> FastAPI:
+def build_isolation_app(
+    database_url: str,
+    private_key: rsa.RSAPrivateKey,
+) -> FastAPI:
     """Build the real ASGI app against the migrated database and a local RSA key.
 
     The per-app NullPool engine is exposed on ``app.state.isolation_engine`` so
@@ -479,6 +482,12 @@ def build_isolation_app(database_url: str, private_key: rsa.RSAPrivateKey) -> Fa
     ``httpx.ASGITransport`` does not run the app lifespan, so a lifespan
     shutdown callback would not fire; the test fixture disposes the engine in
     its own ``finally`` instead.
+
+    The session override mirrors ``get_db``: all RLS context is bound
+    transaction-locally by ``get_current_membership``. That is enough for the
+    restricted runtime role, whose access to the protected tables depends on
+    the context that dependency binds; the records service keeps its post-write
+    refresh inside the write transaction.
     """
     engine = create_async_engine(database_url, poolclass=NullPool)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)

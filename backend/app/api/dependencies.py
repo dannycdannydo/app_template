@@ -29,6 +29,7 @@ from app.core.security import (
     get_user_profile_client,
     verify_webhook_signature,
 )
+from app.db.rls import bind_organisation_context
 from app.db.session import async_session_factory
 from app.integrations.workos.invitations import (
     WorkOSInvitationsProvider,
@@ -50,7 +51,11 @@ async def get_db() -> AsyncIterator[AsyncSession]:
     """Yield one database session for the duration of a request.
 
     The session is committed/closed by SQLAlchemy's ``async_sessionmaker``
-    context manager; the service layer owns transaction boundaries.
+    context manager; the service layer owns transaction boundaries. The RLS
+    tenant context is transaction-local and is bound per transaction by
+    ``get_current_membership``; it is never automatically re-applied to a later
+    transaction, so a protected read must not follow a service commit without
+    an explicit rebind.
     """
     async with async_session_factory() as session:
         yield session
@@ -216,6 +221,12 @@ async def get_current_membership(
             code="not_a_member",
             message="You are not an active member of this organisation.",
         )
+    # RLS prototype (plan P2, ADR-0022 decision 8): only after the active
+    # membership is confirmed is the organisation bound as transaction-local
+    # context. The value comes from the validated membership row, never from
+    # the header directly, and it is parameterised into ``set_config``. Health,
+    # authentication, public and platform routes never bind tenant context.
+    await bind_organisation_context(session, membership.organisation_id)
     bind_identity_context(user_id=str(user.id), organisation_id=str(membership.organisation_id))
     request.state.organisation_id = str(membership.organisation_id)
     return membership
