@@ -28,7 +28,12 @@ class UserListItem(BaseModel):
 
 
 class MeMembershipListItem(BaseModel):
-    """An active or historic membership, including its organisation's name."""
+    """An active or historic membership with its organisation's name and roles.
+
+    ``roles`` is the role set this specific membership grants. It is the
+    selected-organisation authority the frontend must use; the backend still
+    enforces every permission from the validated ``X-Org-Id`` context.
+    """
 
     id: uuid.UUID
     organisation_id: uuid.UUID
@@ -36,14 +41,19 @@ class MeMembershipListItem(BaseModel):
     user_id: uuid.UUID
     status: MembershipStatus
     created_at: datetime
+    roles: list[str]
 
 
 class MeResponse(BaseModel):
     """The current user with their memberships, role codes and platform roles.
 
-    ``platform_roles`` is empty for non-admins; the frontend uses it only to
-    show or hide the Platform Admin Centre (UI awareness is cosmetic — the
-    backend remains the enforcement point).
+    ``memberships[].roles`` is the per-organisation authority. The top-level
+    ``roles`` and ``platform_roles`` lists are retained for compatibility:
+    ``roles`` is a union of role codes across every membership and must never
+    be interpreted as authority for one selected organisation (Plan P10);
+    ``platform_roles`` is empty for non-admins and the frontend uses it only to
+    show or hide the Platform Admin Centre. UI awareness is cosmetic — the
+    backend remains the enforcement point.
     """
 
     user: UserListItem

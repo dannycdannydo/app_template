@@ -538,6 +538,10 @@ export async function mockBackendApi(
             user_id: TEST_USER_ID,
             status: 'active',
             created_at: '2026-01-01T00:00:00Z',
+            // Per-membership authority (Plan P10): the selected-organisation
+            // write affordances derive from this membership's roles, not the
+            // top-level union.
+            roles: ['owner'],
           },
         ],
         roles: ['owner'],

@@ -29,6 +29,24 @@ type MeResponse = components['schemas']['MeResponse']
 type RecordListItem = components['schemas']['RecordListItem']
 
 const ORG_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+const ORG_VIEWER_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+const SELECTED_ORG_KEY = 'app-template:selected-organisation'
+
+function membership(
+  organisationId: string,
+  roles: string[],
+  organisationName = 'Example Organisation',
+): MeResponse['memberships'][number] {
+  return {
+    id: `m-${organisationId}`,
+    organisation_id: organisationId,
+    organisation_name: organisationName,
+    user_id: 'u1',
+    status: 'active',
+    created_at: '2026-01-01T00:00:00Z',
+    roles,
+  }
+}
 
 function me(roles: string[]): MeResponse {
   return {
@@ -39,17 +57,29 @@ function me(roles: string[]): MeResponse {
       is_active: true,
       created_at: '2026-01-01T00:00:00Z',
     },
-    memberships: [
-      {
-        id: 'm1',
-        organisation_id: ORG_ID,
-        organisation_name: 'Example Organisation',
-        user_id: 'u1',
-        status: 'active',
-        created_at: '2026-01-01T00:00:00Z',
-      },
-    ],
+    memberships: [membership(ORG_ID, roles)],
     roles,
+    platform_roles: [],
+  }
+}
+
+/** A user who is an owner in ORG_ID and a viewer in ORG_VIEWER_ID. */
+function meMultiOrg(): MeResponse {
+  return {
+    user: {
+      id: 'u1',
+      email: 'ada@example.com',
+      name: 'Ada Lovelace',
+      is_active: true,
+      created_at: '2026-01-01T00:00:00Z',
+    },
+    memberships: [
+      membership(ORG_ID, ['owner'], 'Owner Organisation'),
+      membership(ORG_VIEWER_ID, ['viewer'], 'Viewer Organisation'),
+    ],
+    // The compatibility union spans both memberships and must not be used for
+    // selected-organisation authority.
+    roles: ['owner', 'viewer'],
     platform_roles: [],
   }
 }
@@ -113,6 +143,7 @@ async function mountList(): Promise<{ wrapper: VueWrapper; router: Router }> {
 describe('RecordsListView', () => {
   beforeEach(() => {
     localStorage.clear()
+    localStorage.setItem(SELECTED_ORG_KEY, ORG_ID)
     setActivePinia(createPinia())
     mockUseMeQuery.mockReset()
     mockUseRecordsQuery.mockReset()
@@ -174,6 +205,27 @@ describe('RecordsListView', () => {
     const { wrapper } = await mountList()
 
     expect(wrapper.findAll('a[href*="/edit"]')).toHaveLength(0)
+  })
+
+  it('derives read-only affordances from the viewer organisation, not the role union', async () => {
+    localStorage.setItem(SELECTED_ORG_KEY, ORG_VIEWER_ID)
+    mockUseMeQuery.mockReturnValue({ data: ref(meMultiOrg()) })
+    stubRecordsQuery()
+    const { wrapper } = await mountList()
+
+    // The union includes owner, but the selected viewer membership must not
+    // inherit those write affordances.
+    expect(wrapper.find('[data-testid="records-create-button"]').exists()).toBe(false)
+    expect(wrapper.findAll('a[href*="/edit"]')).toHaveLength(0)
+  })
+
+  it('offers write affordances in the organisation whose membership grants them', async () => {
+    mockUseMeQuery.mockReturnValue({ data: ref(meMultiOrg()) })
+    stubRecordsQuery()
+    const { wrapper } = await mountList()
+
+    expect(wrapper.find('[data-testid="records-create-button"]').exists()).toBe(true)
+    expect(wrapper.findAll('a[href*="/edit"]')).toHaveLength(2)
   })
 
   it('navigates to the create screen when the action is clicked', async () => {

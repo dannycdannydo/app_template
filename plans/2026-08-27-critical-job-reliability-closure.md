@@ -1,6 +1,6 @@
 # Critical Reliability, Security and Audit Closure Plan
 
-Status: Active
+Status: Complete
 
 ## Goal
 
@@ -672,24 +672,28 @@ secret handling, tenant isolation and any additive public AI API contract.
 
 Dependencies: P7 for final permission semantics; P6-P9 for clone smoke closure
 
-- [ ] Make `/me` expose per-organisation roles/capabilities (or an explicit
+- [x] Make `/me` expose per-organisation roles/capabilities (or an explicit
       selected-org capability endpoint); never interpret a union of roles as
       selected-org authority. Generate frontend API types and derive selected-
       org UI affordances from that context. Backend permission checks remain
       decisive and the viewer-write security suite remains green.
-- [ ] Reconcile the historical `v0.8.0` tag, package versions and
+- [x] Reconcile the historical `v0.8.0` tag, package versions and
       `TEMPLATE_V0_8_SCOPE.md` state without rewriting the immutable tag.
       Document the version convention and a v0.7-to-v0.8 upgrade guide with
       migration, config, worker and frontend-client implications.
-- [ ] Run a fresh-clone smoke scenario: example environment validation,
+- [x] Run a fresh-clone smoke scenario: example environment validation,
       migrations, generated client, protected-route security suite, external
       upload and deployment Compose configuration. Record unsupported/deferred
       features (including chosen malware provider) honestly in starter docs.
-- [ ] Add multi-org owner/viewer frontend and API tests plus version/scope
+- [x] Add multi-org owner/viewer frontend and API tests plus version/scope
       consistency checks; keep all final lint, typing, test and E2E gates green.
 
 Human review required before application: permission model, additive public
 API, generated frontend types, release contract and deployment documentation.
+
+Human approval recorded 2026-09-18 by the repository owner for every category
+above (permission model, additive public `/me` API/schema, generated frontend
+types, release contract bookkeeping and deployment/release documentation).
 
 ## Reference map
 

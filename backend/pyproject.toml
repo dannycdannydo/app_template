@@ -1,6 +1,6 @@
 [project]
 name = "app-template-backend"
-version = "0.7.0"
+version = "0.8.0"
 description = "FastAPI backend for the application starter template"
 requires-python = ">=3.13"
 dependencies = [
@@ -64,6 +64,14 @@ dev = [
 
 [tool.uv]
 package = false
+
+# Blueprint §41: record the starter release this application was built from so
+# clone consumers can infer the implemented template version. Keep this in step
+# with [project].version, frontend/package.json and the released git tag; the
+# version/scope consistency test enforces it.
+[tool.project-template]
+name = "internal-app-template"
+version = "0.8.0"
 
 [tool.ruff]
 target-version = "py313"

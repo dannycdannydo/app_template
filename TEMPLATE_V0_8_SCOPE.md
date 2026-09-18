@@ -570,11 +570,14 @@ existing governing rules below.
 
 ```text
 Release:    v0.8.0 (large AI attachments and reference transfer modes)
-State:      planned
-Started:    —
-Completed:  —
+State:      complete
+Started:    2026-08-12
+Completed:  2026-08-14
 ```
 
-When every §6 checkpoint is checked after review and every §5 criterion is
-verified, update the backend/frontend versions, mark this status complete and
-tag `v0.8.0` from the reviewed release-bookkeeping commit.
+Every acceptance criterion in §5 is met and every §6 box is checked after
+review. The release version is recorded in `backend/pyproject.toml`,
+`frontend/package.json` and `[tool.project-template].version`; the immutable
+`v0.8.0` tag was cut on 2026-08-14. The version convention is documented in
+`CONTRIBUTING.md` and the v0.7-to-v0.8 upgrade steps in
+`docs/upgrades/0.7-to-0.8.md`.

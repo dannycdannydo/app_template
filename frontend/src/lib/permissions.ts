@@ -1,30 +1,60 @@
 import { computed } from 'vue'
 
+import type { components } from '@/api/generated/openapi'
 import { useMeQuery } from '@/queries/me'
+import { useOrganisationStore } from '@/stores/organisation'
 
 /**
- * Record write capabilities derived from the role codes returned by `/me`
- * (v0.3 Scope §6.7, blueprint §14).
+ * Selected-organisation capabilities derived from the role codes `/me` returns
+ * for the membership the user has selected (Plan P10, blueprint §14).
  *
- * The backend remains the enforcement point: `require_permission` gates every
- * records route with default deny (blueprint §9), so a viewer who somehow
- * reaches a write action still gets `403`. This module only decides what the
- * UI offers, mirroring the backend's `ROLE_PERMISSION_MAP` seed
- * (backend/app/modules/permissions/constants.py) for the `records.*`
- * permissions:
+ * `/me` exposes `memberships[].roles`: the roles a specific membership grants.
+ * The UI must derive write affordances from the *selected organisation's*
+ * membership, never from the top-level `roles` union, otherwise a user who is
+ * an owner in one organisation and a viewer in another would see write actions
+ * in the viewer organisation (where the backend correctly answers `403`,
+ * Plan P10). The backend remains the enforcement point:
+ * `require_permission` gates every route with default deny (blueprint §9), so
+ * this module only decides what the UI offers.
+ *
+ * Each bundle below mirrors the backend's `ROLE_PERMISSION_MAP` seed
+ * (backend/app/modules/permissions/constants.py) for its permission family:
  *
  * - `owner`, `administrator`: create, update and delete;
  * - `manager`: create and update (no delete);
  * - `member`: create only (no update, no delete);
  * - `viewer`: read only (no write actions at all).
  *
- * The map is the template's single frontend copy of the role-to-permission
- * bundle. If a later release exposes permissions server-side (e.g. a
- * `GET /api/v1/me/permissions` endpoint), this module becomes a thin client
- * of that and the duplicated bundle disappears; until then the bundle is
- * mirrored here deliberately so a new role or bundle change fails review on
- * both sides of the stack.
+ * The maps are the template's single frontend copy of the role-to-permission
+ * bundles. If a later release exposes permissions server-side, this module
+ * becomes a thin client of that and the duplicated bundles disappear; until
+ * then they are mirrored here deliberately so a new role or bundle change
+ * fails review on both sides of the stack.
  */
+type MeMembershipListItem = components['schemas']['MeMembershipListItem']
+
+/**
+ * Role codes the selected organisation's active membership grants.
+ *
+ * Returns `undefined` when no organisation is selected, the membership is not
+ * active, or the payload has not loaded yet. Callers treat that as default
+ * deny: the UI offers no capability until the selected organisation is known,
+ * matching the backend's `X-Org-Id` requirement.
+ */
+export function selectedOrganisationRoles(
+  memberships: readonly MeMembershipListItem[] | undefined,
+  selectedOrganisationId: string | null,
+): readonly string[] | undefined {
+  if (!selectedOrganisationId || !memberships) {
+    return undefined
+  }
+  const membership = memberships.find(
+    (candidate) =>
+      candidate.organisation_id === selectedOrganisationId && candidate.status === 'active',
+  )
+  return membership?.roles
+}
+
 const RECORD_ROLE_PERMISSIONS: Record<
   string,
   { canCreate: boolean; canUpdate: boolean; canDelete: boolean }
@@ -65,15 +95,12 @@ export const ORGANISATION_ROLE_CODES: readonly string[] = [
 ]
 
 /**
- * Union of record write permissions across the caller's role codes.
+ * Union of record write permissions across one organisation's role codes.
  *
- * `/me` returns the distinct role codes across all of the caller's
- * memberships, not per-organisation roles (v0.2 contract). Treating any role
- * that grants a permission as granting it app-wide is the generous reading;
- * a user with owner in one organisation and viewer in another sees write
- * actions in the viewer organisation, where the backend still answers `403`.
- * The strict per-membership alternative is impossible without a backend
- * change and is deferred; enforcement is server-side either way.
+ * Callers pass the roles of the selected organisation's active membership, so
+ * the union spans only roles held within that organisation (a membership may
+ * hold several roles). The backend still answers `403` for any action the
+ * organisation's permission bundles deny; enforcement is server-side.
  */
 export function recordPermissionsForRoles(roles: readonly string[] | undefined): RecordPermissions {
   if (!roles || roles.length === 0) {
@@ -102,16 +129,21 @@ export function isReadOnlyRoles(roles: readonly string[] | undefined): boolean {
 }
 
 /**
- * Reactive record permissions for the current user (v0.3 Scope §6.7).
+ * Reactive record permissions for the selected organisation (v0.3 Scope §6.7,
+ * Plan P10).
  *
- * Reads the roles from `useMeQuery` and exposes a single computed object so
- * views can gate write actions in one place. The query layer already owns
- * `/me`; this composable only derives UI affordances from it and never
- * touches the HTTP client (blueprint §14, §15).
+ * Reads the selected organisation from the organisation store and the
+ * per-membership roles from `useMeQuery`, then exposes a single computed object
+ * so views can gate write actions in one place. The query layer owns `/me`;
+ * this composable only derives UI affordances from it and never touches the
+ * HTTP client (blueprint §14, §15).
  */
 export function useRecordPermissions() {
   const { data, isPending, isError } = useMeQuery()
-  const roles = computed<readonly string[] | undefined>(() => data.value?.roles)
+  const organisation = useOrganisationStore()
+  const roles = computed<readonly string[] | undefined>(() =>
+    selectedOrganisationRoles(data.value?.memberships, organisation.selectedOrganisationId),
+  )
   const permissions = computed<RecordPermissions>(() => recordPermissionsForRoles(roles.value))
   const isReadOnly = computed(() => {
     const p = permissions.value
@@ -149,8 +181,8 @@ export interface FilePermissions {
 const NO_FILE_PERMISSIONS: FilePermissions = { canUpload: false, canDelete: false }
 
 /**
- * Union of file write permissions across the caller's role codes. Same
- * generous per-role union as `recordPermissionsForRoles`; enforcement is
+ * Union of file write permissions across one organisation's role codes. Same
+ * within-organisation union as `recordPermissionsForRoles`; enforcement is
  * server-side either way.
  */
 export function filePermissionsForRoles(roles: readonly string[] | undefined): FilePermissions {
@@ -169,13 +201,17 @@ export function filePermissionsForRoles(roles: readonly string[] | undefined): F
 }
 
 /**
- * Reactive file permissions for the current user (Scope §6.6). Reads the
- * roles from `useMeQuery` and exposes a single computed object so the files
- * view and upload component gate write actions in one place.
+ * Reactive file permissions for the selected organisation (Scope §6.6,
+ * Plan P10). Reads the selected organisation and its membership roles from
+ * `useMeQuery` and exposes a single computed object so the files view and
+ * upload component gate write actions in one place.
  */
 export function useFilePermissions() {
   const { data, isPending } = useMeQuery()
-  const roles = computed<readonly string[] | undefined>(() => data.value?.roles)
+  const organisation = useOrganisationStore()
+  const roles = computed<readonly string[] | undefined>(() =>
+    selectedOrganisationRoles(data.value?.memberships, organisation.selectedOrganisationId),
+  )
   const permissions = computed<FilePermissions>(() => filePermissionsForRoles(roles.value))
   return { roles, permissions, mePending: isPending }
 }
@@ -213,8 +249,8 @@ const NO_NOTIFICATION_PERMISSIONS: NotificationPermissions = {
 }
 
 /**
- * Union of notification permissions across the caller's role codes. Same
- * generous per-role union as `recordPermissionsForRoles`; enforcement is
+ * Union of notification permissions across one organisation's role codes. Same
+ * within-organisation union as `recordPermissionsForRoles`; enforcement is
  * server-side either way.
  */
 export function notificationPermissionsForRoles(
@@ -235,13 +271,17 @@ export function notificationPermissionsForRoles(
 }
 
 /**
- * Reactive notification permissions for the current user (Scope §6.5). Reads
- * the roles from `useMeQuery` and exposes a single computed object so the
- * bell and notifications view gate the test-send action in one place.
+ * Reactive notification permissions for the selected organisation
+ * (Scope §6.5, Plan P10). Reads the selected organisation and its membership
+ * roles from `useMeQuery` and exposes a single computed object so the bell and
+ * notifications view gate the test-send action in one place.
  */
 export function useNotificationPermissions() {
   const { data, isPending } = useMeQuery()
-  const roles = computed<readonly string[] | undefined>(() => data.value?.roles)
+  const organisation = useOrganisationStore()
+  const roles = computed<readonly string[] | undefined>(() =>
+    selectedOrganisationRoles(data.value?.memberships, organisation.selectedOrganisationId),
+  )
   const permissions = computed<NotificationPermissions>(() =>
     notificationPermissionsForRoles(roles.value),
   )

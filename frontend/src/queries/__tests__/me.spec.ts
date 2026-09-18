@@ -48,7 +48,17 @@ describe('useMeQuery', () => {
           is_active: true,
           created_at: '2026-01-01T00:00:00Z',
         },
-        memberships: [],
+        memberships: [
+          {
+            id: 'm1',
+            organisation_id: 'org-1',
+            organisation_name: 'Example Organisation',
+            user_id: 'u1',
+            status: 'active',
+            created_at: '2026-01-01T00:00:00Z',
+            roles: ['owner'],
+          },
+        ],
         roles: ['owner'],
       },
       error: undefined,
@@ -62,6 +72,7 @@ describe('useMeQuery', () => {
     expect(query.isSuccess.value).toBe(true)
     expect(query.data.value?.user.email).toBe('ada@example.com')
     expect(query.data.value?.roles).toEqual(['owner'])
+    expect(query.data.value?.memberships[0]?.roles).toEqual(['owner'])
   })
 
   it('surfaces the client error when /me fails', async () => {

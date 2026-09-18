@@ -40,6 +40,7 @@ type MeResponse = components['schemas']['MeResponse']
 
 const ORG_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 const RECORD_ID = '11111111-1111-4111-8111-111111111111'
+const SELECTED_ORG_KEY = 'app-template:selected-organisation'
 
 function me(roles: string[]): MeResponse {
   return {
@@ -58,6 +59,7 @@ function me(roles: string[]): MeResponse {
         user_id: 'u1',
         status: 'active',
         created_at: '2026-01-01T00:00:00Z',
+        roles,
       },
     ],
     roles,
@@ -99,6 +101,7 @@ async function mountEdit(): Promise<{ wrapper: VueWrapper; router: Router }> {
 describe('RecordEditView', () => {
   beforeEach(() => {
     localStorage.clear()
+    localStorage.setItem(SELECTED_ORG_KEY, ORG_ID)
     setActivePinia(createPinia())
     mockUseMeQuery.mockReset()
     mockUseRecordQuery.mockReset()
