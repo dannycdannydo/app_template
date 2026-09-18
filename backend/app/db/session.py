@@ -51,7 +51,9 @@ def resolve_database_url(settings: Settings) -> str:
     return settings.database_url
 
 
-def build_session_factory(settings: Settings) -> tuple[AsyncEngine, async_sessionmaker[AsyncSession]]:
+def build_session_factory(
+    settings: Settings,
+) -> tuple[AsyncEngine, async_sessionmaker[AsyncSession]]:
     """Build the engine and session factory for ``settings``.
 
     Kept as a function so the credential selection (``resolve_database_url``)

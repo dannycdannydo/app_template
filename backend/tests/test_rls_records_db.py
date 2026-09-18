@@ -452,12 +452,9 @@ async def test_context_does_not_survive_commit_rollback_or_exception(
 
             # Commit: the same session's next transaction has no context.
             await session.commit()
-            assert (
-                await session.scalar(
-                    text("SELECT current_setting(:s, true)"), {"s": RLS_ORGANISATION_SETTING}
-                )
-                in (None, "")
-            )
+            assert await session.scalar(
+                text("SELECT current_setting(:s, true)"), {"s": RLS_ORGANISATION_SETTING}
+            ) in (None, "")
             assert await session.scalar(text("SELECT count(*) FROM records")) == 0
             # An explicit validated rebind restores access.
             await bind_organisation_context(session, org_a)
@@ -1023,9 +1020,7 @@ async def _seed_representative_records(
     return org_a, sample_id
 
 
-async def _explain(
-    session: AsyncSession, statement: str, params: dict[str, object]
-) -> str:
+async def _explain(session: AsyncSession, statement: str, params: dict[str, object]) -> str:
     """Return the text plan for ``statement`` under the session's current settings."""
     rows = (await session.execute(text("EXPLAIN " + statement), params)).all()
     return "\n".join(row[0] for row in rows)
