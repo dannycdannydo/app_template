@@ -1,7 +1,9 @@
 # ADR 0022: PostgreSQL Row-Level Security as a Tenant-Isolation Backstop
 
-Status: Proposed (P1 design; awaiting human review to proceed to the P2
-`records` prototype). Adoption is decided at the plan's adoption gate after P2.
+Status: Accepted (2026-09-18 adoption gate: RLS is adopted as a
+tenant-isolation backstop after the P2 `records` prototype met its success
+criteria). Production enablement proceeds through plan P3/P4 as separately
+reviewed work units under the active RLS plan.
 
 ## Context
 
@@ -273,6 +275,75 @@ PostgreSQL with a non-owner, non-`BYPASSRLS` runtime role:
 Prototype configuration (role, policies, migrations) is removable without
 residue; production enablement is a separate, later, human-reviewed migration.
 
+## Adoption decision (2026-09-18 gate)
+
+The plan's post-P2 adoption gate is resolved: **PostgreSQL RLS is adopted** as a
+defence-in-depth tenant-isolation backstop. The `records`/`record_revisions`
+prototype met every objective success criterion in decision 11 against real
+PostgreSQL with the restricted `app_runtime` role:
+
+- default denial and fail-closed writes for absent, empty or malformed context;
+- organisation A can read its own rows and cannot select, insert, update or
+  delete organisation B rows;
+- an **unscoped** query returns only the authorised organisation's rows;
+- `WITH CHECK` rejects a mismatched insert and a tenant-key update;
+- context does not survive commit, rollback, exception, cancellation, timeout or
+  pooled-connection reuse;
+- a user who is owner in A and viewer in B receives the correct context and
+  application permissions in each request;
+- the runtime credential cannot disable policies, alter the schema or assume the
+  owner role;
+- upgrade, downgrade and re-upgrade pass and `alembic check` stays green;
+- the existing records API and mandatory security suites stay green; and
+- representative list/detail plans show no sequential-scan regression and a
+  bounded overhead (list ~2.7 ms, detail ~2.4 ms, insert ~5.2 ms).
+
+Evidence: `docs/rls-prototype-findings.md` and
+`backend/tests/test_rls_records_db.py`.
+
+### Approved rollout order and rollback
+
+The approved production enablement order, the per-table-group requirements and
+the rollback procedure are recorded in `docs/rls-rollout.md`. Rollout proceeds
+in bounded table groups, each as its own additive, reversible migration with
+cross-organisation tests and a query-plan review before enforcement. The
+`records` group is already proven by P2 and needs only its production
+enablement migration.
+
+### Release bookkeeping
+
+The production rollout (plan P3/P4) continues under the active plan, which
+remains the execution contract. A versioned release scope and immutable tag
+(anticipated as v0.9) are authored at release time, before production-wide
+enablement; rollout code and documentation adopt version-prefixed citations
+from that point.
+
+### Deployment role separation
+
+Every deployment environment must provide distinct database credentials before
+its table group is enabled:
+
+- **`app_owner`** — schema owner; Alembic/DDL only, never the runtime path
+  (`DATABASE_URL`);
+- **`app_runtime`** — the ordinary API and worker path; non-owner,
+  non-superuser and without `BYPASSRLS` (`DATABASE_RUNTIME_URL`);
+- **`app_coordinator`** (P4) — the outbox coordinator's second non-bypass role,
+  scoped to dispatch state rather than a tenant; and
+- **`app_operator`** (P4) — the isolated, audited operational tooling
+  credential.
+
+The production template already carries `DATABASE_URL` (`app_owner`) and
+`DATABASE_RUNTIME_URL` (`app_runtime`) as separate configuration, and
+`app/db/session.py::resolve_database_url` refuses to start a production process
+without the runtime credential. This is a **capability**, not proof of
+separation: the resolver rejects only an empty runtime URL and never inspects
+the credential, so an environment can still point both URLs at the same role.
+Each environment must confirm the separation by connecting through each
+credential and checking `current_user`, role attributes, protected-table
+ownership and inherited memberships; the per-environment procedure is in
+`docs/operations.md` and `docs/rls-rollout.md`. Plan P4 adds the automated
+startup/deployment check.
+
 ## Consequences
 
 - P1 adds no runtime behaviour: this ADR and
@@ -282,17 +353,18 @@ residue; production enablement is a separate, later, human-reviewed migration.
   policies, parameterised transaction-local context, and real-PostgreSQL
   tests including pool-reuse and cross-organisation cases. The existing
   application-level scoping and `404` behaviour are unchanged.
-- The adoption gate updates this ADR to one reviewed decision. A production
-  rollout (P3/P4) is a separate, versioned, human-reviewed work stream; the
-  versioned scope that carries it is assigned at that gate so the evaluation
-  can be closed without implicitly committing to a rollout. Version-prefixed
-  citations in P2+ code and documentation reference that scope once it exists.
+- The adoption gate (2026-09-18) resolved this ADR to **Accepted**: RLS is
+  adopted. The production rollout (P3/P4) continues under the active plan as a
+  separate, versioned, human-reviewed work stream, so approving the prototype
+  did not by itself enable any production policy. A release scope and tag are
+  authored at release time; until then the active plan is the execution
+  contract.
 - The plan's versioned-scope rule is resolved by recorded human decision
   (2026-09-18): the RLS evaluation is governed by the active plan, and a
-  versioned release scope is assigned at the adoption gate before any
-  production enablement. Prototype (P2) code is removable evaluation work with
-  no release tag; version-prefixed citations apply once the release scope
-  exists.
+  versioned release scope and immutable tag are authored at release time,
+  before any production-wide enablement — not at the adoption gate. Prototype
+  (P2) code is removable evaluation work with no release tag; version-prefixed
+  citations apply once the release scope exists.
 
 This decision follows blueprint §8 (authentication), §9 (organisations and
 permissions), §10 (database conventions), §11 (transactions), §28

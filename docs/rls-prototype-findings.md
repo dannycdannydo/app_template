@@ -44,10 +44,14 @@ rollout (P3/P4).
 - The normal application path uses `DATABASE_RUNTIME_URL`
   (`app/db/session.py` → `resolve_database_url`). A configured runtime URL
   always wins; a production process **refuses to start without one**, so the
-  schema-owner/migration `DATABASE_URL` can never become the ordinary
-  production application credential. Outside production (local development and
-  the default test profile) an empty runtime URL uses `DATABASE_URL`, where the
-  local `app` role is a superuser and no policy is enforced.
+  schema-owner/migration `DATABASE_URL` cannot silently fall back to being the
+  ordinary production application credential. This is not proof the two
+  credentials are distinct — the resolver never inspects the role, so an
+  environment can still point both URLs at the same role; separation is
+  confirmed per environment by `docs/rls-rollout.md` §5. Outside production
+  (local development and the default test profile) an empty runtime URL uses
+  `DATABASE_URL`, where the local `app` role is a superuser and no policy is
+  enforced.
 
 ## Measured query plan and latency
 

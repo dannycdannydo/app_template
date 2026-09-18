@@ -247,10 +247,10 @@ If RLS is deferred or rejected:
 
 If RLS is adopted:
 
-- [ ] Approve a table-group rollout order and rollback procedure.
-- [ ] Confirm deployment environments can provide separate migration and
+- [x] Approve a table-group rollout order and rollback procedure.
+- [x] Confirm deployment environments can provide separate migration and
       runtime roles.
-- [ ] Proceed to P3 and P4 as separately reviewed work units.
+- [x] Proceed to P3 and P4 as separately reviewed work units.
 
 ### P3 — Direct tenant-data rollout
 
@@ -262,7 +262,10 @@ worker context.
 Expected engineering effort after a successful prototype: approximately 5–8
 days for core user-facing data, excluding review.
 
-- [ ] Roll out policies in bounded migrations, beginning with files,
+- [ ] Roll out policies in bounded migrations, beginning with the `records`
+      group (group 0: `records`, `record_revisions`) — a production
+      enablement migration separate from the P2 prototype, with its own
+      cross-organisation tests and reversible downgrade — then files,
       notifications and AI data, then jobs and organisation settings.
 - [ ] Add both read/write policies and cross-organisation tests for every table
       group before enabling enforcement.
@@ -370,9 +373,10 @@ operations. Human review is required before changes are applied.
 
 - [x] Version-scope assignment (recorded human decision, 2026-09-18): the RLS
       evaluation is governed by this active plan, and a versioned release scope
-      is assigned at the adoption gate before any production enablement. New
-      code and documentation use version-prefixed citations from the point the
-      release scope exists.
+      and immutable tag (anticipated as v0.9) are authored at release time,
+      before production-wide enablement — not at the adoption gate. New code and
+      documentation use version-prefixed citations from the point the release
+      scope exists.
 - [ ] Deliver each work unit through `implement -> review -> apply-and-commit`.
 - [ ] Keep migrations additive and reversible during the prototype and staged
       rollout.
