@@ -56,6 +56,54 @@ to an image built locally from the release checkout
 (`docker build deploy/caddy`); the compose-file placeholder is not a real
 image and will not pull.
 
+## Database roles and row-level security (ADR-0022)
+
+The production database uses separate credentials. `DATABASE_URL` is the
+schema-owner/migration credential (`app_owner`, Alembic/DDL only) and
+`DATABASE_RUNTIME_URL` is the restricted runtime credential (`app_runtime`) the
+API and workers use. A production process refuses to start when the runtime
+credential is unset (`app/db/session.py::resolve_database_url`), so a correctly
+configured environment can keep the owner credential off the ordinary
+application path. That is a configuration capability, not proof of separation:
+the resolver does not inspect the credential, and an environment can still
+point both URLs at the same role.
+
+| Role | Credential | Used by | Notes |
+| --- | --- | --- | --- |
+| `app_owner` | `DATABASE_URL` | Alembic DDL/seed | Schema owner; never the runtime path |
+| `app_runtime` | `DATABASE_RUNTIME_URL` | API and Dramatiq workers | Non-owner, non-superuser, no `BYPASSRLS`; subject to enabled policies |
+| `app_coordinator` | P4 credential | Outbox coordinator | Second non-bypass role, scoped to dispatch state |
+| `app_operator` | P4 credential | Backup/restore and support CLI | Isolated, audited operational credential |
+
+Before enabling a table group, confirm in each environment that the two
+credentials authenticate as distinct roles and that the runtime role cannot
+bypass RLS. Connect separately with each credential and run:
+
+```sql
+SELECT current_user;   -- via DATABASE_URL -> app_owner
+                       -- via DATABASE_RUNTIME_URL -> app_runtime (distinct)
+
+SELECT rolname, rolsuper, rolbypassrls, rolcreatedb, rolcreaterole
+FROM pg_roles
+WHERE rolname IN ('app_owner', 'app_runtime');
+-- app_runtime must be rolsuper=false, rolbypassrls=false,
+-- rolcreatedb=false, rolcreaterole=false.
+
+SELECT count(*) FROM pg_tables
+WHERE schemaname = 'public' AND tableowner = 'app_runtime';
+-- must be 0: the runtime role owns no protected table.
+
+SELECT granted.rolname
+FROM pg_auth_members m
+JOIN pg_roles granted ON granted.oid = m.roleid
+JOIN pg_roles member  ON member.oid  = m.member
+WHERE member.rolname = 'app_runtime';
+-- must contain no superuser, BYPASSRLS or protected-table-owner role.
+```
+
+The approved rollout order, per-group requirements and rollback procedure are in
+`docs/rls-rollout.md`; the design is `docs/decisions/0022-postgresql-row-level-security.md`.
+
 ## Scaling
 
 ### Scale API replicas
