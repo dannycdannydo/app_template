@@ -15,25 +15,37 @@ from typing import cast
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import DateTime, ForeignKey, String, Table, UniqueConstraint, text
+from sqlalchemy import DateTime, ForeignKey, MetaData, String, Table, UniqueConstraint, text
 from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.pool import NullPool
 
-from app.db.base import Base
-from app.db.conventions import TimestampMixin, UuidV7, uuid7
+from app.db.conventions import NAMING_CONVENTION, TimestampMixin, UuidV7, uuid7
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 
 
-class _Parent(Base):
+class _TestBase(DeclarativeBase):
+    """Declarative base for this module's throwaway models.
+
+    These models are not application tables, so they must not register on the
+    application ``Base.metadata``: the tenant-isolation registry asserts that
+    every table on that metadata is classified, and a test-only model would
+    otherwise force a spurious registry entry. The naming convention is reused
+    so the constraint-name assertions below stay meaningful.
+    """
+
+    metadata = MetaData(naming_convention=NAMING_CONVENTION)
+
+
+class _Parent(_TestBase):
     __tablename__ = "parents"
 
     id: Mapped[uuid.UUID] = mapped_column(UuidV7, primary_key=True, default=uuid7)
     name: Mapped[str] = mapped_column(String(80), unique=True)
 
 
-class _Child(Base, TimestampMixin):
+class _Child(_TestBase, TimestampMixin):
     __tablename__ = "children"
 
     id: Mapped[uuid.UUID] = mapped_column(UuidV7, primary_key=True, default=uuid7)
@@ -56,7 +68,7 @@ def test_uuid7_embeds_a_monotonic_millisecond_timestamp() -> None:
     assert earlier != later
 
 
-def _table_of(model: type[Base]) -> Table:
+def _table_of(model: type[_TestBase]) -> Table:
     """Return the mapped :class:`Table` with precise typing for introspection."""
     return cast(Table, model.__table__)
 
