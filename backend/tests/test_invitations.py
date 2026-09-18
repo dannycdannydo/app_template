@@ -42,6 +42,7 @@ from tests.context_helpers import (
 from app.core.exceptions import ExternalServiceError
 from app.core.security import UserProfile
 from app.db.base import Base
+from app.integrations.workos.invitations import WorkOSInvitation
 from app.modules.audit.service import (
     ACTION_INVITATION_ACCEPTED,
     ACTION_INVITATION_REVOKED,
@@ -694,7 +695,13 @@ async def test_existing_membership_accepts_without_mutating_it() -> None:
     invitee = make_user(workos_user_id="user_invitee")
     state.users[invitee.workos_user_id] = invitee
     organisation = make_organisation(workos_organisation_id="org_workos_acme")
-    invitation = make_invitation(organisation.id, invitee.id, email=INVITEE_EMAIL)
+    invitation = make_invitation(
+        organisation.id,
+        invitee.id,
+        email=INVITEE_EMAIL,
+        workos_invitation_id="inv_workos_existing",
+        workos_organisation_id="org_workos_acme",
+    )
     state.invitations = [invitation]
     existing = make_membership(invitee, organisation.id)
     state.memberships = [existing]
@@ -737,7 +744,13 @@ async def test_lost_race_recovers_without_double_grant() -> None:
     invitee = make_user(workos_user_id="user_invitee")
     state.users[invitee.workos_user_id] = invitee
     organisation = make_organisation(workos_organisation_id="org_workos_acme")
-    invitation = make_invitation(organisation.id, invitee.id, email=INVITEE_EMAIL)
+    invitation = make_invitation(
+        organisation.id,
+        invitee.id,
+        email=INVITEE_EMAIL,
+        workos_invitation_id="inv_workos_race",
+        workos_organisation_id="org_workos_acme",
+    )
     state.invitations = [invitation]
     winner_membership = make_membership(invitee, organisation.id)
     state.memberships = [winner_membership]
@@ -751,7 +764,9 @@ async def test_lost_race_recovers_without_double_grant() -> None:
     ]
     state.fail_commits = 1
 
-    accepted = await service.link_invitation_on_login(session, invitee, FakeProfileClient(state))
+    accepted = await service.link_invitation_on_login(
+        session, invitee, FakeProfileClient(state), FakeWorkOSInvitationsProvider(state)
+    )
 
     assert accepted == [invitation]
     assert state.memberships == [winner_membership]  # no duplicate
@@ -769,8 +784,200 @@ async def test_no_pending_invitation_is_a_no_op() -> None:
     invitee = make_user(workos_user_id="user_invitee")
     profile_client = FakeProfileClient(state)
 
-    accepted = await service.link_invitation_on_login(session, invitee, profile_client)
+    accepted = await service.link_invitation_on_login(
+        session, invitee, profile_client, FakeWorkOSInvitationsProvider(state)
+    )
 
     assert accepted == []
     assert state.memberships == []
     assert state.audit_events == []
+
+
+# --- Authoritative provider revalidation at login (plan P1 decision 5) ---
+
+
+def _provider_view(
+    local: Invitation,
+    *,
+    invitation_id: str | None = None,
+    state: str = "pending",
+    email: str | None = None,
+    organisation_id: str | None = None,
+    expires_at: datetime | None = None,
+) -> WorkOSInvitation:
+    """Build the fake provider's view of a local invitation row."""
+    return WorkOSInvitation(
+        id=invitation_id or local.workos_invitation_id or "inv_unknown",
+        email=email if email is not None else local.email,
+        organisation_id=(
+            organisation_id if organisation_id is not None else local.workos_organisation_id
+        ),
+        state=state,
+        expires_at=expires_at if expires_at is not None else local.expires_at,
+    )
+
+
+def _provider_id(invitation: Invitation) -> str:
+    """Return the local provider invitation id, narrowing the Optional."""
+    assert invitation.workos_invitation_id is not None
+    return invitation.workos_invitation_id
+
+
+def _revalidation_state() -> tuple[ContextState, User, Invitation]:
+    state = ContextState(owner_role=make_role("owner", "Owner"))
+    invitee = make_user(workos_user_id="user_invitee")
+    state.users[invitee.workos_user_id] = invitee
+    organisation = make_organisation(workos_organisation_id="org_workos_acme")
+    invitation = make_invitation(
+        organisation.id,
+        invitee.id,
+        email=INVITEE_EMAIL,
+        workos_invitation_id="inv_workos_revalidate",
+        workos_organisation_id="org_workos_acme",
+    )
+    state.invitations = [invitation]
+    return state, invitee, invitation
+
+
+async def _link(
+    session: AsyncSession,
+    invitee: User,
+    state: ContextState,
+    provider: FakeWorkOSInvitationsProvider,
+) -> list[Invitation]:
+    return await service.link_invitation_on_login(
+        session, invitee, FakeProfileClient(state), provider
+    )
+
+
+async def test_provider_revoked_invitation_never_grants_when_webhook_missed() -> None:
+    """A WorkOS-side revoke with no delivered webhook still cannot grant."""
+    state, invitee, invitation = _revalidation_state()
+    session: AsyncSession = cast(AsyncSession, FakeSession(state))
+    provider = FakeWorkOSInvitationsProvider(
+        state,
+        catalogue={_provider_id(invitation): _provider_view(invitation, state="revoked")},
+    )
+
+    accepted = await _link(session, invitee, state, provider)
+
+    assert accepted == []
+    assert state.memberships == []
+    assert invitation.status is InvitationStatus.SENT
+
+
+async def test_provider_accepted_invitation_never_grants() -> None:
+    state, invitee, invitation = _revalidation_state()
+    session: AsyncSession = cast(AsyncSession, FakeSession(state))
+    provider = FakeWorkOSInvitationsProvider(
+        state,
+        catalogue={_provider_id(invitation): _provider_view(invitation, state="accepted")},
+    )
+
+    accepted = await _link(session, invitee, state, provider)
+
+    assert accepted == []
+    assert state.memberships == []
+
+
+async def test_provider_expired_invitation_never_grants() -> None:
+    state, invitee, invitation = _revalidation_state()
+    session: AsyncSession = cast(AsyncSession, FakeSession(state))
+    provider = FakeWorkOSInvitationsProvider(
+        state,
+        catalogue={
+            _provider_id(invitation): _provider_view(
+                invitation, expires_at=datetime.now(UTC) - timedelta(minutes=1)
+            )
+        },
+    )
+
+    accepted = await _link(session, invitee, state, provider)
+
+    assert accepted == []
+    assert state.memberships == []
+
+
+async def test_provider_outage_never_grants_and_login_still_succeeds() -> None:
+    """Fail closed on WorkOS unavailability: no grant, no exception, retry later."""
+    state, invitee, invitation = _revalidation_state()
+    session: AsyncSession = cast(AsyncSession, FakeSession(state))
+    provider = FakeWorkOSInvitationsProvider(state, unavailable=True)
+
+    accepted = await _link(session, invitee, state, provider)
+
+    assert accepted == []
+    assert state.memberships == []
+    assert invitation.status is InvitationStatus.SENT
+
+
+async def test_provider_email_mismatch_never_grants() -> None:
+    state, invitee, invitation = _revalidation_state()
+    session: AsyncSession = cast(AsyncSession, FakeSession(state))
+    provider = FakeWorkOSInvitationsProvider(
+        state,
+        catalogue={
+            _provider_id(invitation): _provider_view(invitation, email="someone-else@example.com")
+        },
+    )
+
+    accepted = await _link(session, invitee, state, provider)
+
+    assert accepted == []
+    assert state.memberships == []
+
+
+async def test_cross_organisation_provider_invitation_never_grants() -> None:
+    """A local row wired to another tenant's provider invitation cannot grant."""
+    state, invitee, invitation = _revalidation_state()
+    session: AsyncSession = cast(AsyncSession, FakeSession(state))
+    provider = FakeWorkOSInvitationsProvider(
+        state,
+        catalogue={
+            _provider_id(invitation): _provider_view(
+                invitation, organisation_id="org_workos_other_tenant"
+            )
+        },
+    )
+
+    accepted = await _link(session, invitee, state, provider)
+
+    assert accepted == []
+    assert state.memberships == []
+
+
+async def test_mismatched_provider_invitation_id_never_grants() -> None:
+    """A returned provider invitation with a different id cannot grant the local row."""
+    state, invitee, invitation = _revalidation_state()
+    session: AsyncSession = cast(AsyncSession, FakeSession(state))
+    provider = FakeWorkOSInvitationsProvider(
+        state,
+        catalogue={
+            _provider_id(invitation): _provider_view(
+                invitation, invitation_id="inv_workos_someone_else"
+            )
+        },
+    )
+
+    accepted = await _link(session, invitee, state, provider)
+
+    assert accepted == []
+    assert state.memberships == []
+    assert invitation.status is InvitationStatus.SENT
+
+
+async def test_invitation_without_provider_identity_never_grants() -> None:
+    """A local ``sent`` row with no provider id/org is not grantable (legacy)."""
+    state = ContextState(owner_role=make_role("owner", "Owner"))
+    invitee = make_user(workos_user_id="user_invitee")
+    state.users[invitee.workos_user_id] = invitee
+    organisation = make_organisation(workos_organisation_id="org_workos_acme")
+    invitation = make_invitation(organisation.id, invitee.id, email=INVITEE_EMAIL)
+    state.invitations = [invitation]
+    session: AsyncSession = cast(AsyncSession, FakeSession(state))
+
+    accepted = await _link(session, invitee, state, FakeWorkOSInvitationsProvider(state))
+
+    assert accepted == []
+    assert state.memberships == []
+    assert invitation.status is InvitationStatus.SENT

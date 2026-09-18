@@ -33,6 +33,7 @@ from tests.auth_helpers import build_validator, generate_key_pair, make_token
 
 from app.api.dependencies import get_db
 from app.core.security import UserProfile, get_session_validator, get_user_profile_client
+from app.integrations.workos.invitations import get_workos_invitations_client
 from app.main import create_app
 from app.modules.organisations.models import Organisation
 from app.modules.permissions.constants import PLATFORM_ADMIN_ROLE_CODE
@@ -86,6 +87,19 @@ class _FakeProfileClient:
         )
 
 
+class _NoInvitationsProvider:
+    """No-op invitations adapter: these tests stage no pending invitation.
+
+    ``get_current_user`` resolves the invitations provider for login-time
+    linking (plan P1), so the real WorkOS adapter would otherwise be built
+    against an unset API key. No invitation is pending here, so the linking
+    pass never calls the provider.
+    """
+
+    async def get_invitation(self, workos_invitation_id: str) -> None:
+        return None
+
+
 def _build_app(migrated_database: str, private_key: rsa.RSAPrivateKey) -> FastAPI:
     """Assemble the real app with the migrated database and a local-RSA session
     validator, exactly like the request-flow suites do for their fakes."""
@@ -101,6 +115,7 @@ def _build_app(migrated_database: str, private_key: rsa.RSAPrivateKey) -> FastAP
     app.dependency_overrides[get_db] = override_db
     app.dependency_overrides[get_session_validator] = lambda: build_validator(private_key)
     app.dependency_overrides[get_user_profile_client] = lambda: _FakeProfileClient()
+    app.dependency_overrides[get_workos_invitations_client] = lambda: _NoInvitationsProvider()
     return app
 
 

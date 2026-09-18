@@ -24,13 +24,15 @@ from __future__ import annotations
 import json
 import time
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from httpx import AsyncClient, Response
+from sqlalchemy.ext.asyncio import AsyncSession
 from tests.auth_helpers import generate_key_pair, make_token, webhook_signature_header
 from tests.context_helpers import (
     ContextState,
+    FakeSession,
     build_context_app,
     context_client,
     make_invitation,
@@ -51,6 +53,7 @@ from app.modules.audit.service import (
 from app.modules.invitations.models import InvitationStatus
 from app.modules.organisations.models import MembershipStatus
 from app.modules.webhooks.schemas import MAX_WEBHOOK_PAYLOAD_BYTES, parse_webhook_event
+from app.modules.webhooks.service import process_webhook_event
 
 SECRET = "whsec_test"
 
@@ -104,7 +107,7 @@ def test_parse_webhook_event_accepts_a_known_delivery() -> None:
 
 
 def test_parse_webhook_event_tolerates_unknown_types() -> None:
-    event = parse_webhook_event(b'{"event":"some.future.event","data":{}}')
+    event = parse_webhook_event(b'{"id":"evt_future","event":"some.future.event","data":{}}')
     assert event.event == "some.future.event"
     assert event.is_known_type is False
 
@@ -124,6 +127,17 @@ def test_parse_webhook_event_rejects_missing_event_type() -> None:
         parse_webhook_event(b'{"id":"evt_1","data":{}}')
 
 
+def test_parse_webhook_event_rejects_missing_id() -> None:
+    """Plan P1: an id-less envelope cannot be ledger-backed, so it is rejected."""
+    with pytest.raises(BadRequestError):
+        parse_webhook_event(b'{"event":"invitation.revoked","data":{"id":"inv_1"}}')
+
+
+def test_parse_webhook_event_rejects_empty_id() -> None:
+    with pytest.raises(BadRequestError):
+        parse_webhook_event(b'{"id":"","event":"invitation.revoked","data":{"id":"inv_1"}}')
+
+
 # --- Signature gate (acceptance §5.9) ---
 
 
@@ -133,7 +147,9 @@ async def test_verified_delivery_is_processed(monkeypatch: pytest.MonkeyPatch) -
     app = build_context_app(private_key=generate_key_pair()[0], state=state)
 
     async with context_client(app) as client:
-        response = await _deliver(client, {"event": "unknown.event", "data": {}})
+        response = await _deliver(
+            client, {"id": "evt_verified", "event": "unknown.event", "data": {}}
+        )
 
     assert response.status_code == 200
     assert response.json() == {"processed": True}
@@ -149,7 +165,7 @@ async def test_second_precision_timestamp_is_accepted(monkeypatch: pytest.Monkey
     async with context_client(app) as client:
         response = await _deliver(
             client,
-            {"event": "unknown.event", "data": {}},
+            {"id": "evt_seconds", "event": "unknown.event", "data": {}},
             timestamp_ms=int(time.time()),  # seconds precision
         )
 
@@ -248,6 +264,50 @@ async def test_payload_without_event_type_is_400(monkeypatch: pytest.MonkeyPatch
     assert response.json()["code"] == "invalid_webhook_payload"
 
 
+async def test_signed_delivery_without_event_id_cannot_mutate_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plan P1: no id means no ledger row, so the delivery must not dispatch."""
+    _configure_secret(monkeypatch)
+    state = ContextState(owner_role=make_role("owner", "Owner"))
+    organisation = make_organisation(workos_organisation_id="org_workos_acme")
+    inviter = make_user(workos_user_id="user_inviter")
+    invitation = make_invitation(
+        organisation.id,
+        inviter.id,
+        workos_invitation_id="inv_workos_1",
+        email="ada@example.com",
+    )
+    state.invitations = [invitation]
+    state.lookup_queue = [invitation]  # would be consumed if the event dispatched
+    app = build_context_app(private_key=generate_key_pair()[0], state=state)
+    body = json.dumps({"event": "invitation.revoked", "data": {"id": "inv_workos_1"}}).encode()
+
+    async with context_client(app) as client:
+        response = await client.post(
+            "/api/v1/webhooks/workos",
+            content=body,
+            headers={"workos-signature": _signature_header(body)},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "invalid_webhook_payload"
+    assert invitation.status == InvitationStatus.SENT  # never revoked
+    assert state.audit_events == []
+    assert state.webhook_events == []  # no ledger row was written
+
+
+async def test_dispatched_delivery_is_ledger_backed() -> None:
+    """Plan P1: a dispatched delivery always leaves a dedup ledger row."""
+    state = ContextState(owner_role=make_role("owner", "Owner"))
+    event = parse_webhook_event(b'{"id":"evt_ledger","event":"some.future.event","data":{}}')
+    session: AsyncSession = cast(AsyncSession, FakeSession(state))
+
+    assert await process_webhook_event(session, event) is False
+
+    assert [row.event_id for row in state.webhook_events] == ["evt_ledger"]
+
+
 async def test_oversized_content_length_rejected_before_body_read(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -333,7 +393,11 @@ async def test_invitation_revoked_unknown_workos_id_is_no_op(
     async with context_client(app) as client:
         response = await _deliver(
             client,
-            {"event": "invitation.revoked", "data": {"id": "inv_workos_unknown"}},
+            {
+                "id": "evt_unknown_inv",
+                "event": "invitation.revoked",
+                "data": {"id": "inv_workos_unknown"},
+            },
         )
 
     assert response.status_code == 200
@@ -354,7 +418,7 @@ async def test_invitation_revoked_never_touches_terminal_rows(
     async with context_client(app) as client:
         response = await _deliver(
             client,
-            {"event": "invitation.revoked", "data": {"id": "inv_workos_1"}},
+            {"id": "evt_terminal", "event": "invitation.revoked", "data": {"id": "inv_workos_1"}},
         )
 
     assert response.status_code == 200
@@ -380,6 +444,7 @@ async def test_invitation_accepted_webhook_never_grants(monkeypatch: pytest.Monk
         response = await _deliver(
             client,
             {
+                "id": "evt_accepted",
                 "event": "invitation.accepted",
                 "data": {"id": "inv_workos_1", "state": "accepted"},
             },
@@ -432,7 +497,10 @@ async def test_user_deleted_unknown_user_is_no_op(monkeypatch: pytest.MonkeyPatc
     app = build_context_app(private_key=generate_key_pair()[0], state=state)
 
     async with context_client(app) as client:
-        response = await _deliver(client, {"event": "user.deleted", "data": {"id": "user_unknown"}})
+        response = await _deliver(
+            client,
+            {"id": "evt_unknown_user", "event": "user.deleted", "data": {"id": "user_unknown"}},
+        )
 
     assert response.status_code == 200
     assert state.audit_events == []
@@ -448,7 +516,9 @@ async def test_user_deleted_redelivery_is_idempotent(monkeypatch: pytest.MonkeyP
     app = build_context_app(private_key=generate_key_pair()[0], state=state)
 
     async with context_client(app) as client:
-        response = await _deliver(client, {"event": "user.deleted", "data": {"id": "user_gone"}})
+        response = await _deliver(
+            client, {"id": "evt_redelivery", "event": "user.deleted", "data": {"id": "user_gone"}}
+        )
 
     assert response.status_code == 200
     assert user.is_active is False  # already inactive
@@ -470,6 +540,7 @@ async def test_login_without_any_webhook_delivery_still_links(
     member_role = make_role("member", "Member")
     invitation = make_invitation(organisation.id, invitee.id, email="ada@example.com")
     invitation.workos_invitation_id = "inv_workos_1"
+    invitation.workos_organisation_id = "org_workos_acme"
     state.invitations = [invitation]
 
     membership = make_membership(invitee, organisation.id)
@@ -524,7 +595,12 @@ async def test_webhook_revoked_invitation_never_grants_at_login(
     app = build_context_app(private_key=private_key, state=state)
     async with context_client(app) as client:
         response = await _deliver(
-            client, {"event": "invitation.revoked", "data": {"id": "inv_workos_1"}}
+            client,
+            {
+                "id": "evt_revoke_login",
+                "event": "invitation.revoked",
+                "data": {"id": "inv_workos_1"},
+            },
         )
     assert response.status_code == 200
     assert invitation.status == InvitationStatus.REVOKED

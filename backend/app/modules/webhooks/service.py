@@ -19,6 +19,15 @@ deliberate no-ops: the local invitation row is created authoritatively at
 invite time and the local ``accepted`` status is written only by the grant
 path (flipping it on a webhook would silently prevent the grant). Unknown
 event types are tolerated and ignored (acceptance §5.9).
+
+Duplicate delivery (plan P1): the verified event id is inserted into
+``webhook_events`` under a uniqueness constraint before any handler runs, so a
+WorkOS retry of an already-processed event fails the insert and is a
+deterministic no-op — no refresh is re-applied and no second audit row is
+written. The dedup row commits in the same transaction as the handler (the
+single commit at the end of ``process_webhook_event``), so a handler failure
+rolls the dedup row back and the delivery remains retryable. The ledger stores
+only the provider event id, type and receipt time; no payload is persisted.
 """
 
 from __future__ import annotations
@@ -26,6 +35,7 @@ from __future__ import annotations
 import structlog
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.audit.service import (
@@ -38,6 +48,7 @@ from app.modules.invitations.models import Invitation, InvitationStatus
 from app.modules.platform_admin.queries import acquire_platform_admin_lock
 from app.modules.platform_admin.service import platform_admin_deactivation_locks_out
 from app.modules.users.models import User
+from app.modules.webhooks.models import WebhookEvent
 from app.modules.webhooks.schemas import (
     InvitationEventData,
     UserEventData,
@@ -63,11 +74,36 @@ def _lenient_data[T: BaseModel](event: WorkOSWebhookEvent, model: type[T]) -> T 
 async def process_webhook_event(session: AsyncSession, event: WorkOSWebhookEvent) -> bool:
     """Apply one verified delivery's best-effort refresh; True if state changed.
 
-    Every handled mutation commits inside the service (BP §11 — services own
-    transaction boundaries). A delivery that changes nothing (unknown event,
-    missing identifier, already-terminal state, unknown local row) is a no-op
-    and still acknowledged by the endpoint.
+    The event id is recorded first under a uniqueness constraint; a duplicate
+    delivery is a deterministic no-op that returns immediately (plan P1). The
+    caller only reaches here with a parsed event carrying a non-empty id (the
+    schema rejects an id-less envelope before the signature-verified body is
+    dispatched), so every dispatch is ledger-backed. The single commit at the
+    end owns the transaction boundary for both the dedup row and the refresh
+    (BP §11 — services own transaction boundaries), so a no-op delivery still
+    persists its event id and a failing handler persists neither. A delivery
+    that changes nothing (unknown event, missing identifier, already-terminal
+    state, unknown local row) is a no-op and still acknowledged by the endpoint.
     """
+    session.add(WebhookEvent(event_id=event.id, event_type=event.event))
+    try:
+        await session.flush()
+    except IntegrityError:
+        await session.rollback()
+        logger.info(
+            "webhook_duplicate_delivery",
+            event_type=event.event,
+            workos_event_id=event.id,
+        )
+        return False
+
+    changed = await _dispatch_event(session, event)
+    await session.commit()
+    return changed
+
+
+async def _dispatch_event(session: AsyncSession, event: WorkOSWebhookEvent) -> bool:
+    """Route one verified, not-yet-processed delivery to its handler."""
     if event.event == "invitation.revoked":
         return await _refresh_revoked_invitation(session, event)
     if event.event == "user.deleted":
@@ -112,7 +148,6 @@ async def _refresh_revoked_invitation(session: AsyncSession, event: WorkOSWebhoo
         resource_id=str(invitation.id),
         metadata={"source": "webhook", "workos_event_id": event.id},
     )
-    await session.commit()
     logger.info("webhook_invitation_revoked", invitation_id=str(invitation.id))
     return True
 
@@ -165,7 +200,6 @@ async def _deactivate_deleted_user(session: AsyncSession, event: WorkOSWebhookEv
                 "workos_user_id": user.workos_user_id,
             },
         )
-    await session.commit()
     if locks_out_platform_admin:
         logger.error("webhook_platform_admin_lockout", user_id=str(user.id))
     logger.warning("webhook_user_deactivated", user_id=str(user.id))
@@ -181,6 +215,5 @@ async def _refresh_updated_user(session: AsyncSession, event: WorkOSWebhookEvent
     if user is None or user.email.strip().lower() == data.email.strip().lower():
         return False
     user.email = data.email.strip().lower()
-    await session.commit()
     logger.info("webhook_user_email_refreshed", user_id=str(user.id))
     return True

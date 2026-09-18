@@ -30,6 +30,10 @@ from app.core.security import (
     verify_webhook_signature,
 )
 from app.db.session import async_session_factory
+from app.integrations.workos.invitations import (
+    WorkOSInvitationsProvider,
+    get_workos_invitations_client,
+)
 from app.modules.invitations.service import link_invitation_on_login
 from app.modules.organisations.models import MembershipStatus, OrganisationMembership
 from app.modules.permissions.queries import permission_codes_for_membership
@@ -92,13 +96,18 @@ async def get_current_user(
     session: Annotated[AsyncSession, Depends(get_db)],
     validator: Annotated[SessionValidator, Depends(get_session_validator)],
     profiles: Annotated[UserProfileClient, Depends(get_request_profile_client)],
+    workos_invitations: Annotated[
+        WorkOSInvitationsProvider, Depends(get_workos_invitations_client)
+    ],
     authorization: Annotated[str | None, Header()] = None,
 ) -> User:
     """Resolve the Bearer token to a validated, enabled internal user (BP §8).
 
     Invalid tokens are rejected with 401; valid sessions map to the internal
     user, provisioning the row on first login. Disabled users are blocked with
-    403 even with a valid session.
+    403 even with a valid session. Impersonated sessions (a WorkOS ``act``
+    claim) are always rejected with the same generic 401 (plan P1 decision 1);
+    a safe security event records the identifiers but never the token.
     """
     token = _bearer_token(authorization)
     try:
@@ -113,6 +122,16 @@ async def get_current_user(
             code="invalid_session",
             message="The session is invalid or has expired.",
         ) from exc
+    if validated.is_impersonated:
+        logger.warning(
+            "impersonated_session_rejected",
+            workos_user_id=validated.workos_user_id,
+            session_id=validated.session_id,
+        )
+        raise UnauthorizedError(
+            code="invalid_session",
+            message="The session is invalid or has expired.",
+        )
     user = await get_or_provision_user(session, validated, profiles)
     if not user.is_active:
         logger.warning("disabled_user_rejected", workos_user_id=validated.workos_user_id)
@@ -129,10 +148,12 @@ async def get_current_user(
     await maybe_grant_bootstrap_platform_admin(session, user, profiles)
     # Login-time invitation linking (Scope §6.5, acceptance §5.6) runs on the
     # same chain: pending invitations for the user's verified email are
-    # granted an active membership with the intended role. It is a fast no-op
-    # when no grantable invitation exists (one indexed query, no WorkOS call),
-    # so it is safe to run on every successful authentication.
-    await link_invitation_on_login(session, user, profiles)
+    # revalidated at WorkOS and then granted an active membership with the
+    # intended role. It is a fast no-op when no pending invitation exists (one
+    # indexed query, no WorkOS call), so it is safe to run on every successful
+    # authentication; a provider outage with a pending invitation grants
+    # nothing and retries on the next login (plan P1 decision 5).
+    await link_invitation_on_login(session, user, profiles, workos_invitations)
     # Blueprint §28 logging context: every log line emitted by this request
     # after authentication carries the caller's user id (the request
     # middleware clears the context at the end of the request). The identity

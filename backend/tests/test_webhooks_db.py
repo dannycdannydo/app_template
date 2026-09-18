@@ -171,6 +171,65 @@ async def test_user_deleted_webhook_persists_deactivation_and_audit(
         await engine.dispose()
 
 
+async def test_duplicate_delivery_is_a_deterministic_no_op(
+    migrated_database: str,
+) -> None:
+    """Plan P1: a redelivered event id is absorbed without re-applying the refresh."""
+    engine, session_factory = _session_factory(migrated_database)
+    try:
+        async with session_factory() as session:
+            inviter = User(
+                workos_user_id=f"inviter_{uuid.uuid4().hex[:8]}",
+                email="platform@example.com",
+                name="Platform Admin",
+            )
+            session.add(inviter)
+            await session.commit()
+            inviter_id = inviter.id
+            organisation = Organisation(name="Dupe Ltd")
+            session.add(organisation)
+            await session.commit()
+            invitation = Invitation(
+                organisation_id=organisation.id,
+                email="ada@example.com",
+                role_code="member",
+                workos_invitation_id="inv_workos_dupe_1",
+                workos_organisation_id="org_workos_dupe_1",
+                invited_by_user_id=inviter_id,
+                status=InvitationStatus.SENT,
+                expires_at=datetime.now(UTC) + timedelta(days=7),
+            )
+            session.add(invitation)
+            await session.commit()
+            invitation_id = invitation.id
+
+        event = WorkOSWebhookEvent(
+            id="evt_dupe_wh",
+            event="invitation.revoked",
+            data={"id": "inv_workos_dupe_1", "state": "revoked"},
+        )
+
+        async with session_factory() as session:
+            assert await process_webhook_event(session, event) is True
+
+        async with session_factory() as session:
+            # The redelivery is absorbed by the unique event id: no second
+            # refresh and no second audit row are written.
+            assert await process_webhook_event(session, event) is False
+
+        async with session_factory() as session:
+            row = await session.get(Invitation, invitation_id)
+            assert row is not None and row.status == InvitationStatus.REVOKED
+            audit_rows = (
+                await session.scalars(
+                    select(AuditEvent).where(AuditEvent.resource_id == str(invitation_id))
+                )
+            ).all()
+            assert len(audit_rows) == 1
+    finally:
+        await engine.dispose()
+
+
 async def test_unknown_event_persists_nothing(migrated_database: str) -> None:
     """Unknown event types are tolerated and leave no audit rows behind."""
     engine, session_factory = _session_factory(migrated_database)

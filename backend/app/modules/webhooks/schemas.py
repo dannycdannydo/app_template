@@ -3,7 +3,10 @@
 The application parses WorkOS deliveries itself instead of depending on the
 SDK's event deserialiser, keeping the SDK fully behind the adapter boundary
 (AGENTS.md: provider SDKs stay behind adapters) and giving the suite a stable,
-versioned contract to test against. All data fields are lenient
+versioned contract to test against. The envelope event ``id`` is required and
+non-empty (plan P1): every dispatched delivery must be ledger-backed so a
+WorkOS retry is deduplicated deterministically, so a signed envelope without an
+id is rejected rather than dispatched. The ``data`` fields stay lenient
 (``extra="ignore"``, optional identifiers): the consumer is best-effort by
 design, so a delivery that does not carry the identifiers the local refresh
 needs is tolerated as a no-op rather than rejected.
@@ -79,8 +82,8 @@ class WorkOSWebhookEvent(BaseModel):
 
     model_config = {"extra": "ignore"}
 
-    id: str | None = None
-    """WorkOS event id; recorded in audit metadata for traceability."""
+    id: str = Field(min_length=1)
+    """The WorkOS event id, required so every dispatch is ledger-backed."""
 
     event: str = Field(min_length=1)
     """The event type, e.g. ``invitation.revoked``; unknown types are tolerated."""
@@ -97,8 +100,9 @@ class WorkOSWebhookEvent(BaseModel):
 def parse_webhook_event(payload: bytes) -> WorkOSWebhookEvent:
     """Parse a verified raw delivery into a typed event (raises on malformed).
 
-    Malformed JSON or a payload without an event type is a 400 — a signed
-    delivery that is not a usable WorkOS event should stop WorkOS's retries
+    Malformed JSON, a payload without an event type, or a payload without a
+    non-empty event id is a 400 — a signed delivery that is not a usable WorkOS
+    event (or that could not be deduplicated) should stop WorkOS's retries
     rather than be silently absorbed. Unknown but well-formed event types are
     the consumer's no-op case, not an error here.
     """
@@ -117,8 +121,9 @@ def parse_webhook_event(payload: bytes) -> WorkOSWebhookEvent:
     try:
         return WorkOSWebhookEvent.model_validate(raw)
     except ValidationError as exc:
-        # A payload without a usable event type cannot be dispatched; reject it
-        # so WorkOS stops retrying instead of absorbing a broken delivery.
+        # A payload without a usable event type or dedup id cannot be
+        # dispatched; reject it so WorkOS stops retrying instead of absorbing a
+        # broken or un-deduplicable delivery.
         raise BadRequestError(
             code="invalid_webhook_payload",
             message="The webhook payload is not a valid WorkOS event.",

@@ -23,6 +23,7 @@ from datetime import datetime
 from functools import lru_cache
 from typing import Protocol
 
+from workos import NotFoundError as WorkOSNotFoundError
 from workos import WorkOSClient, WorkOSError
 
 from app.core.config import get_settings
@@ -35,6 +36,8 @@ class WorkOSInvitation:
 
     id: str
     email: str
+    organisation_id: str | None
+    state: str
     expires_at: datetime
 
 
@@ -96,6 +99,8 @@ class WorkOSInvitationsClient:
         return WorkOSInvitation(
             id=invitation.id,
             email=invitation.email,
+            organisation_id=invitation.organization_id,
+            state=invitation.state,
             expires_at=invitation.expires_at,
         )
 
@@ -112,16 +117,30 @@ class WorkOSInvitationsClient:
             ) from exc
 
     async def get_invitation(self, workos_invitation_id: str) -> WorkOSInvitation | None:
-        """Return one WorkOS invitation by its WorkOS id, or None."""
+        """Return one WorkOS invitation by its WorkOS id, or None when absent.
+
+        A provider outage is deliberately *not* reported as a missing
+        invitation: a genuine not-found response returns ``None`` (the caller
+        treats it as a fail-closed mismatch), while any other provider failure
+        is surfaced as an external-service error so the revalidation can
+        distinguish an outage from a mismatch in its logs.
+        """
         try:
             invitation = await asyncio.to_thread(
                 self._client.user_management.get_invitation, workos_invitation_id
             )
-        except WorkOSError:
+        except WorkOSNotFoundError:
             return None
+        except WorkOSError as exc:
+            raise ExternalServiceError(
+                code="workos_invitation_unavailable",
+                message="The invitation could not be checked. Please try again.",
+            ) from exc
         return WorkOSInvitation(
             id=invitation.id,
             email=invitation.email,
+            organisation_id=invitation.organization_id,
+            state=invitation.state,
             expires_at=invitation.expires_at,
         )
 

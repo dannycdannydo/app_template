@@ -23,6 +23,7 @@ from sqlalchemy.exc import IntegrityError
 from tests.auth_helpers import build_validator, generate_key_pair
 
 from app.api.dependencies import get_current_membership, get_db
+from app.core.exceptions import ExternalServiceError
 from app.core.security import (
     UserProfile,
     UserProfileClient,
@@ -63,6 +64,7 @@ from app.modules.platform_admin.models import (
 )
 from app.modules.records.models import Record
 from app.modules.users.models import User
+from app.modules.webhooks.models import WebhookEvent
 
 
 @dataclass
@@ -140,6 +142,9 @@ class ContextState:
     workos_invitations: list[WorkOSInvitation] = field(default_factory=list[WorkOSInvitation])
     # WorkOS invitation ids revoked through the fake provider.
     revoked_workos_invitations: list[str] = field(default_factory=list[str])
+    # Processed webhook delivery ids (plan P1): the fake session enforces the
+    # unique ``event_id`` so duplicate delivery is a deterministic no-op.
+    webhook_events: list[WebhookEvent] = field(default_factory=list[WebhookEvent])
 
 
 def make_owner_role() -> Role:
@@ -358,6 +363,7 @@ def make_invitation(
     email: str = "invitee@example.com",
     role_code: str = "member",
     workos_invitation_id: str | None = None,
+    workos_organisation_id: str | None = None,
     status: InvitationStatus = InvitationStatus.SENT,
     expires_at: datetime | None = None,
 ) -> Invitation:
@@ -367,6 +373,7 @@ def make_invitation(
         email=email,
         role_code=role_code,
         workos_invitation_id=workos_invitation_id,
+        workos_organisation_id=workos_organisation_id,
         invited_by_user_id=invited_by_user_id,
         status=status,
         expires_at=expires_at or (datetime.now(UTC) + timedelta(days=7)),
@@ -558,7 +565,16 @@ class FakeSession:
 
     async def flush(self) -> None:
         now = datetime.now(UTC)
+        seen_event_ids = {event.event_id for event in self._state.webhook_events}
         for obj in self._added:
+            if isinstance(obj, WebhookEvent):
+                # The unique ``event_id`` makes a duplicate delivery a
+                # deterministic no-op, exactly like the database constraint.
+                if obj.event_id in seen_event_ids:
+                    raise IntegrityError("insert", {}, Exception("duplicate key value"))
+                seen_event_ids.add(obj.event_id)
+                obj.id = uuid.uuid4()
+                continue
             if obj.id is None:
                 obj.id = uuid.uuid4()
             if getattr(obj, "created_at", None) is None and hasattr(obj, "created_at"):
@@ -628,6 +644,10 @@ class FakeSession:
                 self._state.platform_memberships.append(obj)
             elif isinstance(obj, BootstrapState):
                 self._state.bootstrap_states.append(obj)
+            elif isinstance(obj, WebhookEvent):
+                # Append-only dedup ledger: never modify an existing event row.
+                if all(existing is not obj for existing in self._state.webhook_events):
+                    self._state.webhook_events.append(obj)
             elif isinstance(obj, User):
                 # Mirrors the model's ``is_active`` default applied at flush time;
                 # provisioned users are always created active.
@@ -740,17 +760,29 @@ class FakeWorkOSInvitationsProvider(WorkOSInvitationsProvider):
     invitations are also recorded on the state for the endpoint tests.
     """
 
-    def __init__(self, state: ContextState | None = None) -> None:
+    def __init__(
+        self,
+        state: ContextState | None = None,
+        *,
+        catalogue: dict[str, WorkOSInvitation] | None = None,
+        unavailable: bool = False,
+    ) -> None:
         self._state = state
         self._counter = 0
         self.sent: dict[str, WorkOSInvitation] = {}
         self.revoked: list[str] = []
+        # Explicit provider view for tests that do not stage a ``ContextState``
+        # (real-database tests) or need to force a provider state/outage.
+        self.catalogue: dict[str, WorkOSInvitation] = dict(catalogue or {})
+        self.unavailable = unavailable
 
     async def send_invitation(self, *, email: str, organisation_id: str) -> WorkOSInvitation:
         self._counter += 1
         invitation = WorkOSInvitation(
             id=f"inv_workos_{uuid.uuid4().hex[:12]}",
             email=email,
+            organisation_id=organisation_id,
+            state="pending",
             expires_at=datetime.now(UTC) + timedelta(days=7),
         )
         self.sent[invitation.id] = invitation
@@ -764,7 +796,39 @@ class FakeWorkOSInvitationsProvider(WorkOSInvitationsProvider):
             self._state.revoked_workos_invitations.append(workos_invitation_id)
 
     async def get_invitation(self, workos_invitation_id: str) -> WorkOSInvitation | None:
-        return self.sent.get(workos_invitation_id)
+        if self.unavailable:
+            raise ExternalServiceError(
+                code="workos_invitation_unavailable",
+                message="The invitation could not be checked. Please try again.",
+            )
+        if workos_invitation_id in self.catalogue:
+            return self.catalogue[workos_invitation_id]
+        found = self.sent.get(workos_invitation_id)
+        if found is not None:
+            return found
+        if self._state is not None:
+            for provider_invitation in self._state.workos_invitations:
+                if provider_invitation.id == workos_invitation_id:
+                    return provider_invitation
+            # Derive the provider view from a staged local invitation row so the
+            # request-flow tests exercise revalidation without re-seeding the
+            # provider separately.
+            for local in self._state.invitations:
+                if local.workos_invitation_id == workos_invitation_id:
+                    assert local.workos_invitation_id is not None
+                    # The provider vocabulary is pending/accepted/revoked/
+                    # expired; a locally ``sent`` row is provider ``pending``.
+                    provider_state = (
+                        "pending" if local.status is InvitationStatus.SENT else local.status.value
+                    )
+                    return WorkOSInvitation(
+                        id=local.workos_invitation_id,
+                        email=local.email,
+                        organisation_id=local.workos_organisation_id,
+                        state=provider_state,
+                        expires_at=local.expires_at,
+                    )
+        return None
 
 
 def build_context_app(

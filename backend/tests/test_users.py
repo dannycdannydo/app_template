@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,8 +25,11 @@ async def test_existing_user_profile_is_refreshed_before_invitation_linking() ->
         ValidatedSession(
             workos_user_id=user.workos_user_id,
             session_id=None,
+            issued_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
             organisation_id=None,
-            claims={},
+            authentication_time=None,
+            impersonator=None,
         ),
         FakeProfileClient(state),
     )
@@ -48,8 +52,11 @@ async def test_unverified_profile_change_does_not_replace_existing_identity() ->
         ValidatedSession(
             workos_user_id=user.workos_user_id,
             session_id=None,
+            issued_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
             organisation_id=None,
-            claims={},
+            authentication_time=None,
+            impersonator=None,
         ),
         FakeProfileClient(state),
     )

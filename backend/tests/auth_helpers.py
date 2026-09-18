@@ -69,6 +69,7 @@ def build_validator(
     issuer: str = ISSUER,
     expected_issuer: str | None = None,
     leeway_seconds: float = 30.0,
+    max_lifetime_seconds: float = 3600.0,
 ) -> WorkOSSessionValidator:
     """Build the real session validator backed by a local signing key."""
     return WorkOSSessionValidator(
@@ -76,6 +77,7 @@ def build_validator(
         api_base_url=issuer,
         issuer=expected_issuer or issuer,
         leeway_seconds=leeway_seconds,
+        max_lifetime_seconds=max_lifetime_seconds,
         jwks_client=StubJWKSClient(private_key),
     )
 

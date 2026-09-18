@@ -118,6 +118,15 @@ class Settings(BaseSettings):
         default=30.0,
         description="Clock-skew leeway in seconds when validating WorkOS session tokens",
     )
+    workos_jwt_max_lifetime_seconds: float = Field(
+        default=3600.0,
+        gt=0,
+        description=(
+            "Maximum accepted access-token lifetime (exp - iat) in seconds; tokens "
+            "whose total lifetime exceeds this are rejected even while unexpired. "
+            "Bounds the accepted session-revocation window (plan P1 decision 2)"
+        ),
+    )
     bootstrap_platform_admin_email: str = Field(
         default="",
         description=(

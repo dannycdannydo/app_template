@@ -16,7 +16,9 @@ service-owned transaction (BP §11 — routers never commit).
 - ``list_invitations``: the platform listing, paginated newest-first.
 - ``link_invitation_on_login``: the authoritative acceptance point. Called
   from the ``get_current_user`` provisioning chain; matches pending
-  invitations by the authenticated (verified) WorkOS email, creates an active
+  invitations by the authenticated (verified) WorkOS email, revalidates each
+  candidate against the live WorkOS invitation (identity, state, email,
+  organisation, expiry; fail closed on outage or mismatch), creates an active
   membership with the intended role, marks the invitation ``accepted`` and
   audits both events. Idempotent and race-safe: an invitation whose
   membership already exists is merely marked accepted, and a lost race
@@ -42,7 +44,9 @@ local revoke rolls the local row back, leaving it ``sent`` and retryable.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 
+import structlog
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -50,6 +54,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import (
     BadRequestError,
     ConflictError,
+    ExternalServiceError,
     NotFoundError,
     ServiceUnavailableError,
 )
@@ -78,8 +83,14 @@ from app.modules.permissions.models import MembershipRole, Role
 from app.modules.platform_admin.service import ensure_workos_organisation
 from app.modules.users.models import User
 
+logger = structlog.get_logger()
+
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 100
+
+# The WorkOS invitation state that can still grant a local membership. WorkOS
+# owns the enum; this is the one value the application accepts.
+_PROVIDER_PENDING_STATE = "pending"
 
 
 def _normalise_email(email: str) -> str:
@@ -171,6 +182,7 @@ async def invite_user(
         email=normalised_email,
         role_code=role.code,
         workos_invitation_id=workos_invitation.id,
+        workos_organisation_id=workos_organisation_id,
         invited_by_user_id=actor.id,
         status=InvitationStatus.SENT,
         expires_at=workos_invitation.expires_at,
@@ -313,6 +325,7 @@ async def link_invitation_on_login(
     session: AsyncSession,
     user: User,
     profiles: UserProfileClient,
+    workos_invitations: WorkOSInvitationsProvider,
 ) -> list[Invitation]:
     """Link the user's pending invitations at login; idempotent and race-safe.
 
@@ -323,6 +336,15 @@ async def link_invitation_on_login(
     provider-email change safe even when a best-effort webhook is delayed or
     missed. The invitation is accepted only when that verified email matches
     (acceptance §5.6, mirroring the bootstrap gate, Scope §6.4).
+
+    The local ``sent`` row is never sufficient on its own (plan P1 decision 5):
+    every candidate is revalidated against the live WorkOS invitation — its
+    identity, state, email, organisation mapping and expiry — before it can
+    grant. The revalidation read happens *before* the row lock is taken, so no
+    provider I/O is performed while a database row lock is held; any local
+    state change committed before the locked re-read is then observed by the
+    Python re-check. A provider outage or a mismatch grants nothing and is
+    retried on the next login (fail closed); the login itself still succeeds.
 
     A membership is created (active, with the intended role) only when the
     user is not already a member of the organisation; an existing membership
@@ -342,21 +364,14 @@ async def link_invitation_on_login(
     # Use the current validated WorkOS address for the candidate query. The
     # internal copy is deliberately not the authority: a user may change
     # their provider email between invitations and their next login.
-    candidates = (await session.scalars(pending_invitations_statement(profile.email))).all()
-    if not candidates:
-        return []
-    matched = [
-        invitation
-        for invitation in candidates
-        if invitation.email.strip().lower() == profile.email.strip().lower()
-    ]
-    if not matched:
+    profile_email = profile.email
+    grantable = await _resolve_grantable_invitations(session, profile_email, workos_invitations)
+    if not grantable:
         return []
 
     user_id = user.id
-    profile_email = profile.email
     try:
-        accepted = await _accept_invitations(session, user, profile_email, matched)
+        accepted = await _accept_invitations(session, user, profile_email, grantable)
         await session.commit()
     except IntegrityError:
         await session.rollback()
@@ -373,18 +388,15 @@ async def link_invitation_on_login(
                 code="invitation_link_failed",
                 message="The invitation could not be linked. Please try again.",
             ) from None
-        retry_candidates = (
-            await session.scalars(pending_invitations_statement(profile_email))
-        ).all()
-        retry_matched = [
-            invitation
-            for invitation in retry_candidates
-            if invitation.email.strip().lower() == profile_email.strip().lower()
-        ]
-        if not retry_matched:
+        retry_grantable = await _resolve_grantable_invitations(
+            session, profile_email, workos_invitations
+        )
+        if not retry_grantable:
             return []
         try:
-            accepted = await _accept_invitations(session, retry_user, profile_email, retry_matched)
+            accepted = await _accept_invitations(
+                session, retry_user, profile_email, retry_grantable
+            )
             await session.commit()
         except IntegrityError:
             await session.rollback()
@@ -393,6 +405,101 @@ async def link_invitation_on_login(
                 message="The invitation could not be linked. Please try again.",
             ) from None
     return accepted
+
+
+async def _resolve_grantable_invitations(
+    session: AsyncSession,
+    profile_email: str,
+    workos_invitations: WorkOSInvitationsProvider,
+) -> list[Invitation]:
+    """Return the locked, still-grantable invitations for a verified email.
+
+    Two phases (plan P1): an unlocked candidate read is revalidated against
+    WorkOS — no provider I/O happens while a row lock is held — and only the
+    invitations whose live provider state is still pending are then re-read
+    ``FOR UPDATE`` so the local acceptance transition still serialises with
+    revoke and webhook (plan P7). Between the two reads a committed revoke is
+    observed by the locked read and filtered out.
+    """
+    candidates = (
+        await session.scalars(pending_invitations_statement(profile_email, for_update=False))
+    ).all()
+    matched = [
+        invitation
+        for invitation in candidates
+        if invitation.email.strip().lower() == profile_email.strip().lower()
+    ]
+    if not matched:
+        return []
+    grantable_ids = {
+        invitation.id
+        for invitation in matched
+        if await _provider_invitation_is_grantable(invitation, profile_email, workos_invitations)
+    }
+    if not grantable_ids:
+        return []
+    locked = (await session.scalars(pending_invitations_statement(profile_email))).all()
+    return [
+        invitation
+        for invitation in locked
+        if invitation.id in grantable_ids
+        and invitation.email.strip().lower() == profile_email.strip().lower()
+    ]
+
+
+async def _provider_invitation_is_grantable(
+    invitation: Invitation,
+    profile_email: str,
+    workos_invitations: WorkOSInvitationsProvider,
+) -> bool:
+    """Revalidate one local invitation against the live WorkOS invitation.
+
+    Identity (the returned provider invitation id equals the id stored at
+    invite time), state (still ``pending``), email (the provider address equals
+    the verified login address), organisation (the provider organisation equals
+    the mapping captured at invite time) and expiry are all required. A missing
+    provider identity, an outage or any mismatch is fail-closed and logged with
+    identifiers only — never the invitation token or provider payload.
+    """
+    if invitation.workos_invitation_id is None or invitation.workos_organisation_id is None:
+        logger.warning(
+            "invitation_revalidation_skipped",
+            invitation_id=str(invitation.id),
+            reason="missing_provider_identity",
+        )
+        return False
+    try:
+        provider_invitation = await workos_invitations.get_invitation(
+            invitation.workos_invitation_id
+        )
+    except ExternalServiceError:
+        logger.warning(
+            "invitation_revalidation_unavailable",
+            invitation_id=str(invitation.id),
+        )
+        return False
+    if provider_invitation is None:
+        reason = "provider_invitation_not_found"
+    elif provider_invitation.id != invitation.workos_invitation_id:
+        # A misbehaving/incorrect adapter response must never grant the wrong
+        # invitation: the returned identity has to be the row's own provider id.
+        reason = "provider_identity_mismatch"
+    elif provider_invitation.state != _PROVIDER_PENDING_STATE:
+        reason = "provider_invitation_not_pending"
+    elif provider_invitation.email.strip().lower() != profile_email.strip().lower():
+        reason = "provider_email_mismatch"
+    elif (provider_invitation.organisation_id or "") != invitation.workos_organisation_id:
+        reason = "provider_organisation_mismatch"
+    elif provider_invitation.expires_at <= datetime.now(UTC):
+        reason = "provider_invitation_expired"
+    else:
+        return True
+    logger.warning(
+        "invitation_revalidation_failed",
+        invitation_id=str(invitation.id),
+        reason=reason,
+    )
+    return False
 
 
 async def _accept_invitations(
