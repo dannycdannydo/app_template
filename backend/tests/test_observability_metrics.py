@@ -158,7 +158,8 @@ async def test_job_counters_increment_through_the_durable_job_service() -> None:
     succeed_state = ContextState()
     succeeded_job = make_job(organisation_id, status=JobStatus.QUEUED)
     succeed_state.jobs.append(succeeded_job)
-    succeed_state.lookup_queue = [succeeded_job]
+    # Two reads: the bootstrap resolves the row, then the locked re-read.
+    succeed_state.lookup_queue = [succeeded_job, succeeded_job]
     await jobs_service.succeed(
         cast(AsyncSession, FakeSession(succeed_state)), job_id=succeeded_job.id
     )
@@ -167,7 +168,8 @@ async def test_job_counters_increment_through_the_durable_job_service() -> None:
     failed_state = ContextState()
     failed_job = make_job(organisation_id, status=JobStatus.QUEUED)
     failed_state.jobs.append(failed_job)
-    failed_state.lookup_queue = [failed_job]
+    # Two reads: the bootstrap resolves the row, then the locked re-read.
+    failed_state.lookup_queue = [failed_job, failed_job]
     await jobs_service.fail(
         cast(AsyncSession, FakeSession(failed_state)),
         job_id=failed_job.id,

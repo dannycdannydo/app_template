@@ -21,7 +21,7 @@ async def run(*, apply: bool) -> int:
     # configured database, while real inspection/apply still validates all
     # settings before touching PostgreSQL.
     from app.core.config import get_settings
-    from app.db.session import async_session_factory
+    from app.db.session import coordinator_session_factory
     from app.job_coordinator.reconciliation import (
         reconcile_queued_jobs,
         reconciliation_candidates,
@@ -29,7 +29,7 @@ async def run(*, apply: bool) -> int:
 
     settings = get_settings()
     now = datetime.now(UTC)
-    async with async_session_factory() as session:
+    async with coordinator_session_factory() as session:
         candidates = await reconciliation_candidates(
             session,
             now=now,
@@ -42,7 +42,7 @@ async def run(*, apply: bool) -> int:
         for job_id in candidates:
             print(job_id)
         return 0
-    async with async_session_factory() as session:
+    async with coordinator_session_factory() as session:
         reconciled = await reconcile_queued_jobs(
             session,
             now=now,

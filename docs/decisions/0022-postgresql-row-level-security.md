@@ -127,7 +127,36 @@ scoped to dispatch state (due/unclaimed rows and their dispatch/lease
 correlation) rather than to an `organisation_id`, and it cannot read tenant
 payload tables (`records`, `files`, `notifications`, AI content). This is the
 plan's "second non-bypass role with equally explicit context" option; it never
-sets `app.organisation_id` and never holds `BYPASSRLS`.
+sets an arbitrary `app.organisation_id` and never holds `BYPASSRLS`.
+
+**Group-4b amendment (approved 2026-09-19).** Group 4b's
+coordinator runs the bounded recovery that can terminally fail an attempt at
+the global ceiling, and the registered `notification.email` exhaustion hook
+runs inside that settlement transaction to finalize the delivery row. That hook
+binds the durable job's own organisation and recipient user as transaction-local
+context before it touches the user-private rows, so the group-4b migration
+grants `app_coordinator` DML on `notifications`/`notification_deliveries` and
+relies on the existing, context-gated user-private policies — never a
+tenant-broad or request-selectable read. The coordinator still holds no
+`BYPASSRLS` and cannot read those rows without the durable row's context. This
+narrow exception is the only deviation from the "no notification access"
+sentence above; it is recorded here and was approved 2026-09-19 together with
+the group-4b tenant-isolation, database-role/grant/policy, worker-context and
+destructive-downgrade changes.
+
+Two further group-4b constraints keep the coordinator and worker paths
+least-privilege. The coordinator's UPDATE authority on `jobs`/`job_attempts` is
+granted **per column** (only the settlement/reconciliation columns) and its
+settle policies restrict the reachable post-update states, so no permissive
+`WITH CHECK (true)` can let it move a tenant key or rewrite a payload,
+reference, progress or ownership field. The `jobs` worker bootstrap is
+`FOR SELECT` only — because PostgreSQL applies UPDATE policies to
+`SELECT ... FOR UPDATE`, a job-keyed bootstrap UPDATE policy would have
+authorised a real update by job id; the worker instead clears `app.job_id`,
+binds the durable row's organisation, and locks under tenant authority.
+`job_attempts.organisation_id` is tied to its parent job by a composite
+`(job_id, organisation_id)` foreign key (with the matching unique pair on
+`jobs`), so the copied tenant key can never diverge from the parent.
 
 Both mechanisms are required before the affected table group is enabled: the
 `records`/`record_revisions` prototype does not depend on them, but the `jobs`

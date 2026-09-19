@@ -29,6 +29,7 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -100,6 +101,10 @@ class Job(Base):
         ),
         CheckConstraint("progress BETWEEN 0 AND 100", name="job_progress_range"),
         CheckConstraint("attempt_count >= 0", name="non_negative_attempt_count"),
+        # The unique (id, organisation_id) pair the job_attempts composite
+        # foreign key references, so an attempt can never belong to a different
+        # organisation than its parent job (ADR-0022 decision 6, BP §9).
+        UniqueConstraint("id", "organisation_id", name="uq_jobs_id_organisation_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UuidV7, primary_key=True, default=uuid7)
@@ -185,6 +190,16 @@ class JobAttempt(Base):
     __table_args__ = (
         UniqueConstraint("job_id", "attempt_number", name="uq_job_attempts_job_number"),
         UniqueConstraint("owner_token", name="uq_job_attempts_owner_token"),
+        # The attempt's copied tenant key must equal its parent job's
+        # organisation: the composite foreign key makes that a database
+        # invariant, not just an application check, and replaces the earlier
+        # single-column ``job_id`` FK (ADR-0022 decision 6, BP §9).
+        ForeignKeyConstraint(
+            ["job_id", "organisation_id"],
+            ["jobs.id", "jobs.organisation_id"],
+            name="fk_job_attempts_job_org_jobs",
+            ondelete="RESTRICT",
+        ),
         Index("ix_job_attempts_job_history", "job_id", "started_at"),
         Index("ix_job_attempts_status_lease", "status", "lease_expires_at"),
         Index(
@@ -201,10 +216,22 @@ class JobAttempt(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UuidV7, primary_key=True, default=uuid7)
-    # RESTRICT preserves the attempt ledger even when an old cleanup path
-    # tries to remove the parent job. It contains no tenant payload.
-    job_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("jobs.id", ondelete="RESTRICT"), nullable=False
+    # The composite constraint below is the sole parent FK; adding a redundant
+    # single-column ``job_id`` FK would drift from the migration without
+    # strengthening tenant integrity. ``RESTRICT`` (on the composite FK)
+    # preserves the attempt ledger even when an old cleanup path tries to
+    # remove the parent job. It contains no tenant payload.
+    job_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    # Denormalised tenant key (ADR-0022 decision 6): the attempt ledger is
+    # indirectly owned through its parent job, but a copied, non-null
+    # ``organisation_id`` lets a single direct RLS policy apply without a join
+    # and keeps correctness independent of a relationship load. It is written
+    # from the durable job row at claim time and never from the broker, and the
+    # composite parent FK ties it to that job's own organisation.
+    organisation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organisations.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
     )
     dispatch_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     owner_token: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)

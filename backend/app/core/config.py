@@ -96,6 +96,17 @@ class Settings(BaseSettings):
             "policy is enforced."
         ),
     )
+    database_coordinator_url: str = Field(
+        default="",
+        description=(
+            "Async SQLAlchemy URL for the restricted, non-owner outbox-coordinator "
+            "role (RLS rollout, ADR-0022 decision 3). The coordinator legitimately "
+            "reads and writes the global dispatch ledgers across tenants, so it uses "
+            "a second non-bypass role whose policies are scoped to dispatch state "
+            "rather than to a tenant. Production requires it once the jobs table "
+            "group is enforced (see app.db.session.resolve_coordinator_database_url)."
+        ),
+    )
     broker_redis_url: str = Field(
         default="",
         description="Dedicated Redis endpoint for Dramatiq broker state",
@@ -918,6 +929,10 @@ class Settings(BaseSettings):
             ("postgresql", "postgres")
         ):
             raise ValueError("database_runtime_url must be a PostgreSQL URL")
+        if self.database_coordinator_url and not self.database_coordinator_url.startswith(
+            ("postgresql", "postgres")
+        ):
+            raise ValueError("database_coordinator_url must be a PostgreSQL URL")
         # The execution lease must outlive the standard task time limit by at
         # least 60 seconds (durable delivery plan P2): a lease that expires
         # while the owning message is still within its time limit would let a

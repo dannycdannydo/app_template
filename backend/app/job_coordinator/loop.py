@@ -815,7 +815,7 @@ async def _async_main() -> None:
     """Wire settings, broker, registry and signals, then run until stopped."""
     from app.core.config import get_settings
     from app.core.logging import configure_logging
-    from app.db.session import async_session_factory
+    from app.db.session import coordinator_session_factory
 
     settings = get_settings()
     configure_logging(log_level=settings.log_level, json_logs=not settings.debug)
@@ -839,7 +839,7 @@ async def _async_main() -> None:
             loop.add_signal_handler(sig, shutdown_event.set)
     try:
         await run_coordinator(
-            async_session_factory,
+            coordinator_session_factory,
             registry=registry,
             batch_size=settings.coordinator_publication_batch_size,
             idle_poll_seconds=settings.coordinator_idle_poll_seconds,

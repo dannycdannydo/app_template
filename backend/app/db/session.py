@@ -51,6 +51,31 @@ def resolve_database_url(settings: Settings) -> str:
     return settings.database_url
 
 
+def resolve_coordinator_database_url(settings: Settings) -> str:
+    """Return the URL the outbox-coordinator engine must use.
+
+    The coordinator is the one production component whose legitimate scope is
+    the global dispatch ledgers across every tenant, so it runs as the separate
+    non-bypass ``app_coordinator`` role (ADR-0022 decision 3) rather than the
+    tenant-scoped runtime role. A configured ``database_coordinator_url`` always
+    wins. In production it is required once the jobs table group is enforced:
+    falling back to the runtime credential would silently strand the coordinator
+    behind the tenant policies. Outside production the runtime (or owner, when
+    no runtime URL is set) credential is used for local development and the
+    default test profile.
+    """
+    if settings.database_coordinator_url:
+        return settings.database_coordinator_url
+    if settings.app_env == "production":
+        raise RuntimeError(
+            "DATABASE_COORDINATOR_URL is required in production: the outbox "
+            "coordinator reads and writes cross-tenant dispatch state and must "
+            "connect as the restricted, non-owner coordinator role rather than the "
+            "tenant-scoped runtime credential (ADR-0022 decision 3)."
+        )
+    return resolve_database_url(settings)
+
+
 def build_session_factory(
     settings: Settings,
 ) -> tuple[AsyncEngine, async_sessionmaker[AsyncSession]]:
@@ -67,4 +92,21 @@ def build_session_factory(
     return engine, async_sessionmaker(engine, expire_on_commit=False)
 
 
+def build_coordinator_session_factory(
+    settings: Settings,
+) -> tuple[AsyncEngine, async_sessionmaker[AsyncSession]]:
+    """Build the coordinator engine and session factory for ``settings``.
+
+    Mirrors :func:`build_session_factory` but binds the separate
+    ``app_coordinator`` credential via :func:`resolve_coordinator_database_url`.
+    """
+    engine = create_async_engine(
+        resolve_coordinator_database_url(settings),
+        pool_pre_ping=True,
+        echo=settings.debug,
+    )
+    return engine, async_sessionmaker(engine, expire_on_commit=False)
+
+
 engine, async_session_factory = build_session_factory(get_settings())
+coordinator_engine, coordinator_session_factory = build_coordinator_session_factory(get_settings())

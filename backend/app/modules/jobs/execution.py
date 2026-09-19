@@ -41,6 +41,7 @@ import structlog
 from dramatiq.middleware import CurrentMessage
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.rls import bind_organisation_context
 from app.db.session import async_session_factory
 from app.modules.jobs import service as jobs_service
 from app.observability.sentry import capture_exception
@@ -189,6 +190,14 @@ async def run_claimed(*, job_id: uuid.UUID, handler: Handler) -> None:
         )
         try:
             async with async_session_factory() as session:
+                # Plan P3 group 4b: ``jobs`` and ``job_attempts`` are RLS
+                # enforced, so every handler transaction carries the durable
+                # row's organisation as transaction-local context before the
+                # handler reads or mutates the protected rows. The value comes
+                # from the claimed durable row, never the broker (ADR-0022
+                # decision 3). Handlers that need a user-private scope (the
+                # notifications email worker) bind the user on top of this.
+                await bind_organisation_context(session, context.organisation_id)
                 await handler(context, session)
             return
         except jobs_service.JobPermanentError:

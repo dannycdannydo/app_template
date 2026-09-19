@@ -211,17 +211,22 @@ async def _queue_depth_refresh_loop() -> None:
     """
     if get_settings().app_env == "test":
         return
-    from app.db.session import async_session_factory
+    from app.db.session import coordinator_session_factory
 
     while True:
         await asyncio.to_thread(update_queue_depths)
         settings = get_settings()
+        # The refresh reads the RLS-protected ``jobs``/``job_attempts`` ledgers
+        # across tenants (plan P3 group 4b), so it uses the explicit
+        # coordinator credential rather than the tenant-scoped runtime role
+        # (ADR-0022 decision 3). The attention-required delivery count goes
+        # through the narrow non-bypass aggregate function.
         await refresh_outbox_metrics(
-            async_session_factory,
+            coordinator_session_factory,
             reconciliation_threshold_seconds=settings.job_reconcile_threshold_seconds,
             reconciliation_cooldown_seconds=settings.job_reconcile_cooldown_seconds,
         )
-        await refresh_reliability_metrics(async_session_factory)
+        await refresh_reliability_metrics(coordinator_session_factory)
         await asyncio.sleep(30)
 
 

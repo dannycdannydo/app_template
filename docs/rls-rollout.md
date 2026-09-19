@@ -65,7 +65,7 @@ blast radius.
 | 2 | notifications (P3) | `notifications`, `notification_deliveries` | **Delivered.** Group 2. Production enablement migration `f5a6b7c8d9e0` installs the canonical user-private `notifications_user_isolation` policy (organisation + transaction-local user) and the `notification_deliveries_parent_isolation` policy (parent `EXISTS` with the same organisation+user predicate), enables and forces RLS, owns the new `app_current_user_id()` helper, and ships a reversible downgrade. The API dependency binds the authenticated user alongside the tenant, and the email worker binds the durable `jobs` row's `organisation_id` and `created_by_user_id` on every self-committing protected transaction; both are covered by the `test_rls_notifications_enablement_db.py` cross-organisation/cross-recipient suite. The group also ships its required operational read: the `app_metrics` non-`BYPASSRLS` role owns the `notification_deliveries_operational_count` `FOR SELECT` policy (scoped to `attention_required` rows) and the `SECURITY DEFINER` aggregate `app_attention_required_delivery_count()`, which the runtime role may execute; the in-process `attention_required_email_deliveries` metric therefore reports the true cross-tenant count without a bypass and without exposing delivery rows (ADR-0022 decision 3). |
 | 3 | AI data (P3) | `ai_requests`, `ai_outputs`, `ai_attachment_references`, `ai_scratch_uploads` | **Delivered.** Group 3. Production enablement migration `b8c9d0e1f2a3` installs the canonical `<table>_organisation_isolation` policies, enables and forces RLS, and ships a reversible downgrade. Organisation context is bound by the `ai.execute` worker from the durable `jobs` row (ADR-0022 decision 3) and rebound after every internal commit by the AI persistence port and the transfer reference store; the API path keeps its membership-dependency context. Attachment resolution stays scoped by the protected row (`DocumentSourceAuthority`), and the three formerly global cross-tenant sweeps — retention/stale reservation (`enforce_ai_retention`), scratch expiry (`expire_scratch_uploads`) and provider-file reconciliation (`reconcile_provider_file_references`) — now iterate the global, unprotected `organisations` table and bind each tenant before touching its AI rows, so they satisfy the default-deny policies without a bypass (ADR-0022 decision 4); the reconciliation sweep allocates its global batch budget fairly across organisations so one tenant cannot starve later tenants. Covered by the `test_rls_ai_data_enablement_db.py` cross-organisation, worker-binding and per-organisation-sweep suite, which exercises own-tenant and cross-tenant insert/update/delete and tenant-key-move on every enabled table. |
 | 4a | organisation settings (P3) | `organisation_features`, `organisation_ai_settings` | **Delivered.** Group 4a. Production enablement migration `c9d0e1f2a3b4` installs the canonical `<table>_organisation_isolation` policies, enables and forces RLS, and ships a reversible downgrade. Both tables are organisation-owned but managed from the platform plane; the feature-flag and AI-settings platform services bind exactly the organisation they target after the platform permission dependency validates the caller, and every organisation-creation path (tenant `create_organisation`, platform `create_platform_organisation`, platform bootstrap) binds the new organisation before writing its default settings row. The per-organisation platform binding is the narrow, human-reviewed exception to ADR-0022 decision 4 recorded there and in §3.1. Covered by the `test_rls_organisation_settings_enablement_db.py` suite: cross-organisation select/insert/update/delete and tenant-key-move, platform-plane service binding, the missing-row and organisation-creation create/update paths under the restricted role, representative multi-tenant `EXPLAIN` plans for both lookups (no sequential-scan regression, rollout principle 4), and migration reversibility. The group has **no tenant resource-detail error surface** (both tables are reached only through the per-organisation platform plane; its sole `404` is `organisation_not_found` from the unprotected `organisations` table), so it claims no part of the aggregate P3 "application errors do not disclose whether RLS hid a foreign row" checkbox. |
-| 4b | jobs (P3) | `jobs`, `job_attempts` | **Blocked on a P4 prerequisite (see §3.1).** Workers bind `app.job_id` for a single-row bootstrap read, then bind organisation context from the durable `jobs` row. `job_attempts` takes a denormalised non-null `organisation_id` (additive, backfilled) or an approved parent-existence policy. Enabling the default-deny policy requires the `app_coordinator` non-bypass mechanism first, because the outbox coordinator, the in-process reliability-metrics refresh and the `reconcile_jobs` operator CLI read `jobs`/`job_attempts` across tenants on the runtime role. |
+| 4b | jobs (P3) | `jobs`, `job_attempts` | **Delivered.** Group 4b. Production enablement migration `d0e1f2a3b4c5` installs the canonical runtime `<table>_organisation_isolation` policies, the single-row `jobs_worker_bootstrap` `FOR SELECT` policy and the `app_current_job_id()` helper, adds the denormalised non-null `job_attempts.organisation_id` (ADR-0022 decision 6) tied to its parent job by a composite `(job_id, organisation_id)` foreign key (with the matching unique pair on `jobs`), enables and forces RLS on both tables, and ships a reversible downgrade. It also delivers the part-4b prerequisite: the non-bypass `app_coordinator` role (`DATABASE_COORDINATOR_URL`) with dispatch-state-scoped read policies and **column-level** UPDATE grants limited to the settlement/reconciliation columns on `jobs`/`job_attempts` (so the coordinator can settle a dispatch but cannot move a tenant key, rewrite a payload/reference, edit progress or change ownership identity). The outbox coordinator, the in-process reliability-metrics refresh and the `reconcile_jobs` CLI now connect as `app_coordinator`. Workers bind `app.job_id` for a single-row bootstrap read, clear it, then bind the durable row's organisation before any protected read or write; the locking `FOR UPDATE` also runs under tenant context, because PostgreSQL applies the UPDATE policies to a locking read and the bootstrap deliberately has no UPDATE policy. Covered by the `test_rls_jobs_enablement_db.py` cross-organisation, worker-bootstrap, coordinator least-privilege and parent/tenant-consistency suite, plus migration reversibility. |
 | 5 | identity and control plane (P4) | `organisation_memberships`, `membership_roles`, `invitations`, platform tables | Pre-tenant membership lookup uses a user-keyed policy; platform operations use an explicit validated platform context, never an exemption. The cross-tenant teardown deletes are routed through the platform policy or `app_operator`. |
 | 6 | operational ledgers (P4) | `audit_events`, `outbox_events`, `maintenance_runs`, `webhook_events` | A `NULL` tenant key never means "all rows". The coordinator uses `app_coordinator`, scoped to due/unclaimed dispatch state. `outbox_events` has no client read path. |
 | 7 | platform-only plane (P4) | `platform_roles`, `platform_role_permissions`, `platform_memberships`, `bootstrap_states` | Control-plane policies keyed to the platform context. Platform status alone grants no tenant-row access. |
@@ -88,19 +88,48 @@ halves have different prerequisites:
   ADR-0022 decision 4) and the organisation-creation paths bind the new
   organisation before writing its default settings row. This migration ships
   both bindings.
-- **4b** cannot be enabled safely under the current ordering. ADR-0022
-  decision 3 requires the `app_coordinator` non-bypass role before the `jobs`
-  group, but §1 of this document (and the plan's P4) places that role in a later
-  work unit. Three consumers read `jobs`/`job_attempts` across tenants on the
-  runtime role and would silently return no rows under the enforced policy:
-  the outbox coordinator (`app/job_coordinator/loop.py`,
+- **4b** originally could not be enabled safely under the then-current ordering:
+  ADR-0022 decision 3 requires the `app_coordinator` non-bypass role before the
+  `jobs` group, but §1 of this document (and the plan's P4) had placed that role
+  in a later work unit. Three consumers read `jobs`/`job_attempts` across
+  tenants on the runtime role and would silently return no rows under the
+  enforced policy: the outbox coordinator (`app/job_coordinator/loop.py`,
   `reconciliation.py`), the in-process reliability-metrics refresh
   (`app/main.py` → `app/observability/`), and the `scripts/reconcile_jobs.py`
   operator CLI. The group-3 "iterate `organisations` and bind each tenant"
   pattern does not fit these, because they must find and aggregate rows across
-  tenants before a tenant is known. **4b therefore waits on the
-  `app_coordinator` design (see §1) and the jobs/job_attempts dispatch-state and
-  operational-read policies**, delivered as its own reviewed work unit.
+  tenants before a tenant is known. **Group 4b is now delivered as its own
+   reviewed work unit**, bringing the `app_coordinator` role and its
+   dispatch-state policies forward with it; all three consumers connect through
+   `app_coordinator` and set no tenant context, satisfying coordinator policies
+   scoped to dispatch state rather than a tenant. The coordinator's UPDATE
+   authority is granted **per column** (settlement/reconciliation columns only)
+   and its settle policies restrict the reachable post-update states, so the
+   dispatch-scoped role remains least-privilege rather than table-wide-write.
+- **4b worker bootstrap has no UPDATE policy.** `SELECT ... FOR UPDATE` is
+  governed by both the SELECT and the UPDATE policies, so a permissive
+  job-keyed bootstrap UPDATE policy would have authorised a real update of the
+  named row (including a tenant-key move). The bootstrap is therefore
+  `FOR SELECT` only: the worker reads the one row its `app.job_id` names, clears
+  that setting, binds the durable row's `organisation_id`, and only then takes
+  the row lock under tenant authority (ADR-0022 decision 3's "cleared before the
+  tenant-context phase"). `job_attempts` additionally carries a composite
+  `(job_id, organisation_id)` foreign key to `jobs (id, organisation_id)` so an
+  attempt's copied tenant key can never reference a parent job in another
+  organisation.
+- **4b notification-exhaustion addendum.** When the coordinator's bounded
+  recovery terminally fails an attempt, the registered `notification.email`
+  exhaustion hook finalizes the delivery row. That hook binds the durable job's
+  own organisation and recipient user before touching the user-private rows, so
+  the group-4b migration grants `app_coordinator` DML on
+  `notifications`/`notification_deliveries` (no new, tenant-broad policy; the
+  existing context-gated user-private policies still apply) and no tenant
+  payload is readable without binding that row's context. This narrow,
+  human-reviewed consequence of the coordinator running the same settlement
+  code is recorded in ADR-0022 and was approved 2026-09-19 with the group-4b
+  tenant-isolation, database-role/grant/policy, worker-context and
+  destructive-downgrade changes.
+
 
 ## 4. Rollback procedure
 

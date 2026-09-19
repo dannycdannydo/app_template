@@ -306,14 +306,24 @@ fixes were applied: the suite now proves representative, realistically sized
 `EXPLAIN` plans for both settings lookups, exercises the missing-row
 create/update and every organisation-creation path under the restricted role,
 and the ADR-0022 decision 4/9 and RLS comments record the approved narrow
-platform-binding exception. Group 4b (`jobs`,
-`job_attempts`) remains and is blocked on the `app_coordinator` non-bypass
-prerequisite (ADR-0022 decision 3): the outbox coordinator, the in-process
-reliability-metrics refresh and the `reconcile_jobs` operator CLI read
-`jobs`/`job_attempts` across tenants on the runtime role, so enabling the
-default-deny policy without that mechanism would silently strand them. The
-aggregate checkboxes below stay unchecked until every group lands; pick up the
-next work unit from `docs/rls-rollout.md` §3 rather than re-doing groups 0–4a.
+platform-binding exception. Group 4b (`jobs`, `job_attempts`) is delivered by
+production enablement migration `d0e1f2a3b4c5`, which brings the `app_coordinator`
+non-bypass prerequisite forward with it: the outbox coordinator, the in-process
+reliability-metrics refresh and the `reconcile_jobs` CLI now connect as
+`app_coordinator` with dispatch-state-scoped policies, workers bind `app.job_id`
+for the single-row bootstrap and then the durable row's organisation, and
+`job_attempts` takes the denormalised non-null `organisation_id` (ADR-0022
+decision 6). The required human review of the group-4b tenant-isolation,
+database-role/grant/policy, worker-context, notification-exhaustion and
+destructive-downgrade changes was recorded (2026-09-19), and the review's
+mandatory fixes were applied: the worker bootstrap is now `FOR SELECT` only
+(the row lock runs under tenant authority after `app.job_id` is cleared), the
+coordinator's `jobs`/`job_attempts` UPDATE authority is granted per
+settlement/reconciliation column with state-scoped `WITH CHECK`, and
+`job_attempts.organisation_id` is tied to its parent job by a composite
+`(job_id, organisation_id)` foreign key. The aggregate checkboxes below stay
+unchecked until every group lands; pick up the next work unit from
+`docs/rls-rollout.md` §3 rather than re-doing groups 0–4b.
 
 - [ ] Roll out policies in bounded migrations, beginning with the `records`
       group (group 0: `records`, `record_revisions`) — a production

@@ -153,9 +153,13 @@ TENANT_REGISTRY: tuple[TableIsolation, ...] = (
     ),
     TableIsolation(
         "job_attempts",
-        IsolationClass.INDIRECT,
-        "Internal attempt ledger with no organisation_id; reachable only "
-        "through a job that already passed the organisation filter.",
+        IsolationClass.ORGANISATION_OWNED,
+        "Internal attempt ledger; the plan P3 group-4b migration added a "
+        "denormalised non-null organisation_id (ADR-0022 decision 6) so a "
+        "direct RLS policy applies without a join. The parent job_id foreign "
+        "key is retained and every read still reaches an attempt through an "
+        "organisation-scoped job.",
+        ownership_columns=("organisation_id",),
         parent_table="jobs",
         parent_column="job_id",
     ),

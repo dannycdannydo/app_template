@@ -47,6 +47,14 @@ METRICS_ROLE = "app_metrics"
 #: Test-only throwaway credential for the operational-metrics role.
 METRICS_PASSWORD = "rls-metrics-test-password"
 
+#: The group-4b non-bypass outbox-coordinator role (ADR-0022 decision 3). It is
+#: created ``NOLOGIN`` by the group-4b migration; a focused test attaches a
+#: throwaway credential to prove its dispatch-state policies are load-bearing.
+COORDINATOR_ROLE = "app_coordinator"
+
+#: Test-only throwaway credential for the coordinator role.
+COORDINATOR_PASSWORD = "rls-coordinator-test-password"
+
 
 def alembic_config() -> Config:
     """Return an Alembic ``Config`` pointed at the backend project."""
@@ -914,6 +922,168 @@ async def seed_representative_settings(
     return org_a, feature_a, ai_settings_a
 
 
+@dataclass(frozen=True)
+class JobsIsolationSeed:
+    """Identifiers for one two-organisation jobs/attempts isolation world.
+
+    Each organisation owns one dispatched job and one open attempt on it. The
+    job carries a ``dispatch_id`` and ``owner_token`` so it satisfies both the
+    runtime organisation policy and the coordinator dispatch-state policies.
+    """
+
+    org_a: uuid.UUID
+    org_b: uuid.UUID
+    job_a: uuid.UUID
+    job_b: uuid.UUID
+    attempt_a: uuid.UUID
+    attempt_b: uuid.UUID
+
+
+async def seed_two_organisation_jobs(owner_url: str) -> JobsIsolationSeed:
+    """Seed two organisations, one job and one open attempt each (owner role).
+
+    The owner credential is used deliberately: the jobs group is direct tenant
+    data, so a seed must be able to write foreign rows the restricted runtime
+    role is denied, and it must run with RLS bypassed the way a migration does.
+    """
+    org_a, org_b = uuid.uuid4(), uuid.uuid4()
+    job_a, job_b = uuid.uuid4(), uuid.uuid4()
+    dispatch_a, dispatch_b = uuid.uuid4(), uuid.uuid4()
+    attempt_a, attempt_b = uuid.uuid4(), uuid.uuid4()
+    engine = create_async_engine(owner_url, poolclass=NullPool)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("INSERT INTO organisations (id, name) VALUES (:a, :an), (:b, :bn)"),
+                {"a": org_a, "an": "Jobs Group A", "b": org_b, "bn": "Jobs Group B"},
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO jobs "
+                    "(id, organisation_id, job_type, status, progress, input_reference, "
+                    "dispatch_id, owner_token) "
+                    "VALUES (:id, :org, 'file.processing', 'running', 0, 'ref', :dispatch, :owner)"
+                ),
+                [
+                    {
+                        "id": job_a,
+                        "org": org_a,
+                        "dispatch": dispatch_a,
+                        "owner": uuid.uuid4(),
+                    },
+                    {
+                        "id": job_b,
+                        "org": org_b,
+                        "dispatch": dispatch_b,
+                        "owner": uuid.uuid4(),
+                    },
+                ],
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO job_attempts "
+                    "(id, job_id, organisation_id, dispatch_id, owner_token, "
+                    "attempt_number, status, lease_expires_at, started_at, taken_over) "
+                    "VALUES (:id, :job, :org, :dispatch, :owner, 1, 'running', "
+                    "now() + interval '1 hour', now(), false)"
+                ),
+                [
+                    {
+                        "id": attempt_a,
+                        "job": job_a,
+                        "org": org_a,
+                        "dispatch": dispatch_a,
+                        "owner": uuid.uuid4(),
+                    },
+                    {
+                        "id": attempt_b,
+                        "job": job_b,
+                        "org": org_b,
+                        "dispatch": dispatch_b,
+                        "owner": uuid.uuid4(),
+                    },
+                ],
+            )
+    finally:
+        await engine.dispose()
+    return JobsIsolationSeed(
+        org_a=org_a,
+        org_b=org_b,
+        job_a=job_a,
+        job_b=job_b,
+        attempt_a=attempt_a,
+        attempt_b=attempt_b,
+    )
+
+
+async def seed_representative_jobs(
+    owner_url: str,
+    *,
+    organisations: int = 40,
+    rows_per_organisation: int = 30,
+) -> tuple[uuid.UUID, uuid.UUID]:
+    """Seed a multi-tenant ``jobs`` table for the representative plan review.
+
+    The org-scoped list is driven by the ``(organisation_id, created_at)``
+    index, so the table needs enough rows across organisations for the planner
+    to prefer the index over a sequential scan. Returns organisation A and one
+    of its job ids.
+    """
+    org_a = uuid.uuid4()
+    other_orgs = [uuid.uuid4() for _ in range(organisations - 1)]
+    sample_id = uuid.uuid4()
+    engine = create_async_engine(owner_url, poolclass=NullPool)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("INSERT INTO organisations (id, name) VALUES (:id, :name)"),
+                [
+                    {"id": org, "name": f"Jobs plan {i}"}
+                    for i, org in enumerate([org_a, *other_orgs])
+                ],
+            )
+            rows = [{"id": sample_id, "org": org_a}]
+            for org in [org_a, *other_orgs]:
+                rows.extend({"id": uuid.uuid4(), "org": org} for _ in range(rows_per_organisation))
+            await connection.execute(
+                text(
+                    "INSERT INTO jobs "
+                    "(id, organisation_id, job_type, status, progress, input_reference) "
+                    "VALUES (:id, :org, 'file.processing', 'succeeded', 100, 'ref')"
+                ),
+                rows,
+            )
+            await connection.execute(text("ANALYZE jobs"))
+    finally:
+        await engine.dispose()
+    return org_a, sample_id
+
+
+def provision_coordinator_login(owner_url: str) -> None:
+    """Grant the coordinator role a throwaway login credential (idempotent)."""
+
+    async def _run() -> None:
+        engine = create_async_engine(owner_url, poolclass=NullPool)
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(f"ALTER ROLE {COORDINATOR_ROLE} LOGIN PASSWORD '{COORDINATOR_PASSWORD}'")
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_run())
+
+
+def coordinator_url(owner_url: str) -> str:
+    """Return the test database URL for the restricted coordinator login."""
+    return (
+        make_url(owner_url)
+        .set(username=COORDINATOR_ROLE, password=COORDINATOR_PASSWORD)
+        .render_as_string(hide_password=False)
+    )
+
+
 def force_drop_runtime_role(database_url: str) -> None:
     """Revoke grants and drop ``app_runtime`` if it exists (test cleanup)."""
 
@@ -959,29 +1129,36 @@ def downgrade_to_base() -> None:
 
 __all__ = [
     "BACKEND_ROOT",
+    "COORDINATOR_PASSWORD",
+    "COORDINATOR_ROLE",
     "METRICS_PASSWORD",
     "METRICS_ROLE",
     "RUNTIME_PASSWORD",
     "RUNTIME_ROLE",
     "AIIsolationSeed",
+    "JobsIsolationSeed",
     "NotificationIsolationSeed",
     "SettingsIsolationSeed",
     "alembic_config",
+    "coordinator_url",
     "database_reachable",
     "downgrade_to_base",
     "force_drop_runtime_role",
     "metrics_url",
+    "provision_coordinator_login",
     "provision_metrics_login",
     "provision_runtime_login",
     "runtime_engine",
     "runtime_url",
     "seed_representative_ai",
     "seed_representative_files",
+    "seed_representative_jobs",
     "seed_representative_notifications",
     "seed_representative_records",
     "seed_representative_settings",
     "seed_two_organisation_ai",
     "seed_two_organisation_files",
+    "seed_two_organisation_jobs",
     "seed_two_organisation_notifications",
     "seed_two_organisation_records",
     "seed_two_organisation_settings",

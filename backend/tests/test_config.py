@@ -106,6 +106,39 @@ def test_resolve_database_url_requires_the_runtime_credential_in_production() ->
         resolve_database_url(_prod_ai(ai_enabled_providers=[]))
 
 
+def test_resolve_coordinator_database_url_prefers_the_coordinator_credential() -> None:
+    """A configured coordinator credential always wins on the coordinator path."""
+    from app.db.session import resolve_coordinator_database_url
+
+    settings = Settings(
+        app_env="test",
+        database_url="postgresql+asyncpg://owner",
+        database_runtime_url="postgresql+asyncpg://runtime",
+        database_coordinator_url="postgresql+asyncpg://coordinator",
+    )
+    assert resolve_coordinator_database_url(settings) == "postgresql+asyncpg://coordinator"
+
+
+def test_resolve_coordinator_database_url_falls_back_outside_production() -> None:
+    """Outside production the runtime credential is the local/test fallback."""
+    from app.db.session import resolve_coordinator_database_url
+
+    settings = Settings(
+        app_env="test",
+        database_url="postgresql+asyncpg://owner",
+        database_runtime_url="postgresql+asyncpg://runtime",
+    )
+    assert resolve_coordinator_database_url(settings) == "postgresql+asyncpg://runtime"
+
+
+def test_resolve_coordinator_database_url_requires_the_credential_in_production() -> None:
+    """Production must not run the cross-tenant coordinator on the runtime role."""
+    from app.db.session import resolve_coordinator_database_url
+
+    with pytest.raises(RuntimeError, match="DATABASE_COORDINATOR_URL"):
+        resolve_coordinator_database_url(_prod_ai(ai_enabled_providers=[]))
+
+
 def test_session_factory_binds_the_runtime_credential() -> None:
     """The factory the app actually uses is built from the runtime URL."""
     import asyncio
@@ -120,6 +153,28 @@ def test_session_factory_binds_the_runtime_credential() -> None:
     engine, factory = build_session_factory(settings)
     try:
         assert engine.url.render_as_string(hide_password=False) == "postgresql+asyncpg://runtime"
+        assert factory.kw["bind"] is engine
+    finally:
+        asyncio.run(engine.dispose())
+
+
+def test_coordinator_session_factory_binds_the_coordinator_credential() -> None:
+    """The coordinator factory is built from the separate coordinator URL."""
+    import asyncio
+
+    from app.db.session import build_coordinator_session_factory
+
+    settings = Settings(
+        app_env="test",
+        database_url="postgresql+asyncpg://owner",
+        database_runtime_url="postgresql+asyncpg://runtime",
+        database_coordinator_url="postgresql+asyncpg://coordinator",
+    )
+    engine, factory = build_coordinator_session_factory(settings)
+    try:
+        assert (
+            engine.url.render_as_string(hide_password=False) == "postgresql+asyncpg://coordinator"
+        )
         assert factory.kw["bind"] is engine
     finally:
         asyncio.run(engine.dispose())
