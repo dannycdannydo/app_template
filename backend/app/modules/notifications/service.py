@@ -31,6 +31,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, NotFoundError
+from app.db.rls import bind_organisation_context, bind_user_context
 from app.modules.audit.service import (
     ACTION_NOTIFICATION_DELIVERY_ATTENTION_REQUIRED,
     ACTION_NOTIFICATION_DELIVERY_FAILED,
@@ -105,6 +106,43 @@ DELIVERY_ERROR_CODES = frozenset(
 )
 
 
+async def _bind_notification_context(
+    session: AsyncSession,
+    *,
+    organisation_id: uuid.UUID,
+    user_id: uuid.UUID,
+) -> None:
+    """Bind the organisation and recipient user for a protected transaction.
+
+    The notifications group is user-private (plan P3, ADR-0022 decisions 5 and
+    9): its policies require both the transaction-local organisation and the
+    transaction-local user, so every protected read/write binds both before it
+    touches ``notifications`` or ``notification_deliveries``. API callers pass
+    the validated membership/authenticated user; worker callers pass the
+    organisation and recipient carried by the durable ``jobs`` row.
+    """
+    await bind_organisation_context(session, organisation_id)
+    await bind_user_context(session, user_id)
+
+
+def _require_durable_recipient(*, user_id: uuid.UUID, actor_user_id: uuid.UUID | None) -> None:
+    """Enforce that a ``notification.email`` job's actor is its recipient.
+
+    The worker derives the user-private RLS context (and the email address) from
+    the durable ``jobs.created_by_user_id`` column (plan P3, ADR-0022 decision
+    3/5). That column is semantically the job's actor, so until a dedicated
+    durable recipient identity exists the two must be equal; otherwise a job
+    scheduled on behalf of a different user would read and email the wrong
+    person's notification. A future producer that genuinely needs actor/receiver
+    divergence must model that recipient identity first.
+    """
+    if actor_user_id != user_id:
+        raise ValueError(
+            "notification.email jobs carry the recipient in jobs.created_by_user_id, "
+            "so the job actor must equal the notification recipient"
+        )
+
+
 def _notification_not_found() -> NotFoundError:
     return NotFoundError(
         code="notification_not_found",
@@ -134,6 +172,7 @@ async def get_notification(
     cross-recipient reads are indistinguishable from missing rows (acceptance
     §5.5).
     """
+    await _bind_notification_context(session, organisation_id=organisation_id, user_id=user_id)
     notification = await session.scalar(
         user_notifications_statement(organisation_id, user_id).where(
             Notification.id == notification_id
@@ -162,6 +201,7 @@ async def list_notifications(
     the same caller/org pair and rides on the envelope so a single request
     refreshes both the list and the header badge (acceptance §5.5).
     """
+    await _bind_notification_context(session, organisation_id=organisation_id, user_id=user_id)
     page = max(page, 1)
     page_size = min(max(page_size, 1), MAX_PAGE_SIZE)
     total = await session.scalar(
@@ -186,6 +226,7 @@ async def unread_count(
     user_id: uuid.UUID,
 ) -> int:
     """Return the caller's unread notification count in the organisation."""
+    await _bind_notification_context(session, organisation_id=organisation_id, user_id=user_id)
     count = await session.scalar(unread_notifications_count_statement(organisation_id, user_id))
     return count or 0
 
@@ -211,8 +252,13 @@ async def mark_read(
     )
     if notification.read_at is None:
         notification.read_at = datetime.now(UTC)
-        await session.commit()
+        # Flush and reload inside the write transaction while the RLS context is
+        # bound; a refresh after the commit would run context-free and be
+        # default-denied on the protected ``notifications`` row (plan P3,
+        # ADR-0022 decision 9).
+        await session.flush()
         await session.refresh(notification)
+        await session.commit()
     return notification
 
 
@@ -228,6 +274,7 @@ async def mark_all_read(
     alter another organisation's or recipient's rows. Repeating it is safe:
     already-read rows do not match and the result is zero.
     """
+    await _bind_notification_context(session, organisation_id=organisation_id, user_id=user_id)
     result = await session.execute(
         mark_all_notifications_read_statement(
             organisation_id,
@@ -258,6 +305,7 @@ async def send_test_notification(
     message with the delivery id as the job's ``input_reference`` — the same
     flow ``complete_upload`` uses for file processing.
     """
+    await _bind_notification_context(session, organisation_id=organisation_id, user_id=user_id)
     notification = Notification(
         organisation_id=organisation_id,
         user_id=user_id,
@@ -284,6 +332,7 @@ async def send_test_notification(
         resource_id=str(notification.id),
         metadata={"channel": DELIVERY_CHANNEL_EMAIL, "recipient": recipient_email},
     )
+    _require_durable_recipient(user_id=user_id, actor_user_id=actor_user_id)
     # Imported lazily: the task module imports this service, so a module-level
     # import would be circular. By the time the test-send flow runs the module
     # is cached, so the import is a dict lookup. The task module is the single
@@ -297,6 +346,10 @@ async def send_test_notification(
         input_reference=str(delivery.id),
         actor_user_id=actor_user_id,
     )
+    # ``schedule_job`` commits, which clears the transaction-local RLS context;
+    # rebind it before refreshing the protected rows, or the reload runs
+    # context-free and is default-denied (plan P3, ADR-0022 decision 9).
+    await _bind_notification_context(session, organisation_id=organisation_id, user_id=user_id)
     await session.refresh(notification)
     await session.refresh(delivery)
     return notification, delivery, job
@@ -335,6 +388,7 @@ async def create_file_notification(
     and re-verified in this transaction before the notification and its
     delivery are written (plan P2, AC5).
     """
+    await _bind_notification_context(session, organisation_id=organisation_id, user_id=user_id)
     if ownership is not None:
         await jobs_service.verify_ownership(session, ownership)
     existing = await session.scalar(
@@ -368,6 +422,7 @@ async def create_file_notification(
     )
     session.add(delivery)
     await session.flush()
+    _require_durable_recipient(user_id=user_id, actor_user_id=actor_user_id)
     # Imported lazily: the task module imports this service, so a module-level
     # import would be circular (the same pattern as ``send_test_notification``).
     from app.modules.notifications import tasks as notifications_tasks
@@ -379,6 +434,10 @@ async def create_file_notification(
         input_reference=str(delivery.id),
         actor_user_id=actor_user_id,
     )
+    # ``schedule_job`` commits and clears the transaction-local RLS context;
+    # rebind before refreshing the protected notification row (plan P3,
+    # ADR-0022 decision 9).
+    await _bind_notification_context(session, organisation_id=organisation_id, user_id=user_id)
     await session.refresh(notification)
     return notification
 
@@ -390,12 +449,17 @@ async def get_delivery_for_task(
     session: AsyncSession,
     *,
     delivery_id: uuid.UUID,
+    organisation_id: uuid.UUID,
+    user_id: uuid.UUID,
 ) -> NotificationDelivery:
     """Return the delivery row a worker task operates on (worker-side read).
 
-    Like ``jobs_service.get_job_for_task`` this is deliberately not
-    org-scoped: the worker knows only the delivery id it was messaged with.
+    The delivery row is protected by its parent notification's user-private
+    policy, so the worker binds the validated organisation and recipient user
+    from the durable ``jobs`` row before this read; the lookup by opaque id is
+    then constrained by RLS exactly as the API path is.
     """
+    await _bind_notification_context(session, organisation_id=organisation_id, user_id=user_id)
     delivery = await session.scalar(
         select(NotificationDelivery).where(NotificationDelivery.id == delivery_id)
     )
@@ -408,13 +472,16 @@ async def get_notification_for_task(
     session: AsyncSession,
     *,
     notification_id: uuid.UUID,
+    organisation_id: uuid.UUID,
+    user_id: uuid.UUID,
 ) -> Notification:
     """Return the notification a delivery belongs to (worker-side read).
 
-    The task needs the notification's title/body to compose the email; like
-    ``get_delivery_for_task`` it is not org-scoped, because the worker knows
-    only the ids it was messaged with.
+    The task needs the notification's title/body to compose the email; the
+    worker binds the durable job's organisation and recipient user so the
+    user-private policy authorises exactly the notification being delivered.
     """
+    await _bind_notification_context(session, organisation_id=organisation_id, user_id=user_id)
     notification = await session.scalar(
         select(Notification).where(Notification.id == notification_id)
     )
@@ -436,6 +503,8 @@ async def mark_delivery_running(
     session: AsyncSession,
     *,
     delivery_id: uuid.UUID,
+    organisation_id: uuid.UUID,
+    user_id: uuid.UUID,
     ownership: jobs_service.JobOwnership | None = None,
 ) -> NotificationDelivery:
     """Transition a delivery to ``running`` at the start of a task attempt.
@@ -450,7 +519,12 @@ async def mark_delivery_running(
     """
     if ownership is not None:
         await jobs_service.verify_ownership(session, ownership)
-    delivery = await get_delivery_for_task(session, delivery_id=delivery_id)
+    delivery = await get_delivery_for_task(
+        session,
+        delivery_id=delivery_id,
+        organisation_id=organisation_id,
+        user_id=user_id,
+    )
     if is_delivery_terminal(delivery.status):
         raise ConflictError(
             code="delivery_in_terminal_state",
@@ -458,8 +532,13 @@ async def mark_delivery_running(
         )
     delivery.status = NotificationDeliveryStatus.RUNNING
     delivery.attempt_count = delivery.attempt_count + 1
-    await session.commit()
+    # Flush and reload inside the write transaction while the RLS context is
+    # bound; a refresh after the commit would run context-free and be
+    # default-denied on the protected delivery/sibling tables (plan P3,
+    # ADR-0022 decision 9).
+    await session.flush()
     await session.refresh(delivery)
+    await session.commit()
     return delivery
 
 
@@ -467,6 +546,8 @@ async def return_delivery_to_queue(
     session: AsyncSession,
     *,
     delivery_id: uuid.UUID,
+    organisation_id: uuid.UUID,
+    user_id: uuid.UUID,
     ownership: jobs_service.JobOwnership | None = None,
 ) -> NotificationDelivery:
     """Return a retryable owned delivery to ``queued`` before broker retry.
@@ -479,11 +560,18 @@ async def return_delivery_to_queue(
     """
     if ownership is not None:
         await jobs_service.verify_ownership(session, ownership)
-    delivery = await get_delivery_for_task(session, delivery_id=delivery_id)
+    delivery = await get_delivery_for_task(
+        session,
+        delivery_id=delivery_id,
+        organisation_id=organisation_id,
+        user_id=user_id,
+    )
     if not is_delivery_terminal(delivery.status):
         delivery.status = NotificationDeliveryStatus.QUEUED
-        await session.commit()
+        # Flush and reload before the commit, while the context is still bound.
+        await session.flush()
         await session.refresh(delivery)
+        await session.commit()
     return delivery
 
 
@@ -492,6 +580,8 @@ async def mark_delivery_succeeded(
     *,
     delivery_id: uuid.UUID,
     provider_message_id: str,
+    organisation_id: uuid.UUID,
+    user_id: uuid.UUID,
     commit: bool = True,
     ownership: jobs_service.JobOwnership | None = None,
 ) -> NotificationDelivery:
@@ -505,14 +595,21 @@ async def mark_delivery_succeeded(
     """
     if ownership is not None:
         await jobs_service.verify_ownership(session, ownership)
-    delivery = await get_delivery_for_task(session, delivery_id=delivery_id)
+    delivery = await get_delivery_for_task(
+        session,
+        delivery_id=delivery_id,
+        organisation_id=organisation_id,
+        user_id=user_id,
+    )
     delivery.status = NotificationDeliveryStatus.SUCCEEDED
     delivery.provider_message_id = provider_message_id
     delivery.error_code = None
     delivery.sent_at = datetime.now(UTC)
     if commit:
-        await session.commit()
+        # Flush and reload before the commit, while the context is still bound.
+        await session.flush()
         await session.refresh(delivery)
+        await session.commit()
     return delivery
 
 
@@ -521,6 +618,7 @@ async def mark_delivery_failed(
     *,
     delivery_id: uuid.UUID,
     organisation_id: uuid.UUID,
+    user_id: uuid.UUID,
     error_code: str,
     commit: bool = True,
     ownership: jobs_service.JobOwnership | None = None,
@@ -540,7 +638,12 @@ async def mark_delivery_failed(
         raise ValueError("error_code must be a recognised delivery error code")
     if ownership is not None:
         await jobs_service.verify_ownership(session, ownership)
-    delivery = await get_delivery_for_task(session, delivery_id=delivery_id)
+    delivery = await get_delivery_for_task(
+        session,
+        delivery_id=delivery_id,
+        organisation_id=organisation_id,
+        user_id=user_id,
+    )
     if is_delivery_terminal(delivery.status):
         return delivery
     delivery.status = NotificationDeliveryStatus.FAILED
@@ -558,8 +661,10 @@ async def mark_delivery_failed(
         },
     )
     if commit:
-        await session.commit()
+        # Flush and reload before the commit, while the context is still bound.
+        await session.flush()
         await session.refresh(delivery)
+        await session.commit()
     return delivery
 
 
@@ -568,6 +673,7 @@ async def mark_delivery_attention_required(
     *,
     delivery_id: uuid.UUID,
     organisation_id: uuid.UUID,
+    user_id: uuid.UUID,
     commit: bool = True,
     ownership: jobs_service.JobOwnership | None = None,
 ) -> NotificationDelivery:
@@ -580,7 +686,12 @@ async def mark_delivery_attention_required(
     """
     if ownership is not None:
         await jobs_service.verify_ownership(session, ownership)
-    delivery = await get_delivery_for_task(session, delivery_id=delivery_id)
+    delivery = await get_delivery_for_task(
+        session,
+        delivery_id=delivery_id,
+        organisation_id=organisation_id,
+        user_id=user_id,
+    )
     if is_delivery_terminal(delivery.status):
         return delivery
     delivery.status = NotificationDeliveryStatus.ATTENTION_REQUIRED
@@ -598,6 +709,8 @@ async def mark_delivery_attention_required(
         },
     )
     if commit:
-        await session.commit()
+        # Flush and reload before the commit, while the context is still bound.
+        await session.flush()
         await session.refresh(delivery)
+        await session.commit()
     return delivery

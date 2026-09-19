@@ -29,7 +29,7 @@ from app.core.security import (
     get_user_profile_client,
     verify_webhook_signature,
 )
-from app.db.rls import bind_organisation_context
+from app.db.rls import bind_organisation_context, bind_user_context
 from app.db.session import async_session_factory
 from app.integrations.workos.invitations import (
     WorkOSInvitationsProvider,
@@ -221,12 +221,18 @@ async def get_current_membership(
             code="not_a_member",
             message="You are not an active member of this organisation.",
         )
-    # RLS prototype (plan P2, ADR-0022 decision 8): only after the active
-    # membership is confirmed is the organisation bound as transaction-local
-    # context. The value comes from the validated membership row, never from
-    # the header directly, and it is parameterised into ``set_config``. Health,
-    # authentication, public and platform routes never bind tenant context.
+    # RLS prototype/rollout (plan P2/P3, ADR-0022 decision 8): only after the
+    # active membership is confirmed is the organisation bound as
+    # transaction-local context. The value comes from the validated membership
+    # row, never from the header directly, and it is parameterised into
+    # ``set_config``. Health, authentication, public and platform routes never
+    # bind tenant context.
     await bind_organisation_context(session, membership.organisation_id)
+    # The user-private notification policies additionally require the
+    # transaction-local user. It is bound here, after the membership is
+    # validated, from the authenticated user (membership.user_id is the same
+    # user). Organisation-plane routes only; the platform plane never binds it.
+    await bind_user_context(session, membership.user_id)
     bind_identity_context(user_id=str(user.id), organisation_id=str(membership.organisation_id))
     request.state.organisation_id = str(membership.organisation_id)
     return membership
