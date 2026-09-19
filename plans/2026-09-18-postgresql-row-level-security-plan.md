@@ -361,9 +361,39 @@ control-plane and backup/recovery changes.
 Expected engineering effort: approximately 3–7 days, depending on the P1
 classification and whether schema changes are required.
 
-- [ ] Implement the approved pre-tenant membership lookup without accepting
+Progress: **group 5 (identity and control plane) is delivered.** Production
+enablement migration `f1a2b3c4d5e6` installs the canonical organisation
+isolation policy on `organisation_memberships` and `invitations`, the
+SELECT-only pre-tenant `organisation_memberships_user_isolation` policy, the
+`membership_roles_parent_isolation` parent-existence policy, the invitee
+email-keyed `invitations_invitee_select`/`invitations_invitee_update` pair and
+the verified-webhook `invitations_webhook_provider_isolation` single-row
+bootstrap, with a reversible downgrade (`docs/rls-rollout.md` §3.2). The
+authenticated user is bound as transaction-local `app.user_id` before the
+pre-tenant identity lookups; every platform membership/invitation operation
+binds exactly the organisation it targets; the cross-tenant teardown deletes
+run under the user-keyed read plus a per-organisation delete, so the group
+needs no `app_operator`; and runtime `UPDATE` on `invitations` is
+column-restricted to `status`/`updated_at`. The required human review of the
+group-5 tenant-isolation, permission/identity access and database
+migration/control-plane changes was recorded (2026-09-19), and the review's
+mandatory fixes were applied: the `membership_roles` read visibility is split
+from write authority (a new `membership_roles_organisation_isolation` policy
+requires the parent membership's durable organisation to equal the validated
+tenant, so a pre-tenant user-only context cannot mutate a grant), the verified
+webhook bootstrap is split into `invitations_webhook_provider_select`/
+`invitations_webhook_provider_update` so binding a provider id can read/lock
+and flip `status` but never insert or delete, and the lost-race invitation
+retry rebinds `app.user_id` after its rollback before re-reading the invitee
+rows. The real-PostgreSQL suite now proves those pre-tenant and provider
+write-denial paths. Groups 6 (operational ledgers, including the `app_operator`
+credential) and 7 (platform-only plane) and the automated runtime-role startup
+check remain. The aggregate P4 checkboxes below stay unchecked until every
+group lands, except the two group-5 bullets completed here.
+
+- [x] Implement the approved pre-tenant membership lookup without accepting
       arbitrary tenant context.
-- [ ] Protect membership, invitation and membership-role access according to
+- [x] Protect membership, invitation and membership-role access according to
       their identity/control-plane classification.
 - [ ] Protect job attempts, notification deliveries and other indirect rows
       using the approved parent or denormalised-key strategy.

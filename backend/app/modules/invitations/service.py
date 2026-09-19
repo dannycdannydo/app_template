@@ -59,6 +59,7 @@ from app.core.exceptions import (
     ServiceUnavailableError,
 )
 from app.core.security import UserProfileClient
+from app.db.rls import bind_organisation_context, bind_user_context
 from app.integrations.workos.invitations import WorkOSInvitationsProvider
 from app.integrations.workos.organizations import WorkOSOrganizationsProvider
 from app.modules.audit.service import (
@@ -128,6 +129,13 @@ async def invite_user(
             code="organisation_not_found",
             message="The organisation could not be found.",
         )
+
+    # Plan P4 group 5: ``invitations`` is default-deny under forced RLS. The
+    # platform plane carries no ``X-Org-Id``; bind exactly the organisation this
+    # operation targets after the platform permission dependency validated the
+    # caller (the explicit per-organisation platform path, never a bypass —
+    # ADR-0022 decision 4).
+    await bind_organisation_context(session, organisation_id)
 
     role = await session.scalar(select(Role).where(Role.code == role_code))
     if role is None:
@@ -215,6 +223,10 @@ async def invite_user(
             code="invitation_pending_exists",
             message="This user already has a pending invitation to this organisation.",
         ) from None
+    # The commit cleared the transaction-local context; rebind the target
+    # organisation before refreshing the protected invitation row (plan P4
+    # group 5).
+    await bind_organisation_context(session, organisation_id)
     await session.refresh(invitation)
     return invitation
 
@@ -242,6 +254,10 @@ async def revoke_invitation(
     (Scope §6.8). The audit row commits in the same transaction as the status
     change.
     """
+    # Plan P4 group 5: bind the target organisation before the protected
+    # invitation lookup (the platform plane carries no ``X-Org-Id``; the
+    # platform permission dependency has already validated the caller).
+    await bind_organisation_context(session, organisation_id)
     invitation = await session.scalar(
         select(Invitation)
         .where(
@@ -283,6 +299,10 @@ async def revoke_invitation(
         metadata={"email": invitation.email},
     )
     await session.commit()
+    # The commit cleared the transaction-local context; rebind the target
+    # organisation before refreshing the protected invitation row (plan P4
+    # group 5).
+    await bind_organisation_context(session, organisation_id)
     await session.refresh(invitation)
     return invitation
 
@@ -309,6 +329,10 @@ async def list_invitations(
             message="The organisation could not be found.",
         )
 
+    # Plan P4 group 5: bind the target organisation before listing its
+    # protected invitation rows (the platform plane carries no ``X-Org-Id``; the
+    # platform permission dependency has already validated the caller).
+    await bind_organisation_context(session, organisation_id)
     page = max(page, 1)
     page_size = min(max(page_size, 1), MAX_PAGE_SIZE)
     total = await session.scalar(invitations_count_statement(organisation_id=organisation_id))
@@ -365,6 +389,12 @@ async def link_invitation_on_login(
     # internal copy is deliberately not the authority: a user may change
     # their provider email between invitations and their next login.
     profile_email = profile.email
+    # Plan P4 group 5 (ADR-0022 decision 8): bind the authenticated user's
+    # transaction-local context before the pre-tenant invitation lookup. The
+    # ``invitations_invitee_*`` policies are keyed to the authenticated user's
+    # current verified email, so no organisation context is invented to read
+    # the invitee's own invitations.
+    await bind_user_context(session, user.id)
     grantable = await _resolve_grantable_invitations(session, profile_email, workos_invitations)
     if not grantable:
         return []
@@ -388,6 +418,11 @@ async def link_invitation_on_login(
                 code="invitation_link_failed",
                 message="The invitation could not be linked. Please try again.",
             ) from None
+        # The rollback cleared the transaction-local context, so the retry must
+        # rebind the authenticated user before re-reading the invitee rows;
+        # otherwise the ``invitations_invitee_*`` policies match nothing and the
+        # retry silently returns no grantable invitations (plan P4 group 5).
+        await bind_user_context(session, retry_user.id)
         retry_grantable = await _resolve_grantable_invitations(
             session, profile_email, workos_invitations
         )
@@ -525,6 +560,12 @@ async def _accept_invitations(
         if invitation.email.strip().lower() != profile_email.strip().lower():
             continue
 
+        # Plan P4 group 5: the acceptance writes the invitee's membership, which
+        # is default-deny under the canonical organisation policy. Bind the
+        # invitation's own validated organisation before the membership and
+        # membership-role inserts (the value comes from the durable invitation
+        # row, never a request value).
+        await bind_organisation_context(session, invitation.organisation_id)
         role = await session.scalar(select(Role).where(Role.code == invitation.role_code))
         if role is None:
             raise ServiceUnavailableError(

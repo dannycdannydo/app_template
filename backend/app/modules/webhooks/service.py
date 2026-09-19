@@ -38,6 +38,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.rls import bind_invitation_provider_context
 from app.modules.audit.service import (
     ACTION_INVITATION_REVOKED,
     ACTION_PLATFORM_ADMIN_LOCKOUT,
@@ -133,6 +134,14 @@ async def _refresh_revoked_invitation(session: AsyncSession, event: WorkOSWebhoo
     data = _lenient_data(event, InvitationEventData)
     if data is None or data.id is None:
         return False
+    # Plan P4 group 5: the webhook control-plane path has no organisation
+    # context. Bind the verified event's own provider invitation id as a
+    # transaction-local single-row bootstrap, so the
+    # ``invitations_webhook_provider_isolation`` policy admits exactly the one
+    # row the (signature-verified) delivery names — never a cross-tenant scan
+    # and never a bypass. The value is an opaque provider id, not tenant
+    # authority.
+    await bind_invitation_provider_context(session, data.id)
     invitation = await session.scalar(
         select(Invitation).where(Invitation.workos_invitation_id == data.id).with_for_update()
     )

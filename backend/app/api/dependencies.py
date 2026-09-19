@@ -144,6 +144,16 @@ async def get_current_user(
             code="user_disabled",
             message="Your account is disabled.",
         )
+    # RLS rollout (plan P4, group 5; ADR-0022 decision 8): bind the validated
+    # user as transaction-local context *before* any membership/invitation
+    # lookup. The identity policies on ``organisation_memberships`` and
+    # ``invitations`` are user-keyed, so the pre-tenant provisioning chain
+    # (bootstrap organisation, login-time invitation linking) can resolve this
+    # user's rows without an organisation context and without a bypass. The
+    # value comes from the validated session's internal user, never a request
+    # value. The setting is transaction-local, so the chains that commit below
+    # rebind it before their next protected read.
+    await bind_user_context(session, user.id)
     # The one-time platform bootstrap (Scope §6.4) runs inside the
     # provisioning chain: after the user is resolved and confirmed enabled,
     # the configured bootstrap email's first verified login is granted
@@ -159,6 +169,12 @@ async def get_current_user(
     # authentication; a provider outage with a pending invitation grants
     # nothing and retries on the next login (plan P1 decision 5).
     await link_invitation_on_login(session, user, profiles, workos_invitations)
+    # Re-establish the transaction-local user context after the provisioning
+    # chain's commits (each commit clears it). The request's remaining
+    # protected reads — ``/me`` and the membership lookup in
+    # ``get_current_membership`` — require ``app.user_id`` under the
+    # user-keyed identity policies (plan P4, group 5).
+    await bind_user_context(session, user.id)
     # Blueprint §28 logging context: every log line emitted by this request
     # after authentication carries the caller's user id (the request
     # middleware clears the context at the end of the request). The identity
@@ -205,6 +221,13 @@ async def get_current_membership(
     organisation context (v0.2 Scope §6.3).
     """
     org_id = _org_context_id(x_org_id)
+    # RLS rollout (plan P4, group 5; ADR-0022 decision 8): the pre-tenant
+    # membership lookup is user-keyed. Bind the authenticated user's
+    # transaction-local context before reading the membership, so the
+    # ``organisation_memberships_user_isolation`` policy can resolve it while no
+    # organisation context exists yet. The value comes from the authenticated
+    # user, never from the ``X-Org-Id`` header or a request body.
+    await bind_user_context(session, user.id)
     membership = await session.scalar(
         select(OrganisationMembership).where(
             OrganisationMembership.user_id == user.id,
@@ -221,20 +244,19 @@ async def get_current_membership(
             code="not_a_member",
             message="You are not an active member of this organisation.",
         )
-    # RLS prototype/rollout (plan P2/P3, ADR-0022 decision 8): only after the
-    # active membership is confirmed is the organisation bound as
-    # transaction-local context. The value comes from the validated membership
-    # row, never from the header directly, and it is parameterised into
-    # ``set_config``. Health, authentication and public routes never bind tenant
-    # context; platform routes bind only the single organisation a P3 group-4a
-    # settings operation targets, after the platform permission dependency
-    # validated the caller (ADR-0022 decision 4).
+    # RLS rollout (plan P2/P3/P4, ADR-0022 decision 8): only after the active
+    # membership is confirmed is the organisation bound as transaction-local
+    # context. The value comes from the validated membership row, never from the
+    # header directly, and it is parameterised into ``set_config``. Health,
+    # authentication and public routes never bind tenant context; platform
+    # routes bind only the single organisation the operation targets, after the
+    # platform permission dependency validated the caller (ADR-0022 decision 4).
     await bind_organisation_context(session, membership.organisation_id)
     # The user-private notification policies additionally require the
-    # transaction-local user. It is bound here, after the membership is
-    # validated, from the authenticated user (membership.user_id is the same
-    # user). Organisation-plane routes only; the platform plane never binds it.
-    await bind_user_context(session, membership.user_id)
+    # transaction-local user; it is already bound above from the authenticated
+    # user (membership.user_id is the same user), and it remains bound for this
+    # transaction. Organisation-plane routes only; the platform plane binds no
+    # request-selected user beyond the authenticated one.
     bind_identity_context(user_id=str(user.id), organisation_id=str(membership.organisation_id))
     request.state.organisation_id = str(membership.organisation_id)
     return membership

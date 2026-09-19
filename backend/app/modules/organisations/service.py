@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.persistence.service import create_default_settings
 from app.core.exceptions import APIError
+from app.db.rls import bind_organisation_context
 from app.modules.audit.service import ACTION_ORGANISATION_CREATED, record_event
 from app.modules.organisations.models import (
     MembershipStatus,
@@ -46,6 +47,14 @@ async def create_organisation(
     organisation = Organisation(name=name)
     session.add(organisation)
     await session.flush()
+
+    # RLS rollout (plan P4, group 5): ``organisation_memberships`` and
+    # ``membership_roles`` are default-deny under forced RLS. The creator's
+    # membership is written for the organisation that was just created, so bind
+    # exactly that organisation's transaction-local context before the
+    # membership/role inserts. The value is the server-generated organisation
+    # id, never client input.
+    await bind_organisation_context(session, organisation.id)
 
     membership = OrganisationMembership(
         user_id=creator.id,

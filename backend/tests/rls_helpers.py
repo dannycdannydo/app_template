@@ -1059,6 +1059,287 @@ async def seed_representative_jobs(
     return org_a, sample_id
 
 
+@dataclass(frozen=True)
+class IdentityIsolationSeed:
+    """Identifiers for one two-organisation identity/control-plane world (P4, 5).
+
+    ``org_a`` holds one member (``user_a``) with an active membership, an owner
+    role grant and a pending invitation addressed to ``user_a``; ``org_b`` holds
+    a distinct member (``user_b``) with the same shape. The world proves the
+    organisation boundary, the pre-tenant user-keyed membership read, the
+    invitee email-keyed invitation access and the webhook single-row bootstrap.
+    """
+
+    org_a: uuid.UUID
+    org_b: uuid.UUID
+    user_a: uuid.UUID
+    user_b: uuid.UUID
+    membership_a: uuid.UUID
+    membership_b: uuid.UUID
+    role_grant_a: uuid.UUID
+    role_grant_b: uuid.UUID
+    invitation_a: uuid.UUID
+    invitation_b: uuid.UUID
+    provider_invitation_a: str
+    provider_invitation_b: str
+
+
+async def seed_two_organisation_identity(owner_url: str) -> IdentityIsolationSeed:
+    """Seed two organisations, two members, their role grants and invitations.
+
+    The owner credential is used deliberately: these identity tables are
+    default-deny under the group-5 RLS policies, so a seed must be able to write
+    rows the restricted runtime role is denied, and it must run with RLS
+    bypassed the way a migration does. Returns the identifiers the suite needs.
+    """
+    org_a, org_b = uuid.uuid4(), uuid.uuid4()
+    user_a, user_b = uuid.uuid4(), uuid.uuid4()
+    membership_a, membership_b = uuid.uuid4(), uuid.uuid4()
+    role_grant_a, role_grant_b = uuid.uuid4(), uuid.uuid4()
+    invitation_a, invitation_b = uuid.uuid4(), uuid.uuid4()
+    provider_invitation_a = f"invitation_{uuid.uuid4().hex}"
+    provider_invitation_b = f"invitation_{uuid.uuid4().hex}"
+    expires_at = datetime.now(UTC) + timedelta(days=7)
+    engine = create_async_engine(owner_url, poolclass=NullPool)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("INSERT INTO organisations (id, name) VALUES (:a, :an), (:b, :bn)"),
+                {"a": org_a, "an": "Identity A", "b": org_b, "bn": "Identity B"},
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO users (id, workos_user_id, email, name, is_active) "
+                    "VALUES (:id, :workos, :email, :name, true)"
+                ),
+                [
+                    {
+                        "id": user_a,
+                        "workos": f"user_identity_a_{uuid.uuid4().hex[:10]}",
+                        "email": f"a-{user_a}@example.com",
+                        "name": "Identity A User",
+                    },
+                    {
+                        "id": user_b,
+                        "workos": f"user_identity_b_{uuid.uuid4().hex[:10]}",
+                        "email": f"b-{user_b}@example.com",
+                        "name": "Identity B User",
+                    },
+                ],
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO organisation_memberships "
+                    "(id, user_id, organisation_id, status) "
+                    "VALUES (:id, :user, :org, 'active')"
+                ),
+                [
+                    {"id": membership_a, "user": user_a, "org": org_a},
+                    {"id": membership_b, "user": user_b, "org": org_b},
+                ],
+            )
+            owner_role_id = await connection.scalar(
+                text("SELECT id FROM roles WHERE code = 'owner'")
+            )
+            if owner_role_id is None:
+                raise RuntimeError("owner role is not seeded; migrations are out of order")
+            await connection.execute(
+                text(
+                    "INSERT INTO membership_roles (id, membership_id, role_id) "
+                    "VALUES (:id, :membership, :role)"
+                ),
+                [
+                    {"id": role_grant_a, "membership": membership_a, "role": owner_role_id},
+                    {"id": role_grant_b, "membership": membership_b, "role": owner_role_id},
+                ],
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO invitations "
+                    "(id, organisation_id, email, role_code, workos_invitation_id, "
+                    "workos_organisation_id, invited_by_user_id, status, expires_at) "
+                    "VALUES (:id, :org, :email, 'owner', :provider, :workos_org, "
+                    ":inviter, 'sent', :expires)"
+                ),
+                [
+                    {
+                        "id": invitation_a,
+                        "org": org_a,
+                        "email": f"a-{user_a}@example.com",
+                        "provider": provider_invitation_a,
+                        "workos_org": f"org_workos_a_{uuid.uuid4().hex[:8]}",
+                        "inviter": user_a,
+                        "expires": expires_at,
+                    },
+                    {
+                        "id": invitation_b,
+                        "org": org_b,
+                        "email": f"b-{user_b}@example.com",
+                        "provider": provider_invitation_b,
+                        "workos_org": f"org_workos_b_{uuid.uuid4().hex[:8]}",
+                        "inviter": user_b,
+                        "expires": expires_at,
+                    },
+                ],
+            )
+    finally:
+        await engine.dispose()
+    return IdentityIsolationSeed(
+        org_a=org_a,
+        org_b=org_b,
+        user_a=user_a,
+        user_b=user_b,
+        membership_a=membership_a,
+        membership_b=membership_b,
+        role_grant_a=role_grant_a,
+        role_grant_b=role_grant_b,
+        invitation_a=invitation_a,
+        invitation_b=invitation_b,
+        provider_invitation_a=provider_invitation_a,
+        provider_invitation_b=provider_invitation_b,
+    )
+
+
+@dataclass(frozen=True)
+class RepresentativeIdentitySeed:
+    """One target row for the group-5 representative plan review.
+
+    ``org_a``/``user_a`` own ``membership_a`` and a pending ``invitation`` for
+    ``email_a`` inside a realistically sized multi-tenant identity world, so the
+    planner's real choice for the membership, ``/me`` and invitee lookups can be
+    reviewed (rollout principle 4).
+    """
+
+    org_a: uuid.UUID
+    user_a: uuid.UUID
+    membership_a: uuid.UUID
+    email_a: str
+    provider_invitation_a: str
+
+
+async def seed_representative_identity(
+    owner_url: str,
+    *,
+    organisations: int = 60,
+    memberships_per_organisation: int = 20,
+) -> RepresentativeIdentitySeed:
+    """Seed a multi-tenant identity world for the plan review.
+
+    Each organisation gets ``memberships_per_organisation`` memberships (one
+    user, one role grant, one pending invitation each), so both the
+    ``organisation_id`` list path and the ``user_id``/``lower(email)``
+    pre-tenant paths have enough rows for the planner to prefer their indexes.
+    Returns organisation A and its target membership/invitation identifiers.
+    """
+    org_a = uuid.uuid4()
+    other_orgs = [uuid.uuid4() for _ in range(organisations - 1)]
+    user_a = uuid.uuid4()
+    membership_a = uuid.uuid4()
+    email_a = f"representative-{user_a}@example.com"
+    provider_invitation_a = f"invitation_{uuid.uuid4().hex}"
+    expires_at = datetime.now(UTC) + timedelta(days=7)
+    engine = create_async_engine(owner_url, poolclass=NullPool)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("INSERT INTO organisations (id, name) VALUES (:id, :name)"),
+                [
+                    {"id": org, "name": f"Identity plan {i}"}
+                    for i, org in enumerate([org_a, *other_orgs])
+                ],
+            )
+            owner_role_id = await connection.scalar(
+                text("SELECT id FROM roles WHERE code = 'owner'")
+            )
+            if owner_role_id is None:
+                raise RuntimeError("owner role is not seeded; migrations are out of order")
+
+            users: list[dict[str, object]] = []
+            memberships: list[dict[str, object]] = []
+            grants: list[dict[str, object]] = []
+            invitations: list[dict[str, object]] = []
+            for org in [org_a, *other_orgs]:
+                for index in range(memberships_per_organisation):
+                    user_id = user_a if org == org_a and index == 0 else uuid.uuid4()
+                    membership_id = membership_a if org == org_a and index == 0 else uuid.uuid4()
+                    email = email_a if org == org_a and index == 0 else f"rep-{user_id}@example.com"
+                    users.append(
+                        {
+                            "id": user_id,
+                            "workos": f"user_identity_plan_{uuid.uuid4().hex[:12]}",
+                            "email": email,
+                            "name": f"Identity plan user {index}",
+                        }
+                    )
+                    memberships.append({"id": membership_id, "user": user_id, "org": org})
+                    grants.append(
+                        {
+                            "id": uuid.uuid4(),
+                            "membership": membership_id,
+                            "role": owner_role_id,
+                        }
+                    )
+                    invitations.append(
+                        {
+                            "id": uuid.uuid4(),
+                            "org": org,
+                            "email": email,
+                            "provider": (
+                                provider_invitation_a
+                                if org == org_a and index == 0
+                                else f"invitation_{uuid.uuid4().hex}"
+                            ),
+                            "workos_org": f"org_workos_{uuid.uuid4().hex[:8]}",
+                            "inviter": user_id,
+                            "expires": expires_at,
+                        }
+                    )
+            await connection.execute(
+                text(
+                    "INSERT INTO users (id, workos_user_id, email, name, is_active) "
+                    "VALUES (:id, :workos, :email, :name, true)"
+                ),
+                users,
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO organisation_memberships "
+                    "(id, user_id, organisation_id, status) "
+                    "VALUES (:id, :user, :org, 'active')"
+                ),
+                memberships,
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO membership_roles (id, membership_id, role_id) "
+                    "VALUES (:id, :membership, :role)"
+                ),
+                grants,
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO invitations "
+                    "(id, organisation_id, email, role_code, workos_invitation_id, "
+                    "workos_organisation_id, invited_by_user_id, status, expires_at) "
+                    "VALUES (:id, :org, :email, 'owner', :provider, :workos_org, "
+                    ":inviter, 'sent', :expires)"
+                ),
+                invitations,
+            )
+            await connection.execute(text("ANALYZE organisation_memberships"))
+            await connection.execute(text("ANALYZE membership_roles"))
+            await connection.execute(text("ANALYZE invitations"))
+    finally:
+        await engine.dispose()
+    return RepresentativeIdentitySeed(
+        org_a=org_a,
+        user_a=user_a,
+        membership_a=membership_a,
+        email_a=email_a,
+        provider_invitation_a=provider_invitation_a,
+    )
+
+
 def provision_coordinator_login(owner_url: str) -> None:
     """Grant the coordinator role a throwaway login credential (idempotent)."""
 
@@ -1136,8 +1417,10 @@ __all__ = [
     "RUNTIME_PASSWORD",
     "RUNTIME_ROLE",
     "AIIsolationSeed",
+    "IdentityIsolationSeed",
     "JobsIsolationSeed",
     "NotificationIsolationSeed",
+    "RepresentativeIdentitySeed",
     "SettingsIsolationSeed",
     "alembic_config",
     "coordinator_url",
@@ -1152,12 +1435,14 @@ __all__ = [
     "runtime_url",
     "seed_representative_ai",
     "seed_representative_files",
+    "seed_representative_identity",
     "seed_representative_jobs",
     "seed_representative_notifications",
     "seed_representative_records",
     "seed_representative_settings",
     "seed_two_organisation_ai",
     "seed_two_organisation_files",
+    "seed_two_organisation_identity",
     "seed_two_organisation_jobs",
     "seed_two_organisation_notifications",
     "seed_two_organisation_records",
