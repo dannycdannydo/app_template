@@ -27,8 +27,12 @@ Design constraints (ADR-0022 decisions 8 and 9):
   the same transaction as the write, so they never need a second,
   automatically re-contextualised transaction.
 - Binding happens only after the active membership has been validated (see
-  ``app.api.dependencies.get_current_membership``); the platform, health,
-  authentication and public routes never fabricate a tenant context.
+  ``app.api.dependencies.get_current_membership``); the health, authentication
+  and public routes never fabricate a tenant context. Platform routes bind no
+  request-selected tenant either, with the single reviewed exception of the P3
+  group-4a organisation-settings services, which bind exactly the one
+  organisation the platform operation targets after the platform permission
+  dependency has validated the caller (ADR-0022 decision 4).
 
 The setting names and the policy predicates are defined once here and mirrored
 by the migrations, which install the ``app_current_tenant_id()`` /

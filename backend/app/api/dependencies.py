@@ -225,8 +225,10 @@ async def get_current_membership(
     # active membership is confirmed is the organisation bound as
     # transaction-local context. The value comes from the validated membership
     # row, never from the header directly, and it is parameterised into
-    # ``set_config``. Health, authentication, public and platform routes never
-    # bind tenant context.
+    # ``set_config``. Health, authentication and public routes never bind tenant
+    # context; platform routes bind only the single organisation a P3 group-4a
+    # settings operation targets, after the platform permission dependency
+    # validated the caller (ADR-0022 decision 4).
     await bind_organisation_context(session, membership.organisation_id)
     # The user-private notification policies additionally require the
     # transaction-local user. It is bound here, after the membership is

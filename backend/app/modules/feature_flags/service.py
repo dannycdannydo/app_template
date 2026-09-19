@@ -35,6 +35,7 @@ from app.core.feature_flags import (
     feature_flag_definition,
     feature_flag_definitions,
 )
+from app.db.rls import bind_organisation_context
 from app.modules.audit.service import ACTION_FEATURE_FLAG_CHANGED, record_event
 from app.modules.feature_flags.models import OrganisationFeature
 from app.modules.feature_flags.queries import (
@@ -109,6 +110,14 @@ async def list_feature_flags(
     overrides: dict[str, OrganisationFeature] = {}
     if organisation_id is not None:
         await _get_organisation_or_404(session, organisation_id)
+        # Plan P3 group 4a: ``organisation_features`` is default-deny under RLS.
+        # This is the platform plane, which has no ``X-Org-Id``; the operation
+        # names exactly one organisation, so bind that organisation's
+        # transaction-local context (after the platform permission dependency
+        # validated the caller) before reading its override rows. This is an
+        # explicit, per-organisation platform path — never a universal bypass
+        # (ADR-0022 decision 4).
+        await bind_organisation_context(session, organisation_id)
         rows = (
             await session.scalars(
                 organisation_features_statement(
@@ -203,6 +212,12 @@ async def set_feature_flag(
 
     async def _write() -> OrganisationFeature:
         """Apply the override, audit it, and commit (one attempt)."""
+        # Plan P3 group 4a: bind the target organisation's transaction-local
+        # context on every attempt (the platform plane carries no ``X-Org-Id``;
+        # the platform permission dependency has already validated the caller).
+        # Rebinding inside the retry loop is required because the first
+        # attempt's commit clears the transaction-local setting.
+        await bind_organisation_context(session, organisation_id)
         override = await _apply_override(
             session,
             organisation_id=organisation_id,

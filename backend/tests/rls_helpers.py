@@ -716,6 +716,85 @@ async def seed_two_organisation_ai(owner_url: str) -> AIIsolationSeed:
     )
 
 
+@dataclass(frozen=True)
+class SettingsIsolationSeed:
+    """Identifiers for one two-organisation organisation-settings world.
+
+    Each organisation owns one ``organisation_features`` override and one
+    ``organisation_ai_settings`` policy row. ``org_c`` is an organisation with
+    no settings rows, used for the same-tenant insert and mismatched-insert
+    proofs (both settings tables have a per-organisation uniqueness invariant,
+    so an existing organisation cannot receive a second row).
+    """
+
+    org_a: uuid.UUID
+    org_b: uuid.UUID
+    org_c: uuid.UUID
+    feature_a: uuid.UUID
+    feature_b: uuid.UUID
+    ai_settings_a: uuid.UUID
+    ai_settings_b: uuid.UUID
+
+
+async def seed_two_organisation_settings(owner_url: str) -> SettingsIsolationSeed:
+    """Seed three organisations and their group-4a settings rows (owner role).
+
+    The owner credential is used deliberately: the settings tables are direct
+    organisation-owned tables, so a seed must be able to write rows the
+    restricted runtime role is denied, and it must run with RLS bypassed the
+    way a migration does.
+    """
+    org_a, org_b, org_c = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    feature_a, feature_b = uuid.uuid4(), uuid.uuid4()
+    ai_settings_a, ai_settings_b = uuid.uuid4(), uuid.uuid4()
+    engine = create_async_engine(owner_url, poolclass=NullPool)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("INSERT INTO organisations (id, name) VALUES (:a, :an), (:b, :bn), (:c, :cn)"),
+                {
+                    "a": org_a,
+                    "an": "Settings A",
+                    "b": org_b,
+                    "bn": "Settings B",
+                    "c": org_c,
+                    "cn": "Settings C",
+                },
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO organisation_features "
+                    "(id, organisation_id, feature_key, enabled) "
+                    "VALUES (:id, :org, 'records.deletion', true)"
+                ),
+                [
+                    {"id": feature_a, "org": org_a},
+                    {"id": feature_b, "org": org_b},
+                ],
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO organisation_ai_settings (id, organisation_id, enabled) "
+                    "VALUES (:id, :org, false)"
+                ),
+                [
+                    {"id": ai_settings_a, "org": org_a},
+                    {"id": ai_settings_b, "org": org_b},
+                ],
+            )
+    finally:
+        await engine.dispose()
+    return SettingsIsolationSeed(
+        org_a=org_a,
+        org_b=org_b,
+        org_c=org_c,
+        feature_a=feature_a,
+        feature_b=feature_b,
+        ai_settings_a=ai_settings_a,
+        ai_settings_b=ai_settings_b,
+    )
+
+
 async def seed_representative_ai(
     owner_url: str,
     *,
@@ -778,6 +857,63 @@ async def seed_representative_ai(
     return org_a, sample_request_id
 
 
+async def seed_representative_settings(
+    owner_url: str,
+    *,
+    organisations: int = 2_000,
+) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
+    """Seed a multi-tenant organisation-settings world for the plan review.
+
+    ``organisation_features`` and ``organisation_ai_settings`` are one-row-per-
+    organisation configuration tables, but their **total** cardinality grows
+    with the organisation count, so the rollout-principle-4 plan review still
+    needs a realistically sized table: a two-row seed cannot prove the planner
+    prefers the per-organisation index. Every organisation gets one feature
+    override and one AI-settings row. Returns organisation A plus one feature
+    row id and one AI-settings row id belonging to it.
+    """
+    org_a = uuid.uuid4()
+    other_orgs = [uuid.uuid4() for _ in range(organisations - 1)]
+    feature_a = uuid.uuid4()
+    ai_settings_a = uuid.uuid4()
+    engine = create_async_engine(owner_url, poolclass=NullPool)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("INSERT INTO organisations (id, name) VALUES (:id, :name)"),
+                [
+                    {"id": org, "name": f"Settings plan {i}"}
+                    for i, org in enumerate([org_a, *other_orgs])
+                ],
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO organisation_features "
+                    "(id, organisation_id, feature_key, enabled) "
+                    "VALUES (:id, :org, 'records.deletion', true)"
+                ),
+                [
+                    {"id": feature_a if org == org_a else uuid.uuid4(), "org": org}
+                    for org in [org_a, *other_orgs]
+                ],
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO organisation_ai_settings (id, organisation_id, enabled) "
+                    "VALUES (:id, :org, false)"
+                ),
+                [
+                    {"id": ai_settings_a if org == org_a else uuid.uuid4(), "org": org}
+                    for org in [org_a, *other_orgs]
+                ],
+            )
+            await connection.execute(text("ANALYZE organisation_features"))
+            await connection.execute(text("ANALYZE organisation_ai_settings"))
+    finally:
+        await engine.dispose()
+    return org_a, feature_a, ai_settings_a
+
+
 def force_drop_runtime_role(database_url: str) -> None:
     """Revoke grants and drop ``app_runtime`` if it exists (test cleanup)."""
 
@@ -829,6 +965,7 @@ __all__ = [
     "RUNTIME_ROLE",
     "AIIsolationSeed",
     "NotificationIsolationSeed",
+    "SettingsIsolationSeed",
     "alembic_config",
     "database_reachable",
     "downgrade_to_base",
@@ -842,9 +979,11 @@ __all__ = [
     "seed_representative_files",
     "seed_representative_notifications",
     "seed_representative_records",
+    "seed_representative_settings",
     "seed_two_organisation_ai",
     "seed_two_organisation_files",
     "seed_two_organisation_notifications",
     "seed_two_organisation_records",
+    "seed_two_organisation_settings",
     "upgrade_to_head",
 ]
