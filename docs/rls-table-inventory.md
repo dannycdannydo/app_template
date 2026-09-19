@@ -56,7 +56,7 @@ and parent path columns are empty where the class has no tenant relationship.
 | `ai_attachment_references` | organisation-owned | `organisation_id` | — |
 | `ai_scratch_uploads` | organisation-owned | `organisation_id` | — |
 | `membership_roles` | indirectly organisation-owned | — | `organisation_memberships.membership_id` |
-| `job_attempts` | indirectly organisation-owned | — | `jobs.job_id` |
+| `job_attempts` | organisation-owned (denormalised) | `organisation_id` | composite `(job_id, organisation_id)` → `jobs (id, organisation_id)` |
 | `notification_deliveries` | indirectly organisation-owned | — | `notifications.notification_id` |
 | `audit_events` | operational | `organisation_id` (nullable) | — |
 | `outbox_events` | operational | `organisation_id` (nullable) | — |
@@ -106,13 +106,13 @@ human-readable grouping matches the `platform-only` classification.
 | `ai_outputs` | AI persistence/service | `ai.service`/`ai.execution` | Same AI routes (result surface) |
 | `ai_attachment_references` | AI persistence/reconciliation; retention maintenance | `ai.persistence.references`; staging adapters | Internal AI transfer/reconcile paths |
 | `ai_scratch_uploads` | `ai.scratch` | `ai.scratch` | `POST /api/v1/ai/scratch/uploads`; `POST /api/v1/ai/scratch/uploads/{id}/complete` |
+| `job_attempts` | `jobs.service` (history); observability metrics; coordinator | `jobs.execution` (claim); `jobs.service` (settlement); `job_coordinator` recovery | Internal attempt ledger; no client route. Carries a denormalised non-null `organisation_id` (plan P3 group 4b, ADR-0022 decision 6); the composite `(job_id, organisation_id)` foreign key to `jobs (id, organisation_id)` is the sole parent key, so the copied tenant key cannot diverge from its parent job. |
 
 ### 2.3 Indirectly organisation-owned
 
 | Table | Parent path | Legitimate readers | Legitimate writers | Application access paths |
 | --- | --- | --- | --- | --- |
 | `membership_roles` | `organisation_memberships` | permission resolution; `platform_admin.service` role lists; `users.service` roles | `permissions.service` (assign/remove); `platform_admin.service` (grant/revoke); login linking; org creation | Internal on protected requests; `POST/DELETE /api/v1/platform/organisations/{id}/memberships/{id}/roles[/{code}]` |
-| `job_attempts` | `jobs` | `jobs.service` (history); observability metrics; coordinator | `jobs.execution`; `job_coordinator` | Internal attempt ledger; no client route |
 | `notification_deliveries` | `notifications` | `notifications.service`; observability metrics | `notifications.tasks` | Internal delivery ledger; no client route |
 
 ### 2.4 Operational

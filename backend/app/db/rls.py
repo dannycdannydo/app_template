@@ -58,11 +58,22 @@ RLS_ORGANISATION_SETTING: Final = "app.organisation_id"
 #: ``NULL`` in ``app_current_user_id()`` and therefore match no row.
 RLS_USER_SETTING: Final = "app.user_id"
 
+#: Transaction-local PostgreSQL setting the single-row worker-bootstrap job
+#: policy reads. A worker is handed exactly one opaque job UUID by the broker
+#: and must read that durable ``jobs`` row before it can know the organisation;
+#: the value is the job UUID as text, and absent/empty/malformed values resolve
+#: to ``NULL`` in ``app_current_job_id()`` so the bootstrap returns no row. It
+#: grants no enumeration and is never treated as a tenant authority: the worker
+#: then binds ``app.organisation_id`` from the durable row's own value
+#: (ADR-0022 decision 3).
+RLS_JOB_SETTING: Final = "app.job_id"
+
 #: Keys under which the most recently bound ids are held on ``session.info``.
 #: These are convenience records for diagnostics/tests only; they are never
 #: used to re-apply context to a later transaction.
 _SESSION_INFO_KEY: Final = "rls_organisation_id"
 _SESSION_INFO_USER_KEY: Final = "rls_user_id"
+_SESSION_INFO_JOB_KEY: Final = "rls_job_id"
 
 _SET_LOCAL_SQL = text("SELECT set_config(:setting, :value, true)")
 
@@ -127,6 +138,24 @@ async def bind_user_context(session: AsyncSession, user_id: uuid.UUID | str) -> 
     await session.execute(_SET_LOCAL_SQL, {"setting": RLS_USER_SETTING, "value": user_id_text})
 
 
+async def bind_job_context(session: AsyncSession, job_id: uuid.UUID | str) -> None:
+    """Bind the opaque job id a worker is bootstrapping from.
+
+    The ``jobs`` worker-bootstrap policy admits exactly the one row whose
+    ``id`` matches the transaction-local ``app.job_id``, so a worker can read
+    its durable row before any tenant context exists (ADR-0022 decision 3).
+    The value is the broker message's opaque id and is never treated as tenant
+    authority: the worker validates the row through the claim/fencing path and
+    only then binds the organisation its own row carries. Like the other
+    settings it is transaction-local and is never re-applied automatically.
+    """
+    if not _is_database_backed(session):
+        return
+    job_id_text = _validated_uuid(job_id)
+    session.info[_SESSION_INFO_JOB_KEY] = job_id_text
+    await session.execute(_SET_LOCAL_SQL, {"setting": RLS_JOB_SETTING, "value": job_id_text})
+
+
 async def clear_organisation_context(session: AsyncSession) -> None:
     """Clear the current transaction's tenant setting explicitly.
 
@@ -134,14 +163,32 @@ async def clear_organisation_context(session: AsyncSession) -> None:
     within one session. Ordinary request/worker sessions do not need to call
     this: the setting is transaction-local and clears on the next boundary.
     """
+    if not _is_database_backed(session):
+        return
     session.info.pop(_SESSION_INFO_KEY, None)
     await session.execute(_SET_LOCAL_SQL, {"setting": RLS_ORGANISATION_SETTING, "value": ""})
 
 
 async def clear_user_context(session: AsyncSession) -> None:
     """Clear the current transaction's user setting explicitly."""
+    if not _is_database_backed(session):
+        return
     session.info.pop(_SESSION_INFO_USER_KEY, None)
     await session.execute(_SET_LOCAL_SQL, {"setting": RLS_USER_SETTING, "value": ""})
+
+
+async def clear_job_context(session: AsyncSession) -> None:
+    """Clear the current transaction's worker-bootstrap job setting explicitly.
+
+    The worker clears ``app.job_id`` before it binds the organisation context
+    derived from the durable row, so the bootstrap setting cannot linger as a
+    second identity inside the tenant-scoped phase (ADR-0022 decision 3). The
+    setting is transaction-local, so ordinary sessions do not need to call it.
+    """
+    if not _is_database_backed(session):
+        return
+    session.info.pop(_SESSION_INFO_JOB_KEY, None)
+    await session.execute(_SET_LOCAL_SQL, {"setting": RLS_JOB_SETTING, "value": ""})
 
 
 def bound_organisation_id(session: AsyncSession) -> str | None:
@@ -153,4 +200,10 @@ def bound_organisation_id(session: AsyncSession) -> str | None:
 def bound_user_id(session: AsyncSession) -> str | None:
     """Return the most recently bound user id, if one has been bound."""
     value = session.info.get(_SESSION_INFO_USER_KEY)
+    return str(value) if value is not None else None
+
+
+def bound_job_id(session: AsyncSession) -> str | None:
+    """Return the most recently bound bootstrap job id, if one has been bound."""
+    value = session.info.get(_SESSION_INFO_JOB_KEY)
     return str(value) if value is not None else None

@@ -40,7 +40,12 @@ async def test_default_inspection_is_read_only(
     config = cast(Any, ModuleType("app.core.config"))
     config.get_settings = lambda: _Settings()
     session = cast(Any, ModuleType("app.db.session"))
-    session.async_session_factory = lambda: _Session()
+    session.coordinator_session_factory = lambda: _Session()
+
+    def _forbidden_runtime_factory() -> None:
+        raise AssertionError("the CLI must use the coordinator credential")
+
+    session.async_session_factory = _forbidden_runtime_factory
     reconciliation = cast(Any, ModuleType("app.job_coordinator.reconciliation"))
 
     async def _candidates(*args: object, **kwargs: object) -> list[uuid.UUID]:

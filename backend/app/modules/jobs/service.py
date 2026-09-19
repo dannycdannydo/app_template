@@ -54,6 +54,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.exceptions import ConflictError, ErrorDetail, NotFoundError, ValidationError
 from app.db.conventions import uuid7
+from app.db.rls import bind_job_context, bind_organisation_context, clear_job_context
 from app.modules.audit.service import (
     ACTION_JOB_FAILED,
     ACTION_JOB_SUCCEEDED,
@@ -268,6 +269,45 @@ def _terminal(status: JobStatus) -> bool:
     return status in (JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.CANCELLED)
 
 
+async def _bind_organisation(session: AsyncSession, job: Job) -> None:
+    """Bind a loaded job's organisation as transaction-local RLS context.
+
+    Plan P3 group 4b: ``jobs`` and ``job_attempts`` are RLS-enforced, so every
+    worker-side transaction that reads or mutates the job must carry the
+    tenant key. The value comes from the durable row itself — never from the
+    broker message — so it is trusted context (ADR-0022 decision 3).
+    """
+    await bind_organisation_context(session, job.organisation_id)
+
+
+async def _bootstrap_job(session: AsyncSession, *, job_id: uuid.UUID) -> Job:
+    """Resolve one broker-named job and hand the transaction to tenant context.
+
+    The worker knows only the opaque id it was messaged with, so the first read
+    is authorised by the single-row ``jobs_worker_bootstrap`` policy bound to
+    transaction-local ``app.job_id``. That bootstrap setting is *not* tenant
+    authority: as soon as the durable row is loaded this helper clears
+    ``app.job_id`` and binds the row's own ``organisation_id``, so the tenant
+    phase that follows carries only tenant context (ADR-0022 decision 3). The
+    bootstrap deliberately has no permissive UPDATE policy, so binding it can
+    never authorise a write before the tenant key is known.
+
+    ``populate_existing`` forces the live row to overwrite any identity-mapped
+    copy the calling session still holds, so the ownership checks compare the
+    database's current token — not a cached snapshot captured before a
+    cross-session takeover (plan P2, AC5).
+    """
+    await bind_job_context(session, job_id)
+    job = await session.scalar(
+        select(Job).where(Job.id == job_id).execution_options(populate_existing=True)
+    )
+    if job is None:
+        raise _not_found()
+    await clear_job_context(session)
+    await _bind_organisation(session, job)
+    return job
+
+
 async def _get_job(session: AsyncSession, *, job_id: uuid.UUID) -> Job:
     """Return one job by id for the worker-side helpers.
 
@@ -275,17 +315,13 @@ async def _get_job(session: AsyncSession, *, job_id: uuid.UUID) -> Job:
     lookup is a query-level concern of the API endpoints (Scope §6.5), where
     the caller's organisation filters the statement so a foreign job is a 404.
 
-    ``populate_existing`` forces the live row to overwrite any identity-mapped
-    copy the calling session still holds, so the ownership checks compare the
-    database's current token — not a cached snapshot captured before a
-    cross-session takeover (plan P2, AC5).
+    Plan P3 group 4b: the read starts from the single-row ``app.job_id``
+    bootstrap and then transitions to the durable row's organisation, so the
+    transaction that follows carries only tenant context (see
+    :func:`_bootstrap_job`). That keeps the read working after a
+    self-committing helper cleared the previous transaction's context.
     """
-    job = await session.scalar(
-        select(Job).where(Job.id == job_id).execution_options(populate_existing=True)
-    )
-    if job is None:
-        raise _not_found()
-    return job
+    return await _bootstrap_job(session, job_id=job_id)
 
 
 async def _get_job_locked(session: AsyncSession, *, job_id: uuid.UUID) -> Job:
@@ -297,16 +333,25 @@ async def _get_job_locked(session: AsyncSession, *, job_id: uuid.UUID) -> Job:
     additionally ensures the locked read repopulates any stale identity-mapped
     ``Job`` the caller still references, so the subsequent ownership checks see
     a takeover that happened in another session (plan P2, AC5).
+
+    Plan P3 group 4b: PostgreSQL applies the SELECT *and* UPDATE policies to a
+    locking read, so the lock must not run under the job-only bootstrap setting
+    (which deliberately has no UPDATE policy). The bootstrap read resolves the
+    row and clears ``app.job_id`` first, then the ``FOR UPDATE`` read runs
+    entirely under the durable row's tenant context and re-checks the tenant
+    key, so a row that moved organisations between the two reads cannot be
+    locked or mutated under a stale key.
     """
-    job = await session.scalar(
+    job = await _bootstrap_job(session, job_id=job_id)
+    locked = await session.scalar(
         select(Job)
-        .where(Job.id == job_id)
+        .where(Job.id == job_id, Job.organisation_id == job.organisation_id)
         .with_for_update()
         .execution_options(populate_existing=True)
     )
-    if job is None:
+    if locked is None:
         raise _not_found()
-    return job
+    return locked
 
 
 async def get_job_for_task(session: AsyncSession, *, job_id: uuid.UUID) -> Job:
@@ -314,7 +359,9 @@ async def get_job_for_task(session: AsyncSession, *, job_id: uuid.UUID) -> Job:
 
     Public wrapper over the worker-side lookup (the task modules call it);
     like ``_get_job`` it is deliberately not org-scoped, because the worker
-    knows only the job id it was messaged with.
+    knows only the job id it was messaged with. The broker's opaque id is bound
+    as transaction-local ``app.job_id`` first so the single-row worker-bootstrap
+    policy admits exactly this row (plan P3 group 4b, ADR-0022 decision 3).
     """
     return await _get_job(session, job_id=job_id)
 
@@ -550,6 +597,10 @@ async def schedule_job(
     )
     if commit:
         await session.commit()
+        # The commit clears the transaction-local context; rebind the job's
+        # organisation before refreshing the now RLS-protected row (plan P3
+        # group 4b, ADR-0022 decision 9).
+        await _bind_organisation(session, job)
         await session.refresh(job)
         # The metric is a committed-success signal: increment only after the
         # job's transaction has durably committed, so a later rollback can
@@ -659,6 +710,7 @@ async def claim_dispatch(session: AsyncSession, *, job_id: uuid.UUID) -> ClaimRe
     session.add(
         JobAttempt(
             job_id=job.id,
+            organisation_id=job.organisation_id,
             dispatch_id=job.dispatch_id,
             owner_token=job.owner_token,
             attempt_number=job.attempt_count,
@@ -669,6 +721,7 @@ async def claim_dispatch(session: AsyncSession, *, job_id: uuid.UUID) -> ClaimRe
         )
     )
     await session.commit()
+    await _bind_organisation(session, job)
     await session.refresh(job)
     return ClaimResult(
         outcome=ClaimOutcome.CLAIMED,
@@ -777,6 +830,7 @@ async def update_progress(
     if attempt is not None:
         attempt.lease_expires_at = lease_expires_at
     await session.commit()
+    await _bind_organisation(session, job)
     await session.refresh(job)
     return job
 
@@ -832,6 +886,7 @@ async def succeed(
         },
     )
     await session.commit()
+    await _bind_organisation(session, job)
     await session.refresh(job)
     JOBS_SUCCEEDED_TOTAL.labels(job_type=job.job_type).inc()
     return job
@@ -902,6 +957,7 @@ async def fail(
         )
     await _fail_locked(session, job, error_code=error_code, error_message=error_message)
     await session.commit()
+    await _bind_organisation(session, job)
     await session.refresh(job)
     JOBS_FAILED_TOTAL.labels(job_type=job.job_type).inc()
     return job

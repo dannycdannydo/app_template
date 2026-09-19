@@ -1148,6 +1148,7 @@ async def test_database_rejects_two_running_attempts_for_one_job(
             session.add(
                 JobAttempt(
                     job_id=job.id,
+                    organisation_id=organisation.id,
                     dispatch_id=claim.dispatch_id,
                     owner_token=uuid.uuid4(),
                     attempt_number=2,
