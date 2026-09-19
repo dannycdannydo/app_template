@@ -293,9 +293,27 @@ across organisations, so a single high-volume tenant can no longer consume the
 whole run and starve every later tenant, and the group-3 real-PostgreSQL suite
 now exercises own-tenant and cross-tenant insert/update/delete and
 tenant-key-move on every enabled table. Group 4 (jobs and organisation settings)
-remains, in the order recorded in `docs/rls-rollout.md` §3. The aggregate
-checkboxes below stay unchecked until every group lands; pick up the next group
-from `docs/rls-rollout.md` §3 rather than re-doing groups 0–3.
+was split during implementation review into 4a and 4b (`docs/rls-rollout.md`
+§3.1). Group 4a (`organisation_features`, `organisation_ai_settings`) is
+delivered by production enablement migration `c9d0e1f2a3b4`: the two tables are
+organisation-owned but platform-managed, so the platform-plane services bind
+exactly the organisation they target (an explicit per-organisation platform
+path, never a bypass) and the organisation-creation paths bind the new
+organisation before writing its default settings row. The required human review
+of the group-4a tenant-isolation, migration/database-role and per-organisation
+platform-binding changes was recorded (2026-09-19), and the review's mandatory
+fixes were applied: the suite now proves representative, realistically sized
+`EXPLAIN` plans for both settings lookups, exercises the missing-row
+create/update and every organisation-creation path under the restricted role,
+and the ADR-0022 decision 4/9 and RLS comments record the approved narrow
+platform-binding exception. Group 4b (`jobs`,
+`job_attempts`) remains and is blocked on the `app_coordinator` non-bypass
+prerequisite (ADR-0022 decision 3): the outbox coordinator, the in-process
+reliability-metrics refresh and the `reconcile_jobs` operator CLI read
+`jobs`/`job_attempts` across tenants on the runtime role, so enabling the
+default-deny policy without that mechanism would silently strand them. The
+aggregate checkboxes below stay unchecked until every group lands; pick up the
+next work unit from `docs/rls-rollout.md` §3 rather than re-doing groups 0–4a.
 
 - [ ] Roll out policies in bounded migrations, beginning with the `records`
       group (group 0: `records`, `record_revisions`) — a production

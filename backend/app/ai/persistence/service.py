@@ -320,6 +320,12 @@ async def create_default_settings(
     transaction (v0.7 Scope §6.5: AI is default-off for new organisations, BP §27).
     The unique ``organisation_id`` is the one-row-per-organisation invariant.
     """
+    # Plan P3 group 4a: ``organisation_ai_settings`` is default-deny under RLS.
+    # Bind the new organisation's transaction-local context before the insert
+    # (the organisation-creation paths run with no tenant context yet), so the
+    # one-row-per-organisation invariant holds from the moment the organisation
+    # exists without a bypass.
+    await bind_organisation_context(session, organisation_id)
     settings_row = OrganisationAISettings(organisation_id=organisation_id)
     session.add(settings_row)
     await session.flush()
@@ -340,6 +346,12 @@ async def get_ai_settings(
     eager creation ever appears.
     """
     await _get_organisation_or_404(session, organisation_id)
+    # Plan P3 group 4a: ``organisation_ai_settings`` is default-deny under RLS.
+    # The platform surface has no ``X-Org-Id``; bind the one organisation this
+    # operation targets after the platform permission dependency already
+    # validated the caller (an explicit per-organisation platform path, never a
+    # bypass — ADR-0022 decision 4).
+    await bind_organisation_context(session, organisation_id)
     rows = (await session.scalars(organisation_ai_settings_statement(organisation_id))).all()
     settings_row = next(
         (row for row in rows if row.organisation_id == organisation_id),
@@ -348,6 +360,9 @@ async def get_ai_settings(
     if settings_row is None:
         settings_row = await create_default_settings(session, organisation_id=organisation_id)
         await session.commit()
+        # The commit cleared the transaction-local context; rebind the tenant
+        # before refreshing the protected row (plan P3 group 4a).
+        await bind_organisation_context(session, organisation_id)
         await session.refresh(settings_row)
     return settings_row
 
@@ -386,6 +401,10 @@ async def update_ai_settings(
     ``max_large_attachment_bytes`` can only tighten the template ceiling.
     """
     await _get_organisation_or_404(session, organisation_id)
+    # Plan P3 group 4a: bind the target organisation before reading/writing its
+    # protected settings row (the platform plane carries no ``X-Org-Id``; the
+    # platform permission dependency has already validated the caller).
+    await bind_organisation_context(session, organisation_id)
     _validate_policy_identifiers(
         allowed_provider_ids=allowed_provider_ids,
         allowed_model_ids=allowed_model_ids,
@@ -453,6 +472,9 @@ async def update_ai_settings(
         },
     )
     await session.commit()
+    # The commit cleared the transaction-local context; rebind the tenant
+    # before refreshing the protected row (plan P3 group 4a).
+    await bind_organisation_context(session, organisation_id)
     await session.refresh(settings_row)
     return settings_row
 
@@ -1133,8 +1155,9 @@ async def enforce_ai_retention(
     stale_reconciled = 0
 
     for organisation_id in organisation_ids:
-        # The settings row is not RLS-protected in this group, but it is read
-        # under the tenant context for consistency with the protected reads.
+        # Plan P3 group 4a: ``organisation_ai_settings`` is now RLS-protected
+        # too, so bind the tenant before this settings read exactly as for the
+        # protected reads below.
         await bind_organisation_context(session, organisation_id)
         settings_row = await session.scalar(organisation_ai_settings_statement(organisation_id))
         retention_days = settings_row.retention_policy_days if settings_row is not None else None

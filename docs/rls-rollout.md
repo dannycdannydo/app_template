@@ -22,14 +22,16 @@ and never replaces, the application layer:
 | `app_owner` | `DATABASE_URL` | Alembic DDL/seed only | schema owner; never the application runtime path |
 | `app_runtime` | `DATABASE_RUNTIME_URL` | API and Dramatiq workers | non-owner, non-superuser, `NOBYPASSRLS`, `NOINHERIT` |
 | `app_metrics` | none (NOLOGIN) | the `SECURITY DEFINER` aggregate metrics function only | non-owner, non-superuser, `NOBYPASSRLS`, `NOINHERIT`; narrow policy scoped to attention-required delivery rows |
-| `app_coordinator` | (P4 credential) | outbox coordinator | second non-bypass role, policies scoped to dispatch state, not a tenant |
+| `app_coordinator` | `DATABASE_COORDINATOR_URL` (group 4b) | outbox coordinator, reliability-metrics refresh and `reconcile_jobs` CLI | second non-bypass role, policies scoped to dispatch state, not a tenant |
 | `app_operator` | (P4 credential) | backup/restore, support and emergency CLI | isolated, audited operational credential; loaded only by CLI/ops tooling |
 
 `app_runtime` is provisioned by the P2 prototype migration (created `NOLOGIN`,
 or safely adopted if a deployment pre-provisioned it, then granted a login
-credential out of band). `app_coordinator` and `app_operator` are P4 designs and
-are not created by the prototype. No runtime credential may be a member of a
-superuser, a `BYPASSRLS` role or a protected-table owner.
+credential out of band). `app_coordinator` and `app_operator` are not created by
+the prototype. `app_coordinator` is a mandatory prerequisite of group 4b
+(§3.1) and is created with that work unit; `app_operator` remains the P4
+operational credential. No runtime credential may be a member of a superuser, a
+`BYPASSRLS` role or a protected-table owner.
 
 ## 2. Rollout principles
 
@@ -62,7 +64,8 @@ blast radius.
 | 1 | files (P3) | `files` | **Delivered.** Group 1. Production enablement migration `e3f4a5b6c7d8` installs the canonical `files_organisation_isolation` policy, enables and forces RLS, and ships a reversible downgrade. Organisation context is bound by the files service for every protected API/worker transaction and by `DocumentSourceAuthority` for the durable AI/document-authority read, both covered by the `test_rls_files_enablement_db.py` cross-organisation suite. |
 | 2 | notifications (P3) | `notifications`, `notification_deliveries` | **Delivered.** Group 2. Production enablement migration `f5a6b7c8d9e0` installs the canonical user-private `notifications_user_isolation` policy (organisation + transaction-local user) and the `notification_deliveries_parent_isolation` policy (parent `EXISTS` with the same organisation+user predicate), enables and forces RLS, owns the new `app_current_user_id()` helper, and ships a reversible downgrade. The API dependency binds the authenticated user alongside the tenant, and the email worker binds the durable `jobs` row's `organisation_id` and `created_by_user_id` on every self-committing protected transaction; both are covered by the `test_rls_notifications_enablement_db.py` cross-organisation/cross-recipient suite. The group also ships its required operational read: the `app_metrics` non-`BYPASSRLS` role owns the `notification_deliveries_operational_count` `FOR SELECT` policy (scoped to `attention_required` rows) and the `SECURITY DEFINER` aggregate `app_attention_required_delivery_count()`, which the runtime role may execute; the in-process `attention_required_email_deliveries` metric therefore reports the true cross-tenant count without a bypass and without exposing delivery rows (ADR-0022 decision 3). |
 | 3 | AI data (P3) | `ai_requests`, `ai_outputs`, `ai_attachment_references`, `ai_scratch_uploads` | **Delivered.** Group 3. Production enablement migration `b8c9d0e1f2a3` installs the canonical `<table>_organisation_isolation` policies, enables and forces RLS, and ships a reversible downgrade. Organisation context is bound by the `ai.execute` worker from the durable `jobs` row (ADR-0022 decision 3) and rebound after every internal commit by the AI persistence port and the transfer reference store; the API path keeps its membership-dependency context. Attachment resolution stays scoped by the protected row (`DocumentSourceAuthority`), and the three formerly global cross-tenant sweeps — retention/stale reservation (`enforce_ai_retention`), scratch expiry (`expire_scratch_uploads`) and provider-file reconciliation (`reconcile_provider_file_references`) — now iterate the global, unprotected `organisations` table and bind each tenant before touching its AI rows, so they satisfy the default-deny policies without a bypass (ADR-0022 decision 4); the reconciliation sweep allocates its global batch budget fairly across organisations so one tenant cannot starve later tenants. Covered by the `test_rls_ai_data_enablement_db.py` cross-organisation, worker-binding and per-organisation-sweep suite, which exercises own-tenant and cross-tenant insert/update/delete and tenant-key-move on every enabled table. |
-| 4 | jobs and organisation settings (P3) | `jobs`, `job_attempts`, `organisation_features`, `organisation_ai_settings` | Workers bind `app.job_id` for a single-row bootstrap read, then bind organisation context from the durable `jobs` row. `job_attempts` takes a denormalised non-null `organisation_id` (additive, backfilled) or an approved parent-existence policy. |
+| 4a | organisation settings (P3) | `organisation_features`, `organisation_ai_settings` | **Delivered.** Group 4a. Production enablement migration `c9d0e1f2a3b4` installs the canonical `<table>_organisation_isolation` policies, enables and forces RLS, and ships a reversible downgrade. Both tables are organisation-owned but managed from the platform plane; the feature-flag and AI-settings platform services bind exactly the organisation they target after the platform permission dependency validates the caller, and every organisation-creation path (tenant `create_organisation`, platform `create_platform_organisation`, platform bootstrap) binds the new organisation before writing its default settings row. The per-organisation platform binding is the narrow, human-reviewed exception to ADR-0022 decision 4 recorded there and in §3.1. Covered by the `test_rls_organisation_settings_enablement_db.py` suite: cross-organisation select/insert/update/delete and tenant-key-move, platform-plane service binding, the missing-row and organisation-creation create/update paths under the restricted role, representative multi-tenant `EXPLAIN` plans for both lookups (no sequential-scan regression, rollout principle 4), and migration reversibility. The group has **no tenant resource-detail error surface** (both tables are reached only through the per-organisation platform plane; its sole `404` is `organisation_not_found` from the unprotected `organisations` table), so it claims no part of the aggregate P3 "application errors do not disclose whether RLS hid a foreign row" checkbox. |
+| 4b | jobs (P3) | `jobs`, `job_attempts` | **Blocked on a P4 prerequisite (see §3.1).** Workers bind `app.job_id` for a single-row bootstrap read, then bind organisation context from the durable `jobs` row. `job_attempts` takes a denormalised non-null `organisation_id` (additive, backfilled) or an approved parent-existence policy. Enabling the default-deny policy requires the `app_coordinator` non-bypass mechanism first, because the outbox coordinator, the in-process reliability-metrics refresh and the `reconcile_jobs` operator CLI read `jobs`/`job_attempts` across tenants on the runtime role. |
 | 5 | identity and control plane (P4) | `organisation_memberships`, `membership_roles`, `invitations`, platform tables | Pre-tenant membership lookup uses a user-keyed policy; platform operations use an explicit validated platform context, never an exemption. The cross-tenant teardown deletes are routed through the platform policy or `app_operator`. |
 | 6 | operational ledgers (P4) | `audit_events`, `outbox_events`, `maintenance_runs`, `webhook_events` | A `NULL` tenant key never means "all rows". The coordinator uses `app_coordinator`, scoped to due/unclaimed dispatch state. `outbox_events` has no client read path. |
 | 7 | platform-only plane (P4) | `platform_roles`, `platform_role_permissions`, `platform_memberships`, `bootstrap_states` | Control-plane policies keyed to the platform context. Platform status alone grants no tenant-row access. |
@@ -71,6 +74,33 @@ The machine-checked classification for every table is
 `backend/tests/tenant_isolation_registry.py`; the human-readable detail is
 `docs/rls-table-inventory.md`. Every table ends with either a tested policy or an
 explicit reviewed exclusion recorded in the inventory.
+
+### 3.1 Group 4 split and the group-4b prerequisite
+
+The plan's original group 4 ("jobs and organisation settings") was split during
+implementation review into **4a** (this delivery: `organisation_features`,
+`organisation_ai_settings`) and **4b** (`jobs`, `job_attempts`), because the two
+halves have different prerequisites:
+
+- **4a** is organisation-owned but platform-managed. Enabling its default-deny
+  policy is safe once the platform-plane services bind exactly the organisation
+  they target (an explicit per-organisation platform path, never a bypass —
+  ADR-0022 decision 4) and the organisation-creation paths bind the new
+  organisation before writing its default settings row. This migration ships
+  both bindings.
+- **4b** cannot be enabled safely under the current ordering. ADR-0022
+  decision 3 requires the `app_coordinator` non-bypass role before the `jobs`
+  group, but §1 of this document (and the plan's P4) places that role in a later
+  work unit. Three consumers read `jobs`/`job_attempts` across tenants on the
+  runtime role and would silently return no rows under the enforced policy:
+  the outbox coordinator (`app/job_coordinator/loop.py`,
+  `reconciliation.py`), the in-process reliability-metrics refresh
+  (`app/main.py` → `app/observability/`), and the `scripts/reconcile_jobs.py`
+  operator CLI. The group-3 "iterate `organisations` and bind each tenant"
+  pattern does not fit these, because they must find and aggregate rows across
+  tenants before a tenant is known. **4b therefore waits on the
+  `app_coordinator` design (see §1) and the jobs/job_attempts dispatch-state and
+  operational-read policies**, delivered as its own reviewed work unit.
 
 ## 4. Rollback procedure
 

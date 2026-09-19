@@ -147,6 +147,24 @@ chooses its own role. Control-plane access is split:
   transaction-local *platform context*, designed and tested in P4 — never by
   exempting the table or by a runtime bypass. Platform status still grants no
   tenant-row access by itself (BP §30 "no hidden universal bypass").
+- **P3 group-4a per-organisation settings binding (narrow, approved
+  exception).** The two platform-managed organisation-settings tables
+  (`organisation_features`, `organisation_ai_settings`) are organisation-owned
+  but have no tenant-plane resource-detail surface: each platform operation
+  names exactly one organisation and touches only that organisation's settings
+  row, and the platform permission dependency has already validated the caller
+  before the service runs. Enabling their default-deny policies in P3 group 4a
+  would otherwise strand that plane until P4. As a deliberately narrow,
+  human-reviewed exception, the feature-flag and AI-settings platform services
+  bind exactly the targeted organisation's transaction-local context after that
+  permission check, and the organisation-creation paths bind the new
+  organisation before writing its default settings row. This is not a
+  request-selectable or universal bypass: the bound organisation is the
+  operation's own validated target and no other protected table is read in
+  those transactions. The P4 validated platform context remains the design for
+  general cross-tenant platform access. Amended 2026-09-19 with recorded human
+  approval of the tenant-isolation, migration/database-role and
+  platform-binding changes.
 - **Operational tooling.** Backup/restore, support recovery, emergency and
   data-bearing maintenance use a separate **`app_operator`** credential with the
   privilege they require (potentially `BYPASSRLS`). It is loaded only by audited
@@ -214,8 +232,10 @@ arbitrary tenant context from a request body or broker message.
 - Transaction-local context clears automatically on commit and rollback; it
   must be provably absent after commit, rollback, exception, cancellation,
   timeout and pooled-connection reuse.
-- Platform, health, authentication and public routes stay functional without
-  fabricating a tenant context.
+- Health, authentication and public routes stay functional without fabricating
+  a tenant context. Platform routes bind no request-selected tenant either,
+  with the single reviewed exception of decision 4's P3 group-4a
+  per-organisation settings binding.
 
 ### 10. Threat model, cost and residual risk
 
