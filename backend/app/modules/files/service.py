@@ -34,6 +34,7 @@ from app.ai.errors import AIInputValidationError
 from app.core.config import get_settings
 from app.core.exceptions import ConflictError, ErrorDetail, NotFoundError, ValidationError
 from app.db.conventions import uuid7
+from app.db.rls import bind_organisation_context
 from app.modules.audit.service import (
     ACTION_FILE_DELETED,
     ACTION_FILE_PROCESSING,
@@ -248,6 +249,11 @@ async def create_upload_intent(
         content_type=content_type,
         size_bytes=size_bytes,
     )
+    # Bind the validated organisation as transaction-local RLS context before
+    # the protected insert. The value is the caller's validated organisation
+    # (a membership on the request path, the durable job row on the worker
+    # path), never a raw request value. See ``app.db.rls`` (ADR-0022 decision 9).
+    await bind_organisation_context(session, organisation_id)
     settings = get_settings()
     file_id = uuid7()
     final_key = object_key_for(organisation_id, file_id)
@@ -295,8 +301,12 @@ async def create_upload_intent(
             "size_bytes": size_bytes,
         },
     )
-    await session.commit()
+    # Refresh inside the write transaction so the database-generated timestamps
+    # load while the transaction-local RLS context is still bound; a refresh
+    # after the commit would run context-free and be default-denied on the
+    # protected ``files`` row (plan P3, ADR-0022 decision 9).
     await session.refresh(file)
+    await session.commit()
     return file, signed_url
 
 
@@ -314,6 +324,7 @@ async def _get_file_locked(
     duplicate. The org-scoped (and not-deleted) filter is the same isolation
     boundary as :func:`get_file`.
     """
+    await bind_organisation_context(session, organisation_id)
     file = await session.scalar(
         org_scoped_files_statement(organisation_id).where(File.id == file_id).with_for_update()
     )
@@ -495,12 +506,15 @@ async def complete_upload(
         actor_user_id=actor_user_id,
         commit=False,
     )
+    # Refresh inside the write transaction while the RLS context is bound; a
+    # refresh after the commit would be default-denied on the protected row
+    # (plan P3, ADR-0022 decision 9).
+    await session.refresh(file)
     await session.commit()
     # The composed transaction is durable: record the enqueue metric now (the
     # ``commit=False`` schedule deliberately does not, so a rollback cannot
     # report a job that was never committed).
     jobs_service.record_job_enqueued(job)
-    await session.refresh(file)
     # Best-effort staging cleanup after the durable commit. A failure leaves an
     # orphaned staging object (the retention/lifecycle backstop owns it); the
     # final bytes are unaffected.
@@ -525,6 +539,7 @@ async def list_files(
     """
     page = max(page, 1)
     page_size = min(max(page_size, 1), MAX_PAGE_SIZE)
+    await bind_organisation_context(session, organisation_id)
     total = await session.scalar(org_files_count_statement(organisation_id, status=status))
     rows = await session.scalars(
         org_scoped_files_statement(organisation_id, status=status)
@@ -548,6 +563,7 @@ async def get_file(
     not match, so cross-organisation and deleted-file reads are
     indistinguishable from missing rows (acceptance §5.4).
     """
+    await bind_organisation_context(session, organisation_id)
     file = await session.scalar(
         org_scoped_files_statement(organisation_id).where(File.id == file_id)
     )
@@ -662,8 +678,11 @@ async def mark_file_processing(
             "original_filename": file.original_filename,
         },
     )
-    await session.commit()
+    # Refresh inside the write transaction while the RLS context is bound; a
+    # refresh after the commit would be default-denied (plan P3, ADR-0022
+    # decision 9).
     await session.refresh(file)
+    await session.commit()
     return file
 
 
@@ -704,8 +723,11 @@ async def mark_file_ready(
             "original_filename": file.original_filename,
         },
     )
-    await session.commit()
+    # Refresh inside the write transaction while the RLS context is bound; a
+    # refresh after the commit would be default-denied (plan P3, ADR-0022
+    # decision 9).
     await session.refresh(file)
+    await session.commit()
     return file
 
 
@@ -745,8 +767,11 @@ async def mark_file_failed(
             "reason": reason,
         },
     )
-    await session.commit()
+    # Refresh inside the write transaction while the RLS context is bound; a
+    # refresh after the commit would be default-denied (plan P3, ADR-0022
+    # decision 9).
     await session.refresh(file)
+    await session.commit()
     return file
 
 
@@ -804,6 +829,9 @@ async def mark_file_quarantined(
             "reason": reason,
         },
     )
-    await session.commit()
+    # Refresh inside the write transaction while the RLS context is bound; a
+    # refresh after the commit would be default-denied (plan P3, ADR-0022
+    # decision 9).
     await session.refresh(file)
+    await session.commit()
     return file

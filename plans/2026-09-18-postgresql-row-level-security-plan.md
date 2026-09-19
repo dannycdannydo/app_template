@@ -262,12 +262,16 @@ worker context.
 Expected engineering effort after a successful prototype: approximately 5–8
 days for core user-facing data, excluding review.
 
-Progress: **group 0 (`records`, `record_revisions`) is delivered** — production
-enablement migration `d2e3f4a5b6c7`, merged in PR #96. Groups 1–4 (files;
-notifications; AI data; jobs and organisation settings) remain, in the order
-recorded in `docs/rls-rollout.md` §3. The aggregate checkboxes below stay
-unchecked until every group lands; pick up the next group from
-`docs/rls-rollout.md` §3 rather than re-doing group 0.
+Progress: **groups 0 and 1 are delivered.** Group 0 (`records`,
+`record_revisions`): production enablement migration `d2e3f4a5b6c7`, merged in
+PR #96. Group 1 (`files`): production enablement migration `e3f4a5b6c7d8`,
+including the queued AI/document-authority worker read closure, with the
+required human review of the tenant-isolation, migration/database-role and
+worker-context changes recorded (2026-09-19). Groups 2–4 (notifications; AI
+data; jobs and organisation settings) remain, in the order recorded in
+`docs/rls-rollout.md` §3. The aggregate checkboxes below stay unchecked until
+every group lands; pick up the next group from `docs/rls-rollout.md` §3 rather
+than re-doing groups 0–1.
 
 - [ ] Roll out policies in bounded migrations, beginning with the `records`
       group (group 0: `records`, `record_revisions`) — a production

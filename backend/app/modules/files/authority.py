@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai import scratch as ai_scratch
 from app.ai.errors import AIInputValidationError
+from app.db.rls import bind_organisation_context
 from app.modules.files.models import File, FileStatus
 from app.modules.files.queries import file_by_object_key_statement
 from app.storage import get_storage
@@ -77,6 +78,16 @@ class DocumentSourceAuthority:
             # Unknown namespace or cross-organisation reference: deny before
             # any metadata is read.
             raise _denied()
+        # Bind the validated organisation to the current transaction before the
+        # protected ``files`` read. The request path already inherits a bound
+        # transaction-local context from its membership dependency, but the
+        # durable AI worker reaches this boundary on a fresh session after the
+        # claim commit (``app.ai.execution._execute_ai_attempt``), so without an
+        # explicit bind the ``files`` policy would default-deny the caller's own
+        # ready document. The value is the same organisation the query already
+        # filters on, so this never widens access; it only makes the RLS context
+        # agree with the explicit predicate (plan P3, ADR-0022 decision 9).
+        await bind_organisation_context(session, organisation_id)
         file = await session.scalar(
             file_by_object_key_statement(organisation_id, storage_reference)
         )
