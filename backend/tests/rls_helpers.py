@@ -140,6 +140,99 @@ async def seed_two_organisation_records(
     return org_a, org_b, record_a, record_b
 
 
+async def seed_two_organisation_files(
+    owner_url: str,
+) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID]:
+    """Seed two organisations and one file row each (owner role).
+
+    The owner credential is used deliberately: grouping ``files`` is a direct
+    tenant table, so a seed must be able to write foreign rows the restricted
+    runtime role is denied. Returns ``(org_a, org_b, file_a, file_b)``.
+    """
+    org_a, org_b = uuid.uuid4(), uuid.uuid4()
+    file_a, file_b = uuid.uuid4(), uuid.uuid4()
+    engine = create_async_engine(owner_url, poolclass=NullPool)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("INSERT INTO organisations (id, name) VALUES (:a, :an), (:b, :bn)"),
+                {"a": org_a, "an": "Files Group A", "b": org_b, "bn": "Files Group B"},
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO files "
+                    "(id, organisation_id, storage_provider, storage_bucket, object_key, "
+                    "original_filename, content_type, size_bytes, status) "
+                    "VALUES (:a, :ao, 'fake', 'bucket', :ka, 'a.pdf', "
+                    "'application/pdf', 1, 'uploaded'), "
+                    "(:b, :bo, 'fake', 'bucket', :kb, 'b.pdf', "
+                    "'application/pdf', 1, 'uploaded')"
+                ),
+                {
+                    "a": file_a,
+                    "ao": org_a,
+                    "ka": f"organisations/{org_a}/documents/{file_a}/original",
+                    "b": file_b,
+                    "bo": org_b,
+                    "kb": f"organisations/{org_b}/documents/{file_b}/original",
+                },
+            )
+    finally:
+        await engine.dispose()
+    return org_a, org_b, file_a, file_b
+
+
+async def seed_representative_files(
+    owner_url: str,
+    *,
+    organisations: int = 40,
+    rows_per_organisation: int = 30,
+) -> tuple[uuid.UUID, uuid.UUID]:
+    """Seed a multi-tenant ``files`` table for the representative plan review.
+
+    A two-row table cannot give a representative plan; with many organisations
+    the indexed ``organisation_id``/``created_at`` path is the planner's real
+    choice. Returns organisation A and one of its file ids.
+    """
+    org_a = uuid.uuid4()
+    other_orgs = [uuid.uuid4() for _ in range(organisations - 1)]
+    sample_id = uuid.uuid4()
+    engine = create_async_engine(owner_url, poolclass=NullPool)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("INSERT INTO organisations (id, name) VALUES (:id, :name)"),
+                [
+                    {"id": org, "name": f"Files plan {i}"}
+                    for i, org in enumerate([org_a, *other_orgs])
+                ],
+            )
+            rows = [
+                {"id": sample_id, "org": org_a, "name": "sample.pdf"},
+                *(
+                    {"id": uuid.uuid4(), "org": org, "name": f"file {index}.pdf"}
+                    for org in [org_a, *other_orgs]
+                    for index in range(rows_per_organisation)
+                ),
+            ]
+            for row in rows:
+                row["key"] = f"organisations/{row['org']}/documents/{row['id']}/original"
+            await connection.execute(
+                text(
+                    "INSERT INTO files "
+                    "(id, organisation_id, storage_provider, storage_bucket, object_key, "
+                    "original_filename, content_type, size_bytes, status) "
+                    "VALUES (:id, :org, 'fake', 'bucket', :key, "
+                    ":name, 'application/pdf', 1, 'uploaded')"
+                ),
+                rows,
+            )
+            await connection.execute(text("ANALYZE files"))
+    finally:
+        await engine.dispose()
+    return org_a, sample_id
+
+
 async def seed_representative_records(
     owner_url: str,
     *,
@@ -259,7 +352,9 @@ __all__ = [
     "provision_runtime_login",
     "runtime_engine",
     "runtime_url",
+    "seed_representative_files",
     "seed_representative_records",
+    "seed_two_organisation_files",
     "seed_two_organisation_records",
     "upgrade_to_head",
 ]
