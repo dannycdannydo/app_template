@@ -45,6 +45,7 @@ from app.core.exceptions import (
     ServiceUnavailableError,
 )
 from app.core.security import UserProfileClient
+from app.db.rls import bind_organisation_context, bind_user_context
 from app.integrations.workos.invitations import WorkOSInvitationsProvider
 from app.integrations.workos.organizations import WorkOSOrganizationsProvider
 from app.modules.audit.service import (
@@ -360,6 +361,11 @@ async def _ensure_bootstrap_organisation(session: AsyncSession, user: User) -> N
     if not org_name:
         return
 
+    # RLS rollout (plan P4, group 5; ADR-0022 decision 8): bind the user being
+    # bootstrapped before the pre-tenant membership lookup, then bind the target
+    # organisation before writing its membership/role rows. The bootstrap runs
+    # from the authentication chain with no organisation context.
+    await bind_user_context(session, user.id)
     organisation = await session.scalar(select(Organisation).where(Organisation.name == org_name))
     if organisation is not None:
         existing = await session.scalar(
@@ -397,6 +403,11 @@ async def _ensure_bootstrap_organisation(session: AsyncSession, user: User) -> N
         # organisation-creation path, including the bootstrap.
         await create_default_settings(session, organisation_id=organisation.id)
 
+    # RLS rollout (plan P4, group 5): ``organisation_memberships`` and
+    # ``membership_roles`` are default-deny under forced RLS. Bind the bootstrap
+    # organisation before writing the creator's membership and owner role,
+    # whether the organisation was just created or reused.
+    await bind_organisation_context(session, organisation.id)
     membership = OrganisationMembership(
         user_id=user.id,
         organisation_id=organisation.id,
@@ -716,18 +727,23 @@ async def delete_provisioned_user(
         return False
 
     locks_out_platform_admin = await platform_admin_deactivation_locks_out(session, user)
-    membership_ids = (
+    # RLS rollout (plan P4, group 5): the teardown is cross-tenant but must not
+    # use a bypass (docs/rls-rollout.md §3 group 5). Bind the target user to
+    # read their own memberships under the user-keyed identity policy, then bind
+    # each membership's organisation before deleting it and its role grants —
+    # the canonical organisation policy admits the per-organisation delete.
+    await bind_user_context(session, user.id)
+    memberships = (
         await session.scalars(
-            select(OrganisationMembership.id).where(OrganisationMembership.user_id == user.id)
+            select(OrganisationMembership).where(OrganisationMembership.user_id == user.id)
         )
     ).all()
-    if membership_ids:
+    for membership in memberships:
+        await bind_organisation_context(session, membership.organisation_id)
         await session.execute(
-            delete(MembershipRole).where(MembershipRole.membership_id.in_(membership_ids))
+            delete(MembershipRole).where(MembershipRole.membership_id == membership.id)
         )
-        await session.execute(
-            delete(OrganisationMembership).where(OrganisationMembership.user_id == user.id)
-        )
+        await session.delete(membership)
     await session.delete(user)
     if locks_out_platform_admin:
         await record_event(
@@ -849,6 +865,12 @@ async def list_memberships(
     and role codes for the admin centre table.
     """
     await _get_organisation_or_404(session, organisation_id)
+    # Plan P4 group 5: ``organisation_memberships``/``membership_roles`` are
+    # default-deny under forced RLS. The platform plane carries no ``X-Org-Id``;
+    # bind exactly the organisation this operation targets after the platform
+    # permission dependency already validated the caller (the explicit
+    # per-organisation platform path, never a bypass — ADR-0022 decision 4).
+    await bind_organisation_context(session, organisation_id)
     page = max(page, 1)
     page_size = min(max(page_size, 1), MAX_PAGE_SIZE)
     total = await session.scalar(memberships_count_statement(organisation_id=organisation_id))
@@ -979,6 +1001,7 @@ async def assign_role(
     transaction.
     """
     await _get_organisation_or_404(session, organisation_id)
+    await bind_organisation_context(session, organisation_id)
     membership = await _get_membership_or_404(
         session, organisation_id=organisation_id, membership_id=membership_id
     )
@@ -1006,6 +1029,9 @@ async def assign_role(
             metadata={"role_code": role.code, "action": "assigned"},
         )
         await session.commit()
+        # The commit cleared the transaction-local context; rebind the target
+        # organisation before the post-commit detail read (plan P4 group 5).
+        await bind_organisation_context(session, organisation_id)
     return await membership_detail(session, membership)
 
 
@@ -1026,6 +1052,7 @@ async def remove_role(
     removal, not role removal, is how a member's presence ends.
     """
     await _get_organisation_or_404(session, organisation_id)
+    await bind_organisation_context(session, organisation_id)
     membership = await _get_membership_or_404(
         session, organisation_id=organisation_id, membership_id=membership_id
     )
@@ -1053,6 +1080,9 @@ async def remove_role(
             metadata={"role_code": role.code, "action": "removed"},
         )
         await session.commit()
+        # The commit cleared the transaction-local context; rebind the target
+        # organisation before the post-commit detail read (plan P4 group 5).
+        await bind_organisation_context(session, organisation_id)
     return await membership_detail(session, membership)
 
 
@@ -1076,6 +1106,7 @@ async def set_membership_status(
     invitation outlives the suspension.
     """
     await _get_organisation_or_404(session, organisation_id)
+    await bind_organisation_context(session, organisation_id)
     membership = await _get_membership_or_404(
         session, organisation_id=organisation_id, membership_id=membership_id
     )
@@ -1111,6 +1142,9 @@ async def set_membership_status(
         metadata=metadata,
     )
     await session.commit()
+    # The commit cleared the transaction-local context; rebind the target
+    # organisation before the post-commit detail read (plan P4 group 5).
+    await bind_organisation_context(session, organisation_id)
     return await membership_detail(session, membership)
 
 
@@ -1134,6 +1168,7 @@ async def remove_membership(
     revoked invitation — all in one transaction.
     """
     await _get_organisation_or_404(session, organisation_id)
+    await bind_organisation_context(session, organisation_id)
     membership = await _get_membership_or_404(
         session, organisation_id=organisation_id, membership_id=membership_id
     )

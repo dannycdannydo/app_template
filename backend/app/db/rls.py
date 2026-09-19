@@ -22,7 +22,14 @@ Design constraints (ADR-0022 decisions 8 and 9):
   is validated. ``app.user_id`` is the user-private key the user-private
   notification policies additionally require; it is bound from the
   authenticated user (API) or the durable job/user row (worker), never from a
-  request body or broker argument.
+  request body or broker argument. It is also the *pre-tenant* key the
+  ``organisation_memberships``/``invitations`` identity policies use while a
+  membership is being resolved and before any organisation exists (ADR-0022
+  decision 8).
+- ``app.invitation_provider_id`` is the single-row bootstrap the signature-
+  verified ``invitation.revoked`` webhook binds from the provider event id so
+  it can mirror a revocation with no organisation context, mirroring the
+  ``app.job_id`` worker bootstrap (plan P4, group 5).
 - The records/files/notifications services keep their post-write refresh inside
   the same transaction as the write, so they never need a second,
   automatically re-contextualised transaction.
@@ -68,12 +75,25 @@ RLS_USER_SETTING: Final = "app.user_id"
 #: (ADR-0022 decision 3).
 RLS_JOB_SETTING: Final = "app.job_id"
 
+#: Transaction-local PostgreSQL setting the single-row webhook bootstrap
+#: invitation policy reads (plan P4, group 5). A signature-verified
+#: ``invitation.revoked`` delivery names exactly one opaque WorkOS invitation
+#: id and must read/revoke that local invitation before any organisation
+#: context exists. The value is the provider invitation id as text, and
+#: absent/empty values resolve to ``NULL`` in
+#: ``app_current_invitation_provider_id()`` so the bootstrap returns no row. It
+#: grants no enumeration and is never treated as tenant authority: it admits
+#: only the one row the verified provider event names (ADR-0022 decision 8's
+#: single-row bootstrap pattern, applied to the webhook control-plane path).
+RLS_INVITATION_PROVIDER_SETTING: Final = "app.invitation_provider_id"
+
 #: Keys under which the most recently bound ids are held on ``session.info``.
 #: These are convenience records for diagnostics/tests only; they are never
 #: used to re-apply context to a later transaction.
 _SESSION_INFO_KEY: Final = "rls_organisation_id"
 _SESSION_INFO_USER_KEY: Final = "rls_user_id"
 _SESSION_INFO_JOB_KEY: Final = "rls_job_id"
+_SESSION_INFO_INVITATION_KEY: Final = "rls_invitation_provider_id"
 
 _SET_LOCAL_SQL = text("SELECT set_config(:setting, :value, true)")
 
@@ -156,6 +176,34 @@ async def bind_job_context(session: AsyncSession, job_id: uuid.UUID | str) -> No
     await session.execute(_SET_LOCAL_SQL, {"setting": RLS_JOB_SETTING, "value": job_id_text})
 
 
+async def bind_invitation_provider_context(
+    session: AsyncSession, provider_invitation_id: str
+) -> None:
+    """Bind the opaque provider invitation id a webhook is reacting to.
+
+    The ``invitations`` webhook-bootstrap policy admits exactly the one row
+    whose ``workos_invitation_id`` matches the transaction-local
+    ``app.invitation_provider_id``, so the signature-verified
+    ``invitation.revoked`` consumer can mirror a provider revocation while no
+    organisation context exists (plan P4, group 5). The value is the verified
+    event's provider invitation id and is never treated as tenant authority: it
+    admits one row by an unguessable provider id and grants no enumeration.
+    Like the other settings it is transaction-local and is never re-applied
+    automatically. A blank value is ignored (fail closed): the setting is left
+    unset rather than bound, so the policy matches no row.
+    """
+    if not _is_database_backed(session):
+        return
+    value = provider_invitation_id.strip()
+    if not value:
+        return
+    session.info[_SESSION_INFO_INVITATION_KEY] = value
+    await session.execute(
+        _SET_LOCAL_SQL,
+        {"setting": RLS_INVITATION_PROVIDER_SETTING, "value": value},
+    )
+
+
 async def clear_organisation_context(session: AsyncSession) -> None:
     """Clear the current transaction's tenant setting explicitly.
 
@@ -191,6 +239,19 @@ async def clear_job_context(session: AsyncSession) -> None:
     await session.execute(_SET_LOCAL_SQL, {"setting": RLS_JOB_SETTING, "value": ""})
 
 
+async def clear_invitation_provider_context(session: AsyncSession) -> None:
+    """Clear the current transaction's webhook invitation-bootstrap setting.
+
+    The webhook consumer binds the verified event's provider invitation id only
+    for the one revocation statement; the setting is transaction-local, so
+    ordinary sessions do not need to call this.
+    """
+    if not _is_database_backed(session):
+        return
+    session.info.pop(_SESSION_INFO_INVITATION_KEY, None)
+    await session.execute(_SET_LOCAL_SQL, {"setting": RLS_INVITATION_PROVIDER_SETTING, "value": ""})
+
+
 def bound_organisation_id(session: AsyncSession) -> str | None:
     """Return the most recently bound tenant id, if one has been bound."""
     value = session.info.get(_SESSION_INFO_KEY)
@@ -206,4 +267,10 @@ def bound_user_id(session: AsyncSession) -> str | None:
 def bound_job_id(session: AsyncSession) -> str | None:
     """Return the most recently bound bootstrap job id, if one has been bound."""
     value = session.info.get(_SESSION_INFO_JOB_KEY)
+    return str(value) if value is not None else None
+
+
+def bound_invitation_provider_id(session: AsyncSession) -> str | None:
+    """Return the most recently bound webhook invitation id, if any."""
+    value = session.info.get(_SESSION_INFO_INVITATION_KEY)
     return str(value) if value is not None else None

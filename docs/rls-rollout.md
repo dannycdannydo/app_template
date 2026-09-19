@@ -66,7 +66,7 @@ blast radius.
 | 3 | AI data (P3) | `ai_requests`, `ai_outputs`, `ai_attachment_references`, `ai_scratch_uploads` | **Delivered.** Group 3. Production enablement migration `b8c9d0e1f2a3` installs the canonical `<table>_organisation_isolation` policies, enables and forces RLS, and ships a reversible downgrade. Organisation context is bound by the `ai.execute` worker from the durable `jobs` row (ADR-0022 decision 3) and rebound after every internal commit by the AI persistence port and the transfer reference store; the API path keeps its membership-dependency context. Attachment resolution stays scoped by the protected row (`DocumentSourceAuthority`), and the three formerly global cross-tenant sweeps — retention/stale reservation (`enforce_ai_retention`), scratch expiry (`expire_scratch_uploads`) and provider-file reconciliation (`reconcile_provider_file_references`) — now iterate the global, unprotected `organisations` table and bind each tenant before touching its AI rows, so they satisfy the default-deny policies without a bypass (ADR-0022 decision 4); the reconciliation sweep allocates its global batch budget fairly across organisations so one tenant cannot starve later tenants. Covered by the `test_rls_ai_data_enablement_db.py` cross-organisation, worker-binding and per-organisation-sweep suite, which exercises own-tenant and cross-tenant insert/update/delete and tenant-key-move on every enabled table. |
 | 4a | organisation settings (P3) | `organisation_features`, `organisation_ai_settings` | **Delivered.** Group 4a. Production enablement migration `c9d0e1f2a3b4` installs the canonical `<table>_organisation_isolation` policies, enables and forces RLS, and ships a reversible downgrade. Both tables are organisation-owned but managed from the platform plane; the feature-flag and AI-settings platform services bind exactly the organisation they target after the platform permission dependency validates the caller, and every organisation-creation path (tenant `create_organisation`, platform `create_platform_organisation`, platform bootstrap) binds the new organisation before writing its default settings row. The per-organisation platform binding is the narrow, human-reviewed exception to ADR-0022 decision 4 recorded there and in §3.1. Covered by the `test_rls_organisation_settings_enablement_db.py` suite: cross-organisation select/insert/update/delete and tenant-key-move, platform-plane service binding, the missing-row and organisation-creation create/update paths under the restricted role, representative multi-tenant `EXPLAIN` plans for both lookups (no sequential-scan regression, rollout principle 4), and migration reversibility. The group has **no tenant resource-detail error surface** (both tables are reached only through the per-organisation platform plane; its sole `404` is `organisation_not_found` from the unprotected `organisations` table), so it claims no part of the aggregate P3 "application errors do not disclose whether RLS hid a foreign row" checkbox. |
 | 4b | jobs (P3) | `jobs`, `job_attempts` | **Delivered.** Group 4b. Production enablement migration `d0e1f2a3b4c5` installs the canonical runtime `<table>_organisation_isolation` policies, the single-row `jobs_worker_bootstrap` `FOR SELECT` policy and the `app_current_job_id()` helper, adds the denormalised non-null `job_attempts.organisation_id` (ADR-0022 decision 6) tied to its parent job by a composite `(job_id, organisation_id)` foreign key (with the matching unique pair on `jobs`), enables and forces RLS on both tables, and ships a reversible downgrade. It also delivers the part-4b prerequisite: the non-bypass `app_coordinator` role (`DATABASE_COORDINATOR_URL`) with dispatch-state-scoped read policies and **column-level** UPDATE grants limited to the settlement/reconciliation columns on `jobs`/`job_attempts` (so the coordinator can settle a dispatch but cannot move a tenant key, rewrite a payload/reference, edit progress or change ownership identity). The outbox coordinator, the in-process reliability-metrics refresh and the `reconcile_jobs` CLI now connect as `app_coordinator`. Workers bind `app.job_id` for a single-row bootstrap read, clear it, then bind the durable row's organisation before any protected read or write; the locking `FOR UPDATE` also runs under tenant context, because PostgreSQL applies the UPDATE policies to a locking read and the bootstrap deliberately has no UPDATE policy. Covered by the `test_rls_jobs_enablement_db.py` cross-organisation, worker-bootstrap, coordinator least-privilege and parent/tenant-consistency suite, plus migration reversibility. |
-| 5 | identity and control plane (P4) | `organisation_memberships`, `membership_roles`, `invitations`, platform tables | Pre-tenant membership lookup uses a user-keyed policy; platform operations use an explicit validated platform context, never an exemption. The cross-tenant teardown deletes are routed through the platform policy or `app_operator`. |
+| 5 | identity and control plane (P4) | `organisation_memberships`, `membership_roles`, `invitations` | **Delivered.** Group 5. Production enablement migration `f1a2b3c4d5e6` installs the canonical organisation-isolation policy on the two organisation-owned tables, a **SELECT-only** pre-tenant user-keyed policy on `organisation_memberships`, the `membership_roles_parent_isolation` parent-existence **read** policy plus the `membership_roles_organisation_isolation` write policy (which requires the parent membership's durable organisation to equal the validated tenant), the invitee email-keyed `invitations_invitee_select`/`invitations_invitee_update` pair and the verified-webhook single-row `invitations_webhook_provider_select`/`invitations_webhook_provider_update` bootstrap, enables and forces RLS, and ships a reversible downgrade. The authenticated user is bound as transaction-local `app.user_id` before the pre-tenant membership/invitation lookups (ADR-0022 decision 8); every platform-plane operation binds exactly the organisation it targets after the platform permission dependency validated the caller (the per-organisation platform path, never a bypass); the cross-tenant teardown deletes read the user's memberships under the user-keyed policy and then delete per organisation; and runtime `UPDATE` on `invitations` is column-restricted to `status`/`updated_at`, so no invitee path can move an invitation's organisation, email or role. Covered by the `test_rls_identity_enablement_db.py` cross-organisation, pre-tenant-lookup, pre-tenant-write-denial, invitee, webhook, platform-binding, teardown, pool-reuse and migration-reversibility suite. |
 | 6 | operational ledgers (P4) | `audit_events`, `outbox_events`, `maintenance_runs`, `webhook_events` | A `NULL` tenant key never means "all rows". The coordinator uses `app_coordinator`, scoped to due/unclaimed dispatch state. `outbox_events` has no client read path. |
 | 7 | platform-only plane (P4) | `platform_roles`, `platform_role_permissions`, `platform_memberships`, `bootstrap_states` | Control-plane policies keyed to the platform context. Platform status alone grants no tenant-row access. |
 
@@ -130,6 +130,74 @@ halves have different prerequisites:
   tenant-isolation, database-role/grant/policy, worker-context and
   destructive-downgrade changes.
 
+### 3.2 Group 5 design notes (identity and control plane)
+
+Group 5 is the first group whose rows are read **before** any organisation
+context exists, so the canonical organisation policy is supplemented rather
+than replaced:
+
+- **Pre-tenant membership lookup (ADR-0022 decision 8).** The authenticated
+  user is bound as transaction-local `app.user_id` in `get_current_user` and
+  before the membership lookup in `get_current_membership`. The
+  `organisation_memberships_user_isolation` policy is **SELECT only**: a user
+  can read their own memberships for `/me`, context resolution and the
+  teardown, but can never insert, update or delete one. Every membership write
+  is reached through an organisation context (the canonical policy) or the
+  validated platform path.
+- **Indirect role grants (ADR-0022 decision 6, parent strategy).** The plan
+  allows a denormalised tenant key or the reviewed parent strategy;
+  `membership_roles` has no key of its own, so it uses the parent strategy with
+  **read visibility split from write authority**. The
+  `membership_roles_parent_isolation` policy is `FOR SELECT` only: the parent
+  `organisation_memberships` policies are themselves RLS-filtered, so a role
+  grant is visible exactly when its parent membership is visible — an
+  organisation context admits the organisation's grants, a pre-tenant user
+  context admits only the user's own, and no context admits none. A separate
+  `membership_roles_organisation_isolation` policy is `FOR ALL` and requires
+  the parent membership's own `organisation_id` to equal the validated
+  `app_current_tenant_id()`, so a pre-tenant user context (no organisation)
+  can read its own grants but can never insert, update or delete one. This
+  mirrors the group-2 `notification_deliveries_parent_isolation` read policy
+  while adding the explicit write predicate the read-only parent check cannot
+  provide.
+- **Invitee invitation access.** Login-time linking resolves and accepts the
+  invitee's own pending invitations with no organisation context, so
+  `invitations_invitee_select` and `invitations_invitee_update` are keyed to the
+  authenticated user's verified email via `app_current_user_email()`. Runtime
+  `UPDATE` on `invitations` is **column-restricted** to `status`/`updated_at`,
+  so the invitee policy (and every other runtime update) can only advance the
+  status and can never rewrite the organisation, email or role of a row. The
+  two policies are separate rather than one `FOR ALL` policy, so an invitee
+  email can never authorise an insert.
+- **Verified webhook bootstrap.** The `invitation.revoked` consumer is a
+  signature-gated control-plane path with no tenant or user identity. It binds
+  the verified event's own provider invitation id as transaction-local
+  `app.invitation_provider_id`; `invitations_webhook_provider_select` and
+  `invitations_webhook_provider_update` admit exactly the one row whose
+  `workos_invitation_id` matches, for the read/lock and the status flip the
+  operation actually performs. The bootstrap is deliberately not `FOR ALL`:
+  binding a provider id must not create insert or delete authority (the same
+  reason the group-4b job bootstrap is `FOR SELECT` only). This is the
+  `app.job_id` single-row bootstrap pattern applied to a webhook, never a bypass
+  or a cross-tenant scan.
+- **Platform plane and teardown.** Every platform membership/invitation
+  operation names exactly one organisation in the path and binds it after the
+  platform permission dependency validated the caller (the group-4a
+  per-organisation platform path). The cross-tenant `delete_provisioned_user`
+  teardown does not need `app_operator`: it binds the target user to read their
+  memberships under the user-keyed policy, then binds each membership's
+  organisation before deleting the membership and its role grants.
+- **Invitee lookup index (rollout principle 4).** The pre-tenant login lookup
+  filters ``lower(email)`` with ``status = 'sent'``; the existing ``email``
+  index cannot serve a ``lower()`` predicate and the pending-uniqueness index
+  leads with ``organisation_id``, so the migration adds the partial functional
+  index ``ix_invitations_lower_email``. The identity suite's representative
+  ``EXPLAIN`` review proves the membership, ``/me`` and invitee lookups use
+  their indexes with no sequential scan.
+- **Error non-disclosure.** A foreign membership/invitation is hidden by the
+  policies and is reported by the application as the same `404`/`403` a missing
+  or unauthorised row already produces; no new tenant resource-detail surface
+  is introduced.
 
 ## 4. Rollback procedure
 

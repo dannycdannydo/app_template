@@ -100,7 +100,13 @@ TENANT_REGISTRY: tuple[TableIsolation, ...] = (
         IsolationClass.INDIRECT,
         "No organisation_id; tenant ownership is inherited from the parent "
         "membership, so every role query joins and filters on the parent's "
-        "organisation_id.",
+        "organisation_id. Plan P4 group 5 backs that with the "
+        "membership_roles_parent_isolation read policy, whose parent EXISTS "
+        "follows the RLS-filtered membership's visibility, and the "
+        "membership_roles_organisation_isolation write policy, which requires "
+        "the parent membership's durable organisation to equal the validated "
+        "tenant, so a pre-tenant user context cannot mutate a grant (ADR-0022 "
+        "decisions 4 and 6).",
         parent_table="organisation_memberships",
         parent_column="membership_id",
     ),

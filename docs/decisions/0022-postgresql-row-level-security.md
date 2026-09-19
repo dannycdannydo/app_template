@@ -250,6 +250,38 @@ Absent, empty or malformed context returns no tenant rows and fails closed for
 writes; it never means unrestricted. Membership lookup never accepts an
 arbitrary tenant context from a request body or broker message.
 
+**Group-5 implementation amendment.** *This note describes the intended
+implementation; it does not itself record the human review that plan P4 and
+`AGENTS.md` require before apply-and-commit.* The identity group
+(`organisation_memberships`, `membership_roles`, `invitations`) implements
+decision 8 as follows. The authenticated user is
+bound as transaction-local `app.user_id` before the pre-tenant lookups;
+`organisation_memberships` takes a **SELECT-only** user-keyed policy (a user
+can read their own memberships but can never write one, so no user-keyed insert
+can join an arbitrary organisation); `membership_roles` splits decision-6
+**read visibility** from **write authority** — a `FOR SELECT` parent-existence
+policy follows the RLS-filtered parent membership's visibility rather than a
+denormalised key, while a separate `FOR ALL` policy requires the parent
+membership's own `organisation_id` to equal the validated
+`app_current_tenant_id()`, so a pre-tenant user context can read its own grants
+but can never insert, update or delete one; and `invitations` takes the
+canonical organisation policy plus an invitee email-keyed select/update pair
+(`app_current_user_email()`) for login-time linking. Runtime `UPDATE` on
+`invitations` is **column-restricted to `status`/`updated_at`**, so the invitee
+path cannot move an invitation's organisation, email or role. The
+signature-verified `invitation.revoked` webhook is a control-plane path with no
+tenant or user identity: it binds the verified event's provider invitation id
+as transaction-local `app.invitation_provider_id` and the single-row
+`invitations_webhook_provider_select`/`invitations_webhook_provider_update`
+policies admit exactly that row for a read/lock and a status flip only (no
+insert or delete authority) — the decision-3 `app.job_id` bootstrap pattern,
+never a bypass. Platform membership
+and invitation operations continue to bind exactly the organisation they target
+(decision 4's per-organisation platform path), and the cross-tenant
+`delete_provisioned_user` teardown binds the target user, reads their
+memberships under the user-keyed policy, then deletes per organisation without
+`app_operator`.
+
 ### 9. Context propagation
 
 - Set context with a **parameterised** transaction-local operation

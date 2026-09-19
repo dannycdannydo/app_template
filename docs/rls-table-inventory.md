@@ -115,6 +115,16 @@ human-readable grouping matches the `platform-only` classification.
 | `membership_roles` | `organisation_memberships` | permission resolution; `platform_admin.service` role lists; `users.service` roles | `permissions.service` (assign/remove); `platform_admin.service` (grant/revoke); login linking; org creation | Internal on protected requests; `POST/DELETE /api/v1/platform/organisations/{id}/memberships/{id}/roles[/{code}]` |
 | `notification_deliveries` | `notifications` | `notifications.service`; observability metrics | `notifications.tasks` | Internal delivery ledger; no client route |
 
+Plan P4 group 5 (migration `f1a2b3c4d5e6`) gave the group-5 identity tables
+their tested policies: `organisation_memberships` and `invitations` carry the
+canonical `<table>_organisation_isolation` policy plus the pre-tenant
+user-keyed / invitee email-keyed policies, and `membership_roles` carries the
+`membership_roles_parent_isolation` parent-existence **read** policy plus the
+`membership_roles_organisation_isolation` write policy, which requires the
+parent membership's durable organisation to equal the validated tenant
+(ADR-0022 decision 6). The policy design and rollback procedure are recorded in
+`docs/rls-rollout.md` §3.2.
+
 ### 2.4 Operational
 
 | Table | Tenant key | Legitimate readers | Legitimate writers | Application access paths |
