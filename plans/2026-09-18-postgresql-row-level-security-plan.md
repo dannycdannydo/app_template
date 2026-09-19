@@ -262,7 +262,7 @@ worker context.
 Expected engineering effort after a successful prototype: approximately 5–8
 days for core user-facing data, excluding review.
 
-Progress: **groups 0, 1 and 2 are delivered.** Group 0 (`records`,
+Progress: **groups 0, 1, 2 and 3 are delivered.** Group 0 (`records`,
 `record_revisions`): production enablement migration `d2e3f4a5b6c7`, merged in
 PR #96. Group 1 (`files`): production enablement migration `e3f4a5b6c7d8`,
 including the queued AI/document-authority worker read closure, with the
@@ -277,10 +277,25 @@ non-bypass aggregate operational read the enforced user-private policy requires
 `attention_required_email_deliveries` metric stays truthful without a bypass.
 The required human review of the group-2 tenant-isolation,
 migration/database-role and worker-context changes, including that operational
-read, was recorded 2026-09-19. Groups 3–4 (AI data; jobs and organisation
-settings) remain, in the order recorded in `docs/rls-rollout.md` §3. The
-aggregate checkboxes below stay unchecked until every group lands; pick up the
-next group from `docs/rls-rollout.md` §3 rather than re-doing groups 0–2.
+read, was recorded 2026-09-19. Group 3 (AI data: `ai_requests`, `ai_outputs`,
+`ai_attachment_references`, `ai_scratch_uploads`): production enablement
+migration `b8c9d0e1f2a3`, installing the canonical organisation-isolation
+policies with a reversible downgrade. The group also binds the organisation
+context for the durable `ai.execute` worker and, because the plan forbids a
+universal bypass, reworks the three formerly global cross-tenant AI sweeps
+(retention/stale reservation, scratch expiry and provider-file reconciliation)
+to iterate the global, unprotected `organisations` table and bind each tenant
+before touching its protected AI rows. The required human review of the group-3
+tenant-isolation, migration/database-role and worker-context changes was
+recorded (2026-09-19), and the review's mandatory fixes were applied: the
+provider-file reconciliation sweep now allocates its global batch budget fairly
+across organisations, so a single high-volume tenant can no longer consume the
+whole run and starve every later tenant, and the group-3 real-PostgreSQL suite
+now exercises own-tenant and cross-tenant insert/update/delete and
+tenant-key-move on every enabled table. Group 4 (jobs and organisation settings)
+remains, in the order recorded in `docs/rls-rollout.md` §3. The aggregate
+checkboxes below stay unchecked until every group lands; pick up the next group
+from `docs/rls-rollout.md` §3 rather than re-doing groups 0–3.
 
 - [ ] Roll out policies in bounded migrations, beginning with the `records`
       group (group 0: `records`, `record_revisions`) — a production

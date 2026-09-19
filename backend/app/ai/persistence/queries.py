@@ -24,6 +24,7 @@ from app.ai.persistence.models import (
     AIScratchUpload,
     OrganisationAISettings,
 )
+from app.modules.organisations.models import Organisation
 
 #: Statuses that count towards committed monthly spend (v0.7 Scope §6.5
 #: documented reservation policy): a ``running`` row is an in-flight
@@ -169,17 +170,6 @@ def expired_ai_outputs_statement(
     )
 
 
-def organisations_with_retention_policy_statement() -> Select[tuple[OrganisationAISettings]]:
-    """Return every policy row that declares a retention policy.
-
-    The retention job sweeps exactly these organisations for expired outputs
-    and scratch objects (v0.7 Scope §6.5).
-    """
-    return select(OrganisationAISettings).where(
-        OrganisationAISettings.retention_policy_days.is_not(None)
-    )
-
-
 def scratch_upload_by_upload_id_statement(
     organisation_id: uuid.UUID,
     upload_id: uuid.UUID,
@@ -207,20 +197,38 @@ def scratch_upload_by_object_key_statement(
     )
 
 
+def all_organisation_ids_statement() -> Select[tuple[uuid.UUID]]:
+    """Return every organisation id in stable order.
+
+    Plan P3 group 3: the AI-data policies are default-deny and the global
+    retention/scratch/reconciliation sweeps run on the restricted runtime role,
+    so a cross-tenant scan can no longer read the AI tables directly. The
+    ``organisations`` table is a global, unprotected table, so the sweep can
+    still enumerate the tenants and bind each organisation's transaction-local
+    context before touching its AI rows (ADR-0022 decision 4: no universal
+    bypass). Ordering by id keeps a run deterministic.
+    """
+    return select(Organisation.id).order_by(Organisation.id)
+
+
 def expired_scratch_uploads_statement(
+    organisation_id: uuid.UUID,
     *,
     expired_before: datetime,
     batch_size: int,
 ) -> Select[tuple[AIScratchUpload]]:
-    """Return the bounded next batch of scratch intents past their expiry.
+    """Return the bounded next batch of one organisation's expired intents.
 
-    Plan P6: this sweep runs globally, independent of any per-organisation
-    retention policy, so a global maximum lifetime applies to every scratch
-    object. Only non-terminal rows are candidates.
+    Plan P6: the sweep runs for every organisation, independent of any
+    per-organisation retention policy, so a global maximum lifetime applies to
+    every scratch object. Only non-terminal rows are candidates. The
+    organisation filter keeps the default-deny RLS policy and the explicit
+    application predicate in agreement (plan P3, ADR-0022 decision 9).
     """
     return (
         select(AIScratchUpload)
         .where(
+            AIScratchUpload.organisation_id == organisation_id,
             AIScratchUpload.expires_at <= expired_before,
             AIScratchUpload.status.in_(("pending", "ready")),
         )
@@ -230,18 +238,23 @@ def expired_scratch_uploads_statement(
 
 
 def stale_running_requests_statement(
+    organisation_id: uuid.UUID,
     older_than: datetime,
 ) -> Select[tuple[AIRequestRecord]]:
-    """Return request rows stuck in ``running`` longer than a cut-off.
+    """Return one organisation's request rows stuck in ``running``.
 
     A row that never settled is a crashed worker execution; the retention job
     marks it ``failed`` keeping its reserved cost, so the budget it reserved
     is never silently released (v0.7 Scope §6.5 documented reservation
-    policy). Deliberately not org-scoped by a parameter: every organisation's
-    crashed reservations are reconciled, independent of whether that
-    organisation configured an output retention policy.
+    policy). The sweep covers every organisation's crashed reservations,
+    independent of whether that organisation configured an output retention
+    policy; it iterates organisations and binds each one rather than scanning
+    across tenants, because the ``ai_requests`` RLS policy is default-deny
+    (plan P3 group 3, ADR-0022 decision 4). The explicit organisation filter
+    keeps the application predicate and the policy in agreement.
     """
     return select(AIRequestRecord).where(
+        AIRequestRecord.organisation_id == organisation_id,
         AIRequestRecord.status == "running",
         AIRequestRecord.created_at < older_than,
     )
@@ -333,11 +346,12 @@ def ai_attachment_references_for_request_statement(
 
 
 def ai_attachment_references_needing_reconciliation_statement(
+    organisation_id: uuid.UUID,
     *,
     retry_after: datetime,
     batch_size: int,
 ) -> Select[tuple[AIAttachmentReference]]:
-    """Return the bounded next batch of provider-file references to reconcile.
+    """Return the bounded next batch of one organisation's references.
 
     v0.8 Scope §2.5/§6.7: the reconciliation sweep covers exactly the
     provider-hosted copies (``provider_upload`` mode) that terminal cleanup
@@ -348,7 +362,11 @@ def ai_attachment_references_needing_reconciliation_statement(
     backoff window (``deletion_attempted_at <= retry_after``), so a failing
     provider is not hammered. Managed signed URLs (no provider copy), Vertex
     GCS staging objects (deployer-owned lifecycle) and feature-owned source
-    objects never match this statement (BP §28, Scope §2.5).
+    objects never match this statement (BP §28, Scope §2.5). The sweep
+    iterates organisations because ``ai_attachment_references`` is
+    default-deny under RLS (plan P3 group 3, ADR-0022 decision 4); the
+    organisation filter keeps the application predicate and the policy
+    aligned.
     """
     latest_attempt = (
         select(
@@ -381,6 +399,7 @@ def ai_attachment_references_needing_reconciliation_statement(
             & (latest_status.c.request_id == AIAttachmentReference.logical_request_id),
         )
         .where(
+            AIAttachmentReference.organisation_id == organisation_id,
             AIAttachmentReference.transfer_mode == "provider_upload",
             AIAttachmentReference.status != "deleted",
             # A terminal owning request (succeeded/failed) or an orphan makes
@@ -404,16 +423,19 @@ def ai_attachment_references_needing_reconciliation_statement(
 
 
 def ai_attachment_reference_reconciliation_backlog_statement(
+    organisation_id: uuid.UUID,
     *,
     retry_after: datetime,
 ) -> Select[tuple[int]]:
-    """Count every currently eligible provider-file reference (the backlog).
+    """Count one organisation's currently eligible provider-file references.
 
     The same predicate as :func:`ai_attachment_references_needing_reconciliation_statement`
-    without the batch limit; the count feeds the low-cardinality
-    ``ai_transfer_cleanup_backlog`` gauge the §6.7 runbook alerts on. Only
-    provider-hosted copies are counted — managed URLs and GCS staging objects
-    never are (Scope §2.5).
+    without the batch limit; the per-organisation counts are summed into the
+    low-cardinality ``ai_transfer_cleanup_backlog`` gauge the §6.7 runbook
+    alerts on. Only provider-hosted copies are counted — managed URLs and GCS
+    staging objects never are (Scope §2.5). The organisation filter is the
+    explicit predicate that agrees with the default-deny policy (plan P3 group
+    3).
     """
     latest_attempt = (
         select(
@@ -447,6 +469,7 @@ def ai_attachment_reference_reconciliation_backlog_statement(
             & (latest_status.c.request_id == AIAttachmentReference.logical_request_id),
         )
         .where(
+            AIAttachmentReference.organisation_id == organisation_id,
             AIAttachmentReference.transfer_mode == "provider_upload",
             AIAttachmentReference.status != "deleted",
             # Same terminal-or-orphan predicate as the candidate statement:

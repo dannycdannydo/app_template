@@ -283,7 +283,7 @@ async def test_reconcile_claim_deletes_orphan_and_audits(migrated_database: str)
             # The backlog gauge predicate matches: nothing eligible remains.
             remaining = await session.scalar(
                 ai_attachment_reference_reconciliation_backlog_statement(
-                    retry_after=datetime.now(UTC) - timedelta(seconds=60)
+                    org.id, retry_after=datetime.now(UTC) - timedelta(seconds=60)
                 )
             )
             assert remaining == 0
@@ -449,11 +449,55 @@ async def test_reconcile_is_bounded_by_batch_size(migrated_database: str) -> Non
         async with session_factory() as session:
             remaining = await session.scalar(
                 ai_attachment_reference_reconciliation_backlog_statement(
-                    retry_after=datetime.now(UTC) - timedelta(seconds=60)
+                    org.id, retry_after=datetime.now(UTC) - timedelta(seconds=60)
                 )
             )
             assert remaining == 0
         await _cleanup(session, org.id)
+    finally:
+        await engine.dispose()
+
+
+async def test_reconcile_is_fair_across_organisations(migrated_database: str) -> None:
+    """A tenant with more than one batch queued never starves a later tenant.
+
+    Plan P3 group 3 review regression: the sweep shares its global batch budget
+    fairly, so an earlier organisation whose backlog exceeds one run's batch
+    bound still leaves budget for a later organisation's rows in the same run
+    (the previous fixed-order sweep let the first organisation consume the
+    whole budget and skip every later organisation on every run).
+    """
+    engine, session_factory = _session_factory(migrated_database)
+    try:
+        async with session_factory() as session:
+            # ``Organisation.id`` is UUIDv7 (time-ordered), so the first-created
+            # organisation sorts first in the sweep's ascending enumeration.
+            big = await _seed_organisation(session)
+            small = await _seed_organisation(session)
+            big_keys: list[str] = []
+            for index in range(4):
+                request_id = f"req-fair-big-{index}"
+                await _seed_terminal_request(session, big.id, request_id)
+                big_keys.append(await _seed_provider_reference(session, big.id, request_id))
+            # The later organisation's row has no owning request row: a genuine
+            # orphan, so it is eligible on its own.
+            small_key = await _seed_provider_reference(session, small.id, "req-fair-small")
+        store = FakeTransferStore()
+        async with session_factory() as session:
+            summary = await _sweep(session, store, batch_size=2)
+            assert summary["candidates"] == 2  # global batch bound retained
+            assert summary["deleted"] == 2
+        async with session_factory() as session:
+            small_row = await _row(session, small_key)
+            assert small_row is not None
+            assert small_row.status == "deleted", "later organisation was starved"
+            # The earlier, over-budget organisation was still bounded to one
+            # slot so the later organisation could make progress in this run.
+            big_rows = [await _row(session, key) for key in big_keys]
+            assert sum(1 for row in big_rows if row is not None and row.status == "deleted") == 1
+        async with session_factory() as session:
+            await _cleanup(session, big.id)
+            await _cleanup(session, small.id)
     finally:
         await engine.dispose()
 

@@ -63,6 +63,7 @@ from app.ai.schemas import AIRequest, AIResult
 from app.core.exceptions import NotFoundError
 from app.core.logging import bind_worker_context
 from app.db.conventions import uuid7
+from app.db.rls import bind_organisation_context
 from app.db.session import async_session_factory
 from app.modules.jobs import service as jobs_service
 from app.modules.jobs.execution import DurableJobContext, run_claimed
@@ -229,6 +230,10 @@ async def get_ai_execution_snapshot(
     request_id: str,
 ) -> AIExecutionSnapshot:
     """Return an organisation-scoped execution result without leaking ORM types."""
+    # Bind the validated organisation before reading the protected execution
+    # rows; the API dependency already binds, but this keeps the read safe on
+    # any session that has crossed a commit (plan P3 group 3).
+    await bind_organisation_context(session, organisation_id)
     record = await session.scalar(ai_winning_attempt_statement(organisation_id, request_id))
     if record is None:
         record = await session.scalar(ai_latest_attempt_statement(organisation_id, request_id))
@@ -338,6 +343,15 @@ async def _execute_ai_attempt(context: DurableJobContext, session: AsyncSession)
         await _fail_permanent(session, job_uuid, failure, owner_token=context.owner_token)
         raise jobs_service.JobPermanentError(failure.message)
 
+    # Plan P3 group 3 / ADR-0022 decisions 3 and 9: the AI-data tables are
+    # default-deny under RLS. The worker reaches this boundary on a fresh
+    # session after the claim commit and reads the organisation from the
+    # durable ``jobs`` row (``context.organisation_id``), never from the broker
+    # message. Bind it so the source-authority read and every AI persistence
+    # transaction agree with the explicit organisation predicate; the
+    # persistence port and reference store rebind after each of their own
+    # commits, so context is never assumed stale.
+    await bind_organisation_context(session, context.organisation_id)
     try:
         result = await execute_managed_ai(
             session,
@@ -421,6 +435,10 @@ async def _reconcile_replay(
     reservation later (v0.7 Scope §6.5). Every settlement names the captured
     owner token (plan P2) so a stale attempt cannot settle a newer owner.
     """
+    # The replay path may follow one or more commits by the persistence port,
+    # so rebind the durable job's organisation before reading ``ai_requests``
+    # (plan P3 group 3).
+    await bind_organisation_context(session, organisation_id)
     winning = await session.scalar(ai_winning_attempt_statement(organisation_id, request_id))
     if winning is not None:
         await jobs_service.succeed(

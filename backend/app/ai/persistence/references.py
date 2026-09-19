@@ -56,6 +56,7 @@ from app.ai.persistence.queries import (
 )
 from app.ai.staging import ExternalFileReference
 from app.ai.transfer import SourceLifecycle, TransferMode, derive_idempotency_key
+from app.db.rls import bind_organisation_context
 
 #: Safe error code recorded on a reference row when terminal cleanup or the
 #: reconciliation sweep could not delete the provider-hosted copy; the row
@@ -123,7 +124,11 @@ class TransferReferenceStore(Protocol):
     ) -> bool: ...
 
     async def claim_needing_reconciliation(
-        self, *, retry_after: datetime, batch_size: int
+        self,
+        *,
+        organisation_id: UUID,
+        retry_after: datetime,
+        batch_size: int,
     ) -> list[ExternalFileReference]: ...
 
     async def claim_for_deletion(
@@ -164,6 +169,12 @@ class SQLTransferReferenceStore:
         session = self._session
         key = reference.idempotency_key
         for _ in range(2):
+            # Bind the validated organisation before touching the protected
+            # table: the policy is default-deny and transaction-local, and this
+            # method (and the retry loop) crosses commit/rollback boundaries, so
+            # every iteration rebinds rather than relying on a stale context
+            # (plan P3 group 3, ADR-0022 decision 9).
+            await bind_organisation_context(session, reference.organisation_id)
             existing = await session.scalar(
                 ai_live_attachment_reference_by_key_statement(reference.organisation_id, key)
             )
@@ -231,6 +242,7 @@ class SQLTransferReferenceStore:
             source_digest=source_digest,
             region=region,
         )
+        await bind_organisation_context(self._session, organisation_id)
         row = await self._session.scalar(
             ai_live_attachment_reference_by_key_statement(organisation_id, key)
         )
@@ -253,6 +265,7 @@ class SQLTransferReferenceStore:
         expired/deleted rows can share the idempotency key with a live
         replacement, and adoption must always land on the live row.
         """
+        await bind_organisation_context(self._session, organisation_id)
         row = await self._session.scalar(
             ai_live_attachment_reference_by_key_statement(organisation_id, idempotency_key)
         )
@@ -264,6 +277,7 @@ class SQLTransferReferenceStore:
 
     async def mark_expired(self, *, organisation_id: UUID, idempotency_key: str) -> bool:
         """Mark one reference terminal-expired; returns whether it was found."""
+        await bind_organisation_context(self._session, organisation_id)
         row = await self._session.scalar(
             ai_live_attachment_reference_by_key_statement(organisation_id, idempotency_key)
         )
@@ -286,6 +300,7 @@ class SQLTransferReferenceStore:
         clears any recorded deletion failure. Returns whether a row was marked
         (``False`` when every row for the key is already terminal).
         """
+        await bind_organisation_context(self._session, organisation_id)
         row = await self._session.scalar(
             ai_attachment_reference_for_deletion_statement(organisation_id, idempotency_key)
         )
@@ -311,6 +326,7 @@ class SQLTransferReferenceStore:
         instead of deleting the same copy forever. Returns whether a
         non-deleted row was found.
         """
+        await bind_organisation_context(self._session, organisation_id)
         row = await self._session.scalar(
             ai_attachment_reference_for_deletion_statement(organisation_id, idempotency_key)
         )
@@ -325,9 +341,13 @@ class SQLTransferReferenceStore:
         return True
 
     async def claim_needing_reconciliation(
-        self, *, retry_after: datetime, batch_size: int
+        self,
+        *,
+        organisation_id: UUID,
+        retry_after: datetime,
+        batch_size: int,
     ) -> list[ExternalFileReference]:
-        """Atomically claim the bounded next batch of provider files to clean.
+        """Atomically claim one organisation's next provider-file batch.
 
         The candidate selection and the deletion-attempt stamp happen in one
         transaction: the batch is selected with ``FOR UPDATE SKIP LOCKED``
@@ -340,12 +360,15 @@ class SQLTransferReferenceStore:
         still stamped — so even the fail-closed path backs off instead of
         being re-claimed every sweep (Scope §2.5/§6.7). The caller deletes
         through the owning provider's store afterwards; ``mark_deleted`` clears
-        the stamp on success.
+        the stamp on success. The sweep calls this once per organisation and
+        binds the tenant context, because the table is default-deny under RLS
+        (plan P3 group 3, ADR-0022 decision 4).
         """
+        await bind_organisation_context(self._session, organisation_id)
         rows = (
             await self._session.scalars(
                 ai_attachment_references_needing_reconciliation_statement(
-                    retry_after=retry_after, batch_size=batch_size
+                    organisation_id, retry_after=retry_after, batch_size=batch_size
                 ).with_for_update(
                     of=AIAttachmentReference.__table__,
                     skip_locked=True,
@@ -380,6 +403,7 @@ class SQLTransferReferenceStore:
         reconciliation sweep. Returns ``None`` when every row for the key is
         already terminal.
         """
+        await bind_organisation_context(self._session, organisation_id)
         row = await self._session.scalar(
             ai_attachment_reference_for_deletion_statement(
                 organisation_id, idempotency_key
@@ -406,6 +430,7 @@ class SQLTransferReferenceStore:
         best-effort ``delete`` path, and the reconciliation job covers
         failures (Scope §2.5, §6.7).
         """
+        await bind_organisation_context(self._session, organisation_id)
         rows = (
             await self._session.scalars(
                 ai_attachment_references_for_request_statement(organisation_id, logical_request_id)
@@ -429,6 +454,7 @@ class SQLTransferReferenceStore:
         organisation's rows. Used by the terminal cleanup path and by the
         reconciliation surfaces (Scope §6.7).
         """
+        await bind_organisation_context(self._session, organisation_id)
         rows = (
             await self._session.scalars(
                 ai_attachment_references_for_request_statement(organisation_id, logical_request_id)
