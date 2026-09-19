@@ -41,10 +41,14 @@ from uuid import UUID
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai.persistence.queries import ai_attachment_reference_reconciliation_backlog_statement
+from app.ai.persistence.queries import (
+    ai_attachment_reference_reconciliation_backlog_statement,
+    all_organisation_ids_statement,
+)
 from app.ai.persistence.references import SQLTransferReferenceStore, TransferReferenceStore
 from app.ai.staging import TransferStore
 from app.ai.transfer_orchestrator import TransferOrchestrator
+from app.db.rls import bind_organisation_context
 from app.modules.audit.service import (
     ACTION_AI_TRANSFER_RECONCILED,
     record_event,
@@ -119,67 +123,103 @@ async def reconcile_provider_file_references(
         references = SQLTransferReferenceStore(session)
     now = datetime.now(UTC)
     retry_after = now - timedelta(seconds=retry_after_seconds)
-    candidates = await references.claim_needing_reconciliation(
-        retry_after=retry_after, batch_size=batch_size
-    )
+    # Plan P3 group 3 / ADR-0022 decision 4: ``ai_attachment_references`` (and
+    # the ``ai_requests`` rows the candidate predicate joins) are default-deny
+    # under RLS, so the sweep enumerates the global, unprotected
+    # ``organisations`` table and binds each tenant before claiming its rows.
+    # It never uses a bypass, and the remaining batch budget is shared across
+    # organisations so one run stays bounded exactly as before. The budget is
+    # allocated fairly: each not-yet-visited organisation is guaranteed at
+    # least one slot while any budget remains, so a single high-volume tenant
+    # can never consume the whole run and skip every later tenant on every run
+    # (plan P3 group 3 review; regression test
+    # ``test_reconcile_is_fair_across_organisations``).
+    organisation_ids = (await session.scalars(all_organisation_ids_statement())).all()
+    total_organisations = len(organisation_ids)
+    total_candidates = 0
     deleted = 0
     failed = 0
-    deleted_by_org: dict[UUID, int] = {}
-    for reference in candidates:
-        store = stores.get(reference.provider)
-        if store is None:
-            # No deployed store owns this provider's copies: fail closed and
-            # leave the row stamped for the next sweep (the deployment may
-            # enable the provider later). Never logged with ids or URLs (BP §28).
-            failed += 1
-            observe_ai_transfer_reconciliation(provider=reference.provider, result="failed")
-            continue
-        orchestrator = TransferOrchestrator(
-            storage=storage,
-            store=store,
-            references=references,
-            audit_recorder=_session_audit_recorder(session),
-        )
-        try:
-            if await orchestrator.delete_reference(reference=reference):
-                deleted += 1
-                observe_ai_transfer_reconciliation(provider=reference.provider, result="deleted")
-                deleted_by_org[reference.organisation_id] = (
-                    deleted_by_org.get(reference.organisation_id, 0) + 1
-                )
-        except Exception:
-            # The row stays stamped for the bounded backoff window; the next
-            # sweep re-claims it. Never logged with ids or URLs (BP §28).
-            failed += 1
-            observe_ai_transfer_reconciliation(provider=reference.provider, result="failed")
-    for organisation_id, count in deleted_by_org.items():
-        await record_event(
-            session,
+    remaining = batch_size
+    for index, organisation_id in enumerate(organisation_ids):
+        if remaining <= 0:
+            break
+        organisations_left = total_organisations - index
+        share = max(1, remaining // organisations_left)
+        await bind_organisation_context(session, organisation_id)
+        candidates = await references.claim_needing_reconciliation(
             organisation_id=organisation_id,
-            action=ACTION_AI_TRANSFER_RECONCILED,
-            resource_type=_RESOURCE_TYPE,
-            resource_id=str(organisation_id),
-            # Counts only — never request ids, object keys, external ids,
-            # URLs or content (BP §28; the audit contract in
-            # ``app/modules/audit/service.py``).
-            metadata={"deleted": count},
+            retry_after=retry_after,
+            batch_size=share,
         )
-    await session.commit()
-    set_ai_transfer_cleanup_backlog(count=await _backlog_count(session, retry_after=retry_after))
+        total_candidates += len(candidates)
+        remaining -= len(candidates)
+        deleted_by_org = 0
+        for reference in candidates:
+            store = stores.get(reference.provider)
+            if store is None:
+                # No deployed store owns this provider's copies: fail closed
+                # and leave the row stamped for the next sweep (the deployment
+                # may enable the provider later). Never logged with ids or URLs
+                # (BP §28).
+                failed += 1
+                observe_ai_transfer_reconciliation(provider=reference.provider, result="failed")
+                continue
+            orchestrator = TransferOrchestrator(
+                storage=storage,
+                store=store,
+                references=references,
+                audit_recorder=_session_audit_recorder(session),
+            )
+            try:
+                if await orchestrator.delete_reference(reference=reference):
+                    deleted += 1
+                    observe_ai_transfer_reconciliation(
+                        provider=reference.provider, result="deleted"
+                    )
+                    deleted_by_org += 1
+            except Exception:
+                # The row stays stamped for the bounded backoff window; the
+                # next sweep re-claims it. Never logged with ids or URLs (BP §28).
+                failed += 1
+                observe_ai_transfer_reconciliation(provider=reference.provider, result="failed")
+        if deleted_by_org:
+            await record_event(
+                session,
+                organisation_id=organisation_id,
+                action=ACTION_AI_TRANSFER_RECONCILED,
+                resource_type=_RESOURCE_TYPE,
+                resource_id=str(organisation_id),
+                # Counts only — never request ids, object keys, external ids,
+                # URLs or content (BP §28; the audit contract in
+                # ``app/modules/audit/service.py``).
+                metadata={"deleted": deleted_by_org},
+            )
+        await session.commit()
+    backlog = 0
+    for organisation_id in organisation_ids:
+        await bind_organisation_context(session, organisation_id)
+        backlog += await _backlog_count(
+            session, organisation_id=organisation_id, retry_after=retry_after
+        )
+    set_ai_transfer_cleanup_backlog(count=backlog)
     logger.info(
         "ai.transfer_reconcile.completed",
-        candidates=len(candidates),
+        candidates=total_candidates,
         deleted=deleted,
         failed=failed,
     )
-    return {"candidates": len(candidates), "deleted": deleted, "failed": failed}
+    return {"candidates": total_candidates, "deleted": deleted, "failed": failed}
 
 
-async def _backlog_count(session: AsyncSession, *, retry_after: datetime) -> int:
-    """Return the currently eligible provider-file backlog for the gauge."""
+async def _backlog_count(
+    session: AsyncSession, *, organisation_id: UUID, retry_after: datetime
+) -> int:
+    """Return one organisation's currently eligible provider-file backlog."""
     return (
         await session.scalar(
-            ai_attachment_reference_reconciliation_backlog_statement(retry_after=retry_after)
+            ai_attachment_reference_reconciliation_backlog_statement(
+                organisation_id, retry_after=retry_after
+            )
         )
         or 0
     )

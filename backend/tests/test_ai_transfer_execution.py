@@ -177,10 +177,17 @@ class _InMemoryReferenceStore:
         return True
 
     async def claim_needing_reconciliation(
-        self, *, retry_after: datetime, batch_size: int
+        self,
+        *,
+        organisation_id: UUID,
+        retry_after: datetime,
+        batch_size: int,
     ) -> list[ExternalFileReference]:
         return [
-            r for r in self._by_key.values() if r.status is not ExternalReferenceStatus.DELETED
+            r
+            for r in self._by_key.values()
+            if r.organisation_id == organisation_id
+            and r.status is not ExternalReferenceStatus.DELETED
         ][:batch_size]
 
     async def claim_for_deletion(

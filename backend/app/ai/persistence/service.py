@@ -74,11 +74,11 @@ from app.ai.persistence.queries import (
     ai_month_spend_statement,
     ai_request_by_request_id_statement,
     ai_request_record_statement,
+    all_organisation_ids_statement,
     expired_ai_outputs_statement,
     expired_scratch_uploads_statement,
     organisation_ai_settings_for_update_statement,
     organisation_ai_settings_statement,
-    organisations_with_retention_policy_statement,
     scratch_upload_by_object_key_statement,
     scratch_upload_by_upload_id_statement,
     stale_running_requests_statement,
@@ -93,6 +93,7 @@ from app.ai.transfer import (
 )
 from app.core.config import AI_KNOWN_PROVIDER_IDS
 from app.core.exceptions import ConflictError, ErrorDetail, NotFoundError, ValidationError
+from app.db.rls import bind_organisation_context
 from app.modules.audit.service import (
     ACTION_AI_BUDGET_DENIED,
     ACTION_AI_REQUEST_COMPLETED,
@@ -560,6 +561,12 @@ class AIPersistencePortImpl:
         """
         await self._verify_ownership()
         session = self._session
+        # Bind the validated organisation before touching the protected
+        # ``ai_requests``/``ai_outputs`` tables. The policy is default-deny and
+        # transaction-local, so a worker or API path that committed earlier must
+        # rebind here rather than rely on stale context (plan P3 group 3,
+        # ADR-0022 decisions 4 and 9).
+        await bind_organisation_context(session, organisation_id)
         existing = await session.scalar(
             ai_request_by_request_id_statement(organisation_id, request_id, 1)
         )
@@ -640,6 +647,9 @@ class AIPersistencePortImpl:
             existing.input_reference = input_reference
             existing.input_digest = input_digest
             await session.commit()
+            # The commit ended the transaction-local context; rebind before the
+            # post-commit refresh of the protected row.
+            await bind_organisation_context(session, organisation_id)
             await session.refresh(existing)
             return AIRequestReservation(row_id=existing.id, created=True)
 
@@ -674,6 +684,7 @@ class AIPersistencePortImpl:
             # whole transaction (including the row lock) rolls back and the
             # winner's first row is the one to reuse.
             await session.rollback()
+            await bind_organisation_context(session, organisation_id)
             winner = await session.scalar(
                 ai_request_by_request_id_statement(organisation_id, request_id, 1)
             )
@@ -682,6 +693,7 @@ class AIPersistencePortImpl:
                 await session.commit()
                 return AIRequestReservation(row_id=row_id, created=False)
             raise
+        await bind_organisation_context(session, organisation_id)
         await session.refresh(record)
         return AIRequestReservation(row_id=record.id, created=True)
 
@@ -716,6 +728,7 @@ class AIPersistencePortImpl:
         """
         await self._verify_ownership()
         session = self._session
+        await bind_organisation_context(session, organisation_id)
         existing = await session.scalar(
             ai_request_by_request_id_statement(organisation_id, request_id, attempt_number)
         )
@@ -748,12 +761,14 @@ class AIPersistencePortImpl:
             await session.commit()
         except IntegrityError:
             await session.rollback()
+            await bind_organisation_context(session, organisation_id)
             winner = await session.scalar(
                 ai_request_by_request_id_statement(organisation_id, request_id, attempt_number)
             )
             if winner is not None:
                 return winner.id
             raise
+        await bind_organisation_context(session, organisation_id)
         await session.refresh(record)
         return record.id
 
@@ -804,6 +819,7 @@ class AIPersistencePortImpl:
         """
         await self._verify_ownership()
         session = self._session
+        await bind_organisation_context(session, organisation_id)
         record = await session.scalar(ai_request_record_statement(ai_request_id, organisation_id))
         if record is None:
             raise NotFoundError(
@@ -902,8 +918,11 @@ async def create_scratch_upload(
     Plan P6: the intent is created only after the organisation's AI policy has
     been confirmed, so obtaining a scratch PUT capability cannot bypass
     default-deny AI enablement. The bounded ``expires_at`` is computed by the
-    caller from the global ceiling and any tighter organisation policy.
+    caller from the global ceiling and any tighter organisation policy. The
+    organisation context is bound so the insert satisfies the default-deny
+    ``ai_scratch_uploads`` policy (plan P3 group 3).
     """
+    await bind_organisation_context(session, organisation_id)
     row = AIScratchUpload(
         organisation_id=organisation_id,
         upload_id=upload_id,
@@ -925,6 +944,7 @@ async def get_scratch_upload(
     upload_id: uuid.UUID,
 ) -> AIScratchUpload | None:
     """Return the org-scoped scratch intent for one caller-visible upload id."""
+    await bind_organisation_context(session, organisation_id)
     return await session.scalar(scratch_upload_by_upload_id_statement(organisation_id, upload_id))
 
 
@@ -944,6 +964,7 @@ async def complete_scratch_upload(
     is returned for an idempotent replay; an expired ``ready`` row is not.
     """
     completed_at = now or datetime.now(UTC)
+    await bind_organisation_context(session, organisation_id)
     row = await session.scalar(
         scratch_upload_by_upload_id_statement(organisation_id, upload_id).with_for_update()
     )
@@ -980,6 +1001,7 @@ async def authorize_scratch_object(
     closed — an unknown, pending, expired or cross-organisation scratch key is
     never treated as an authorised AI source.
     """
+    await bind_organisation_context(session, organisation_id)
     row = await session.scalar(scratch_upload_by_object_key_statement(organisation_id, object_key))
     if row is None or row.status != AIScratchUploadStatus.READY:
         return None
@@ -988,32 +1010,36 @@ async def authorize_scratch_object(
     return row
 
 
-#: Bounded batch size for the global expired-scratch sweep (plan P6).
+#: Bounded batch size for the per-organisation expired-scratch sweep (plan P6).
 SCRATCH_EXPIRY_BATCH_SIZE = 200
 
 
-async def expire_scratch_uploads(
+async def _expire_scratch_uploads_for_organisation(
     session: AsyncSession,
     storage: ObjectStorage,
     *,
-    now: datetime | None = None,
+    organisation_id: uuid.UUID,
+    expired_before: datetime,
 ) -> int:
-    """Delete every expired scratch object and mark its intent expired.
+    """Expire one organisation's scratch intents and delete their objects.
 
-    Plan P6: runs globally, independent of any per-organisation retention
-    policy, so the global maximum lifetime is enforced even for organisations
-    with no retention policy configured. Object deletion is best-effort (a
-    provider failure leaves the object for the object-store lifecycle backstop)
-    while the row still moves to a terminal ``expired`` state. Returns the
-    number of intents expired.
+    The sweep runs for every organisation; this helper handles exactly one so
+    both the standalone scratch sweep and the retention sweep share the same
+    per-tenant logic. It binds the organisation's transaction-local context
+    before every batch, because the ``ai_scratch_uploads`` policy is
+    default-deny and the batch commit ends the context (plan P3 group 3,
+    ADR-0022 decision 4). Object deletion is best-effort (a provider failure
+    leaves the object for the object-store lifecycle backstop) while the row
+    still moves to a terminal ``expired`` state.
     """
-    expired_at = now or datetime.now(UTC)
     expired = 0
     while True:
+        await bind_organisation_context(session, organisation_id)
         batch = (
             await session.scalars(
                 expired_scratch_uploads_statement(
-                    expired_before=expired_at,
+                    organisation_id,
+                    expired_before=expired_before,
                     batch_size=SCRATCH_EXPIRY_BATCH_SIZE,
                 )
             )
@@ -1028,6 +1054,35 @@ async def expire_scratch_uploads(
             row.status = AIScratchUploadStatus.EXPIRED
             expired += 1
         await session.commit()
+    return expired
+
+
+async def expire_scratch_uploads(
+    session: AsyncSession,
+    storage: ObjectStorage,
+    *,
+    now: datetime | None = None,
+) -> int:
+    """Delete every expired scratch object and mark its intent expired.
+
+    Plan P6: runs for every organisation, independent of any per-organisation
+    retention policy, so the global maximum lifetime is enforced even for
+    organisations with no retention policy configured. It enumerates the
+    global, unprotected ``organisations`` table and binds each tenant before
+    touching its protected ``ai_scratch_uploads`` rows, because that table is
+    default-deny under RLS (plan P3 group 3, ADR-0022 decision 4: no universal
+    bypass). Returns the number of intents expired.
+    """
+    expired_at = now or datetime.now(UTC)
+    organisation_ids = (await session.scalars(all_organisation_ids_statement())).all()
+    expired = 0
+    for organisation_id in organisation_ids:
+        expired += await _expire_scratch_uploads_for_organisation(
+            session,
+            storage,
+            organisation_id=organisation_id,
+            expired_before=expired_at,
+        )
     return expired
 
 
@@ -1054,95 +1109,132 @@ async def enforce_ai_retention(
        organisation's AI scratch namespace is swept page by page for orphaned
        analyse-only objects older than the policy.
 
+    Plan P3 group 3 / ADR-0022 decision 4: the ``ai_requests``, ``ai_outputs``
+    and ``ai_scratch_uploads`` policies are default-deny, so a global
+    cross-tenant scan no longer works. The sweep enumerates the global,
+    unprotected ``organisations`` table and binds each organisation's
+    transaction-local context before touching its protected AI rows; it never
+    uses a bypass. Each organisation's work commits before the next tenant is
+    bound, so context never leaks across tenants.
+
     Keep-flow objects under ``organisations/{org}/documents/…`` are never
     touched — they remain owned by their feature (v0.7 Scope §6.5/§6.3). One
     ``ai.retention_deleted`` audit event per affected organisation records the
     purge with counts only; never content. Returns a summary for the job log.
     """
     now = now or datetime.now(UTC)
-    # 1. Global stale reconciliation, committed up front so a crash mid-sweep
-    # can never strand it; the per-organisation audit events follow below.
-    stale_candidates = (
-        await session.scalars(stale_running_requests_statement(now - STALE_RUNNING_THRESHOLD))
-    ).all()
-    stale_by_org: dict[uuid.UUID, list[AIRequestRecord]] = {}
-    for record in stale_candidates:
-        record.status = AIRequestStatus.FAILED
-        record.error_code = ERROR_CODE_WORKER_CRASHED
-        stale_by_org.setdefault(record.organisation_id, []).append(record)
-    stale_reconciled = len(stale_candidates)
-    await session.commit()
+    stale_cutoff = now - STALE_RUNNING_THRESHOLD
+    organisation_ids = (await session.scalars(all_organisation_ids_statement())).all()
 
-    # 1b. Global scratch-intent expiry (plan P6): independent of any
-    # per-organisation retention policy, so every scratch object has a bounded
-    # global maximum lifetime even when no policy is configured.
-    scratch_intents_expired = await expire_scratch_uploads(session, storage, now=now)
-
-    # 2. Per-organisation output retention and scratch sweep.
-    rows = (await session.scalars(organisations_with_retention_policy_statement())).all()
-    retention_org_ids = {
-        settings_row.organisation_id
-        for settings_row in rows
-        if settings_row.retention_policy_days is not None
-    }
     organisations_purged = 0
     outputs_deleted = 0
     scratch_objects_deleted = 0
-    for settings_row in rows:
-        if settings_row.retention_policy_days is None:
-            continue
-        organisation_id = settings_row.organisation_id
-        older_than = now - timedelta(days=settings_row.retention_policy_days)
-        prefix = ai_scratch_prefix(organisation_id)
-        org_scratch_deleted = 0
+    scratch_intents_expired = 0
+    stale_reconciled = 0
 
-        outputs = (
-            await session.scalars(expired_ai_outputs_statement(organisation_id, older_than))
+    for organisation_id in organisation_ids:
+        # The settings row is not RLS-protected in this group, but it is read
+        # under the tenant context for consistency with the protected reads.
+        await bind_organisation_context(session, organisation_id)
+        settings_row = await session.scalar(organisation_ai_settings_statement(organisation_id))
+        retention_days = settings_row.retention_policy_days if settings_row is not None else None
+
+        # 1. Stale-reservation reconciliation for this organisation, committed
+        # up front so a crash mid-sweep can never strand it.
+        stale_candidates = (
+            await session.scalars(stale_running_requests_statement(organisation_id, stale_cutoff))
         ).all()
-        for output in outputs:
-            reference = output.output_reference
-            if reference and reference.startswith(prefix):
-                try:
-                    await storage.delete_object(reference)
-                    org_scratch_deleted += 1
-                except Exception:
-                    # A storage failure must not block the record purge; the
-                    # object remains in the scratch namespace for the next
-                    # sweep. Never logged with the key (BP §28).
-                    pass
-            await session.delete(output)
+        for record in stale_candidates:
+            record.status = AIRequestStatus.FAILED
+            record.error_code = ERROR_CODE_WORKER_CRASHED
+        stale_reconciled += len(stale_candidates)
+        await session.commit()
 
-        # Continuation sweep: page over the whole scratch namespace, advancing
-        # past every listed key, so an expired object beyond the first page can
-        # never be stranded while lexicographically earlier fresh objects keep
-        # filling the page. Deleting mid-sweep is safe: the next page starts
-        # strictly after the last listed key.
-        start_after: str | None = None
-        while True:
-            page = await storage.list_objects(
-                prefix, limit=SCRATCH_SWEEP_PAGE_SIZE, start_after=start_after
+        # 1b. Scratch-intent expiry for this organisation (plan P6):
+        # independent of any per-organisation retention policy, so every
+        # scratch object has a bounded maximum lifetime.
+        scratch_intents_expired += await _expire_scratch_uploads_for_organisation(
+            session,
+            storage,
+            organisation_id=organisation_id,
+            expired_before=now,
+        )
+
+        # 2. Output retention and scratch-namespace sweep for this organisation.
+        outputs: list[AIOutputRecord] = []
+        org_scratch_deleted = 0
+        if retention_days is not None:
+            # The scratch helper committed; rebind before the protected read.
+            await bind_organisation_context(session, organisation_id)
+            older_than = now - timedelta(days=retention_days)
+            prefix = ai_scratch_prefix(organisation_id)
+
+            outputs = list(
+                (
+                    await session.scalars(expired_ai_outputs_statement(organisation_id, older_than))
+                ).all()
             )
-            if not page:
-                break
-            for info in page:
-                if info.last_modified is not None and info.last_modified < older_than:
-                    await storage.delete_object(info.object_key)
-                    org_scratch_deleted += 1
-            start_after = page[-1].object_key
+            for output in outputs:
+                reference = output.output_reference
+                if reference and reference.startswith(prefix):
+                    try:
+                        await storage.delete_object(reference)
+                        org_scratch_deleted += 1
+                    except Exception:
+                        # A storage failure must not block the record purge; the
+                        # object remains in the scratch namespace for the next
+                        # sweep. Never logged with the key (BP §28).
+                        pass
+                await session.delete(output)
 
-        stale = stale_by_org.get(organisation_id, [])
-        if outputs or org_scratch_deleted or stale:
+            # Continuation sweep: page over the whole scratch namespace,
+            # advancing past every listed key, so an expired object beyond the
+            # first page can never be stranded while lexicographically earlier
+            # fresh objects keep filling the page. Deleting mid-sweep is safe:
+            # the next page starts strictly after the last listed key.
+            start_after: str | None = None
+            while True:
+                page = await storage.list_objects(
+                    prefix, limit=SCRATCH_SWEEP_PAGE_SIZE, start_after=start_after
+                )
+                if not page:
+                    break
+                for info in page:
+                    if info.last_modified is not None and info.last_modified < older_than:
+                        await storage.delete_object(info.object_key)
+                        org_scratch_deleted += 1
+                start_after = page[-1].object_key
+
+        # 3. One audit event per affected organisation; its resource type and
+        # metadata reflect whether the organisation configured retention.
+        if retention_days is not None:
+            if outputs or org_scratch_deleted or stale_candidates:
+                await record_event(
+                    session,
+                    organisation_id=organisation_id,
+                    action=ACTION_AI_RETENTION_DELETED,
+                    resource_type="ai_output",
+                    resource_id=str(organisation_id),
+                    metadata={
+                        "outputs_deleted": len(outputs),
+                        "scratch_objects_deleted": org_scratch_deleted,
+                        "stale_requests_reconciled": len(stale_candidates),
+                        "retention_policy_days": retention_days,
+                    },
+                )
+                organisations_purged += 1
+        elif stale_candidates:
             await record_event(
                 session,
                 organisation_id=organisation_id,
                 action=ACTION_AI_RETENTION_DELETED,
-                resource_type="ai_output",
+                resource_type="ai_request",
                 resource_id=str(organisation_id),
                 metadata={
-                    "outputs_deleted": len(outputs),
-                    "scratch_objects_deleted": org_scratch_deleted,
-                    "stale_requests_reconciled": len(stale),
-                    "retention_policy_days": settings_row.retention_policy_days,
+                    "outputs_deleted": 0,
+                    "scratch_objects_deleted": 0,
+                    "stale_requests_reconciled": len(stale_candidates),
+                    "retention_policy_days": None,
                 },
             )
             organisations_purged += 1
@@ -1150,27 +1242,6 @@ async def enforce_ai_retention(
         scratch_objects_deleted += org_scratch_deleted
         await session.commit()
 
-    # 3. Audit organisations whose only sweep action was stale reconciliation
-    # (no output retention policy configured) — their event must not be tied
-    # to a retention config.
-    for organisation_id, stale in stale_by_org.items():
-        if organisation_id in retention_org_ids:
-            continue  # already audited (with counts) in the loop above
-        await record_event(
-            session,
-            organisation_id=organisation_id,
-            action=ACTION_AI_RETENTION_DELETED,
-            resource_type="ai_request",
-            resource_id=str(organisation_id),
-            metadata={
-                "outputs_deleted": 0,
-                "scratch_objects_deleted": 0,
-                "stale_requests_reconciled": len(stale),
-                "retention_policy_days": None,
-            },
-        )
-        organisations_purged += 1
-        await session.commit()
     return {
         "organisations_purged": organisations_purged,
         "outputs_deleted": outputs_deleted,

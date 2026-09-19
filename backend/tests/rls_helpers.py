@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from alembic import command
@@ -568,6 +569,215 @@ async def seed_representative_records(
     return org_a, sample_id
 
 
+@dataclass(frozen=True)
+class AIIsolationSeed:
+    """Identifiers for one two-organisation AI-data isolation world.
+
+    Each organisation owns one row in every group-3 table: an ``ai_requests``
+    attempt, its ``ai_outputs`` result, an ``ai_attachment_references`` live
+    transfer and an ``ai_scratch_uploads`` intent. The shape proves the single
+    organisation boundary the four policies enforce.
+    """
+
+    org_a: uuid.UUID
+    org_b: uuid.UUID
+    request_a: uuid.UUID
+    request_b: uuid.UUID
+    request_id_a: str
+    request_id_b: str
+    output_a: uuid.UUID
+    output_b: uuid.UUID
+    reference_a: uuid.UUID
+    reference_b: uuid.UUID
+    scratch_a: uuid.UUID
+    scratch_b: uuid.UUID
+
+
+async def seed_two_organisation_ai(owner_url: str) -> AIIsolationSeed:
+    """Seed two organisations and one AI row each across the group-3 tables.
+
+    The owner credential is used deliberately: the AI-data tables are direct
+    organisation-owned tables, so a seed must be able to write rows the
+    restricted runtime role is denied, and it must run with RLS bypassed the
+    way a migration does.
+    """
+    org_a, org_b = uuid.uuid4(), uuid.uuid4()
+    request_a, request_b = uuid.uuid4(), uuid.uuid4()
+    request_id_a, request_id_b = uuid.uuid4().hex, uuid.uuid4().hex
+    output_a, output_b = uuid.uuid4(), uuid.uuid4()
+    reference_a, reference_b = uuid.uuid4(), uuid.uuid4()
+    scratch_a, scratch_b = uuid.uuid4(), uuid.uuid4()
+    digest_a, digest_b = "a1" * 32, "b2" * 32
+    key_a, key_b = "c3" * 32, "d4" * 32
+    expires_at = datetime.now(UTC) + timedelta(hours=1)
+    engine = create_async_engine(owner_url, poolclass=NullPool)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("INSERT INTO organisations (id, name) VALUES (:a, :an), (:b, :bn)"),
+                {"a": org_a, "an": "AI Group A", "b": org_b, "bn": "AI Group B"},
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO ai_requests "
+                    "(id, organisation_id, request_id, attempt_number, task, provider, model, "
+                    "prompt_name, prompt_version, routing_reason, region, status, input_tokens, "
+                    "output_tokens, latency_ms) "
+                    "VALUES (:id, :org, :request_id, 1, 'document.classify', 'fake', "
+                    "'fake.document-classifier', 'document.classify', 1, 'seeded', '', 'failed', "
+                    "0, 0, 0)"
+                ),
+                [
+                    {"id": request_a, "org": org_a, "request_id": request_id_a},
+                    {"id": request_b, "org": org_b, "request_id": request_id_b},
+                ],
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO ai_outputs (id, ai_request_id, organisation_id, output_json) "
+                    "VALUES (:id, :request, :org, '{\"seeded\": true}'::jsonb)"
+                ),
+                [
+                    {"id": output_a, "request": request_a, "org": org_a},
+                    {"id": output_b, "request": request_b, "org": org_b},
+                ],
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO ai_attachment_references "
+                    "(id, organisation_id, logical_request_id, provider, transfer_mode, "
+                    "external_id, source_reference, source_digest, size_bytes, mime_type, "
+                    "source_lifecycle, region, status, idempotency_key) "
+                    "VALUES (:id, :org, :logical, 'fake', 'provider_upload', :external, "
+                    ":source_reference, :digest, 1600, 'application/pdf', 'transient', "
+                    "'eu-west-1', 'live', :key)"
+                ),
+                [
+                    {
+                        "id": reference_a,
+                        "org": org_a,
+                        "logical": "rls-ai-logical-a",
+                        "external": f"fake-a-{uuid.uuid4().hex[:12]}",
+                        "source_reference": f"organisations/{org_a}/documents/x/original",
+                        "digest": digest_a,
+                        "key": key_a,
+                    },
+                    {
+                        "id": reference_b,
+                        "org": org_b,
+                        "logical": "rls-ai-logical-b",
+                        "external": f"fake-b-{uuid.uuid4().hex[:12]}",
+                        "source_reference": f"organisations/{org_b}/documents/x/original",
+                        "digest": digest_b,
+                        "key": key_b,
+                    },
+                ],
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO ai_scratch_uploads "
+                    "(id, organisation_id, upload_id, object_key, content_type, "
+                    "size_bytes, status, expires_at) "
+                    "VALUES (:id, :org, :upload_id, :key, 'application/pdf', 1024, "
+                    "'pending', :expires)"
+                ),
+                [
+                    {
+                        "id": scratch_a,
+                        "org": org_a,
+                        "upload_id": uuid.uuid4(),
+                        "key": f"organisations/{org_a}/ai/scratch/{uuid.uuid4()}.pdf",
+                        "expires": expires_at,
+                    },
+                    {
+                        "id": scratch_b,
+                        "org": org_b,
+                        "upload_id": uuid.uuid4(),
+                        "key": f"organisations/{org_b}/ai/scratch/{uuid.uuid4()}.pdf",
+                        "expires": expires_at,
+                    },
+                ],
+            )
+    finally:
+        await engine.dispose()
+    return AIIsolationSeed(
+        org_a=org_a,
+        org_b=org_b,
+        request_a=request_a,
+        request_b=request_b,
+        request_id_a=request_id_a,
+        request_id_b=request_id_b,
+        output_a=output_a,
+        output_b=output_b,
+        reference_a=reference_a,
+        reference_b=reference_b,
+        scratch_a=scratch_a,
+        scratch_b=scratch_b,
+    )
+
+
+async def seed_representative_ai(
+    owner_url: str,
+    *,
+    organisations: int = 40,
+    rows_per_organisation: int = 30,
+) -> tuple[uuid.UUID, str]:
+    """Seed a multi-tenant ``ai_requests``/``ai_outputs`` pair for plan review.
+
+    A two-row table cannot give a representative plan; with many organisations
+    the indexed ``organisation_id``/``request_id`` path is the planner's real
+    choice. Returns organisation A and one of its request ids.
+    """
+    org_a = uuid.uuid4()
+    other_orgs = [uuid.uuid4() for _ in range(organisations - 1)]
+    sample_request_id = uuid.uuid4().hex
+    engine = create_async_engine(owner_url, poolclass=NullPool)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("INSERT INTO organisations (id, name) VALUES (:id, :name)"),
+                [{"id": org, "name": f"AI plan {i}"} for i, org in enumerate([org_a, *other_orgs])],
+            )
+            requests: list[dict[str, object]] = []
+            for org in [org_a, *other_orgs]:
+                for index in range(rows_per_organisation):
+                    requests.append(
+                        {
+                            "id": uuid.uuid4(),
+                            "org": org,
+                            "request_id": (
+                                sample_request_id
+                                if org == org_a and index == 0
+                                else uuid.uuid4().hex
+                            ),
+                        }
+                    )
+            await connection.execute(
+                text(
+                    "INSERT INTO ai_requests "
+                    "(id, organisation_id, request_id, attempt_number, task, provider, model, "
+                    "prompt_name, prompt_version, routing_reason, region, status, input_tokens, "
+                    "output_tokens, latency_ms) "
+                    "VALUES (:id, :org, :request_id, 1, 'document.classify', 'fake', "
+                    "'fake.document-classifier', 'document.classify', 1, 'plan', '', 'succeeded', "
+                    "0, 0, 0)"
+                ),
+                requests,
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO ai_outputs (id, ai_request_id, organisation_id, output_json) "
+                    "VALUES (:id, :request, :org, '{\"plan\": true}'::jsonb)"
+                ),
+                [{"id": uuid.uuid4(), "request": row["id"], "org": row["org"]} for row in requests],
+            )
+            await connection.execute(text("ANALYZE ai_requests"))
+            await connection.execute(text("ANALYZE ai_outputs"))
+    finally:
+        await engine.dispose()
+    return org_a, sample_request_id
+
+
 def force_drop_runtime_role(database_url: str) -> None:
     """Revoke grants and drop ``app_runtime`` if it exists (test cleanup)."""
 
@@ -617,6 +827,7 @@ __all__ = [
     "METRICS_ROLE",
     "RUNTIME_PASSWORD",
     "RUNTIME_ROLE",
+    "AIIsolationSeed",
     "NotificationIsolationSeed",
     "alembic_config",
     "database_reachable",
@@ -627,9 +838,11 @@ __all__ = [
     "provision_runtime_login",
     "runtime_engine",
     "runtime_url",
+    "seed_representative_ai",
     "seed_representative_files",
     "seed_representative_notifications",
     "seed_representative_records",
+    "seed_two_organisation_ai",
     "seed_two_organisation_files",
     "seed_two_organisation_notifications",
     "seed_two_organisation_records",
