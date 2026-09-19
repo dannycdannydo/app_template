@@ -72,6 +72,7 @@ point both URLs at the same role.
 | --- | --- | --- | --- |
 | `app_owner` | `DATABASE_URL` | Alembic DDL/seed | Schema owner; never the runtime path |
 | `app_runtime` | `DATABASE_RUNTIME_URL` | API and Dramatiq workers | Non-owner, non-superuser, no `BYPASSRLS`; subject to enabled policies |
+| `app_metrics` | none (NOLOGIN) | `SECURITY DEFINER` aggregate metrics function | Non-owner, non-superuser, no `BYPASSRLS`; narrow policy scoped to attention-required delivery rows |
 | `app_coordinator` | P4 credential | Outbox coordinator | Second non-bypass role, scoped to dispatch state |
 | `app_operator` | P4 credential | Backup/restore and support CLI | Isolated, audited operational credential |
 
@@ -225,7 +226,9 @@ transport. Scrape these database-backed gauges from `/metrics`: `outbox_events`
 `stale_queued_jobs`, `stale_running_jobs`, `job_attempts`,
 `attention_required_email_deliveries`, `maintenance_runs`, and
 `dead_current_job_dispatches`. They deliberately never label an organisation, job id,
-payload, error or provider reference.
+payload, error or provider reference. Under group-2 RLS the ambiguous-email
+count is read through the non-bypass `app_attention_required_delivery_count()`
+aggregate, so the gauge reports the true cross-tenant count rather than zero.
 
 When a delivery alert fires:
 

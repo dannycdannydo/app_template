@@ -8,10 +8,6 @@ from sqlalchemy import Select, func, select
 
 from app.modules.jobs.models import Job, JobAttempt, JobAttemptStatus, JobStatus
 from app.modules.maintenance.models import MaintenanceRun, MaintenanceRunStatus
-from app.modules.notifications.models import (
-    NotificationDelivery,
-    NotificationDeliveryStatus,
-)
 from app.modules.outbox.models import OutboxEvent, OutboxEventStatus
 
 
@@ -20,11 +16,16 @@ def job_attempt_metric_rows_statement() -> Select[tuple[JobAttemptStatus, int]]:
 
 
 def attention_required_delivery_count_statement() -> Select[tuple[int]]:
-    return (
-        select(func.count())
-        .select_from(NotificationDelivery)
-        .where(NotificationDelivery.status == NotificationDeliveryStatus.ATTENTION_REQUIRED)
-    )
+    """Count attention-required deliveries through the operational read.
+
+    ``notification_deliveries`` is user-private and RLS-enforced (plan P3
+    group 2), so the in-process metrics loop cannot read the table directly
+    without tenant context. It calls the ``app_attention_required_delivery_count()``
+    aggregate instead: the function executes as the narrow non-bypass
+    ``app_metrics`` role and returns only a scalar count, so the metric stays
+    truthful without exposing delivery rows (ADR-0022 decision 3).
+    """
+    return select(func.app_attention_required_delivery_count())
 
 
 def maintenance_run_metric_rows_statement(

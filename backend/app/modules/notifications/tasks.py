@@ -119,17 +119,58 @@ async def _send_notification_email_attempt(
             reason="wrong_job_type",
             owner_token=context.owner_token,
         )
-    delivery = await notifications_service.get_delivery_for_task(
-        session, delivery_id=uuid.UUID(context.input_reference)
-    )
-    notification = await notifications_service.get_notification_for_task(
-        session, notification_id=delivery.notification_id
-    )
-    if notification.organisation_id != context.organisation_id:
+    # The notifications group is user-private (plan P3, ADR-0022 decisions 3
+    # and 5): the worker binds the durable job's organisation and recipient user
+    # as transaction-local context before it reads the protected delivery and
+    # notification rows. The user comes from the durable row, never the broker.
+    # ``created_by_user_id`` is the recipient by invariant: the producers
+    # enforce actor == recipient for ``notification.email`` jobs
+    # (``notifications_service._require_durable_recipient``) until a dedicated
+    # durable recipient identity is modelled.
+    if context.created_by_user_id is None:
         await _fail_invalid_context(
             session,
             job_id=context.job_id,
-            reason="organisation_mismatch",
+            reason="missing_recipient_user",
+            owner_token=context.owner_token,
+        )
+    recipient_user_id = context.created_by_user_id
+    try:
+        delivery = await notifications_service.get_delivery_for_task(
+            session,
+            delivery_id=uuid.UUID(context.input_reference),
+            organisation_id=context.organisation_id,
+            user_id=recipient_user_id,
+        )
+        notification = await notifications_service.get_notification_for_task(
+            session,
+            notification_id=delivery.notification_id,
+            organisation_id=context.organisation_id,
+            user_id=recipient_user_id,
+        )
+    except notifications_service.NotFoundError:
+        # A missing row under the durable context means the referenced delivery
+        # or notification does not belong to this organisation/recipient, or was
+        # deleted. RLS makes a foreign row indistinguishable from a missing one;
+        # fail closed and permanently rather than retrying.
+        await _fail_invalid_context(
+            session,
+            job_id=context.job_id,
+            reason="protected_row_not_visible",
+            owner_token=context.owner_token,
+        )
+    # The application-level scope check stays the first enforcement layer even
+    # where RLS is bypassed (owner/maintenance paths, or a superuser test
+    # credential): a notification that is not the durable job's organisation and
+    # recipient is never sent.
+    if (
+        notification.organisation_id != context.organisation_id
+        or notification.user_id != recipient_user_id
+    ):
+        await _fail_invalid_context(
+            session,
+            job_id=context.job_id,
+            reason="context_mismatch",
             owner_token=context.owner_token,
         )
 
@@ -141,12 +182,21 @@ async def _send_notification_email_attempt(
         # A newer attempt finding RUNNING means the prior worker crossed the
         # durable pre-send boundary but never recorded a definite outcome. It
         # may have died after provider acceptance, so automatic resend is unsafe.
-        await _settle_acceptance_unknown(session, context=context, delivery_id=delivery.id)
+        await _settle_acceptance_unknown(
+            session,
+            context=context,
+            delivery_id=delivery.id,
+            user_id=recipient_user_id,
+        )
 
     # The durable reference context is complete and owned before the delivery
     # row moves to running or an external provider can be called.
     await notifications_service.mark_delivery_running(
-        session, delivery_id=delivery.id, ownership=context.ownership
+        session,
+        delivery_id=delivery.id,
+        organisation_id=context.organisation_id,
+        user_id=recipient_user_id,
+        ownership=context.ownership,
     )
     # Revalidate ownership immediately before the external provider call (plan
     # P2, AC5): holding the job row lock across the network call is
@@ -166,19 +216,28 @@ async def _send_notification_email_attempt(
         )
     except TransientEmailSendError:
         await notifications_service.return_delivery_to_queue(
-            session, delivery_id=delivery.id, ownership=context.ownership
+            session,
+            delivery_id=delivery.id,
+            organisation_id=context.organisation_id,
+            user_id=recipient_user_id,
+            ownership=context.ownership,
         )
         logger.warning("notification.email.retrying", error_code="email_delivery_transient")
         raise
     except AcceptanceUnknownEmailSendError as exc:
         await _settle_acceptance_unknown(
-            session, context=context, delivery_id=delivery.id, cause=exc
+            session,
+            context=context,
+            delivery_id=delivery.id,
+            user_id=recipient_user_id,
+            cause=exc,
         )
     except PermanentEmailSendError as exc:
         await notifications_service.mark_delivery_failed(
             session,
             delivery_id=delivery.id,
             organisation_id=context.organisation_id,
+            user_id=recipient_user_id,
             error_code=notifications_service.DELIVERY_ERROR_PERMANENTLY_REJECTED,
             commit=False,
             ownership=context.ownership,
@@ -197,6 +256,7 @@ async def _send_notification_email_attempt(
             session,
             delivery_id=delivery.id,
             organisation_id=context.organisation_id,
+            user_id=recipient_user_id,
             error_code=notifications_service.DELIVERY_ERROR_UNCLASSIFIED_PROVIDER,
             commit=False,
             ownership=context.ownership,
@@ -215,6 +275,8 @@ async def _send_notification_email_attempt(
         session,
         delivery_id=delivery.id,
         provider_message_id=result.provider_message_id,
+        organisation_id=context.organisation_id,
+        user_id=recipient_user_id,
         commit=False,
         ownership=context.ownership,
     )
@@ -269,6 +331,7 @@ async def _settle_acceptance_unknown(
     *,
     context: DurableJobContext,
     delivery_id: uuid.UUID,
+    user_id: uuid.UUID,
     cause: BaseException | None = None,
 ) -> NoReturn:
     """Atomically terminally settle an outcome that must not be auto-retried."""
@@ -276,6 +339,7 @@ async def _settle_acceptance_unknown(
         session,
         delivery_id=delivery_id,
         organisation_id=context.organisation_id,
+        user_id=user_id,
         commit=False,
         ownership=context.ownership,
     )
@@ -330,7 +394,10 @@ async def _on_notification_email_exhausted(
     already fenced by the job ownership guard and needs no second credential.
     """
     job = await session.get(Job, job_id)
-    if job is None:
+    if job is None or job.created_by_user_id is None:
+        # A notification job always carries its recipient user; without it the
+        # user-private delivery row cannot be read or updated and the hook
+        # leaves it for the owner-checked job settlement to surface.
         return
     try:
         delivery_id = uuid.UUID(job.input_reference)
@@ -348,6 +415,7 @@ async def _on_notification_email_exhausted(
         session,
         delivery_id=delivery_id,
         organisation_id=job.organisation_id,
+        user_id=job.created_by_user_id,
         error_code=delivery_error_code,
         commit=False,
     )

@@ -455,13 +455,20 @@ async def test_delivery_lifecycle_helpers(migrated_database: str) -> None:
             await session.commit()
 
             running = await notifications_service.mark_delivery_running(
-                session, delivery_id=delivery.id
+                session,
+                delivery_id=delivery.id,
+                organisation_id=org.id,
+                user_id=user.id,
             )
             assert running.status == NotificationDeliveryStatus.RUNNING
             assert running.attempt_count == 1
 
             succeeded = await notifications_service.mark_delivery_succeeded(
-                session, delivery_id=delivery.id, provider_message_id="fake-1"
+                session,
+                delivery_id=delivery.id,
+                provider_message_id="fake-1",
+                organisation_id=org.id,
+                user_id=user.id,
             )
             assert succeeded.status == NotificationDeliveryStatus.SUCCEEDED
             assert succeeded.provider_message_id == "fake-1"
@@ -544,8 +551,42 @@ async def test_create_file_notification_is_idempotent_on_retry(
                 body=notifications_service.FILE_READY_BODY.format(filename="other.pdf"),
                 resource_id="file-2",
                 recipient_email=user.email,
+                actor_user_id=user.id,
             )
             assert other.id != first.id
+    finally:
+        await engine.dispose()
+
+
+async def test_notification_job_requires_actor_to_equal_recipient(
+    migrated_database: str,
+) -> None:
+    """A `notification.email` job cannot schedule on behalf of another user.
+
+    The worker derives the user-private RLS context from the durable
+    ``jobs.created_by_user_id``, so the producers enforce that the job actor is
+    the recipient until a dedicated durable recipient identity exists.
+    """
+    engine = create_async_engine(migrated_database, poolclass=NullPool)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            org, user = await _seed_org_and_user(session)
+            actor = User(
+                workos_user_id=f"user_{uuid.uuid4().hex}",
+                email="actor@example.com",
+                name="Actor",
+            )
+            session.add(actor)
+            await session.commit()
+            with pytest.raises(ValueError, match="job actor must equal"):
+                await notifications_service.send_test_notification(
+                    session,
+                    organisation_id=org.id,
+                    user_id=user.id,
+                    recipient_email=user.email,
+                    actor_user_id=actor.id,
+                )
     finally:
         await engine.dispose()
 
@@ -578,6 +619,7 @@ async def test_mark_delivery_failed_writes_audit(migrated_database: str) -> None
                 session,
                 delivery_id=delivery.id,
                 organisation_id=org.id,
+                user_id=user.id,
                 error_code=notifications_service.DELIVERY_ERROR_PERMANENTLY_REJECTED,
             )
             assert failed.status == NotificationDeliveryStatus.FAILED
@@ -1104,6 +1146,8 @@ async def test_stale_delivery_worker_cannot_mutate_after_takeover(
                     session,
                     delivery_id=delivery_id,
                     provider_message_id="stale-provider-id",
+                    organisation_id=org.id,
+                    user_id=user.id,
                     ownership=stale_owner,
                 )
             with pytest.raises(jobs_service.StaleDispatchError):
@@ -1111,12 +1155,17 @@ async def test_stale_delivery_worker_cannot_mutate_after_takeover(
                     session,
                     delivery_id=delivery_id,
                     organisation_id=org.id,
+                    user_id=user.id,
                     error_code=notifications_service.DELIVERY_ERROR_PERMANENTLY_REJECTED,
                     ownership=stale_owner,
                 )
             with pytest.raises(jobs_service.StaleDispatchError):
                 await notifications_service.return_delivery_to_queue(
-                    session, delivery_id=delivery_id, ownership=stale_owner
+                    session,
+                    delivery_id=delivery_id,
+                    organisation_id=org.id,
+                    user_id=user.id,
+                    ownership=stale_owner,
                 )
 
             row = await session.get(NotificationDelivery, delivery_id)
