@@ -29,7 +29,7 @@ define load_env
 	set -a; [ -f .env ] && . ./.env; set +a;
 endef
 
-.PHONY: dev dev-docker dev-infra-check dev-down dev-reset worker coordinator jobs-reconcile jobs-reconcile-apply migrate provision-admin provision-admin-delete recover-admin lint typecheck test test-ai-contracts e2e format generate-client validate-ai-registries validate-execution-contracts check
+.PHONY: dev dev-docker dev-infra-check dev-down dev-reset worker coordinator jobs-reconcile jobs-reconcile-apply verify-db-roles migrate provision-admin provision-admin-delete recover-admin lint typecheck test test-ai-contracts e2e format generate-client validate-ai-registries validate-execution-contracts check
 
 ## Start PostgreSQL + Redis + MinIO + Mailhog in Docker, then run the API,
 ## Dramatiq worker, outbox coordinator and frontend natively with live reload
@@ -99,6 +99,12 @@ jobs-reconcile:
 ## Create deduplicated recovery intents; requires CONFIRM_RECONCILE=1.
 jobs-reconcile-apply:
 	@$(load_env) cd backend && uv run python -m scripts.reconcile_jobs --apply
+
+## Verify the configured runtime/coordinator credentials authenticate as
+## restricted, non-owner, non-BYPASSRLS roles before a table group is enforced
+## (RLS plan P4, docs/rls-rollout.md §5). The same check runs at production startup.
+verify-db-roles:
+	@$(load_env) cd backend && uv run python -m scripts.verify_db_roles
 
 ## Create the bootstrap platform admin in WorkOS (email + password; idempotent).
 ## Reads BOOTSTRAP_PLATFORM_ADMIN_EMAIL / BOOTSTRAP_PLATFORM_ADMIN_PASSWORD from
