@@ -38,7 +38,11 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.rls import bind_invitation_provider_context, bind_organisation_context
+from app.db.rls import (
+    bind_invitation_provider_context,
+    bind_organisation_context,
+    bind_platform_service_context,
+)
 from app.modules.audit.service import (
     ACTION_INVITATION_REVOKED,
     ACTION_PLATFORM_ADMIN_LOCKOUT,
@@ -183,6 +187,13 @@ async def _deactivate_deleted_user(session: AsyncSession, event: WorkOSWebhookEv
     data = _lenient_data(event, UserEventData)
     if data is None or data.id is None:
         return False
+    # RLS rollout (plan P4, group 7): this signature-verified control-plane path
+    # has no platform administrator present, but the lockout check reads the
+    # cross-user platform membership set. Bind the narrow trusted service
+    # context (not the platform-admin audit context, which would also open the
+    # cross-tenant audit read). It is bound only after the signature check and a
+    # non-null event id, never from a request, and grants no tenant-row access.
+    await bind_platform_service_context(session)
     await acquire_platform_admin_lock(session)
     user = await session.scalar(
         select(User).where(User.workos_user_id == data.id).with_for_update()

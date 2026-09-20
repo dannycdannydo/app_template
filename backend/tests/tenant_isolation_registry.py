@@ -279,23 +279,39 @@ TENANT_REGISTRY: tuple[TableIsolation, ...] = (
         "platform_roles",
         IsolationClass.PLATFORM,
         "Cross-tenant platform role catalogue; grants platform authority, never "
-        "tenant-data authority.",
+        "tenant-data authority. Plan P4 group 7 installs the "
+        "platform_roles_runtime_read policy, so the runtime role may read the "
+        "global catalogue (the pre-authorisation self lookup joins through it) "
+        "but has no write grant (the seed migration owns it).",
     ),
     TableIsolation(
         "platform_role_permissions",
         IsolationClass.PLATFORM,
-        "Platform role/permission grants; resolved by the platform plane only.",
+        "Platform role/permission grants; resolved by the platform plane only. "
+        "Plan P4 group 7 installs platform_role_permissions_runtime_read for the "
+        "global catalogue read; runtime has no write path.",
     ),
     TableIsolation(
         "platform_memberships",
         IsolationClass.PLATFORM,
         "Links a user to the platform plane; platform authority does not grant "
-        "organisation membership or tenant-row access.",
+        "organisation membership or tenant-row access. Plan P4 group 7 backs "
+        "that with the SELECT-only platform_memberships_self_isolation policy "
+        "(a user reads only their own membership before any platform context "
+        "exists, ADR-0022 decision 8) and the platform_memberships_platform_access "
+        "policy (cross-user list/grant/revoke only under the validated "
+        "transaction-local platform or service context, ADR-0022 decision 4), so "
+        "a user context can never grant itself platform authority.",
     ),
     TableIsolation(
         "bootstrap_states",
         IsolationClass.PLATFORM,
-        "One-time platform bootstrap record; global platform provisioning state.",
+        "One-time platform bootstrap record; global platform provisioning state "
+        "holding the consuming administrator's identity. Plan P4 group 7 installs "
+        "the context-gated bootstrap_states_service_read/insert/delete policies "
+        "and narrows the runtime grant to SELECT, INSERT, DELETE (no UPDATE), so "
+        "a tenant context can neither read nor claim nor clear the bootstrap and "
+        "the sentinel is immutable.",
     ),
 )
 

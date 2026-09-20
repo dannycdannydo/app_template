@@ -403,10 +403,37 @@ context; a pre-existing `app_operator` is adopted only after revoking
 memberships in **both** directions, and the downgrade always revokes the
 migration's read grants (with adversarial upgrade/downgrade tests); and
 `docs/backup-and-recovery.md` now uses an executable libpq-compatible operator
-DSN derived from `DATABASE_OPERATOR_URL`. Group 7 (platform-only plane) and the
-automated runtime-role startup check remain. The aggregate P4 checkboxes below
-stay unchecked until every group lands, except the group-5 and group-6 bullets
-completed here.
+DSN derived from `DATABASE_OPERATOR_URL`. Group 7 (platform-only plane) is
+implemented and human-reviewed by production enablement migration
+`b4c5d6e7f8a9`: the global
+platform catalogue (`platform_roles`, `platform_role_permissions`) takes a
+runtime read policy and has its inherited table-wide DML grant revoked,
+`platform_memberships` takes the **SELECT-only**
+pre-authorisation user-keyed policy plus the cross-user platform-access policy,
+and `bootstrap_states` takes context-gated read/insert/delete policies (no
+runtime-wide read, no UPDATE) with its inherited grant narrowed to
+`SELECT, INSERT, DELETE`. The
+platform permission dependency rebinds `app.user_id` before the caller's own
+membership lookup and then binds `app.platform_admin`; the one-time bootstrap
+grant, the signature-verified `user.deleted` webhook and the operator
+recovery/teardown CLI bind the separate narrow `app.platform_service` context
+(never the platform-admin flag, which also opens the cross-tenant audit read),
+so none of those paths needs a bypass. RLS is enabled and forced on all four
+tables, and the group's real-PostgreSQL suite proves the pre-authorisation self
+read, the write denial, the cross-user platform/service access, the bootstrap
+sentinel gating, the service-path bindings, pool-reuse safety and migration
+reversibility. The review's blocking findings were applied before approval: the
+identity-bearing bootstrap sentinel is no longer readable runtime-wide (the
+hook verifies the profile, then binds the trusted context before reading it),
+the earlier groups' inherited table-wide DML grant is revoked so each platform
+table holds only its least privilege, and the real-PostgreSQL suite now
+exercises the caller's own-row write denial, the service context's lack of
+tenant access, the `user.deleted` binding and upgraded/downgraded grants.
+**Human review recorded 2026-09-20:** the tenant-isolation,
+database-role/grant/policy, control-plane platform-context and service-context
+changes were reviewed and approved. The automated runtime-role startup check
+remains the only open P4 implementation bullet, so the aggregate P4 completion
+evidence below stays unchecked.
 
 Known follow-up (separately scoped, not group 6): `alembic check` reports drift
 on `ix_invitations_lower_email` because the group-5 functional partial index is
@@ -421,7 +448,7 @@ unit so the P2 migration-drift evidence returns green.
       using the approved parent or denormalised-key strategy.
 - [x] Handle global versus tenant audit/outbox events without treating a null
       tenant key as unrestricted access.
-- [ ] Give platform operations an explicit, narrowly scoped path and test that
+- [x] Give platform operations an explicit, narrowly scoped path and test that
       platform status alone cannot read ordinary tenant data.
 - [x] Document and test migration, support, backup, restore and emergency
       access roles.

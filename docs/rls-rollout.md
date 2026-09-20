@@ -67,7 +67,7 @@ blast radius.
 | 4b | jobs (P3) | `jobs`, `job_attempts` | **Delivered.** Group 4b. Production enablement migration `d0e1f2a3b4c5` installs the canonical runtime `<table>_organisation_isolation` policies, the single-row `jobs_worker_bootstrap` `FOR SELECT` policy and the `app_current_job_id()` helper, adds the denormalised non-null `job_attempts.organisation_id` (ADR-0022 decision 6) tied to its parent job by a composite `(job_id, organisation_id)` foreign key (with the matching unique pair on `jobs`), enables and forces RLS on both tables, and ships a reversible downgrade. It also delivers the part-4b prerequisite: the non-bypass `app_coordinator` role (`DATABASE_COORDINATOR_URL`) with dispatch-state-scoped read policies and **column-level** UPDATE grants limited to the settlement/reconciliation columns on `jobs`/`job_attempts` (so the coordinator can settle a dispatch but cannot move a tenant key, rewrite a payload/reference, edit progress or change ownership identity). The outbox coordinator, the in-process reliability-metrics refresh and the `reconcile_jobs` CLI now connect as `app_coordinator`. Workers bind `app.job_id` for a single-row bootstrap read, clear it, then bind the durable row's organisation before any protected read or write; the locking `FOR UPDATE` also runs under tenant context, because PostgreSQL applies the UPDATE policies to a locking read and the bootstrap deliberately has no UPDATE policy. Covered by the `test_rls_jobs_enablement_db.py` cross-organisation, worker-bootstrap, coordinator least-privilege and parent/tenant-consistency suite, plus migration reversibility. |
 | 5 | identity and control plane (P4) | `organisation_memberships`, `membership_roles`, `invitations` | **Delivered.** Group 5. Production enablement migration `f1a2b3c4d5e6` installs the canonical organisation-isolation policy on the two organisation-owned tables, a **SELECT-only** pre-tenant user-keyed policy on `organisation_memberships`, the `membership_roles_parent_isolation` parent-existence **read** policy plus the `membership_roles_organisation_isolation` write policy (which requires the parent membership's durable organisation to equal the validated tenant), the invitee email-keyed `invitations_invitee_select`/`invitations_invitee_update` pair and the verified-webhook single-row `invitations_webhook_provider_select`/`invitations_webhook_provider_update` bootstrap, enables and forces RLS, and ships a reversible downgrade. The authenticated user is bound as transaction-local `app.user_id` before the pre-tenant membership/invitation lookups (ADR-0022 decision 8); every platform-plane operation binds exactly the organisation it targets after the platform permission dependency validated the caller (the per-organisation platform path, never a bypass); the cross-tenant teardown deletes read the user's memberships under the user-keyed policy and then delete per organisation; and runtime `UPDATE` on `invitations` is column-restricted to `status`/`updated_at`, so no invitee path can move an invitation's organisation, email or role. Covered by the `test_rls_identity_enablement_db.py` cross-organisation, pre-tenant-lookup, pre-tenant-write-denial, invitee, webhook, platform-binding, teardown, pool-reuse and migration-reversibility suite. |
 | 6 | operational ledgers (P4) | `audit_events`, `outbox_events`, `maintenance_runs`, `webhook_events` | **Delivered.** Group 6. Production enablement migration `a2b3c4d5e6f7` installs the null-safe operational-ledger policies and the isolated `app_operator` credential, enables and forces RLS, and ships a reversible downgrade. A `NULL` tenant key never means "all rows": a tenant context reads only its own `audit_events`/`outbox_events` rows, while the cross-tenant and global audit history is reachable only through the explicit, validated transaction-local platform context (`app.platform_admin`) bound by the platform permission dependency after authorisation — never by exempting the table. The audit append is **tenant-checked** (own tenant, global null-tenant, or validated platform context) so a foreign-tenant attribution is denied even if a service predicate is missed. The coordinator (`app_coordinator`) reads the whole dispatch ledger, moves a dispatch through its lifecycle via **column-level** UPDATE grants limited to the claim/settle/release/recovery columns, and purges only published rows. `app_operator` is adopted only after membership normalisation in both directions, and the downgrade always revokes the migration's read grants. `outbox_events` still has no client read path. Covered by the `test_rls_operational_ledgers_enablement_db.py` cross-organisation, platform-context, coordinator-lifecycle, coordinator-column-denial, adversarial-adoption, global-ledger, pool-reuse and migration-reversibility suite. |
-| 7 | platform-only plane (P4) | `platform_roles`, `platform_role_permissions`, `platform_memberships`, `bootstrap_states` | Control-plane policies keyed to the platform context. Platform status alone grants no tenant-row access. |
+| 7 | platform-only plane (P4) | `platform_roles`, `platform_role_permissions`, `platform_memberships`, `bootstrap_states` | **Delivered.** Group 7. Production enablement migration `b4c5d6e7f8a9` installs the global catalogue read policies on `platform_roles`/`platform_role_permissions`, the **SELECT-only** pre-authorisation `platform_memberships_self_isolation` policy (a user reads only their own membership before any platform context exists, ADR-0022 decision 8), the cross-user `platform_memberships_platform_access` policy keyed to the validated transaction-local platform context (or the trusted service context below), and the context-gated `bootstrap_states_service_read`/`bootstrap_states_service_insert`/`bootstrap_states_service_delete` policies (no runtime-wide read and no UPDATE, and the inherited table-wide DML grant narrowed to the platform-plane need); it enables and forces RLS on all four tables and ships a reversible downgrade. The platform permission dependency rebinds `app.user_id` before resolving the caller's own membership and then binds `app.platform_admin`; the one-time bootstrap grant, the signature-verified `user.deleted` webhook and the operator recovery/teardown CLI bind the **separate** `app.platform_service` flag (never `app.platform_admin`, which also opens the cross-tenant audit read). Platform status alone grants no tenant-row access. Covered by the `test_rls_platform_plane_enablement_db.py` cross-user, pre-authorisation, write-denial, bootstrap-sentinel, service-path, pool-reuse and migration-reversibility suite. |
 
 The machine-checked classification for every table is
 `backend/tests/tenant_isolation_registry.py`; the human-readable detail is
@@ -276,6 +276,55 @@ platform and could not express the coordinator's cross-tenant dispatch scope):
   `USAGE`/`SELECT` grants, and drops the role only when this migration created
   it, so an adopted credential keeps its own out-of-band attributes but never
   the migration's operational read surface.
+
+### 3.4 Group 7 design notes (platform-only plane)
+
+Group 7 protects the platform authorisation plane, which grants no tenant rows by
+itself and is read at three distinct trust levels:
+
+- **Pre-authorisation self read (ADR-0022 decision 8, platform-plane analogue).**
+  ``require_platform_permission`` and ``/me`` resolve the caller's *own* platform
+  memberships **before** any platform context can exist — the permission check is
+  the authorisation itself. The authenticated user is bound as transaction-local
+  ``app.user_id``, so ``platform_memberships_self_isolation`` is **SELECT only**
+  and keyed to ``user_id``: a user reads their own membership and can never
+  insert, update or delete one. A user-keyed insert is deliberately absent, so a
+  user context cannot grant itself platform authority. ``platform_roles`` and
+  ``platform_role_permissions`` are the global catalogue that lookup joins
+  through and take a runtime read policy, exactly as the organisation
+  ``roles``/``permissions`` catalogue is not tenant-scoped. Group 7 revokes the
+  table-wide DML grant the earlier groups inherited on all four platform tables
+  and re-grants only the catalogue ``SELECT`` (the runtime role has no write
+  grant on either; the seed migration owns them).
+- **Validated platform context (ADR-0022 decision 4).** After the permission
+  check authorises the caller, ``require_platform_permission`` binds
+  **``app.platform_admin``**. ``platform_memberships_platform_access`` (``FOR
+  ALL`` with matching ``USING``/``WITH CHECK``) admits the cross-user
+  list/grant/revoke. The platform tables carry no tenant rows, so this context
+  grants no tenant-data access — proven by the group suite, which shows an
+  ordinary tenant table stays default-denied under it.
+- **Trusted service context for non-interactive control-plane paths.** Three
+  paths need cross-user platform-table access with **no platform administrator
+  present**: the one-time bootstrap grant (verified email, then sentinel
+  read/insert), the signature-verified ``user.deleted`` webhook deactivation and
+  the operator recovery/teardown CLI. They bind a **separate** transaction-local
+  **``app.platform_service``** flag. It is deliberately *not* ``app.platform_admin``:
+  that flag also opens the group-6 cross-tenant audit read, so reusing it would
+  hand these paths audit access they do not need. ``app.platform_service`` is
+  referenced only by the group-7 policies, is bound only by those trusted paths
+  after their own validation (never from a request), and grants no tenant-row
+  access.
+- **``bootstrap_states``.** The sentinel row records the consuming
+  administrator's verified email, user id and timestamp, so it is **not**
+  readable runtime-wide. The bootstrap hook resolves the verified WorkOS
+  profile first, then binds the trusted service context and reads the singleton
+  to decide whether it is already consumed; the read, insert and delete are all
+  gated to the validated platform/service context, so a tenant context can
+  neither read nor claim nor clear the bootstrap. There is no UPDATE policy and
+  no runtime UPDATE grant: the sentinel is immutable once consumed.
+- **Error non-disclosure.** The platform plane has no tenant resource-detail
+  surface, so group 7 claims no part of the aggregate P3 error-non-disclosure
+  checkbox.
 
 ## 4. Rollback procedure
 

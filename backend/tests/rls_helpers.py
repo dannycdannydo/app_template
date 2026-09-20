@@ -1470,6 +1470,106 @@ async def seed_two_organisation_ledgers(owner_url: str) -> OperationalLedgerSeed
     )
 
 
+@dataclass(frozen=True)
+class PlatformPlaneSeed:
+    """Identifiers for one platform-only-plane world (P4, group 7).
+
+    ``user_a`` and ``user_b`` each hold one ``platform_admin`` membership;
+    ``user_c`` holds none. A consumed ``bootstrap_states`` singleton row is
+    seeded so the read/no-op path is exercised. The shape proves the
+    pre-authorisation self read (a user sees only their own membership), the
+    cross-user platform/service access, and the write gating.
+    """
+
+    user_a: uuid.UUID
+    user_b: uuid.UUID
+    user_c: uuid.UUID
+    user_a_email: str
+    user_c_email: str
+    role_id: uuid.UUID
+    membership_a: uuid.UUID
+    membership_b: uuid.UUID
+    bootstrap_email: str
+
+
+async def seed_platform_plane(owner_url: str) -> PlatformPlaneSeed:
+    """Seed two platform members, a candidate user and the bootstrap sentinel.
+
+    The owner credential is used deliberately: the platform-only tables are
+    default-deny under the group-7 RLS policies, so a seed must be able to write
+    rows the restricted runtime role is denied, and it must run with RLS
+    bypassed the way a migration does.
+    """
+    user_a, user_b, user_c = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    membership_a, membership_b = uuid.uuid4(), uuid.uuid4()
+    suffix = uuid.uuid4().hex[:10]
+    user_a_email = f"platform-a-{suffix}@example.com"
+    user_c_email = f"platform-c-{suffix}@example.com"
+    bootstrap_email = f"bootstrap-{suffix}@example.com"
+    engine = create_async_engine(owner_url, poolclass=NullPool)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "INSERT INTO users (id, workos_user_id, email, name, is_active) "
+                    "VALUES (:a, :wa, :ea, 'Platform A', true), "
+                    "(:b, :wb, :eb, 'Platform B', true), "
+                    "(:c, :wc, :ec, 'Platform C', true)"
+                ),
+                {
+                    "a": user_a,
+                    "wa": f"user_platform_a_{suffix}",
+                    "ea": user_a_email,
+                    "b": user_b,
+                    "wb": f"user_platform_b_{suffix}",
+                    "eb": f"platform-b-{suffix}@example.com",
+                    "c": user_c,
+                    "wc": f"user_platform_c_{suffix}",
+                    "ec": user_c_email,
+                },
+            )
+            role_id = await connection.scalar(
+                text("SELECT id FROM platform_roles WHERE code = 'platform_admin'")
+            )
+            if role_id is None:
+                raise RuntimeError("platform_admin role is not seeded; migrations are out of order")
+            await connection.execute(
+                text(
+                    "INSERT INTO platform_memberships (id, user_id, platform_role_id) "
+                    "VALUES (:id, :user, :role)"
+                ),
+                [
+                    {"id": membership_a, "user": user_a, "role": role_id},
+                    {"id": membership_b, "user": user_b, "role": role_id},
+                ],
+            )
+            # Idempotent: the sentinel id is fixed, so repeated seeding within a
+            # suite reassigns the single consumed row to this call's user rather
+            # than conflicting.
+            await connection.execute(
+                text(
+                    "INSERT INTO bootstrap_states (id, email, consumed_by_user_id) "
+                    "VALUES (1, :email, :user) "
+                    "ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email, "
+                    "consumed_by_user_id = EXCLUDED.consumed_by_user_id"
+                ),
+                {"email": bootstrap_email, "user": user_a},
+            )
+    finally:
+        await engine.dispose()
+    return PlatformPlaneSeed(
+        user_a=user_a,
+        user_b=user_b,
+        user_c=user_c,
+        user_a_email=user_a_email,
+        user_c_email=user_c_email,
+        role_id=role_id,
+        membership_a=membership_a,
+        membership_b=membership_b,
+        bootstrap_email=bootstrap_email,
+    )
+
+
 def provision_coordinator_login(owner_url: str) -> None:
     """Grant the coordinator role a throwaway login credential (idempotent)."""
 
@@ -1616,6 +1716,7 @@ __all__ = [
     "JobsIsolationSeed",
     "NotificationIsolationSeed",
     "OperationalLedgerSeed",
+    "PlatformPlaneSeed",
     "RepresentativeIdentitySeed",
     "SettingsIsolationSeed",
     "alembic_config",
@@ -1632,6 +1733,7 @@ __all__ = [
     "provision_runtime_login",
     "runtime_engine",
     "runtime_url",
+    "seed_platform_plane",
     "seed_representative_ai",
     "seed_representative_files",
     "seed_representative_identity",

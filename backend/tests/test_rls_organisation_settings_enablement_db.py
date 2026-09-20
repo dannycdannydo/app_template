@@ -666,10 +666,16 @@ async def test_organisation_creation_paths_write_settings_under_rls(
             ).id
 
         # 3. Platform bootstrap. The bootstrap sentinel is a global singleton,
-        # so clear it first to make this run's grant fire.
-        async with factory() as session:
-            await session.execute(delete(BootstrapState))
-            await session.commit()
+        # so clear it first to make this run's grant fire. The cleanup runs on
+        # the owner credential: group 7 (plan P4) forces RLS on
+        # ``bootstrap_states``, whose insert/delete are gated to the validated
+        # platform/service context, and this fixture reset is neither.
+        owner_reset_engine = create_async_engine(migrated_database, poolclass=NullPool)
+        try:
+            async with owner_reset_engine.begin() as connection:
+                await connection.execute(delete(BootstrapState))
+        finally:
+            await owner_reset_engine.dispose()
         async with factory() as session:
             membership = await platform_admin_service.maybe_grant_bootstrap_platform_admin(
                 session,
