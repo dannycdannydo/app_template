@@ -356,6 +356,50 @@ PostgreSQL with a non-owner, non-`BYPASSRLS` runtime role:
 Prototype configuration (role, policies, migrations) is removable without
 residue; production enablement is a separate, later, human-reviewed migration.
 
+### 12. Operational-ledger and operator-credential implementation (group 6)
+
+Plan P4 group 6 (migration `a2b3c4d5e6f7`) implements decisions 4 and 7 for the
+operational ledgers:
+
+- `audit_events` is append-only under RLS: an own-tenant SELECT policy, a
+  **tenant-checked** INSERT policy and **no** UPDATE/DELETE policy. The INSERT
+  `WITH CHECK` admits only the writer's own validated tenant, a global
+  (null-tenant) row, or any row under the validated platform context, so a
+  foreign-tenant attribution is denied at the policy even if a service predicate
+  is ever missed. The cross-tenant and global (null-tenant) history is admitted
+  only by `audit_events_platform_read`, keyed to the transaction-local
+  `app.platform_admin` flag that `require_platform_permission` binds after it
+  has validated the caller. This is decision 4's reviewed platform context, not
+  a table exemption, and the flag is referenced by no other table's policy.
+- `outbox_events` keeps a null-safe split: the runtime role reads/appends only
+  its own tenant's rows (or the global maintenance rows it produces), while
+  `app_coordinator` owns the dispatch lifecycle with UPDATE `USING` bounded to
+  the dispatch states (including `published` so the retention sweep can take a
+  locking read), DELETE bounded to `published` rows, and **column-level** UPDATE
+  grants limited to the claim/settle/release/recovery columns (`status`,
+  `claimed_at`, `claim_token`, `attempt_count`, `processed_at`, `last_error`,
+  `available_at`), so it cannot move a tenant key or rewrite a payload.
+- `maintenance_runs` and `webhook_events` carry no tenant key and admit only the
+  roles that own their paths.
+- Because an append-only ledger grants no SELECT to every writer and PostgreSQL
+  applies the SELECT policies to `INSERT ... RETURNING`, the ledger timestamp
+  columns carry a Python-side default as well as the database default, so a
+  writer never needs a `RETURNING` read it may not be permitted (the schema
+  default is retained for direct SQL).
+- The isolated `app_operator` credential is created (`NOLOGIN`, non-owner,
+  member of no application role, `BYPASSRLS`) and resolved only by
+  `DATABASE_OPERATOR_URL`/`resolve_operator_database_url` for audited CLI/ops
+  tooling. The ordinary runtime role remains non-bypass and cannot assume it. A
+  pre-existing (deployment-provisioned) role is adopted only after full
+  normalisation: safe attributes forced, table ownership refused, and
+  memberships revoked in **both** directions (including a dangerous
+  `app_runtime -> app_operator` grant). The downgrade always revokes the
+  migration-added `USAGE`/`SELECT` grants and drops the role only when this
+  migration created it.
+
+This note describes the implementation; it does not itself record the human
+review that plan P4 and `AGENTS.md` require before apply-and-commit.
+
 ## Adoption decision (2026-09-18 gate)
 
 The plan's post-P2 adoption gate is resolved: **PostgreSQL RLS is adopted** as a

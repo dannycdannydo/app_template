@@ -55,6 +55,15 @@ COORDINATOR_ROLE = "app_coordinator"
 #: Test-only throwaway credential for the coordinator role.
 COORDINATOR_PASSWORD = "rls-coordinator-test-password"
 
+#: The group-6 isolated operational credential (ADR-0022 decision 4). It is
+#: created ``NOLOGIN`` with ``BYPASSRLS`` by the group-6 migration; a focused
+#: test attaches a throwaway credential to prove its cross-tenant read path is
+#: deliberate and that the ordinary roles cannot assume it.
+OPERATOR_ROLE = "app_operator"
+
+#: Test-only throwaway credential for the operational role.
+OPERATOR_PASSWORD = "rls-operator-test-password"
+
 
 def alembic_config() -> Config:
     """Return an Alembic ``Config`` pointed at the backend project."""
@@ -1340,6 +1349,127 @@ async def seed_representative_identity(
     )
 
 
+@dataclass(frozen=True)
+class OperationalLedgerSeed:
+    """Identifiers for one two-organisation operational-ledger world (P4, 6).
+
+    Each organisation owns one audit event and one pending outbox dispatch
+    event; there is a single global (null-tenant) audit event and outbox
+    maintenance event, one queued maintenance run and one webhook dedup row.
+    That shape proves the nullable-tenant policies: a tenant context sees only
+    its own rows and never the global ones, while the validated platform context
+    sees the cross-tenant and global audit history.
+    """
+
+    org_a: uuid.UUID
+    org_b: uuid.UUID
+    audit_a: uuid.UUID
+    audit_b: uuid.UUID
+    audit_global: uuid.UUID
+    outbox_a: uuid.UUID
+    outbox_b: uuid.UUID
+    outbox_global: uuid.UUID
+    maintenance_run: uuid.UUID
+    webhook_event: uuid.UUID
+
+
+async def seed_two_organisation_ledgers(owner_url: str) -> OperationalLedgerSeed:
+    """Seed two organisations and the group-6 operational-ledger rows (owner role).
+
+    The owner credential is used deliberately: the operational ledgers are
+    default-deny under the group-6 RLS policies, so a seed must be able to write
+    rows the restricted runtime role cannot, and it must run with RLS bypassed
+    the way a migration does.
+    """
+    org_a, org_b = uuid.uuid4(), uuid.uuid4()
+    audit_a, audit_b, audit_global = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    outbox_a, outbox_b, outbox_global = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    maintenance_run = uuid.uuid4()
+    webhook_event = uuid.uuid4()
+    engine = create_async_engine(owner_url, poolclass=NullPool)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("INSERT INTO organisations (id, name) VALUES (:a, :an), (:b, :bn)"),
+                {"a": org_a, "an": "Ledger A", "b": org_b, "bn": "Ledger B"},
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO audit_events "
+                    "(id, organisation_id, action, resource_type, resource_id) "
+                    "VALUES (:id, :org, 'record.created', 'record', :resource)"
+                ),
+                [
+                    {"id": audit_a, "org": org_a, "resource": str(audit_a)},
+                    {"id": audit_b, "org": org_b, "resource": str(audit_b)},
+                    {"id": audit_global, "org": None, "resource": str(audit_global)},
+                ],
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO outbox_events "
+                    "(id, organisation_id, event_type, event_version, aggregate_type, "
+                    "aggregate_id, payload, deduplication_key, status, available_at) "
+                    "VALUES (:id, :org, 'job.dispatch_requested', 1, 'job', :agg, "
+                    "'{}'::jsonb, :dedup, 'pending', now())"
+                ),
+                [
+                    {
+                        "id": outbox_a,
+                        "org": org_a,
+                        "agg": outbox_a,
+                        "dedup": f"seed:{outbox_a}",
+                    },
+                    {
+                        "id": outbox_b,
+                        "org": org_b,
+                        "agg": outbox_b,
+                        "dedup": f"seed:{outbox_b}",
+                    },
+                    {
+                        "id": outbox_global,
+                        "org": None,
+                        "agg": None,
+                        "dedup": f"seed:{outbox_global}",
+                    },
+                ],
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO maintenance_runs "
+                    "(id, task_type, schedule_key, scheduled_for, status) "
+                    "VALUES (:id, 'ai.retention', :key, now(), 'queued')"
+                ),
+                [
+                    {
+                        "id": maintenance_run,
+                        "key": f"ai.retention:schedule:{maintenance_run}",
+                    }
+                ],
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO webhook_events (id, event_id, event_type) "
+                    "VALUES (:id, :event_id, 'user.updated')"
+                ),
+                [{"id": webhook_event, "event_id": f"event_{uuid.uuid4().hex}"}],
+            )
+    finally:
+        await engine.dispose()
+    return OperationalLedgerSeed(
+        org_a=org_a,
+        org_b=org_b,
+        audit_a=audit_a,
+        audit_b=audit_b,
+        audit_global=audit_global,
+        outbox_a=outbox_a,
+        outbox_b=outbox_b,
+        outbox_global=outbox_global,
+        maintenance_run=maintenance_run,
+        webhook_event=webhook_event,
+    )
+
+
 def provision_coordinator_login(owner_url: str) -> None:
     """Grant the coordinator role a throwaway login credential (idempotent)."""
 
@@ -1361,6 +1491,31 @@ def coordinator_url(owner_url: str) -> str:
     return (
         make_url(owner_url)
         .set(username=COORDINATOR_ROLE, password=COORDINATOR_PASSWORD)
+        .render_as_string(hide_password=False)
+    )
+
+
+def provision_operator_login(owner_url: str) -> None:
+    """Grant the operational role a throwaway login credential (idempotent)."""
+
+    async def _run() -> None:
+        engine = create_async_engine(owner_url, poolclass=NullPool)
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(f"ALTER ROLE {OPERATOR_ROLE} LOGIN PASSWORD '{OPERATOR_PASSWORD}'")
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_run())
+
+
+def operator_url(owner_url: str) -> str:
+    """Return the test database URL for the isolated operational login."""
+    return (
+        make_url(owner_url)
+        .set(username=OPERATOR_ROLE, password=OPERATOR_PASSWORD)
         .render_as_string(hide_password=False)
     )
 
@@ -1398,6 +1553,44 @@ def force_drop_runtime_role(database_url: str) -> None:
     asyncio.run(_run())
 
 
+def force_drop_operator_role(database_url: str) -> None:
+    """Revoke grants and drop ``app_operator`` if it exists (test cleanup).
+
+    Used by the adversarial-adoption test, which may leave a deployment-shaped
+    (unmarked) operator role behind that the migration downgrade intentionally
+    does not drop.
+    """
+
+    async def _run() -> None:
+        engine = create_async_engine(database_url, poolclass=NullPool)
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        f"""
+                        DO $$
+                        BEGIN
+                            IF EXISTS (
+                                SELECT 1 FROM pg_roles WHERE rolname = '{OPERATOR_ROLE}'
+                            ) THEN
+                                EXECUTE 'REVOKE ALL ON ALL TABLES IN SCHEMA public
+                                         FROM {OPERATOR_ROLE}';
+                                EXECUTE 'REVOKE ALL ON ALL SEQUENCES IN SCHEMA public
+                                         FROM {OPERATOR_ROLE}';
+                                EXECUTE 'REVOKE ALL ON SCHEMA public FROM {OPERATOR_ROLE}';
+                                EXECUTE 'DROP ROLE {OPERATOR_ROLE}';
+                            END IF;
+                        END
+                        $$;
+                        """
+                    )
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_run())
+
+
 def upgrade_to_head() -> None:
     """Apply every migration to head."""
     command.upgrade(alembic_config(), "head")
@@ -1414,22 +1607,28 @@ __all__ = [
     "COORDINATOR_ROLE",
     "METRICS_PASSWORD",
     "METRICS_ROLE",
+    "OPERATOR_PASSWORD",
+    "OPERATOR_ROLE",
     "RUNTIME_PASSWORD",
     "RUNTIME_ROLE",
     "AIIsolationSeed",
     "IdentityIsolationSeed",
     "JobsIsolationSeed",
     "NotificationIsolationSeed",
+    "OperationalLedgerSeed",
     "RepresentativeIdentitySeed",
     "SettingsIsolationSeed",
     "alembic_config",
     "coordinator_url",
     "database_reachable",
     "downgrade_to_base",
+    "force_drop_operator_role",
     "force_drop_runtime_role",
     "metrics_url",
+    "operator_url",
     "provision_coordinator_login",
     "provision_metrics_login",
+    "provision_operator_login",
     "provision_runtime_login",
     "runtime_engine",
     "runtime_url",
@@ -1444,6 +1643,7 @@ __all__ = [
     "seed_two_organisation_files",
     "seed_two_organisation_identity",
     "seed_two_organisation_jobs",
+    "seed_two_organisation_ledgers",
     "seed_two_organisation_notifications",
     "seed_two_organisation_records",
     "seed_two_organisation_settings",

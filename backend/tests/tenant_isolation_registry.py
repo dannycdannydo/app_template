@@ -234,7 +234,14 @@ TENANT_REGISTRY: tuple[TableIsolation, ...] = (
         IsolationClass.OPERATIONAL,
         "Append-only audit ledger. organisation_id is nullable because "
         "platform/system events have no tenant; tenant listings filter on the "
-        "non-null value and a null row is never treated as visible to a tenant.",
+        "non-null value and a null row is never treated as visible to a tenant. "
+        "Plan P4 group 6 backs that with the audit_events_organisation_isolation "
+        "read policy (own tenant only), the audit_events_platform_read policy "
+        "(cross-tenant and global rows only under the validated transaction-local "
+        "platform context bound after the platform permission check) and an "
+        "append-only INSERT policy; no UPDATE/DELETE policy exists, so those "
+        "commands stay default-denied on top of the append-only trigger "
+        "(ADR-0022 decisions 4 and 7).",
         ownership_columns=("organisation_id",),
     ),
     TableIsolation(
@@ -242,19 +249,30 @@ TENANT_REGISTRY: tuple[TableIsolation, ...] = (
         IsolationClass.OPERATIONAL,
         "Transactional outbox. organisation_id is nullable for global "
         "maintenance events; tenant job dispatches copy the validated "
-        "organisation id and are never read by a client.",
+        "organisation id and are never read by a client. Plan P4 group 6 gives "
+        "the runtime role an own-tenant read and an append policy (own tenant or "
+        "the global null-tenant maintenance rows), and gives app_coordinator the "
+        "whole-dispatch-ledger read, append, in-flight UPDATE (USING only "
+        "pending/publishing/published so a settled row cannot be rewritten) and "
+        "published-retention DELETE (ADR-0022 decisions 3 and 7).",
         ownership_columns=("organisation_id",),
     ),
     TableIsolation(
         "maintenance_runs",
         IsolationClass.OPERATIONAL,
-        "Global infrastructure ledger with no tenant payload and no organisation_id by design.",
+        "Global infrastructure ledger with no tenant payload and no "
+        "organisation_id by design. Plan P4 group 6 enables RLS and admits only "
+        "the two roles that own the path: the runtime maintenance worker may "
+        "read and settle a run, and app_coordinator may schedule and recover "
+        "them; every other role is denied.",
     ),
     TableIsolation(
         "webhook_events",
         IsolationClass.OPERATIONAL,
         "Global provider-delivery dedup ledger; holds no tenant or identity "
-        "data beyond the provider event id and type.",
+        "data beyond the provider event id and type. Plan P4 group 6 enables RLS "
+        "and admits only the runtime webhook consumer's dedup read and insert; "
+        "every other role is denied.",
     ),
     # --- Platform authorisation plane --------------------------------------
     TableIsolation(

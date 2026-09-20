@@ -29,7 +29,7 @@ from app.core.security import (
     get_user_profile_client,
     verify_webhook_signature,
 )
-from app.db.rls import bind_organisation_context, bind_user_context
+from app.db.rls import bind_organisation_context, bind_platform_context, bind_user_context
 from app.db.session import async_session_factory
 from app.integrations.workos.invitations import (
     WorkOSInvitationsProvider,
@@ -319,6 +319,16 @@ def require_platform_permission(permission_code: str):
                 code="platform_admin_required",
                 message="You are not a platform administrator.",
             )
+        # RLS rollout (plan P4, group 6; ADR-0022 decision 4): after the platform
+        # permission has been validated, bind the transaction-local platform read
+        # context. The operational-ledger policies (``audit_events``) have no
+        # tenant key to filter the cross-tenant platform audit screen, so the
+        # explicit ``audit_events_platform_read`` policy admits those rows only
+        # under this validated flag. It is bound *after* the authorisation check,
+        # never before, and it is a flag rather than a request-selected tenant:
+        # the ordinary tenant policies on every other protected table are
+        # unaffected and a non-platform caller never reaches this bind.
+        await bind_platform_context(session)
         return user
 
     return _require_platform_permission

@@ -73,8 +73,8 @@ point both URLs at the same role.
 | `app_owner` | `DATABASE_URL` | Alembic DDL/seed | Schema owner; never the runtime path |
 | `app_runtime` | `DATABASE_RUNTIME_URL` | API and Dramatiq workers | Non-owner, non-superuser, no `BYPASSRLS`; subject to enabled policies |
 | `app_metrics` | none (NOLOGIN) | `SECURITY DEFINER` aggregate metrics function | Non-owner, non-superuser, no `BYPASSRLS`; narrow policy scoped to attention-required delivery rows |
-| `app_coordinator` | P4 credential | Outbox coordinator | Second non-bypass role, scoped to dispatch state |
-| `app_operator` | P4 credential | Backup/restore and support CLI | Isolated, audited operational credential |
+| `app_coordinator` | `DATABASE_COORDINATOR_URL` | Outbox coordinator, reliability-metrics refresh, `reconcile_jobs` CLI | Second non-bypass role, scoped to dispatch state |
+| `app_operator` | `DATABASE_OPERATOR_URL` | Backup/restore and support CLI | Isolated, audited operational credential; owns no table, member of no application role; the one `BYPASSRLS` application role; loaded only by CLI/ops tooling |
 
 Before enabling a table group, confirm in each environment that the two
 credentials authenticate as distinct roles and that the runtime role cannot
@@ -104,6 +104,36 @@ WHERE member.rolname = 'app_runtime';
 
 The approved rollout order, per-group requirements and rollback procedure are in
 `docs/rls-rollout.md`; the design is `docs/decisions/0022-postgresql-row-level-security.md`.
+
+### Operational database access (`app_operator`)
+
+Backup/restore, support and emergency access use the separate `app_operator`
+credential (`DATABASE_OPERATOR_URL`), never the runtime or owner credential.
+It is the only application role that may carry `BYPASSRLS`, because its reviewed
+operations are exactly the cross-tenant reads a row policy cannot express; it
+owns no table and has **no membership in either direction** (it inherits no
+application role and no role is a member of it), and the runtime role
+cannot `SET ROLE` it (`SET ROLE app_operator` as `app_runtime` must fail with
+`permission denied to set role`).
+
+- The credential is resolved only by `app.db.session.resolve_operator_database_url`;
+  an unset value raises rather than falling back to the runtime or owner role,
+  and no HTTP process or worker loads it.
+- A logical backup (`pg_dump`) or a cross-tenant support read connects with this
+  credential. It is granted `SELECT` on the application tables and sequences
+  (`pg_dump` reads each sequence's `last_value`, so the sequence grant is what
+  makes the backup executable); destructive restore remains an explicit,
+  separately reviewed operation and follows `docs/backup-and-recovery.md`.
+  `DATABASE_OPERATOR_URL` is a SQLAlchemy async URL, so libpq tools must use the
+  plain `postgresql://` form (strip the `+asyncpg` suffix) as Procedure 1 shows.
+- Every use is a privileged operational path: record who ran it, what operation
+  was performed and against which environment. Do **not** place row contents,
+  secrets, tokens or provider responses in the record or in an audit event
+  (BP §28 never-log list).
+- Verify the separation the same way as the runtime check above: connect with
+  `DATABASE_OPERATOR_URL`, confirm `current_user = app_operator`, that
+  `rolbypassrls = true` and `rolsuper = false`, that it owns no table, and that
+  it inherits no application role (`docs/rls-rollout.md` §5).
 
 ## Scaling
 

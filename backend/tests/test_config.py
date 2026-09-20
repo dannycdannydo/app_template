@@ -180,6 +180,61 @@ def test_coordinator_session_factory_binds_the_coordinator_credential() -> None:
         asyncio.run(engine.dispose())
 
 
+def test_resolve_operator_database_url_returns_the_configured_credential() -> None:
+    """The isolated operational credential is resolved from its own setting."""
+    from app.db.session import resolve_operator_database_url
+
+    settings = Settings(
+        app_env="test",
+        database_url="postgresql+asyncpg://owner",
+        database_runtime_url="postgresql+asyncpg://runtime",
+        database_operator_url="postgresql+asyncpg://operator",
+    )
+    assert resolve_operator_database_url(settings) == "postgresql+asyncpg://operator"
+
+
+def test_resolve_operator_database_url_requires_the_credential() -> None:
+    """There is no fallback to the runtime or owner credential in any environment."""
+    from app.db.session import resolve_operator_database_url
+
+    settings = Settings(
+        app_env="test",
+        database_url="postgresql+asyncpg://owner",
+        database_runtime_url="postgresql+asyncpg://runtime",
+    )
+    with pytest.raises(RuntimeError, match="DATABASE_OPERATOR_URL"):
+        resolve_operator_database_url(settings)
+
+
+def test_operator_session_factory_binds_the_operator_credential() -> None:
+    """The operational factory is built from the separate operator URL."""
+    import asyncio
+
+    from app.db.session import build_operator_session_factory
+
+    settings = Settings(
+        app_env="test",
+        database_url="postgresql+asyncpg://owner",
+        database_runtime_url="postgresql+asyncpg://runtime",
+        database_operator_url="postgresql+asyncpg://operator",
+    )
+    engine, factory = build_operator_session_factory(settings)
+    try:
+        assert engine.url.render_as_string(hide_password=False) == "postgresql+asyncpg://operator"
+        assert factory.kw["bind"] is engine
+    finally:
+        asyncio.run(engine.dispose())
+
+
+def test_database_operator_url_rejects_non_postgres() -> None:
+    with pytest.raises(ValidationError, match="database_operator_url"):
+        Settings(
+            app_env="development",
+            database_url="postgresql+asyncpg://owner",
+            database_operator_url="sqlite:///operator.db",
+        )
+
+
 def test_database_runtime_url_accepts_a_postgres_url() -> None:
     settings = Settings(
         app_env="development",

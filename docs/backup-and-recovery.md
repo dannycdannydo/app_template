@@ -132,17 +132,38 @@ upgrade head` (a no-op when the backup is already at head; migrations are
 
 **Fallback: logical dump restore.** The nightly `pg_dump -Fc` archive is the
 provider-neutral escape hatch (works against any PostgreSQL, including moving
-between providers). Restore into an empty database:
+between providers). Take the dump and connect for the restore with the isolated
+operational credential (`DATABASE_OPERATOR_URL`, role `app_operator`), which is
+the one `BYPASSRLS` application role (ADR-0022 decision 4): a `pg_dump` run as a
+non-`BYPASSRLS` role would silently omit every row an enabled policy hides.
+Restore into an empty database with the schema-owner credential:
 
 ```bash
+# Take the dump with the isolated operational credential (the one BYPASSRLS
+# application role), never the owner: a pg_dump run as a non-BYPASSRLS role
+# silently omits every row an enabled policy hides. DATABASE_OPERATOR_URL is
+# the application's SQLAlchemy async URL (postgresql+asyncpg://...); libpq
+# tools do not accept the `+asyncpg` driver suffix, so substitute the plain
+# `postgresql://` scheme without echoing the secret.
+pg_dump -Fc -d "${DATABASE_OPERATOR_URL/postgresql+asyncpg/postgresql}" \
+  -f app_template_production_$(date -u +%F).dump
+
 # Restore target: a new, empty database (never restore over the live one).
-pg_restore --no-owner --role=app -d app_template_production_restore \
+# Connect with the schema-owner credential so the owner owns the restored
+# objects and RLS is restored with the schema. Set RESTORE_URL to that empty
+# database's owner DSN — also a plain `postgresql://` URL, not the SQLAlchemy
+# `postgresql+asyncpg://` form.
+pg_restore --no-owner -d "$RESTORE_URL" \
   app_template_production_$(date -u +%F).dump
 # Then steps 4-6 above (migration, recreate, /ready, verify).
 ```
 
-Because the dump is taken nightly, its RPO is up to 24 h: use it only when
-PITR is unavailable, and expect to re-apply anything written after the dump.
+After the restore, confirm RLS is re-enabled and forced on the protected tables
+(`docs/rls-rollout.md` §5) before returning the deployment to service; a
+logical restore that accidentally left a policy disabled would silently remove
+the backstop. Because the dump is taken nightly, its RPO is up to 24 h: use it
+only when PITR is unavailable, and expect to re-apply anything written after the
+dump.
 
 ### Record revisions and append-only audit after a restore
 
@@ -492,7 +513,33 @@ The run validates the logical-dump escape hatch end to end. The primary
 provider-native PITR path cannot be executed against scratch infrastructure
 (no provider), so it is validated by construction: the procedure is provider
 console/API steps around the same post-restore steps (migration, recreate,
-`/ready`, verification) that the scratch run proved.
+`/ready`, verification) that the scratch run proved. Since the RLS rollout, the
+dump must be taken with the isolated `app_operator` credential (the one
+`BYPASSRLS` application role, ADR-0022 decision 4) rather than the schema owner;
+see the fallback procedure above.
+
+### Tested run C: operator-credential logical restore after the RLS rollout
+
+Environment: the migrated development PostgreSQL at the group-6 head
+(migration `a2b3c4d5e6f7`), with `app_operator` granted a throwaway login, one
+marker row in `audit_events`, and the protected tables enabled **and forced**
+under RLS. The run exercises the exact fallback procedure above.
+
+| Step | Command | Result |
+| --- | --- | --- |
+| Provision the operator login | `ALTER ROLE app_operator LOGIN PASSWORD '...'` | ready |
+| Verify the bypass read | `psql "$OPERATOR_DSN" -tAc "SELECT current_user, count(*) FROM audit_events;"` | `app_operator|1` |
+| Take the backup | `pg_dump -Fc -d "${DATABASE_OPERATOR_URL/postgresql+asyncpg/postgresql}"` | custom-format archive written |
+| Restore into empty DB | `pg_restore --no-owner -d "$RESTORE_URL" app-template_<date>.dump` | no errors; all objects recreated |
+| Verify data | `SELECT count(*) FROM audit_events;` | `1` (marker preserved) |
+| Verify the backstop | count of the four group-6 tables with `relrowsecurity AND relforcerowsecurity` | `4` |
+| Cleanup | `DROP DATABASE scratch_restore;` | ready |
+
+This run also caught and closed a real gap: the initial operator grant covered
+tables only, so `pg_dump` failed on `permission denied for sequence ...`. The
+group-6 migration now also grants `SELECT` on the schema's sequences (reverted
+on downgrade), which is what makes the documented operator-backed backup an
+executable procedure rather than a table-only approximation.
 
 ### Tested run B: environment recreation on scratch infrastructure
 
