@@ -306,6 +306,20 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
+        # Plan P4: before a production process serves traffic, prove the
+        # configured credentials authenticate as restricted roles. The check is
+        # a no-op outside production (see app.db.role_checks); a violation
+        # raises and aborts startup rather than running with policies disabled.
+        from app.db.role_checks import verify_production_database_roles
+        from app.db.session import coordinator_engine, engine
+
+        await verify_production_database_roles(
+            settings,
+            runtime_engine=engine,
+            coordinator_engine=coordinator_engine,
+        )
+        # Log success only after the role check has passed, so monitoring never
+        # reports a rejected process as having started.
         logger.info("application_started", app=settings.app_name, env=settings.app_env)
         queue_depth_task = asyncio.create_task(_queue_depth_refresh_loop())
         try:

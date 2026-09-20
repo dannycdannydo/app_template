@@ -448,9 +448,21 @@ WHERE member.rolname = 'app_runtime';
 The two `current_user` results must differ and name the intended roles, the
 protected-table-ownership count must be zero, and the inherited-membership set
 must contain no superuser, `BYPASSRLS` or protected-table-owner role. The same
-per-environment verification is repeated in `docs/operations.md`. Until it is
-automated, the adoption gate records this confirmation as **capability**; plan
-P4 adds the startup/deployment check that proves it automatically.
+per-environment verification is repeated in `docs/operations.md`.
+
+**Automated check (plan P4).** The catalogue verification above is now executed
+by `app.db.role_checks`. A production process runs it from `create_app`'s
+lifespan and refuses to serve traffic when the runtime credential owns a table,
+carries `SUPERUSER`/`BYPASSRLS`/`CREATEDB`/`CREATEROLE` or inherits a privileged
+role; the check never connects with the owner credential, so an environment that
+points both URLs at the same role is rejected rather than silently accepted. The
+coordinator credential is checked the same way when configured. The same check
+is available before deployment:
+
+```bash
+make verify-db-roles
+# or: cd backend && uv run python -m scripts.verify_db_roles
+```
 
 Group 6 adds the isolated operational credential, and it uses the same checks
 with one deliberate difference — `app_operator` is the **only** application
@@ -482,7 +494,10 @@ WHERE granted.rolname = 'app_operator';  -- must be 0 (no role is a member of op
 Every use of `app_operator` is a privileged operational path: record who ran it,
 what operation it performed and against which environment without placing row
 contents or secrets in the audit event (`docs/operations.md` →
-Operational database access).
+Operational database access). The automated check also asserts that
+`app_operator` is the only application role carrying `BYPASSRLS`, owns no table
+and has no membership in either direction, and that the runtime role cannot
+`SET ROLE` it.
 
 ## 6. Execution contract and release bookkeeping
 

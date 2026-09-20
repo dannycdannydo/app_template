@@ -431,9 +431,15 @@ exercises the caller's own-row write denial, the service context's lack of
 tenant access, the `user.deleted` binding and upgraded/downgraded grants.
 **Human review recorded 2026-09-20:** the tenant-isolation,
 database-role/grant/policy, control-plane platform-context and service-context
-changes were reviewed and approved. The automated runtime-role startup check
-remains the only open P4 implementation bullet, so the aggregate P4 completion
-evidence below stays unchecked.
+changes were reviewed and approved.
+
+**Human review recorded 2026-09-20 (automated runtime-role check):** the
+tenant-isolation and database-role safety of the startup/deployment verifier,
+the control-plane isolation of `app_operator`, and the production startup and
+backup/recovery implications of requiring it were reviewed and approved after
+the blocking indirect-membership-traversal and fail-closed `SET ROLE` probe
+findings were corrected. The indirect-rows bullet and the aggregate P4
+completion evidence below remain unchecked.
 
 Known follow-up (separately scoped, not group 6): `alembic check` reports drift
 on `ix_invitations_lower_email` because the group-5 functional partial index is
@@ -454,7 +460,7 @@ unit so the P2 migration-drift evidence returns green.
       access roles.
 - [x] Audit use of any privileged operational path without placing secrets or
       row contents in the audit event.
-- [ ] Add startup or deployment checks proving runtime roles do not own
+- [x] Add startup or deployment checks proving runtime roles do not own
       protected tables and lack `BYPASSRLS`.
 
 P4 completion evidence:

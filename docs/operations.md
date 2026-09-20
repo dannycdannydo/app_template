@@ -102,6 +102,25 @@ WHERE member.rolname = 'app_runtime';
 -- must contain no superuser, BYPASSRLS or protected-table-owner role.
 ```
 
+The check above is automated (RLS plan P4): `app.db.role_checks` connects with
+each configured credential and proves, from the server catalogue, that the
+authenticated role owns no table in `public`, carries none of
+`SUPERUSER`/`BYPASSRLS`/`CREATEDB`/`CREATEROLE` and inherits no privileged role.
+It runs automatically at production startup — `create_app`'s lifespan aborts the
+process before it serves traffic when a credential fails — and is available as a
+pre-deployment command:
+
+```bash
+make verify-db-roles
+# or: cd backend && uv run python -m scripts.verify_db_roles
+```
+
+The command exits non-zero on any violation and prints only role names and the
+violated predicates, never credential material. The check deliberately connects
+only with the runtime/coordinator credentials: a runtime URL that was
+misconfigured to the schema owner is exactly what its ownership and `BYPASSRLS`
+predicates reject.
+
 The approved rollout order, per-group requirements and rollback procedure are in
 `docs/rls-rollout.md`; the design is `docs/decisions/0022-postgresql-row-level-security.md`.
 
@@ -133,7 +152,11 @@ cannot `SET ROLE` it (`SET ROLE app_operator` as `app_runtime` must fail with
 - Verify the separation the same way as the runtime check above: connect with
   `DATABASE_OPERATOR_URL`, confirm `current_user = app_operator`, that
   `rolbypassrls = true` and `rolsuper = false`, that it owns no table, and that
-  it inherits no application role (`docs/rls-rollout.md` §5).
+  it inherits no application role (`docs/rls-rollout.md` §5). The automated
+  startup/deployment check also proves the operator invariants from the runtime
+  connection: `app_operator` is the only application role carrying `BYPASSRLS`,
+  it owns no table and has no membership in either direction, and the runtime
+  role cannot `SET ROLE` it.
 
 ## Scaling
 
