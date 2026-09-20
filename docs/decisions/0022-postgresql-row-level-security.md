@@ -400,6 +400,53 @@ operational ledgers:
 This note describes the implementation; it does not itself record the human
 review that plan P4 and `AGENTS.md` require before apply-and-commit.
 
+### 13. Platform-only-plane implementation (group 7)
+
+Plan P4 group 7 (migration `b4c5d6e7f8a9`) implements decision 4 for the
+platform-only plane (`platform_roles`, `platform_role_permissions`,
+`platform_memberships`, `bootstrap_states`), which grants no tenant rows by
+itself:
+
+- The **pre-authorisation self read** is the platform-plane analogue of
+  decision 8: `require_platform_permission` and `/me` resolve the caller's own
+  platform membership before a platform context exists, so
+  `platform_memberships_self_isolation` is **SELECT only** and keyed to
+  `app.user_id`. A user context reads its own membership but can never insert,
+  update or delete one — a user-keyed insert is deliberately absent, so no user
+  context can grant itself platform authority. `platform_roles` and
+  `platform_role_permissions` take a runtime read policy as the global
+  catalogue the lookup joins through (the organisation `roles`/`permissions`
+  catalogue is likewise not tenant-scoped). Group 7 revokes the table-wide DML
+  grant the earlier groups inherited on all four platform tables and re-grants
+  only the catalogue `SELECT`, so there is no runtime write grant on either.
+- The **validated platform context** (`app.platform_admin`, decision 4) admits
+  the cross-user list/grant/revoke through
+  `platform_memberships_platform_access`. The platform tables carry no tenant
+  rows, so this context grants no tenant-data access.
+- A **separate narrow service context** (`app.platform_service`) is bound by the
+  three trusted non-interactive paths that need cross-user platform-table
+  access with no platform administrator present: the one-time bootstrap grant
+  (verified email, then sentinel read/insert), the signature-verified
+  `user.deleted` webhook deactivation and the operator recovery/teardown CLI. It
+  is deliberately **not** `app.platform_admin`: that flag also opens the group-6
+  cross-tenant audit read, so reusing it would hand those paths audit access
+  they do not need. The service flag is referenced only by the group-7
+  policies, is bound only by those trusted paths after their own validation,
+  and grants no tenant-row access.
+- `bootstrap_states` records the consuming administrator's verified email, user
+  id and timestamp, so it is **not** readable runtime-wide: the bootstrap hook
+  verifies the WorkOS profile first, then binds the trusted service context and
+  reads the singleton to decide whether it is already consumed. Its read, insert
+  and delete are all gated to the validated platform/service context (no
+  runtime-wide read), its runtime grant is `SELECT, INSERT, DELETE` only, and
+  there is no UPDATE policy, so a tenant context can neither read nor claim nor
+  clear the bootstrap and the immutable sentinel can never be modified.
+
+The ordinary runtime role remains non-owner and non-`BYPASSRLS` throughout; RLS
+is enabled and forced on all four tables. This note describes the
+implementation; it does not itself record the human review that plan P4 and
+`AGENTS.md` require before apply-and-commit.
+
 ## Adoption decision (2026-09-18 gate)
 
 The plan's post-P2 adoption gate is resolved: **PostgreSQL RLS is adopted** as a

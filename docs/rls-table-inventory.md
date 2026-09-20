@@ -158,6 +158,24 @@ never means "all rows" (ADR-0022 decision 7). The policy design is recorded in
 | `platform_memberships` | `platform_admin.queries`; bootstrap recovery | bootstrap grant; `platform_admin.service` (grant/revoke); recovery script | `GET/POST/DELETE /api/v1/platform/admins`; `/me`; login-time bootstrap |
 | `bootstrap_states` | bootstrap grant hook; provision/recovery scripts | bootstrap grant; provision/recovery scripts | `scripts/provision_bootstrap_admin.py`; `scripts/recover_platform_admin.py`; login-time bootstrap |
 
+Plan P4 group 7 (migration `b4c5d6e7f8a9`) gave the platform-only plane its
+tested policies, enabled and forced RLS on all four tables, and revoked the
+table-wide DML grant the earlier groups inherited so the runtime role holds only
+the exact privilege each table needs. The global catalogue
+(`platform_roles`/`platform_role_permissions`) is read-only (`SELECT`) to the
+runtime role. `platform_memberships` carries a **SELECT-only** user-keyed
+policy for the pre-authorisation self read (ADR-0022 decision 8) and a
+cross-user `FOR ALL` policy keyed to the validated transaction-local platform
+context (`app.platform_admin`) or the narrow trusted service context
+(`app.platform_service`) bound by the one-time bootstrap, the signature-verified
+`user.deleted` webhook and the operator recovery/teardown CLI — never by a
+request. `bootstrap_states` records the consuming administrator's identity, so
+its read, insert and delete are all gated to the platform/service context and
+its runtime grant is `SELECT, INSERT, DELETE` only (no `UPDATE`; the sentinel is
+immutable), so a tenant context can neither read nor claim nor clear it.
+Platform status alone grants no tenant-row access, which the group suite proves.
+The policy design is recorded in `docs/rls-rollout.md` §3.4.
+
 ## 3. Raw SQL, bulk mutations and relationship loads
 
 These are the places where a query does not go through a simple, obviously
@@ -294,4 +312,15 @@ that closes the operational-tooling side of gaps 1 and 5: it is the one
 role in either direction, and is adopted only after membership normalisation.
 Gaps 1 (runtime separation), 2 (indirect tables), 4 (pre-tenant lookup)
 and the in-app platform context are already delivered by the P2/P3/group-5
-work; the remaining platform-only-table policies are group 7.
+work. **Group 7 resolution (2026-09-20).** The remaining platform-only tables
+(`platform_roles`, `platform_role_permissions`, `platform_memberships`,
+`bootstrap_states`) now carry their tested policies under migration
+`b4c5d6e7f8a9`, with RLS enabled and forced: the global platform catalogue is
+runtime-read-only, the caller's own platform membership is resolved under the
+pre-authorisation user context, cross-user platform administration is keyed to
+the validated platform context, and the one-time bootstrap, the webhook
+deactivation and the operator CLI use the separate narrow service context. The
+identity-bearing bootstrap sentinel is context-gated for read as well as write,
+it is never UPDATE-able, and the earlier groups' inherited table-wide DML grant
+was revoked so each platform table holds only its least privilege.
+Every table in this inventory now has a tested policy or a reviewed exclusion.

@@ -36,6 +36,14 @@ Design constraints (ADR-0022 decisions 8 and 9):
   the explicit ``audit_events_platform_read`` policy (ADR-0022 decision 4).
   It is a flag, never a tenant id, and it is bound only after the platform
   permission has been validated.
+- ``app.platform_service`` is the narrow trusted control-plane service context
+  the platform-only table policies (plan P4, group 7) read. The one-time
+  bootstrap grant (verified email, then sentinel read/insert), the
+  signature-verified ``user.deleted`` webhook and the operator recovery/teardown
+  CLI bind it for the cross-user platform-table access they legitimately need.
+  It is separate from ``app.platform_admin`` (which also opens the cross-tenant
+  audit read), grants no tenant-row access and is referenced only by the
+  group-7 policies.
 - The records/files/notifications services keep their post-write refresh inside
   the same transaction as the write, so they never need a second,
   automatically re-contextualised transaction.
@@ -104,6 +112,21 @@ RLS_INVITATION_PROVIDER_SETTING: Final = "app.invitation_provider_id"
 #: ``app_current_platform_admin()`` and therefore admit no cross-tenant row.
 RLS_PLATFORM_SETTING: Final = "app.platform_admin"
 
+#: Transaction-local PostgreSQL setting the platform-only table policies read
+#: (plan P4, group 7). Three trusted, non-interactive control-plane paths need
+#: cross-user platform-table access with no platform administrator present: the
+#: one-time bootstrap grant (which also reads the identity-bearing sentinel
+#: row), the signature-verified ``user.deleted`` webhook deactivation and the
+#: operator recovery/teardown CLI. They bind this flag
+#: after their own validation. It is deliberately **separate** from
+#: ``app.platform_admin``: that flag also opens the group-6 cross-tenant audit
+#: read, so reusing it here would hand those paths audit access they do not
+#: need. This flag is referenced only by the group-7 platform-table policies
+#: and grants no tenant-row access. Absent/empty/malformed values resolve to
+#: ``false`` in ``app_current_platform_service()`` and therefore admit no
+#: cross-user row.
+RLS_PLATFORM_SERVICE_SETTING: Final = "app.platform_service"
+
 #: Keys under which the most recently bound ids are held on ``session.info``.
 #: These are convenience records for diagnostics/tests only; they are never
 #: used to re-apply context to a later transaction.
@@ -112,6 +135,7 @@ _SESSION_INFO_USER_KEY: Final = "rls_user_id"
 _SESSION_INFO_JOB_KEY: Final = "rls_job_id"
 _SESSION_INFO_INVITATION_KEY: Final = "rls_invitation_provider_id"
 _SESSION_INFO_PLATFORM_KEY: Final = "rls_platform_admin"
+_SESSION_INFO_PLATFORM_SERVICE_KEY: Final = "rls_platform_service"
 
 _SET_LOCAL_SQL = text("SELECT set_config(:setting, :value, true)")
 
@@ -242,6 +266,29 @@ async def bind_platform_context(session: AsyncSession) -> None:
     await session.execute(_SET_LOCAL_SQL, {"setting": RLS_PLATFORM_SETTING, "value": "true"})
 
 
+async def bind_platform_service_context(session: AsyncSession) -> None:
+    """Bind the narrow trusted control-plane service context.
+
+    The platform-only table policies (plan P4, group 7) admit cross-user
+    platform-table access under either the validated platform-admin flag or this
+    service flag. This flag is bound only by trusted, non-interactive paths
+    after their own validation: the one-time bootstrap grant (verified email,
+    then sentinel read/insert), the signature-verified ``user.deleted`` webhook
+    and the operator recovery/teardown CLI. It is deliberately not
+    ``app.platform_admin``: that flag also opens the group-6 cross-tenant audit
+    read, which these paths do not need. It is a flag rather than a
+    request-selected tenant, it grants no tenant-row access, and it is
+    referenced only by the group-7 platform-table policies. Like the other
+    settings it is transaction-local and is never re-applied automatically.
+    """
+    if not _is_database_backed(session):
+        return
+    session.info[_SESSION_INFO_PLATFORM_SERVICE_KEY] = "true"
+    await session.execute(
+        _SET_LOCAL_SQL, {"setting": RLS_PLATFORM_SERVICE_SETTING, "value": "true"}
+    )
+
+
 async def clear_organisation_context(session: AsyncSession) -> None:
     """Clear the current transaction's tenant setting explicitly.
 
@@ -303,6 +350,19 @@ async def clear_platform_context(session: AsyncSession) -> None:
     await session.execute(_SET_LOCAL_SQL, {"setting": RLS_PLATFORM_SETTING, "value": ""})
 
 
+async def clear_platform_service_context(session: AsyncSession) -> None:
+    """Clear the current transaction's trusted service context.
+
+    Exposed for tests and for handlers that deliberately end the service scope
+    within one session. Ordinary service paths do not need to call this: the
+    setting is transaction-local and clears on the next boundary.
+    """
+    if not _is_database_backed(session):
+        return
+    session.info.pop(_SESSION_INFO_PLATFORM_SERVICE_KEY, None)
+    await session.execute(_SET_LOCAL_SQL, {"setting": RLS_PLATFORM_SERVICE_SETTING, "value": ""})
+
+
 def bound_organisation_id(session: AsyncSession) -> str | None:
     """Return the most recently bound tenant id, if one has been bound."""
     value = session.info.get(_SESSION_INFO_KEY)
@@ -330,3 +390,8 @@ def bound_invitation_provider_id(session: AsyncSession) -> str | None:
 def bound_platform_context(session: AsyncSession) -> bool:
     """Return whether the platform-administrator read context is bound."""
     return session.info.get(_SESSION_INFO_PLATFORM_KEY) == "true"
+
+
+def bound_platform_service_context(session: AsyncSession) -> bool:
+    """Return whether the trusted control-plane service context is bound."""
+    return session.info.get(_SESSION_INFO_PLATFORM_SERVICE_KEY) == "true"

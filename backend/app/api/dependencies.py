@@ -308,6 +308,17 @@ def require_platform_permission(permission_code: str):
         session: Annotated[AsyncSession, Depends(get_db)],
         user: Annotated[User, Depends(get_current_user)],
     ) -> User:
+        # RLS rollout (plan P4, group 7; ADR-0022 decision 8): the platform
+        # permission check is the platform-plane analogue of the pre-tenant
+        # organisation membership lookup — it resolves the caller's own
+        # platform memberships, and it necessarily runs *before* any platform
+        # context can be bound. Rebind the authenticated user as
+        # transaction-local ``app.user_id`` so the SELECT-only
+        # ``platform_memberships_self_isolation`` policy admits exactly the
+        # caller's own rows. The value comes from the authenticated user, never
+        # from a request body or header; a commit on the provisioning chain may
+        # have cleared an earlier bind, so this is deterministic.
+        await bind_user_context(session, user.id)
         granted = await platform_permission_codes_for_user(session, user.id)
         if permission_code not in granted:
             logger.warning(

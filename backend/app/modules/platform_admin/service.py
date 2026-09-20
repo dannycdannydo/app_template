@@ -45,7 +45,12 @@ from app.core.exceptions import (
     ServiceUnavailableError,
 )
 from app.core.security import UserProfileClient
-from app.db.rls import bind_organisation_context, bind_user_context
+from app.db.rls import (
+    bind_organisation_context,
+    bind_platform_service_context,
+    bind_user_context,
+    clear_platform_service_context,
+)
 from app.integrations.workos.invitations import WorkOSInvitationsProvider
 from app.integrations.workos.organizations import WorkOSOrganizationsProvider
 from app.modules.audit.service import (
@@ -255,10 +260,15 @@ async def maybe_grant_bootstrap_platform_admin(
     following hold:
 
     - ``BOOTSTRAP_PLATFORM_ADMIN_EMAIL`` is configured;
-    - the ``bootstrap_states`` row does not exist yet (unconsumed);
     - the WorkOS profile behind the session reports the configured email and
       ``email_verified`` (the profile is fetched server-side, so the email and
-      its verification state never come from client input — BP §8).
+      its verification state never come from client input — BP §8);
+    - the ``bootstrap_states`` row does not exist yet (unconsumed).
+
+    The profile is verified *before* the sentinel is read: the sentinel row
+    records the consuming administrator's identity, so it is not readable
+    runtime-wide. Only once the verified email has authorised the trusted
+    service context is the singleton read (and its absence confirmed).
 
     When the grant fires, the platform membership, the bootstrap record and
     the ``platform.bootstrap_granted`` audit event are written in one
@@ -278,16 +288,23 @@ async def maybe_grant_bootstrap_platform_admin(
     if not configured:
         return None
 
-    bootstrap = await session.scalar(
-        select(BootstrapState).where(BootstrapState.id == BOOTSTRAP_SINGLETON_ID)
-    )
-    if bootstrap is not None:
-        return None
-
     profile = await profiles.get_profile(user.workos_user_id)
     if profile.email.strip().lower() != configured:
         return None
     if not profile.email_verified:
+        return None
+
+    # RLS rollout (plan P4, group 7): the sentinel row records the consuming
+    # administrator's identity, so it is not readable runtime-wide. Only after
+    # the server-side profile has been verified as the configured, verified
+    # email do we bind the narrow trusted service context and read the
+    # singleton; its read, insert and delete are all gated to that context.
+    await bind_platform_service_context(session)
+    bootstrap = await session.scalar(
+        select(BootstrapState).where(BootstrapState.id == BOOTSTRAP_SINGLETON_ID)
+    )
+    if bootstrap is not None:
+        await clear_platform_service_context(session)
         return None
 
     role = await session.scalar(
@@ -306,6 +323,13 @@ async def maybe_grant_bootstrap_platform_admin(
     # back with the rest of the grant.
     await _ensure_bootstrap_organisation(session, user)
 
+    # RLS rollout (plan P4, group 7): this is the one path that creates the
+    # first platform membership with no platform administrator present. The
+    # narrow trusted service context was already bound before the sentinel read
+    # above (it is required for that read) and remains bound across this insert
+    # unit, so the platform-only table policies admit the platform membership
+    # and bootstrap-sentinel insert. It is a flag bound only here, never from a
+    # request, and it grants no tenant-row access (ADR-0022 decision 4).
     membership = PlatformMembership(user_id=user.id, platform_role_id=role.id)
     bootstrap_state = BootstrapState(email=profile.email, consumed_by_user_id=user.id)
     session.add(membership)
@@ -325,12 +349,16 @@ async def maybe_grant_bootstrap_platform_admin(
         await session.commit()
     except IntegrityError:
         await session.rollback()
+        # The rollback cleared the transaction-local service context; rebind it
+        # before the sentinel re-read under RLS.
+        await bind_platform_service_context(session)
         bootstrap = await session.scalar(
             select(BootstrapState).where(BootstrapState.id == BOOTSTRAP_SINGLETON_ID)
         )
         if bootstrap is not None:
             # A concurrent first login consumed the bootstrap first; our
             # grant was rolled back with the losing transaction.
+            await clear_platform_service_context(session)
             return None
         raise ServiceUnavailableError(
             code="platform_bootstrap_failed",
@@ -661,6 +689,13 @@ async def recover_platform_admin(session: AsyncSession, *, email: str, reason: s
             message="A break-glass recovery reason is required.",
         )
     normalised_email = email.strip().lower()
+    # RLS rollout (plan P4, group 7): the break-glass CLI is a trusted
+    # control-plane path with no platform administrator present, yet it must
+    # read the cross-user platform membership set to prove the plane is locked
+    # out and then insert the recovery grant. Bind the narrow service context
+    # (not the platform-admin audit context); it is bound only here, from the
+    # operator command, never from a request.
+    await bind_platform_service_context(session)
     role = await _platform_admin_role_or_503(session)
     await acquire_platform_admin_lock(session)
     user = await session.scalar(
@@ -725,7 +760,14 @@ async def delete_provisioned_user(
     command to a development/test context. The user's organisation memberships
     and their role grants are removed explicitly first; ``platform_memberships``
     and ``bootstrap_states`` cascade from the ``users`` row.
+
+    RLS rollout (plan P4, group 7): the enabled-admin check reads the cross-user
+    platform membership set and the cascade removes the target's platform rows,
+    so the operator path binds the narrow trusted service context (not the
+    platform-admin audit context) before the lock and the check. It is bound
+    only here, from the operator CLI, never from a request.
     """
+    await bind_platform_service_context(session)
     await acquire_platform_admin_lock(session)
     user = await session.scalar(select(User).where(User.id == user_id).with_for_update())
     if user is None:
