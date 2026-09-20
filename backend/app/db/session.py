@@ -76,6 +76,27 @@ def resolve_coordinator_database_url(settings: Settings) -> str:
     return resolve_database_url(settings)
 
 
+def resolve_operator_database_url(settings: Settings) -> str:
+    """Return the URL the isolated operational (``app_operator``) engine must use.
+
+    ``app_operator`` is the audited operational credential (ADR-0022 decision 4):
+    backup/restore, support and emergency tooling use it for the cross-tenant
+    reads a policy cannot express. It is deliberately **not** resolved for any
+    normal process — the API and workers never call this — so an unset
+    credential is not a startup failure; it is only an error when a caller
+    explicitly asks for the operational engine. There is no fallback to the
+    runtime or owner credential: silently borrowing a different role would
+    defeat the isolated, auditable path.
+    """
+    if not settings.database_operator_url:
+        raise RuntimeError(
+            "DATABASE_OPERATOR_URL is required for operational tooling: the "
+            "isolated app_operator credential must be configured separately and "
+            "loaded only by audited CLI/ops commands (ADR-0022 decision 4)."
+        )
+    return settings.database_operator_url
+
+
 def build_session_factory(
     settings: Settings,
 ) -> tuple[AsyncEngine, async_sessionmaker[AsyncSession]]:
@@ -102,6 +123,24 @@ def build_coordinator_session_factory(
     """
     engine = create_async_engine(
         resolve_coordinator_database_url(settings),
+        pool_pre_ping=True,
+        echo=settings.debug,
+    )
+    return engine, async_sessionmaker(engine, expire_on_commit=False)
+
+
+def build_operator_session_factory(
+    settings: Settings,
+) -> tuple[AsyncEngine, async_sessionmaker[AsyncSession]]:
+    """Build the isolated operational engine and session factory.
+
+    Mirrors :func:`build_coordinator_session_factory` but binds the separate
+    ``app_operator`` credential via :func:`resolve_operator_database_url`. This
+    is called only by audited CLI/ops tooling, never by an HTTP process or a
+    worker; an unset credential raises rather than falling back to another role.
+    """
+    engine = create_async_engine(
+        resolve_operator_database_url(settings),
         pool_pre_ping=True,
         echo=settings.debug,
     )

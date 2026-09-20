@@ -16,7 +16,7 @@ stored here (BP §28, §30).
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy import DateTime, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
@@ -35,5 +35,8 @@ class WebhookEvent(Base):
     event_id: Mapped[str] = mapped_column(String(255), nullable=False)
     event_type: Mapped[str] = mapped_column(String(120), nullable=False)
     received_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
     )

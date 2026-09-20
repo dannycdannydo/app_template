@@ -901,6 +901,13 @@ async def _fail_locked(
     attempt_status: JobAttemptStatus = JobAttemptStatus.FAILED,
 ) -> None:
     """Write failure, attempt outcome and audit before the caller commits."""
+    # RLS rollout (plan P4, group 6): the audit append policy is tenant-checked,
+    # so the transaction-local organisation must carry the durable job row's own
+    # tenant before the append. Worker paths already bound it from the same row;
+    # the coordinator's bounded recovery loads a job under its dispatch-state
+    # policy without tenant context, so binding here keeps every failure-audit
+    # append attributable and never foreign (ADR-0022 decisions 3 and 7).
+    await bind_organisation_context(session, job.organisation_id)
     now = datetime.now(UTC)
     _close_attempt(
         await _running_attempt(session, job),

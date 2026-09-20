@@ -38,7 +38,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.rls import bind_invitation_provider_context
+from app.db.rls import bind_invitation_provider_context, bind_organisation_context
 from app.modules.audit.service import (
     ACTION_INVITATION_REVOKED,
     ACTION_PLATFORM_ADMIN_LOCKOUT,
@@ -148,6 +148,12 @@ async def _refresh_revoked_invitation(session: AsyncSession, event: WorkOSWebhoo
     if invitation is None or invitation.status is not InvitationStatus.SENT:
         return False
 
+    # RLS rollout (plan P4, group 6): the audit append policy is tenant-checked,
+    # so derive the transaction-local organisation from the durable, provider-
+    # keyed invitation row before auditing the revocation. The value comes from
+    # the verified row, never from the delivery payload (ADR-0022 decisions 3
+    # and 7), so the append is attributable to this invitation's own tenant.
+    await bind_organisation_context(session, invitation.organisation_id)
     invitation.status = InvitationStatus.REVOKED
     await record_event(
         session,

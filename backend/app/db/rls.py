@@ -30,6 +30,12 @@ Design constraints (ADR-0022 decisions 8 and 9):
   verified ``invitation.revoked`` webhook binds from the provider event id so
   it can mirror a revocation with no organisation context, mirroring the
   ``app.job_id`` worker bootstrap (plan P4, group 5).
+- ``app.platform_admin`` is the operational-ledger read context the validated
+  platform permission dependency binds (plan P4, group 6). It admits the
+  cross-tenant and global audit history the platform audit screen lists through
+  the explicit ``audit_events_platform_read`` policy (ADR-0022 decision 4).
+  It is a flag, never a tenant id, and it is bound only after the platform
+  permission has been validated.
 - The records/files/notifications services keep their post-write refresh inside
   the same transaction as the write, so they never need a second,
   automatically re-contextualised transaction.
@@ -87,6 +93,17 @@ RLS_JOB_SETTING: Final = "app.job_id"
 #: single-row bootstrap pattern, applied to the webhook control-plane path).
 RLS_INVITATION_PROVIDER_SETTING: Final = "app.invitation_provider_id"
 
+#: Transaction-local PostgreSQL setting the operational-ledger policies read
+#: (plan P4, group 6). A validated platform administrator binds it after the
+#: platform permission dependency has authorised the caller, so the
+#: ``audit_events`` platform-read policy can admit the cross-tenant and global
+#: audit history the platform screen exists to list. It is deliberately a plain
+#: flag, not an arbitrary tenant id: the runtime role can never set a tenant
+#: context it was not authorised for, and no ordinary tenant request binds it.
+#: Absent/empty/malformed values resolve to ``false`` in
+#: ``app_current_platform_admin()`` and therefore admit no cross-tenant row.
+RLS_PLATFORM_SETTING: Final = "app.platform_admin"
+
 #: Keys under which the most recently bound ids are held on ``session.info``.
 #: These are convenience records for diagnostics/tests only; they are never
 #: used to re-apply context to a later transaction.
@@ -94,6 +111,7 @@ _SESSION_INFO_KEY: Final = "rls_organisation_id"
 _SESSION_INFO_USER_KEY: Final = "rls_user_id"
 _SESSION_INFO_JOB_KEY: Final = "rls_job_id"
 _SESSION_INFO_INVITATION_KEY: Final = "rls_invitation_provider_id"
+_SESSION_INFO_PLATFORM_KEY: Final = "rls_platform_admin"
 
 _SET_LOCAL_SQL = text("SELECT set_config(:setting, :value, true)")
 
@@ -204,6 +222,26 @@ async def bind_invitation_provider_context(
     )
 
 
+async def bind_platform_context(session: AsyncSession) -> None:
+    """Bind the validated platform-administrator read context.
+
+    The operational-ledger policies (plan P4, group 6) have no tenant key to
+    filter on for the platform audit screen: the platform administrator lists
+    the audit history across every organisation. After
+    ``require_platform_permission`` has authorised the caller, it binds this
+    transaction-local flag so the explicit ``audit_events_platform_read`` policy
+    admits those rows (ADR-0022 decision 4). It is a flag, never a tenant id:
+    the ordinary runtime role still cannot set an arbitrary organisation, and
+    the tenant-scoped policies on every other protected table are unaffected.
+    Like the other settings it is transaction-local and is never re-applied
+    automatically.
+    """
+    if not _is_database_backed(session):
+        return
+    session.info[_SESSION_INFO_PLATFORM_KEY] = "true"
+    await session.execute(_SET_LOCAL_SQL, {"setting": RLS_PLATFORM_SETTING, "value": "true"})
+
+
 async def clear_organisation_context(session: AsyncSession) -> None:
     """Clear the current transaction's tenant setting explicitly.
 
@@ -252,6 +290,19 @@ async def clear_invitation_provider_context(session: AsyncSession) -> None:
     await session.execute(_SET_LOCAL_SQL, {"setting": RLS_INVITATION_PROVIDER_SETTING, "value": ""})
 
 
+async def clear_platform_context(session: AsyncSession) -> None:
+    """Clear the current transaction's platform-administrator read context.
+
+    Exposed for tests and for request paths that must end the platform scope
+    deliberately. Ordinary platform requests do not need to call this: the
+    setting is transaction-local and clears on the next boundary.
+    """
+    if not _is_database_backed(session):
+        return
+    session.info.pop(_SESSION_INFO_PLATFORM_KEY, None)
+    await session.execute(_SET_LOCAL_SQL, {"setting": RLS_PLATFORM_SETTING, "value": ""})
+
+
 def bound_organisation_id(session: AsyncSession) -> str | None:
     """Return the most recently bound tenant id, if one has been bound."""
     value = session.info.get(_SESSION_INFO_KEY)
@@ -274,3 +325,8 @@ def bound_invitation_provider_id(session: AsyncSession) -> str | None:
     """Return the most recently bound webhook invitation id, if any."""
     value = session.info.get(_SESSION_INFO_INVITATION_KEY)
     return str(value) if value is not None else None
+
+
+def bound_platform_context(session: AsyncSession) -> bool:
+    """Return whether the platform-administrator read context is bound."""
+    return session.info.get(_SESSION_INFO_PLATFORM_KEY) == "true"

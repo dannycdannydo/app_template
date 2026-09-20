@@ -23,7 +23,7 @@ provenance intact. See ADR-0020 for the reviewed retention tradeoff.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import DateTime, Index, String, func, text
@@ -65,5 +65,14 @@ class AuditEvent(Base):
         server_default=text("'{}'::jsonb"),
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
+        DateTime(timezone=True),
+        nullable=False,
+        # Python-side default as well as the database default: under the RLS
+        # operational-ledger policies (plan P4 group 6) an ``INSERT ...
+        # RETURNING`` would require a SELECT policy on the new row, which an
+        # append-only ledger deliberately does not grant to every writer (the
+        # coordinator appends without a read path). Supplying the value client
+        # side keeps the append working without granting that read.
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
     )

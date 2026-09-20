@@ -23,15 +23,14 @@ and never replaces, the application layer:
 | `app_runtime` | `DATABASE_RUNTIME_URL` | API and Dramatiq workers | non-owner, non-superuser, `NOBYPASSRLS`, `NOINHERIT` |
 | `app_metrics` | none (NOLOGIN) | the `SECURITY DEFINER` aggregate metrics function only | non-owner, non-superuser, `NOBYPASSRLS`, `NOINHERIT`; narrow policy scoped to attention-required delivery rows |
 | `app_coordinator` | `DATABASE_COORDINATOR_URL` (group 4b) | outbox coordinator, reliability-metrics refresh and `reconcile_jobs` CLI | second non-bypass role, policies scoped to dispatch state, not a tenant |
-| `app_operator` | (P4 credential) | backup/restore, support and emergency CLI | isolated, audited operational credential; loaded only by CLI/ops tooling |
+| `app_operator` | `DATABASE_OPERATOR_URL` (group 6) | backup/restore, support and emergency CLI | isolated, audited operational credential; owns no table, member of no other role; may carry `BYPASSRLS`; loaded only by CLI/ops tooling |
 
 `app_runtime` is provisioned by the P2 prototype migration (created `NOLOGIN`,
 or safely adopted if a deployment pre-provisioned it, then granted a login
-credential out of band). `app_coordinator` and `app_operator` are not created by
-the prototype. `app_coordinator` is a mandatory prerequisite of group 4b
-(§3.1) and is created with that work unit; `app_operator` remains the P4
-operational credential. No runtime credential may be a member of a superuser, a
-`BYPASSRLS` role or a protected-table owner.
+credential out of band). `app_coordinator` is created by its group-4b
+migration, and `app_operator` by the group-6 migration, each `NOLOGIN` and
+safely adopted if a deployment pre-provisioned it. No runtime credential may be
+a member of a superuser, a `BYPASSRLS` role or a protected-table owner.
 
 ## 2. Rollout principles
 
@@ -67,7 +66,7 @@ blast radius.
 | 4a | organisation settings (P3) | `organisation_features`, `organisation_ai_settings` | **Delivered.** Group 4a. Production enablement migration `c9d0e1f2a3b4` installs the canonical `<table>_organisation_isolation` policies, enables and forces RLS, and ships a reversible downgrade. Both tables are organisation-owned but managed from the platform plane; the feature-flag and AI-settings platform services bind exactly the organisation they target after the platform permission dependency validates the caller, and every organisation-creation path (tenant `create_organisation`, platform `create_platform_organisation`, platform bootstrap) binds the new organisation before writing its default settings row. The per-organisation platform binding is the narrow, human-reviewed exception to ADR-0022 decision 4 recorded there and in §3.1. Covered by the `test_rls_organisation_settings_enablement_db.py` suite: cross-organisation select/insert/update/delete and tenant-key-move, platform-plane service binding, the missing-row and organisation-creation create/update paths under the restricted role, representative multi-tenant `EXPLAIN` plans for both lookups (no sequential-scan regression, rollout principle 4), and migration reversibility. The group has **no tenant resource-detail error surface** (both tables are reached only through the per-organisation platform plane; its sole `404` is `organisation_not_found` from the unprotected `organisations` table), so it claims no part of the aggregate P3 "application errors do not disclose whether RLS hid a foreign row" checkbox. |
 | 4b | jobs (P3) | `jobs`, `job_attempts` | **Delivered.** Group 4b. Production enablement migration `d0e1f2a3b4c5` installs the canonical runtime `<table>_organisation_isolation` policies, the single-row `jobs_worker_bootstrap` `FOR SELECT` policy and the `app_current_job_id()` helper, adds the denormalised non-null `job_attempts.organisation_id` (ADR-0022 decision 6) tied to its parent job by a composite `(job_id, organisation_id)` foreign key (with the matching unique pair on `jobs`), enables and forces RLS on both tables, and ships a reversible downgrade. It also delivers the part-4b prerequisite: the non-bypass `app_coordinator` role (`DATABASE_COORDINATOR_URL`) with dispatch-state-scoped read policies and **column-level** UPDATE grants limited to the settlement/reconciliation columns on `jobs`/`job_attempts` (so the coordinator can settle a dispatch but cannot move a tenant key, rewrite a payload/reference, edit progress or change ownership identity). The outbox coordinator, the in-process reliability-metrics refresh and the `reconcile_jobs` CLI now connect as `app_coordinator`. Workers bind `app.job_id` for a single-row bootstrap read, clear it, then bind the durable row's organisation before any protected read or write; the locking `FOR UPDATE` also runs under tenant context, because PostgreSQL applies the UPDATE policies to a locking read and the bootstrap deliberately has no UPDATE policy. Covered by the `test_rls_jobs_enablement_db.py` cross-organisation, worker-bootstrap, coordinator least-privilege and parent/tenant-consistency suite, plus migration reversibility. |
 | 5 | identity and control plane (P4) | `organisation_memberships`, `membership_roles`, `invitations` | **Delivered.** Group 5. Production enablement migration `f1a2b3c4d5e6` installs the canonical organisation-isolation policy on the two organisation-owned tables, a **SELECT-only** pre-tenant user-keyed policy on `organisation_memberships`, the `membership_roles_parent_isolation` parent-existence **read** policy plus the `membership_roles_organisation_isolation` write policy (which requires the parent membership's durable organisation to equal the validated tenant), the invitee email-keyed `invitations_invitee_select`/`invitations_invitee_update` pair and the verified-webhook single-row `invitations_webhook_provider_select`/`invitations_webhook_provider_update` bootstrap, enables and forces RLS, and ships a reversible downgrade. The authenticated user is bound as transaction-local `app.user_id` before the pre-tenant membership/invitation lookups (ADR-0022 decision 8); every platform-plane operation binds exactly the organisation it targets after the platform permission dependency validated the caller (the per-organisation platform path, never a bypass); the cross-tenant teardown deletes read the user's memberships under the user-keyed policy and then delete per organisation; and runtime `UPDATE` on `invitations` is column-restricted to `status`/`updated_at`, so no invitee path can move an invitation's organisation, email or role. Covered by the `test_rls_identity_enablement_db.py` cross-organisation, pre-tenant-lookup, pre-tenant-write-denial, invitee, webhook, platform-binding, teardown, pool-reuse and migration-reversibility suite. |
-| 6 | operational ledgers (P4) | `audit_events`, `outbox_events`, `maintenance_runs`, `webhook_events` | A `NULL` tenant key never means "all rows". The coordinator uses `app_coordinator`, scoped to due/unclaimed dispatch state. `outbox_events` has no client read path. |
+| 6 | operational ledgers (P4) | `audit_events`, `outbox_events`, `maintenance_runs`, `webhook_events` | **Delivered.** Group 6. Production enablement migration `a2b3c4d5e6f7` installs the null-safe operational-ledger policies and the isolated `app_operator` credential, enables and forces RLS, and ships a reversible downgrade. A `NULL` tenant key never means "all rows": a tenant context reads only its own `audit_events`/`outbox_events` rows, while the cross-tenant and global audit history is reachable only through the explicit, validated transaction-local platform context (`app.platform_admin`) bound by the platform permission dependency after authorisation — never by exempting the table. The audit append is **tenant-checked** (own tenant, global null-tenant, or validated platform context) so a foreign-tenant attribution is denied even if a service predicate is missed. The coordinator (`app_coordinator`) reads the whole dispatch ledger, moves a dispatch through its lifecycle via **column-level** UPDATE grants limited to the claim/settle/release/recovery columns, and purges only published rows. `app_operator` is adopted only after membership normalisation in both directions, and the downgrade always revokes the migration's read grants. `outbox_events` still has no client read path. Covered by the `test_rls_operational_ledgers_enablement_db.py` cross-organisation, platform-context, coordinator-lifecycle, coordinator-column-denial, adversarial-adoption, global-ledger, pool-reuse and migration-reversibility suite. |
 | 7 | platform-only plane (P4) | `platform_roles`, `platform_role_permissions`, `platform_memberships`, `bootstrap_states` | Control-plane policies keyed to the platform context. Platform status alone grants no tenant-row access. |
 
 The machine-checked classification for every table is
@@ -199,6 +198,85 @@ than replaced:
   or unauthorised row already produces; no new tenant resource-detail surface
   is introduced.
 
+### 3.3 Group 6 design notes (operational ledgers)
+
+Group 6 protects the operational ledgers whose tenant key is **nullable** or
+absent, so the canonical `organisation_id = app_current_tenant_id()` policy
+alone would be wrong in both directions (it would hide global rows from the
+platform and could not express the coordinator's cross-tenant dispatch scope):
+
+- **`audit_events` (append-only, nullable tenant).** The runtime role gets an
+  own-tenant SELECT policy, a **tenant-checked** INSERT policy, and no
+  UPDATE/DELETE policy at all — on top of the append-only trigger, so the ledger
+  stays append-only under RLS. The INSERT `WITH CHECK` admits only the writer's
+  own validated tenant, a global (null-tenant) row, or any row under the
+  validated platform context; a foreign-tenant attribution is a policy violation
+  even if an application predicate is ever missed. Global and foreign rows are
+  never visible to a tenant context. The platform audit screen
+  (`GET /api/v1/platform/audit-events`) has no tenant filter, so after
+  `require_platform_permission` validates the caller it binds the
+  transaction-local `app.platform_admin` flag; the explicit
+  `audit_events_platform_read` policy admits the cross-tenant and global rows
+  **only** under that flag. This is ADR-0022 decision 4's reviewed platform
+  path, not a table exemption: the flag is a boolean, is bound only after the
+  permission check, and is referenced by no other table's policy. The
+  coordinator's job-failed settlement appends audit rows with a separate
+  `app_coordinator` INSERT policy (also tenant-checked, and the settlement binds
+  the durable job's own organisation first); it has no audit read path.
+- **`audit_events` INSERT and `INSERT ... RETURNING`.** An append-only ledger
+  deliberately grants no SELECT to every writer, and PostgreSQL applies the
+  SELECT policies to an `INSERT ... RETURNING` clause. The append-only timestamp
+  columns therefore carry a Python-side default as well as the database default
+  (`audit_events.created_at`; and for the same reason
+  `outbox_events.available_at`/`created_at`, `maintenance_runs.created_at`,
+  `webhook_events.received_at`), so SQLAlchemy no longer needs a `RETURNING`
+  read of a row the writer may not be allowed to see. The schema default is
+  retained for direct SQL and backfills. Accepted skew: `outbox_events.available_at`
+  is therefore the application host's UTC clock rather than PostgreSQL's, and
+  hosts/database are required to be NTP-synchronised (the claim query compares
+  against the same application clock, bounding skew to sub-second).
+- **`outbox_events` (nullable tenant).** Runtime may read its own tenant's rows
+  and append either its own tenant's dispatch rows or the global null-tenant
+  maintenance rows; it cannot read or mutate a foreign row and has no UPDATE or
+  DELETE policy. `app_coordinator` reads the whole dispatch ledger (there is no
+  client read path) and owns the lifecycle: an UPDATE policy whose `USING`
+  covers `pending`/`publishing`/`published` (the retention sweep takes a
+  `SELECT ... FOR UPDATE` lock, and PostgreSQL applies the UPDATE policy to a
+  locking read) with a `WITH CHECK` confined to the four lifecycle states, a
+  DELETE policy that admits only `published` rows, and — crucially — a
+  **column-level** UPDATE grant limited to the claim/settle/release/recovery
+  columns (`status`, `claimed_at`, `claim_token`, `attempt_count`,
+  `processed_at`, `last_error`, `available_at`). The coordinator can move a
+  dispatch through its states but can never rewrite its tenant key, event
+  identity/contract, payload, aggregate reference or immutable timestamp.
+- **`maintenance_runs` and `webhook_events` (no tenant key).** Both are global
+  infrastructure with no tenant payload. RLS is enabled and admits only the
+  roles that own the paths — the runtime maintenance worker and the coordinator
+  for runs, the runtime webhook consumer for the dedup ledger — and denies
+  every other role.
+- **`app_operator` (reviewed operational credential, ADR-0022 decision 4).**
+  The group migration also creates the isolated `app_operator` role
+  (`NOLOGIN`, non-owner, member of no application role, `BYPASSRLS`) and grants
+  it read access (tables and sequences: `pg_dump` reads sequence `last_value`)
+  for backup/support tooling. `BYPASSRLS` is the deliberate,
+  reviewed privilege whose scope is exactly the cross-tenant read a policy
+  cannot express; the credential is resolved only by
+  `DATABASE_OPERATOR_URL`/`app.db.session.resolve_operator_database_url`, is
+  never loaded by an HTTP process or a worker, and `resolve_operator_database_url`
+  refuses to fall back to the runtime or owner credential. Destructive restore
+  remains an explicit, separately reviewed operation. Because the *runtime*
+  role must stay non-bypass, the deployment check in §5 is extended to assert
+  `app_operator` is the only `BYPASSRLS` application role and that `app_runtime`
+  cannot `SET ROLE` it. A **deployment-provisioned** (pre-existing) role is
+  adopted only after full normalisation: the migration forces the safe
+  attributes, refuses a role that owns a table, and revokes pre-existing
+  memberships in **both** directions — including a dangerous
+  `app_runtime -> app_operator` grant that would let the ordinary role assume
+  the bypass credential. The downgrade always revokes the migration-added
+  `USAGE`/`SELECT` grants, and drops the role only when this migration created
+  it, so an adopted credential keeps its own out-of-band attributes but never
+  the migration's operational read surface.
+
 ## 4. Rollback procedure
 
 Each group migration ships with a downgrade that reverses exactly that group and
@@ -324,6 +402,38 @@ must contain no superuser, `BYPASSRLS` or protected-table-owner role. The same
 per-environment verification is repeated in `docs/operations.md`. Until it is
 automated, the adoption gate records this confirmation as **capability**; plan
 P4 adds the startup/deployment check that proves it automatically.
+
+Group 6 adds the isolated operational credential, and it uses the same checks
+with one deliberate difference — `app_operator` is the **only** application
+role allowed to carry `BYPASSRLS`:
+
+```sql
+-- Connect with DATABASE_OPERATOR_URL and run:
+SELECT current_user;   -- must be app_operator (distinct from both roles above)
+
+SELECT rolname, rolsuper, rolbypassrls FROM pg_roles
+WHERE rolname = 'app_operator';
+-- app_operator must be rolsuper=false and rolbypassrls=true.
+
+-- app_operator must own no table and have no membership in either direction:
+SELECT count(*) FROM pg_tables
+WHERE schemaname = 'public' AND tableowner = 'app_operator';  -- must be 0
+SELECT count(*) FROM pg_auth_members m
+JOIN pg_roles member ON member.oid = m.member
+WHERE member.rolname = 'app_operator';  -- must be 0 (operator is a member of none)
+SELECT count(*) FROM pg_auth_members m
+JOIN pg_roles granted ON granted.oid = m.roleid
+WHERE granted.rolname = 'app_operator';  -- must be 0 (no role is a member of operator)
+
+-- And the runtime role must NOT be able to assume it:
+--   connect with DATABASE_RUNTIME_URL and run: SET ROLE app_operator;
+--   this must fail with "permission denied to set role".
+```
+
+Every use of `app_operator` is a privileged operational path: record who ran it,
+what operation it performed and against which environment without placing row
+contents or secrets in the audit event (`docs/operations.md` →
+Operational database access).
 
 ## 6. Execution contract and release bookkeeping
 

@@ -107,6 +107,18 @@ class Settings(BaseSettings):
             "group is enforced (see app.db.session.resolve_coordinator_database_url)."
         ),
     )
+    database_operator_url: str = Field(
+        default="",
+        description=(
+            "Async SQLAlchemy URL for the isolated, audited operational credential "
+            "``app_operator`` (RLS rollout, ADR-0022 decision 4). It is loaded only "
+            "by CLI/ops tooling for backup/restore, support and emergency access, "
+            "never by an HTTP process or a worker (see "
+            "app.db.session.resolve_operator_database_url). Unlike the runtime and "
+            "coordinator roles it may carry ``BYPASSRLS`` because its reviewed "
+            "operations are exactly the cross-tenant reads a policy cannot express."
+        ),
+    )
     broker_redis_url: str = Field(
         default="",
         description="Dedicated Redis endpoint for Dramatiq broker state",
@@ -933,6 +945,10 @@ class Settings(BaseSettings):
             ("postgresql", "postgres")
         ):
             raise ValueError("database_coordinator_url must be a PostgreSQL URL")
+        if self.database_operator_url and not self.database_operator_url.startswith(
+            ("postgresql", "postgres")
+        ):
+            raise ValueError("database_operator_url must be a PostgreSQL URL")
         # The execution lease must outlive the standard task time limit by at
         # least 60 seconds (durable delivery plan P2): a lease that expires
         # while the owning message is still within its time limit would let a

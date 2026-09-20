@@ -131,8 +131,23 @@ parent membership's durable organisation to equal the validated tenant
 | --- | --- | --- | --- | --- |
 | `audit_events` | `organisation_id` nullable | `audit.service`; platform audit route | `audit.service` (append-only) | `GET /api/v1/platform/audit-events`; appended by every service |
 | `outbox_events` | `organisation_id` nullable | `job_coordinator`; observability metrics | services (enqueue); coordinator (claim/complete); reconciliation (purge) | Internal only; never read by a client |
-| `maintenance_runs` | — | `job_coordinator`; observability metrics | `maintenance.service`; coordinator | Internal only |
+| `maintenance_runs` | — | `job_coordinator`; observability metrics; maintenance worker | `maintenance.service`; coordinator | Internal only |
 | `webhook_events` | — | `webhooks.service` (dedup lookup) | `webhooks.service` (insert) | `POST /api/v1/webhooks/workos` (internal dedup only) |
+
+Plan P4 group 6 (migration `a2b3c4d5e6f7`) gave the operational ledgers their
+tested policies. `audit_events` carries an own-tenant SELECT policy, a
+**tenant-checked** INSERT policy (own tenant, global null-tenant, or validated
+platform context) and **no** UPDATE/DELETE policy, while the cross-tenant and
+global history is admitted only by `audit_events_platform_read` under the
+validated transaction-local platform context (`app.platform_admin`) the platform
+permission dependency binds after authorisation. `outbox_events` gives the
+runtime role an own-tenant read and an own-tenant-or-global append, and gives
+`app_coordinator` the whole dispatch read plus dispatch-lifecycle UPDATE (via
+**column-level** grants limited to the claim/settle/release/recovery columns) and
+published-only DELETE policies. `maintenance_runs` and `webhook_events` carry no
+tenant key and admit only the roles that own their paths. A `NULL` tenant key
+never means "all rows" (ADR-0022 decision 7). The policy design is recorded in
+`docs/rls-rollout.md` §3.3.
 
 ### 2.5 Platform-only authorisation plane
 
@@ -266,3 +281,17 @@ maintenance is represented by `maintenance_runs` and claimed by the coordinator.
 5. **Platform plane.** The in-app platform administration routes are subject to
    the runtime role; their cross-tenant policy design is deferred to P4, not
    solved by granting the runtime role a bypass.
+
+**Group 6 resolution (2026-09-19).** Gap 3 is closed by
+`a2b3c4d5e6f7`: `audit_events` and `outbox_events` now carry null-safe policies
+that never read a null tenant as "all rows", the audit append is tenant-checked
+so a foreign-tenant attribution is denied at the policy, and the
+cross-tenant/global audit history is reachable only under the validated platform
+context. The same migration introduces the isolated `app_operator` credential
+that closes the operational-tooling side of gaps 1 and 5: it is the one
+`BYPASSRLS` application role, is loaded only by audited CLI/ops tooling
+(`DATABASE_OPERATOR_URL`), is neither the runtime path nor a member of any other
+role in either direction, and is adopted only after membership normalisation.
+Gaps 1 (runtime separation), 2 (indirect tables), 4 (pre-tenant lookup)
+and the in-app platform context are already delivered by the P2/P3/group-5
+work; the remaining platform-only-table policies are group 7.

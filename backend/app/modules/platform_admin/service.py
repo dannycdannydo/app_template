@@ -388,6 +388,11 @@ async def _ensure_bootstrap_organisation(session: AsyncSession, user: User) -> N
         organisation = Organisation(name=org_name)
         session.add(organisation)
         await session.flush()
+        # RLS rollout (plan P4, group 6): the audit append policy is
+        # tenant-checked, so bind the just-created organisation before the
+        # ``organisation.created`` append. The membership writes below rebind
+        # the same value, so this is the same validated tenant either way.
+        await bind_organisation_context(session, organisation.id)
         await record_event(
             session,
             organisation_id=organisation.id,

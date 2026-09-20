@@ -16,6 +16,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import current_request_id
+from app.db.rls import bind_organisation_context
 from app.modules.audit.models import AuditEvent
 from app.modules.audit.queries import audit_events_count_statement, audit_events_statement
 
@@ -176,6 +177,17 @@ async def record_event(
     caller supplied one explicitly; ``metadata`` itself is optional and
     defaults to an empty object.
     """
+    # RLS rollout (plan P4 group 6; ADR-0022 decisions 3 and 7): the operational
+    # ledger's append policy is tenant-checked, so an event that names an
+    # organisation must be appended under that organisation's transaction-local
+    # context. Binding here (idempotent, and always from the caller's validated
+    # value, never client input) keeps every org-scoped audit write attributable
+    # even when an intermediate helper committed and cleared the context — for
+    # example the transfer-reference store's per-operation commits, after which
+    # the orchestrator appends its lifecycle event. A null organisation (global
+    # system event) binds nothing.
+    if organisation_id is not None:
+        await bind_organisation_context(session, organisation_id)
     event_metadata = dict(metadata or {})
     event_metadata.setdefault("request_id", current_request_id())
     event = AuditEvent(

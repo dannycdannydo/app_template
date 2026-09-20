@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import enum
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import (
@@ -131,7 +131,19 @@ class OutboxEvent(Base):
         server_default=OutboxEventStatus.PENDING.value,
     )
     available_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
+        DateTime(timezone=True),
+        nullable=False,
+        # Python-side default as well as the database default (plan P4 group 6):
+        # a runtime-role global maintenance insert has no SELECT policy for the
+        # null-tenant row, so an ``INSERT ... RETURNING`` would be denied. The
+        # caller's explicit value still wins. Accepted skew (review should-fix):
+        # the due time is therefore the application host's UTC clock rather than
+        # PostgreSQL's; hosts and the database are required to be
+        # NTP-synchronised, and the claim query compares against the same
+        # application clock, so a bounded (sub-second) skew is the documented
+        # operating bound.
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
     )
     claimed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
@@ -149,5 +161,8 @@ class OutboxEvent(Base):
     # publications (plan: logs and errors never carry payload content).
     last_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        server_default=func.now(),
     )

@@ -386,10 +386,32 @@ webhook bootstrap is split into `invitations_webhook_provider_select`/
 and flip `status` but never insert or delete, and the lost-race invitation
 retry rebinds `app.user_id` after its rollback before re-reading the invitee
 rows. The real-PostgreSQL suite now proves those pre-tenant and provider
-write-denial paths. Groups 6 (operational ledgers, including the `app_operator`
-credential) and 7 (platform-only plane) and the automated runtime-role startup
-check remain. The aggregate P4 checkboxes below stay unchecked until every
-group lands, except the two group-5 bullets completed here.
+write-denial paths. Group 6 (operational ledgers: `audit_events`,
+`outbox_events`, `maintenance_runs`, `webhook_events`, including the
+`app_operator` credential) is delivered by production enablement migration
+`a2b3c4d5e6f7`: null-safe read policies, a **tenant-checked** audit append
+policy, the validated transaction-local platform context, the isolated
+`app_operator` credential, and a reversible downgrade. The required human
+review of the group-6 tenant-isolation, database-role/grant/policy, migration,
+control-plane/platform-context and backup/recovery changes was recorded
+(2026-09-20), and the review's mandatory fixes were applied: the coordinator's
+`outbox_events` UPDATE authority is **column-level** (the lifecycle columns
+only, with real-PostgreSQL denial tests for tenant-key, payload/contract,
+aggregate and identity rewrites); the audit append `WITH CHECK` is
+tenant-checked so a foreign-tenant attribution is denied for an ordinary tenant
+context; a pre-existing `app_operator` is adopted only after revoking
+memberships in **both** directions, and the downgrade always revokes the
+migration's read grants (with adversarial upgrade/downgrade tests); and
+`docs/backup-and-recovery.md` now uses an executable libpq-compatible operator
+DSN derived from `DATABASE_OPERATOR_URL`. Group 7 (platform-only plane) and the
+automated runtime-role startup check remain. The aggregate P4 checkboxes below
+stay unchecked until every group lands, except the group-5 and group-6 bullets
+completed here.
+
+Known follow-up (separately scoped, not group 6): `alembic check` reports drift
+on `ix_invitations_lower_email` because the group-5 functional partial index is
+not declared on the `Invitation` ORM model. It must be picked up as its own work
+unit so the P2 migration-drift evidence returns green.
 
 - [x] Implement the approved pre-tenant membership lookup without accepting
       arbitrary tenant context.
@@ -397,13 +419,13 @@ group lands, except the two group-5 bullets completed here.
       their identity/control-plane classification.
 - [ ] Protect job attempts, notification deliveries and other indirect rows
       using the approved parent or denormalised-key strategy.
-- [ ] Handle global versus tenant audit/outbox events without treating a null
+- [x] Handle global versus tenant audit/outbox events without treating a null
       tenant key as unrestricted access.
 - [ ] Give platform operations an explicit, narrowly scoped path and test that
       platform status alone cannot read ordinary tenant data.
-- [ ] Document and test migration, support, backup, restore and emergency
+- [x] Document and test migration, support, backup, restore and emergency
       access roles.
-- [ ] Audit use of any privileged operational path without placing secrets or
+- [x] Audit use of any privileged operational path without placing secrets or
       row contents in the audit event.
 - [ ] Add startup or deployment checks proving runtime roles do not own
       protected tables and lack `BYPASSRLS`.
