@@ -32,6 +32,7 @@ import asyncio
 import os
 import uuid
 from collections.abc import Iterator
+from datetime import datetime
 from typing import Any, cast
 
 import pytest
@@ -767,6 +768,479 @@ async def test_coordinator_settles_a_ceiling_job_and_writes_audit(
             assert audit == 1
     finally:
         await owner_engine.dispose()
+
+
+# --- Worker leases, retries and reconciliation under enforced RLS -------------
+#
+# Plan P3 aggregate checklist: "Prove retries, leases, reconciliation and outbox
+# dispatch work without a bypass role." The job lifecycle suites prove those
+# paths on the owner credential; these tests prove the same paths on the two
+# restricted logins the rollout provisions — the non-owner ``app_runtime``
+# worker and the non-bypass ``app_coordinator`` recovery role — under the
+# enforced ``jobs``/``job_attempts``/``outbox_events`` policies.
+
+
+async def _create_runtime_organisation(owner_url: str, name: str) -> uuid.UUID:
+    """Create one organisation with the owner credential (RLS-bypassing seed)."""
+    organisation_id = uuid.uuid4()
+    engine = create_async_engine(owner_url, poolclass=NullPool)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("INSERT INTO organisations (id, name) VALUES (:id, :name)"),
+                {"id": organisation_id, "name": name},
+            )
+    finally:
+        await engine.dispose()
+    return organisation_id
+
+
+async def _schedule_and_claim_under_runtime(
+    runtime_database_url: str, organisation_id: uuid.UUID
+) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
+    """Schedule and claim a durable job through the restricted runtime role."""
+    from app.modules.jobs import service as jobs_service
+
+    engine = runtime_engine(runtime_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with factory() as session:
+            await bind_organisation_context(session, organisation_id)
+            job = await jobs_service.schedule_job(
+                session,
+                organisation_id=organisation_id,
+                job_type="file.processing",
+                input_reference=f"lease-{uuid.uuid4().hex[:8]}",
+            )
+            claim = await jobs_service.claim_dispatch(session, job_id=job.id)
+            assert claim.outcome == jobs_service.ClaimOutcome.CLAIMED
+            assert claim.owner_token is not None
+            assert claim.dispatch_id is not None
+            return job.id, claim.owner_token, claim.dispatch_id
+    finally:
+        await engine.dispose()
+
+
+async def _expire_execution_lease(owner_url: str, job_id: uuid.UUID) -> None:
+    """Simulate a dead worker by expiring the job's execution lease (owner seed)."""
+    engine = create_async_engine(owner_url, poolclass=NullPool)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "UPDATE jobs SET execution_lease_expires_at = now() - interval '1 second' "
+                    "WHERE id = :id"
+                ),
+                {"id": job_id},
+            )
+    finally:
+        await engine.dispose()
+
+
+async def _make_dispatch_due(owner_url: str, dispatch_id: uuid.UUID) -> None:
+    """Move a dispatch's due time into the past (owner seed; models elapsed time)."""
+    engine = create_async_engine(owner_url, poolclass=NullPool)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "UPDATE outbox_events SET available_at = now() - interval '1 second' "
+                    "WHERE id = :id"
+                ),
+                {"id": dispatch_id},
+            )
+    finally:
+        await engine.dispose()
+
+
+async def _dispatch_status(owner_url: str, dispatch_id: uuid.UUID) -> str:
+    """Return one dispatch's status with the owner credential."""
+    engine = create_async_engine(owner_url, poolclass=NullPool)
+    try:
+        async with engine.connect() as connection:
+            value = await connection.scalar(
+                text("SELECT status FROM outbox_events WHERE id = :id"), {"id": dispatch_id}
+            )
+        return str(value)
+    finally:
+        await engine.dispose()
+
+
+async def _job_state(owner_url: str, job_id: uuid.UUID) -> tuple[str, uuid.UUID | None, int, bool]:
+    """Return ``(status, dispatch_id, attempt_count, lease_set)`` (owner read)."""
+    engine = create_async_engine(owner_url, poolclass=NullPool)
+    try:
+        async with engine.connect() as connection:
+            row = (
+                await connection.execute(
+                    text(
+                        "SELECT status, dispatch_id, attempt_count, "
+                        "execution_lease_expires_at FROM jobs WHERE id = :id"
+                    ),
+                    {"id": job_id},
+                )
+            ).one()
+        return (
+            str(row.status),
+            row.dispatch_id,
+            int(row.attempt_count),
+            row.execution_lease_expires_at is not None,
+        )
+    finally:
+        await engine.dispose()
+
+
+async def _job_owner_token(owner_url: str, job_id: uuid.UUID) -> uuid.UUID | None:
+    """Return one job's owner token with the owner credential (fencing read)."""
+    engine = create_async_engine(owner_url, poolclass=NullPool)
+    try:
+        async with engine.connect() as connection:
+            value = await connection.scalar(
+                text("SELECT owner_token FROM jobs WHERE id = :id"), {"id": job_id}
+            )
+        return value
+    finally:
+        await engine.dispose()
+
+
+async def _database_now(owner_url: str) -> datetime:
+    """Return the database clock the coordinator compares against.
+
+    ``run_cycle`` derives ``now`` from ``SELECT now()`` and the seeds stamp
+    their rows against the same clock, so the test must not mix in the host
+    clock (the review's consistency finding).
+    """
+    engine = create_async_engine(owner_url, poolclass=NullPool)
+    try:
+        async with engine.connect() as connection:
+            value = await connection.scalar(text("SELECT now()"))
+        assert isinstance(value, datetime)
+        return value
+    finally:
+        await engine.dispose()
+
+
+async def _attempt_history(owner_url: str, job_id: uuid.UUID) -> list[tuple[int, str, bool]]:
+    """Return ``(attempt_number, status, taken_over)`` for one job (owner read)."""
+    engine = create_async_engine(owner_url, poolclass=NullPool)
+    try:
+        async with engine.connect() as connection:
+            rows = (
+                await connection.execute(
+                    text(
+                        "SELECT attempt_number, status, taken_over FROM job_attempts "
+                        "WHERE job_id = :id ORDER BY attempt_number"
+                    ),
+                    {"id": job_id},
+                )
+            ).all()
+        return [(int(row.attempt_number), str(row.status), bool(row.taken_over)) for row in rows]
+    finally:
+        await engine.dispose()
+
+
+async def _seed_stranded_reconciliation_jobs(
+    owner_url: str,
+) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID]:
+    """Seed one stranded queued job and one lease-expired running job (owner).
+
+    Both jobs' current dispatch is already published and older than the
+    reconciliation cutoff, so the non-bypass coordinator's recovery sweeps
+    select them. Returns ``(queued_job, queued_event, running_job,
+    running_event, running_token)``; the token lets the caller prove lease
+    recovery rotated the dead worker's credential (the fencing property).
+    """
+    org = uuid.uuid4()
+    queued_job, running_job = uuid.uuid4(), uuid.uuid4()
+    queued_event, running_event = uuid.uuid4(), uuid.uuid4()
+    running_attempt = uuid.uuid4()
+    running_token = uuid.uuid4()
+    engine = create_async_engine(owner_url, poolclass=NullPool)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("INSERT INTO organisations (id, name) VALUES (:id, 'Stranded jobs')"),
+                {"id": org},
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO jobs "
+                    "(id, organisation_id, job_type, status, progress, input_reference, "
+                    "dispatch_id, owner_token, attempt_count, execution_lease_expires_at) "
+                    "VALUES (:id, :org, 'file.processing', 'queued', 0, 'stranded', "
+                    ":dispatch, NULL, 0, NULL), "
+                    "(:rid, :org, 'file.processing', 'running', 0, 'expired', "
+                    ":rdispatch, :rtoken, 1, now() - interval '1 second')"
+                ),
+                {
+                    "id": queued_job,
+                    "rid": running_job,
+                    "org": org,
+                    "dispatch": queued_event,
+                    "rdispatch": running_event,
+                    "rtoken": running_token,
+                },
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO outbox_events "
+                    "(id, organisation_id, event_type, event_version, aggregate_type, "
+                    "aggregate_id, payload, deduplication_key, status, available_at, "
+                    "processed_at) "
+                    "VALUES (:id, :org, 'job.dispatch_requested', 1, 'job', :agg, "
+                    "CAST(:payload AS jsonb), :dedup, 'published', "
+                    "now() - interval '1000 seconds', now() - interval '1000 seconds')"
+                ),
+                [
+                    {
+                        "id": queued_event,
+                        "org": org,
+                        "agg": queued_job,
+                        "payload": f'{{"job_id": "{queued_job}"}}',
+                        "dedup": f"stranded:{queued_event}",
+                    },
+                    {
+                        "id": running_event,
+                        "org": org,
+                        "agg": running_job,
+                        "payload": f'{{"job_id": "{running_job}"}}',
+                        "dedup": f"stranded:{running_event}",
+                    },
+                ],
+            )
+            await connection.execute(
+                text(
+                    "INSERT INTO job_attempts "
+                    "(id, job_id, organisation_id, dispatch_id, owner_token, "
+                    "attempt_number, status, lease_expires_at, started_at, taken_over) "
+                    "VALUES (:id, :job, :org, :dispatch, :token, 1, 'running', "
+                    "now() - interval '1 second', now() - interval '1 hour', false)"
+                ),
+                {
+                    "id": running_attempt,
+                    "job": running_job,
+                    "org": org,
+                    "dispatch": running_event,
+                    "token": running_token,
+                },
+            )
+    finally:
+        await engine.dispose()
+    return queued_job, queued_event, running_job, running_event, running_token
+
+
+async def test_worker_takes_over_an_expired_lease_under_enforced_rls(
+    migrated_database: str, runtime_database_url: str
+) -> None:
+    """A restricted-role duplicate takes a dead attempt over without a bypass.
+
+    Plan P3 aggregate. The worker path is a self-committing service on the
+    non-owner ``app_runtime`` login: it schedules and claims a durable job, the
+    lease expires while the row stays ``running``, and a duplicate message takes
+    the dead attempt over — rotating the owner token, retaining the dispatch
+    identity, abandoning the dead attempt and opening a fresh one — all under
+    the enforced ``jobs``/``job_attempts`` policies.
+    """
+    from app.modules.jobs import service as jobs_service
+
+    org = await _create_runtime_organisation(migrated_database, "Lease takeover")
+    job_id, first_token, first_dispatch = await _schedule_and_claim_under_runtime(
+        runtime_database_url, org
+    )
+    assert await _attempt_history(migrated_database, job_id) == [(1, "running", False)]
+
+    await _expire_execution_lease(migrated_database, job_id)
+
+    engine = runtime_engine(runtime_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with factory() as session:
+            takeover = await jobs_service.claim_dispatch(session, job_id=job_id)
+            assert takeover.outcome == jobs_service.ClaimOutcome.CLAIMED
+            assert takeover.taken_over is True
+            assert takeover.dispatch_id == first_dispatch
+            assert takeover.owner_token is not None
+            assert takeover.owner_token != first_token
+            assert takeover.job is not None
+            assert takeover.job.attempt_count == 2
+    finally:
+        await engine.dispose()
+
+    status, dispatch_id, attempt_count, lease_set = await _job_state(migrated_database, job_id)
+    assert (status, dispatch_id, attempt_count, lease_set) == (
+        "running",
+        first_dispatch,
+        2,
+        True,
+    )
+    assert await _attempt_history(migrated_database, job_id) == [
+        (1, "abandoned", False),
+        (2, "running", True),
+    ]
+
+
+async def test_transient_failure_retry_is_durable_under_enforced_rls(
+    migrated_database: str, runtime_database_url: str, coordinator_database_url: str
+) -> None:
+    """A restricted-role retry is durably queued, published and re-claimed.
+
+    Plan P3 aggregate. The runtime worker settles a transient failure into a
+    replacement dispatch without a bypass; the non-bypass coordinator's real
+    ``run_cycle`` claims the due dispatch (``FOR UPDATE SKIP LOCKED``), reads the
+    job aggregate under its own policy, publishes it through the allow-listed
+    registry and settles it owner-checked; and the runtime re-claims the
+    published retry as a new attempt. The whole retry loop therefore runs on the
+    two restricted credentials the rollout provisions.
+    """
+    from app.job_coordinator.loop import run_cycle
+    from app.job_coordinator.registry import DispatchRegistry
+    from app.modules.jobs import service as jobs_service
+    from app.modules.jobs.models import JobStatus
+
+    org = await _create_runtime_organisation(migrated_database, "Retry dispatch")
+    job_id, first_token, _ = await _schedule_and_claim_under_runtime(runtime_database_url, org)
+
+    engine = runtime_engine(runtime_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with factory() as session:
+            decision = await jobs_service.settle_retryable_failure(
+                session, job_id=job_id, owner_token=first_token
+            )
+            assert decision is JobStatus.QUEUED
+    finally:
+        await engine.dispose()
+
+    status, retry_dispatch, attempt_count, lease_set = await _job_state(migrated_database, job_id)
+    assert status == "queued"
+    assert retry_dispatch is not None
+    assert (attempt_count, lease_set) == (1, False)
+    assert await _attempt_history(migrated_database, job_id) == [(1, "retry_scheduled", False)]
+    assert await _dispatch_status(migrated_database, retry_dispatch) == "pending"
+
+    # Time passes and the coordinator owns the dispatch lifecycle: the real
+    # publish cycle runs on the non-bypass ``app_coordinator`` login, exercising
+    # the claim, the job-aggregate read under the coordinator policy and the
+    # owner-checked settle, not the lifecycle columns directly. Earlier tests in
+    # the module may leave other due pending rows, so assert on this dispatch's
+    # row and on membership in the recorded sends rather than exact counts.
+    await _make_dispatch_due(migrated_database, retry_dispatch)
+
+    recorded_sends: list[dict[str, Any]] = []
+
+    class _RecordingTarget:
+        def send(self, **kwargs: Any) -> None:
+            recorded_sends.append(kwargs)
+
+    registry = DispatchRegistry(
+        job_actors={"file.processing": _RecordingTarget()}, maintenance_actors={}
+    )
+    coordinator_engine = create_async_engine(coordinator_database_url, poolclass=NullPool)
+    coordinator_factory = async_sessionmaker(coordinator_engine, expire_on_commit=False)
+    try:
+        stats = await run_cycle(
+            coordinator_factory,
+            registry=registry,
+            batch_size=50,
+            publication_lease_seconds=60,
+        )
+    finally:
+        await coordinator_engine.dispose()
+    assert stats.published >= 1
+    assert {"job_id": str(job_id)} in recorded_sends
+    assert await _dispatch_status(migrated_database, retry_dispatch) == "published"
+
+    # The worker re-claims the published retry as its second attempt.
+    engine = runtime_engine(runtime_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with factory() as session:
+            retried = await jobs_service.claim_dispatch(session, job_id=job_id)
+            assert retried.outcome == jobs_service.ClaimOutcome.CLAIMED
+            assert retried.taken_over is False
+            assert retried.job is not None
+            assert retried.job.attempt_count == 2
+    finally:
+        await engine.dispose()
+
+    assert await _attempt_history(migrated_database, job_id) == [
+        (1, "retry_scheduled", False),
+        (2, "running", False),
+    ]
+
+
+async def test_coordinator_reconciles_stranded_jobs_under_enforced_rls(
+    migrated_database: str, coordinator_database_url: str
+) -> None:
+    """The non-bypass coordinator recovers stranded queued and expired-running jobs.
+
+    Plan P3 aggregate. Each stranded job gets exactly one replacement pending
+    dispatch; the expired running job's dead attempt is abandoned, its owner
+    token is rotated and it returns to ``queued`` — all under the enforced
+    policies on the restricted ``app_coordinator`` login.
+    """
+    from app.job_coordinator.reconciliation import (
+        reconcile_queued_jobs,
+        reconcile_running_jobs,
+    )
+
+    (
+        queued_job,
+        queued_event,
+        running_job,
+        running_event,
+        running_token,
+    ) = await _seed_stranded_reconciliation_jobs(migrated_database)
+    # Reconciliation compares its cutoff against the database clock (and the
+    # seeds stamp their rows against it), so take ``now`` from the database
+    # rather than the host clock.
+    now = await _database_now(migrated_database)
+    # The candidate statements deliberately carry no ORDER BY, so the limit only
+    # bounds the pass: the membership assertions below hold while the module
+    # database holds fewer than 50 stranded candidates (it migrates from base).
+    engine = runtime_engine(coordinator_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with factory() as session:
+            reconciled = await reconcile_queued_jobs(
+                session,
+                now=now,
+                threshold_seconds=900,
+                cooldown_seconds=900,
+                limit=50,
+            )
+            assert queued_job in reconciled
+
+        async with factory() as session:
+            recovered = await reconcile_running_jobs(
+                session,
+                now=now,
+                threshold_seconds=900,
+                cooldown_seconds=900,
+                limit=50,
+            )
+            assert running_job in recovered
+    finally:
+        await engine.dispose()
+
+    queued_status, queued_replacement, _, _ = await _job_state(migrated_database, queued_job)
+    assert queued_status == "queued"
+    assert queued_replacement not in (None, queued_event)
+    assert await _dispatch_status(migrated_database, queued_replacement) == "pending"
+
+    running_status, running_replacement, running_attempts, running_lease = await _job_state(
+        migrated_database, running_job
+    )
+    assert running_status == "queued"
+    assert running_replacement not in (None, running_event)
+    assert (running_attempts, running_lease) == (1, False)
+    assert await _dispatch_status(migrated_database, running_replacement) == "pending"
+    assert await _attempt_history(migrated_database, running_job) == [(1, "abandoned", False)]
+    # Recovery rotates the owner token, so the dead worker's captured credential
+    # can never mutate the recovered job (the fencing property of lease recovery).
+    recovered_token = await _job_owner_token(migrated_database, running_job)
+    assert recovered_token is not None
+    assert recovered_token != running_token
 
 
 # --- Migration reversibility -------------------------------------------------

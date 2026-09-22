@@ -79,6 +79,22 @@ read split from tenant-checked write) — are proven together by
 `backend/tests/test_rls_indirect_rows_db.py` rather than only inside each group
 suite.
 
+The plan-P3 aggregate requirement that retries, leases, reconciliation and
+outbox dispatch work **without a bypass role** is proven on the restricted
+logins themselves by `backend/tests/test_rls_jobs_enablement_db.py`:
+`test_worker_takes_over_an_expired_lease_under_enforced_rls` runs a claim and an
+expired-lease takeover on the `app_runtime` worker login,
+`test_transient_failure_retry_is_durable_under_enforced_rls` settles a transient
+failure into a durable retry dispatch on `app_runtime`, runs the coordinator's
+real publish cycle (`run_cycle`: claim, job-aggregate read, publish and
+owner-checked settle) on the non-bypass `app_coordinator`, then has the worker
+re-claim the published retry, and
+`test_coordinator_reconciles_stranded_jobs_under_enforced_rls` recovers stranded
+queued and lease-expired running jobs through the `app_coordinator` reconciliation
+sweeps. All three run under the enforced `jobs`/`job_attempts`/`outbox_events`
+policies, so the two restricted credentials are the evidence rather than the
+owner-side lifecycle suites.
+
 ### 3.1 Group 4 split and the group-4b prerequisite
 
 The plan's original group 4 ("jobs and organisation settings") was split during

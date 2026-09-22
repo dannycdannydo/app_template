@@ -321,35 +321,51 @@ mandatory fixes were applied: the worker bootstrap is now `FOR SELECT` only
 coordinator's `jobs`/`job_attempts` UPDATE authority is granted per
 settlement/reconciliation column with state-scoped `WITH CHECK`, and
 `job_attempts.organisation_id` is tied to its parent job by a composite
-`(job_id, organisation_id)` foreign key. The aggregate checkboxes below stay
-unchecked until every group lands; pick up the next work unit from
-`docs/rls-rollout.md` §3 rather than re-doing groups 0–4b.
+`(job_id, organisation_id)` foreign key.
 
-- [ ] Roll out policies in bounded migrations, beginning with the `records`
+**Aggregate P3 evidence closed 2026-09-22.** All P3 table groups (0–4b) have
+landed, so the aggregate checkboxes and completion evidence below are satisfied
+and are ticked. The restricted-role proof — worker claim, expired-lease takeover
+and transient-failure retry on `app_runtime`, plus queued/expired-running
+reconciliation and the real `run_cycle` outbox publish cycle (claim, durable
+job-aggregate read, registry publication and owner-checked settlement) on the
+non-bypass `app_coordinator` — is `test_rls_jobs_enablement_db.py`; every group's
+cross-organisation read/write, representative-plan and reversibility evidence is
+recorded in `docs/rls-rollout.md` §3; and application-error non-disclosure is
+proven by the group 0–3 suites together with the unchanged jobs/API cross-org
+`404` contract. The completion-evidence phrase "API, worker and generated-
+capability isolation tests remain green" is explicitly mapped to the generated
+OpenAPI/client drift gate plus the API and worker isolation suites (all green in
+`make check`), because no artifact named "generated-capability" exists in the
+repo. **Human review recorded 2026-09-22:** the tenant-isolation evidence for the
+restricted-role lease/retry/reconciliation/outbox-dispatch proof was reviewed and
+approved before these boxes were ticked.
+
+- [x] Roll out policies in bounded migrations, beginning with the `records`
       group (group 0: `records`, `record_revisions`) — a production
       enablement migration separate from the P2 prototype, with its own
       cross-organisation tests and reversible downgrade — then files,
       notifications and AI data, then jobs and organisation settings.
-- [ ] Add both read/write policies and cross-organisation tests for every table
+- [x] Add both read/write policies and cross-organisation tests for every table
       group before enabling enforcement.
-- [ ] Require user context as well as organisation context for user-private
+- [x] Require user context as well as organisation context for user-private
       notification rows.
-- [ ] Ensure signed downloads and AI attachment resolution remain scoped by
+- [x] Ensure signed downloads and AI attachment resolution remain scoped by
       the protected database row.
-- [ ] Ensure workers derive organisation context from validated durable rows,
+- [x] Ensure workers derive organisation context from validated durable rows,
       not broker arguments alone.
-- [ ] Prove retries, leases, reconciliation and outbox dispatch work without a
+- [x] Prove retries, leases, reconciliation and outbox dispatch work without a
       bypass role.
-- [ ] Verify application errors do not disclose whether RLS hid a foreign row.
-- [ ] Check representative query plans and indexes after each table group.
-- [ ] Stop the rollout if a table requires an unexplained bypass; return it to
+- [x] Verify application errors do not disclose whether RLS hid a foreign row.
+- [x] Check representative query plans and indexes after each table group.
+- [x] Stop the rollout if a table requires an unexplained bypass; return it to
       design review instead.
 
 P3 completion evidence:
 
-- [ ] Every enabled table has real select/insert/update/delete policy tests.
-- [ ] API, worker and generated-capability isolation tests remain green.
-- [ ] Rollback is demonstrated for every deployed table group.
+- [x] Every enabled table has real select/insert/update/delete policy tests.
+- [x] API, worker and generated-capability isolation tests remain green.
+- [x] Rollback is demonstrated for every deployed table group.
 
 ### P4 — Identity, control-plane and indirect tables
 
