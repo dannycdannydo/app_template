@@ -18,9 +18,12 @@ This audit reads the universal rule sections of the blueprint and scans the **wh
 
 You are auditing work on a reusable full-stack application starter template: FastAPI + SQLAlchemy 2 + Pydantic 2 + PostgreSQL + Vue 3 + TypeScript + Tailwind + shadcn-vue.
 
-The build is **stage by stage**. The current release is v0.5 (files and jobs). One local file tracks progress:
+The build is **stage by stage**. The audit covers the codebase as it stands at the **current release**. Discover the active execution contract exactly as prompts 01–02 do:
 
-- `TEMPLATE_V0_5_SCOPE.md` — §2 deliverables, §3 exclusions, §6 progress checklist.
+- the unique `plans/*.md` file whose exact line is `Status: Active`; or otherwise
+- the highest-numbered root `TEMPLATE_V0_*_SCOPE.md`.
+
+Read that contract's §2 scope, §3 exclusions and progress checklist (or the plan's `Agreed scope` / `Out of scope` / checkpoints) so the audit is judged against the current contract, not a fixed release number.
 
 The architecture blueprint (`Internal_Custom_Application_Starter_Architecture_v2.md`) is large. **You do not read the whole file.** You read only the cross-cutting, universal rule sections listed below. These are the conventions that apply to every task, not just one.
 
@@ -45,11 +48,7 @@ Do not read other blueprint sections unless a specific finding sends you there.
 
 2. Survey the codebase as it currently stands. Use `ls`, file reads (scoped, not whole-file where possible), `grep`, and `git log` to understand what has been built so far and how it is structured.
 
-3. Be **applicability-aware**. The codebase is growing incrementally. Only check a rule where the relevant code exists. For example:
-   - The foundation (v0.1) and identity/tenancy core (v0.2) are shipped, so "routers remain thin" and "business logic belongs in services" are **live** wherever routers and services exist — check them.
-   - "ORM models are never API request models" applies wherever both ORM models and API request schemas coexist — check it in every module that has both.
-   - Rules for capabilities that have not landed yet — e.g. "structured JSON logging", "email provider interface" and "basic notifications" (v0.6) — are **not applicable yet** — note this and move on.
-   - State explicitly which rules are not yet applicable and why, so the user knows you did not skip them by accident.
+3. Be **applicability-aware**. Only check a rule where the relevant code exists, and judge applicability against the active contract's scope. The foundation, identity/tenancy, platform plane, storage/jobs, notifications, AI and RLS capabilities are all shipped, so their rules (thin routers, services own business logic, org-scoped queries, adapter import boundaries, worker-only long-running work, audit events, and transaction-local RLS context handling) are **live** — check each wherever the code exists. Rules tied to a capability the active contract explicitly excludes are not applicable; note them rather than passing them silently. State explicitly which rules are not applicable and why, so the user knows you did not skip them by accident.
 
 4. For each applicable rule, scan the codebase for violations. Common things to look for:
    - Files in the wrong location per the §5 backend structure or §14 frontend structure.
@@ -109,7 +108,7 @@ Do not read other blueprint sections unless a specific finding sends you there.
 ## When to use this prompt
 
 - **On demand**, when you suspect drift or want a health check.
-- **At the end of each release**, before tagging. For the current release (v0.5), this means after the final §6 subsection is complete and before tagging `v0.5.0` — a clean audit is a gating acceptance criterion (see scope §5).
+- **At the end of each release**, before tagging. For the current release, this means after the final work unit is complete and before cutting the release tag — a clean audit is a gating acceptance criterion (see the active contract's acceptance criteria).
 - **After a cluster of related subsections**, if you want an early sweep before the release gate.
 
 ## How findings are handled

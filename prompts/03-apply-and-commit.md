@@ -36,7 +36,40 @@ You are the **implementer**, picking up after a review.
 
 4. Apply the should-fix items unless there is a good reason not to. Address nits at your discretion. If you choose not to address a should-fix item, state why.
 
-5. Run the **single complete local validation gate** for the work unit, whether
+5. **Update the documentation for every area this work unit touched.** A change
+   that alters behaviour, configuration, a pattern or an invariant is not done
+   until the documents that describe it are correct. This is the final
+   documentation gate — prompt 01 should already have updated docs as part of
+   implementation and prompt 02 should have checked them, but fix any gap here
+   before validating. Inspect the diff and the touched areas, then:
+
+   - **Area guides:** update the `AGENTS.md` at the root of each area touched
+     (`backend/AGENTS.md`, `backend/app/db/AGENTS.md`, `backend/app/ai/AGENTS.md`,
+     `backend/app/job_coordinator/AGENTS.md`, `frontend/AGENTS.md`) when the
+     change alters that area's rules, invariants, layout, procedures or
+     gotchas. A stale guide is worse than none.
+   - **Centralised docs:** update `ARCHITECTURE.md` (system shape, request flow,
+     layering, cross-cutting behaviour), `API_CONVENTIONS.md` (HTTP surface and
+     conventions), `SECURITY.md` (controls, deferrals) or `README.md` (the
+     front-page summary and command surface) whenever the change makes them
+     inaccurate. A new `/api/v1` endpoint, permission code, background job type
+     or security control must be reflected where it belongs.
+   - **Configuration and runbooks:** document every new setting in
+     `.env.example` (and `.env.production.example` when production-relevant);
+     update `docs/operations.md`, `docs/backup-and-recovery.md`,
+     `docs/rls-*.md` or add/supersede a `docs/decisions/` ADR when the change
+     affects deployment, recovery, tenant isolation or a standing decision.
+   - **Release bookkeeping:** update the release/version markers and upgrade
+     guide if, and only if, this unit is release bookkeeping; the active
+     contract checklist itself is updated in step 6.
+
+   Do not rewrite unaffected docs and do not invent documentation. If a doc
+   looks stale but you are unsure whether this work unit changed it, inspect it:
+   either correct it in this change, or state in the report why it is unchanged.
+   Documentation changes are staged and committed with the work unit, never as
+   a separate later cleanup.
+
+6. Run the **single complete local validation gate** for the work unit, whether
    the review was clean or changes were applied:
    - `make check`
    - every additional command required by the active checkpoint/contract that
@@ -52,14 +85,14 @@ You are the **implementer**, picking up after a review.
    named category. Stop before changing checkboxes, committing or merging if it
    is absent; never treat an automated/agent review as human approval.
 
-6. **Update the active contract.** Change `[ ]` to `[x]` only in the selected
+7. **Update the active contract.** Change `[ ]` to `[x]` only in the selected
    subsection/checkpoint for every genuinely complete item approved by the
    review. For a plan in `plans/`, once every implementation checkbox in every
    checkpoint is checked, change the exact `Status: Active` line to
    `Status: Complete`; otherwise retain it. Leave unchecked any incomplete item.
 
-7. **Commit.** Stage all relevant changes (implementation files + updated
-   scope file or plan). Write a clear commit message:
+8. **Commit.** Stage all relevant changes (implementation files, updated docs,
+   and updated scope file or plan). Write a clear commit message:
 
    ```
    Implement <work-unit name> for <template v0.N or plan name>
@@ -69,23 +102,26 @@ You are the **implementer**, picking up after a review.
 
    Include the attribution lines required by the project (see existing commits or the project's commit conventions).
 
-8. **Push, open a PR, and merge it to `main`.** The work unit lives on a `feature/*` branch — never push directly to `main`. Push the branch and open a pull request to `main`: the PR is where CI runs and is the single merge gate (see `CONTRIBUTING.md` → Branch workflow). Once CI on the PR is green, **merge the PR into `main`** (and close it if the merge does not close it automatically) as part of this step. The review has already happened earlier in the loop, so do not leave the PR open for further review — PRs should not pile up. Delete the merged `feature/*` branch after merging.
+9. **Push, open a PR, and merge it to `main`.** The work unit lives on a `feature/*` branch — never push directly to `main`. Push the branch and open a pull request to `main`: the PR is where CI runs and is the single merge gate (see `CONTRIBUTING.md` → Branch workflow). Once CI on the PR is green, **merge the PR into `main`** (and close it if the merge does not close it automatically) as part of this step. The review has already happened earlier in the loop, so do not leave the PR open for further review — PRs should not pile up. Delete the merged `feature/*` branch after merging.
 
-9. **Clear the handoff files.** Delete `.handoff/implementation.md` and `.handoff/review.md`. They have served their purpose and should not linger — the next cycle starts fresh.
+10. **Clear the handoff files.** Delete `.handoff/implementation.md` and `.handoff/review.md`. They have served their purpose and should not linger — the next cycle starts fresh.
 
-10. **Report status.** After committing and merging, state:
-   - which subsection/checkpoint was completed, committed and merged;
-   - whether the review was clean or changes were applied (summarise);
-   - validation results;
-   - the commit hash and the PR number;
-   - which subsection/checkpoint is next in sequence;
-   - if this completed a standalone plan, report `Status: Complete`;
-   - if this was the last release-scope subsection, note that its acceptance
-     criteria must be verified before tagging.
+11. **Report status.** After committing and merging, state:
+    - which subsection/checkpoint was completed, committed and merged;
+    - whether the review was clean or changes were applied (summarise);
+    - which documentation was updated (area guides, centralised docs,
+      configuration, runbooks) and why any touched-area doc needed no change;
+    - validation results;
+    - the commit hash and the PR number;
+    - which subsection/checkpoint is next in sequence;
+    - if this completed a standalone plan, report `Status: Complete`;
+    - if this was the last release-scope subsection, note that its acceptance
+      criteria must be verified before tagging.
 
 ## Done means
 
-Review feedback is applied, validation passes, the active contract reflects the
-new state, and the work is committed and merged to `main`. The loop is ready to
-restart at `01-implement-next.md` for the next work unit, or to close the active
-plan/release when none remains.
+Review feedback is applied, documentation for every touched area (and any
+affected centralised doc) is accurate, validation passes, the active contract
+reflects the new state, and the work is committed and merged to `main`. The loop
+is ready to restart at `01-implement-next.md` for the next work unit, or to
+close the active plan/release when none remains.

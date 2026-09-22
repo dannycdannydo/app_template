@@ -70,6 +70,14 @@ You are the **reviewer**. You did not write this code. Your job is to find probl
 
    **Code quality** — Clear naming, no dead code, no stubs/TODOs, no unjustified dependencies, strict types.
 
+   **Documentation** — Is the documentation for every touched area accurate?
+   Check the area `AGENTS.md` guide(s) for changed rules, invariants, layout,
+   procedures or gotchas, and any centralised doc (`ARCHITECTURE.md`,
+   `API_CONVENTIONS.md`, `SECURITY.md`, `README.md`, `.env.example`, `docs/`)
+   that the diff makes stale — a new endpoint, permission code, job type,
+   setting or security control must be reflected where it belongs. Treat a
+   missing or stale update as a must-fix, not a nit.
+
    **Scope discipline** — Stayed within the current release's scope (§2)? Avoided pulling in deferred work (§3)? Flag any scope creep.
 
 6. Review the implementer's validation evidence and run **focused checks**
@@ -115,6 +123,11 @@ You are the **reviewer**. You did not write this code. Your job is to find probl
    Interface-coverage evidence:
    - (requirement → method/path → schema/test; list every missing operation,
      or "none")
+
+   Documentation evidence:
+   - (for each touched area: which `AGENTS.md`/centralised doc/config/runbook
+     was updated, or confirm none needed changing; list any stale doc as a
+     must-fix)
 
    Validation evidence:
    - (focused commands run and results; state if no commands were needed)

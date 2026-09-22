@@ -1,11 +1,11 @@
-# Root Makefile — v0.1 command surface (blueprint §32, Scope §4).
+# Root Makefile — development and quality-gate command surface (blueprint §32).
 #
 # Two dev entry points per ADR-0008: native app code with containerised
 # infrastructure (`make dev`, including the Dramatiq worker and outbox
 # coordinator natively) and the
 # full-container path for CI parity and onboarding (`make dev-docker`).
 # `make check` is the complete local quality gate (lint + typecheck + test +
-# generated-client drift).
+# AI-registry and execution-contract validation + generated-client drift).
 #
 # Native backend commands load the repo-root `.env` by sourcing it in the
 # recipe shell (see `load_env`), which parses dotenv syntax correctly (inline
