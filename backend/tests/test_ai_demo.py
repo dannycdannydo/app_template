@@ -45,6 +45,10 @@ from app.ai.persistence.models import AIRequestRecord, AIRequestStatus, AIScratc
 from app.ai.persistence.service import create_default_settings
 from app.core.exceptions import NotFoundError, ServiceUnavailableError
 from app.modules.ai_demo import service as demo_service
+from app.modules.ai_demo.schemas import (
+    DocumentAskAcceptedResponse,
+    DocumentClassifyAcceptedResponse,
+)
 from app.modules.jobs.models import JobStatus
 from app.modules.organisations.models import Organisation
 from app.modules.users.models import User
@@ -148,6 +152,7 @@ async def _seed_org_user_and_enable_ai(session: AsyncSession) -> tuple[Organisat
     await session.flush()
     settings_row = await create_default_settings(session, organisation_id=organisation.id)
     settings_row.enabled = True
+    settings_row.retention_policy_days = 1
     user = User(
         workos_user_id=f"demo_user_{uuid.uuid4().hex[:8]}",
         email="demo-classify@example.com",
@@ -349,6 +354,34 @@ async def test_enqueue_creates_job_and_queued_request(migrated_database: str) ->
         assert record.status == AIRequestStatus.QUEUED
         assert record.task == "document.classify"
         assert record.input_reference == storage_key
+    finally:
+        await _dispose_engine(engine)
+
+
+async def test_enqueue_ask_persists_bounded_expiring_question(
+    migrated_database: str,
+) -> None:
+    """A durable ask persists only its bounded task variables beside the queued row."""
+    engine, session_factory = _session_factory(migrated_database)
+    try:
+        async with session_factory() as session:
+            organisation, user = await _seed_org_user_and_enable_ai(session)
+            storage_key = await _put_authorized_document(session, organisation.id)
+            accepted = await demo_service.enqueue_ask(
+                session,
+                organisation_id=organisation.id,
+                user=user,
+                storage_reference=storage_key,
+                question="What is the renewal term?",
+            )
+        async with session_factory() as session:
+            record = await session.scalar(_request_statement(organisation.id, accepted.request_id))
+        assert record is not None
+        assert record.task == "document.ask"
+        assert record.status == AIRequestStatus.QUEUED
+        assert record.execution_metadata == {"question": "What is the renewal term?"}
+        assert record.execution_metadata_expires_at is not None
+        assert record.execution_metadata_expires_at > datetime.now(UTC)
     finally:
         await _dispose_engine(engine)
 
@@ -902,10 +935,77 @@ async def test_ask_validates_request_schema(context_app: ContextApp) -> None:
             json={
                 "storage_reference": f"organisations/{org_id}/ai/scratch/doc.txt",
                 "question": "What is this?",
-                "sync": True,
+                "unexpected": True,
             },
             headers=_auth_headers(_stage(), org_id),
         )
     assert missing.status_code == 422
     assert empty.status_code == 422
     assert extra.status_code == 422
+
+
+async def test_ask_default_path_returns_documented_202_acknowledgement(
+    context_app: ContextApp,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The queued model must not be validated as the synchronous 200 shape."""
+    app, state, private_key = context_app
+    org_id = uuid.uuid4()
+    user = make_user()
+    state.users[user.workos_user_id] = user
+    membership = make_membership(user, org_id)
+    state.lookup_queue = [user, membership]
+    state.granted_permissions = {"documents.upload"}
+    accepted = DocumentAskAcceptedResponse(
+        job_id="01a0c975-502f-743c-8d45-c32321ef474f",
+        request_id="01a0c975502f743c8d45c32321ef474f",
+    )
+
+    async def _enqueue_ask(*_args: Any, **_kwargs: Any) -> DocumentAskAcceptedResponse:
+        return accepted
+
+    monkeypatch.setattr(demo_service, "enqueue_ask", _enqueue_ask)
+    async with context_client(app) as client:
+        response = await client.post(
+            "/api/v1/ai/ask",
+            json={
+                "storage_reference": f"organisations/{org_id}/ai/scratch/lease.pdf",
+                "question": "What is the break clause?",
+            },
+            headers=_auth_headers(make_token(private_key), org_id),
+        )
+
+    assert response.status_code == 202
+    assert response.json() == accepted.model_dump(mode="json")
+
+
+async def test_classify_default_path_returns_documented_202_acknowledgement(
+    context_app: ContextApp,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The classification endpoint follows the same two-response contract."""
+    app, state, private_key = context_app
+    org_id = uuid.uuid4()
+    user = make_user()
+    state.users[user.workos_user_id] = user
+    membership = make_membership(user, org_id)
+    state.lookup_queue = [user, membership]
+    state.granted_permissions = {"documents.upload"}
+    accepted = DocumentClassifyAcceptedResponse(
+        job_id="01a0c975-502f-743c-8d45-c32321ef474f",
+        request_id="01a0c975502f743c8d45c32321ef474f",
+    )
+
+    async def _enqueue_classify(*_args: Any, **_kwargs: Any) -> DocumentClassifyAcceptedResponse:
+        return accepted
+
+    monkeypatch.setattr(demo_service, "enqueue_classify", _enqueue_classify)
+    async with context_client(app) as client:
+        response = await client.post(
+            "/api/v1/ai/classify",
+            json={"storage_reference": f"organisations/{org_id}/ai/scratch/lease.pdf"},
+            headers=_auth_headers(make_token(private_key), org_id),
+        )
+
+    assert response.status_code == 202
+    assert response.json() == accepted.model_dump(mode="json")

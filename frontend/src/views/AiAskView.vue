@@ -11,7 +11,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { formatDateTime } from '@/lib/format'
 import { useFilePermissions } from '@/lib/permissions'
 import { showApiErrorToast } from '@/lib/toast'
-import { useAskMutation } from '@/queries/ai'
+import { isAskAccepted, useAskMutation, useAskResultQuery } from '@/queries/ai'
 
 /**
  * AI test screen (v0.8 Scope §2.2/§6.4/§6.5).
@@ -21,12 +21,9 @@ import { useAskMutation } from '@/queries/ai'
  * which namespace the file lands in and therefore which source lifecycle the
  * AI layer classifies — ``transient`` uploads into ``ai/scratch/`` while
  * ``permanent`` uploads through the files module into ``documents/``. The
- * synchronous ask endpoint is bounded (``AI_ASK_MAX_SYNCHRONOUS_BYTES``,
- * default 5 MB), so a larger document is rejected with a documented error
- * rather than starting a long transfer inside the request. This release
- * exposes no durable asynchronous ask operation, so the supported remedy is a
- * smaller document. The backend decides the exact transfer path and this view
- * never names a provider; the backend re-validates ownership on every request.
+ * document question is queued durably, so a large-file transfer never runs in
+ * the submitting HTTP request. The backend decides the exact transfer path and
+ * this view never names a provider; ownership is re-validated by the worker.
  *
  * The upload/ask affordances are gated by the documents.upload role bundle
  * (`useFilePermissions`); the backend stays the enforcement point.
@@ -40,6 +37,23 @@ const storageMode = ref<StorageMode>('transient')
 const storageReference = ref<string | null>(null)
 const question = ref('')
 const askMutation = useAskMutation()
+const askRequestId = ref('')
+const askResultQuery = useAskResultQuery(askRequestId)
+
+const answer = computed(() => {
+  const submitted = askMutation.data.value
+  if (submitted && !isAskAccepted(submitted)) return submitted
+  return askResultQuery.data.value?.status === 'succeeded' ? askResultQuery.data.value : undefined
+})
+const askPending = computed(
+  () =>
+    askMutation.isPending.value ||
+    askResultQuery.data.value?.status === 'queued' ||
+    askResultQuery.data.value?.status === 'running',
+)
+const askFailed = computed(
+  () => askMutation.isError.value || askResultQuery.data.value?.status === 'failed',
+)
 
 const canAsk = computed(() => storageReference.value !== null && question.value.trim().length > 0)
 
@@ -50,11 +64,14 @@ function onUploaded(reference: string): void {
 async function submitQuestion(): Promise<void> {
   if (storageReference.value === null || question.value.trim() === '') return
   askMutation.reset()
+  askRequestId.value = ''
   try {
-    await askMutation.mutateAsync({
+    const submitted = await askMutation.mutateAsync({
       storage_reference: storageReference.value,
       question: question.value.trim(),
+      sync: false,
     })
+    if (isAskAccepted(submitted)) askRequestId.value = submitted.request_id
   } catch (error) {
     showApiErrorToast(error, { title: 'Could not ask the document' })
   }
@@ -66,9 +83,8 @@ async function submitQuestion(): Promise<void> {
     <div>
       <h1 class="text-2xl font-semibold">AI test</h1>
       <p class="text-muted-foreground mt-1 text-sm">
-        Upload a PDF, ask a question about it, and read the answer. Synchronous asks are bounded (5
-        MB by default); there is no asynchronous ask path in this release, so a larger document must
-        be reduced in size.
+        Upload a PDF, ask a question about it, and read the answer. Questions run as durable
+        background jobs, including PDFs above the 5 MB inline threshold.
       </p>
     </div>
 
@@ -163,74 +179,74 @@ async function submitQuestion(): Promise<void> {
           </div>
           <Button
             data-testid="ai-ask-submit"
-            :disabled="!canAsk || askMutation.isPending.value"
+            :disabled="!canAsk || askPending"
             @click="submitQuestion"
           >
-            <LoaderCircleIcon
-              v-if="askMutation.isPending.value"
-              class="animate-spin"
-              aria-hidden="true"
-            />
+            <LoaderCircleIcon v-if="askPending" class="animate-spin" aria-hidden="true" />
             <SendIcon v-else class="size-4" aria-hidden="true" />
-            {{ askMutation.isPending.value ? 'Asking…' : 'Ask' }}
+            {{ askPending ? 'Asking…' : 'Ask' }}
           </Button>
         </template>
       </CardContent>
     </Card>
 
-    <Card v-if="askMutation.isError.value" data-testid="ai-ask-error-card">
+    <Card v-if="askFailed" data-testid="ai-ask-error-card">
       <CardHeader>
         <CardTitle>The question could not be answered</CardTitle>
       </CardHeader>
       <CardContent class="text-muted-foreground text-sm">
-        {{ askMutation.error.value?.message ?? 'An unexpected error occurred.' }}
+        {{
+          askMutation.error.value?.message ??
+          (askResultQuery.data.value?.error_code
+            ? `The background job failed (${askResultQuery.data.value.error_code}).`
+            : 'An unexpected error occurred.')
+        }}
       </CardContent>
     </Card>
 
-    <Card v-if="askMutation.data.value" data-testid="ai-ask-answer-card">
+    <Card v-if="answer" data-testid="ai-ask-answer-card">
       <CardHeader>
         <CardTitle>Answer</CardTitle>
       </CardHeader>
       <CardContent class="space-y-4">
         <p class="text-sm whitespace-pre-wrap" data-testid="ai-ask-answer">
-          {{ askMutation.data.value.output }}
+          {{ answer.output ?? 'The answer was not retained by the organisation policy.' }}
         </p>
         <dl class="text-muted-foreground flex flex-wrap gap-x-6 gap-y-1 text-xs">
           <div class="flex items-center gap-1.5">
             <dt>Model</dt>
             <dd class="text-foreground font-medium">
-              {{ askMutation.data.value.routing.model }}
+              {{ answer.routing?.model }}
             </dd>
           </div>
           <div class="flex items-center gap-1.5">
             <dt>Provider</dt>
             <dd class="text-foreground font-medium">
-              {{ askMutation.data.value.routing.provider }}
+              {{ answer.routing?.provider }}
             </dd>
           </div>
-          <div v-if="askMutation.data.value.routing.region" class="flex items-center gap-1.5">
+          <div v-if="answer.routing?.region" class="flex items-center gap-1.5">
             <dt>Region</dt>
             <dd class="text-foreground font-medium">
-              {{ askMutation.data.value.routing.region }}
+              {{ answer.routing.region }}
             </dd>
           </div>
           <div class="flex items-center gap-1.5">
             <dt>Tokens</dt>
             <dd class="text-foreground font-medium">
-              {{ askMutation.data.value.usage.input_tokens }} in /
-              {{ askMutation.data.value.usage.output_tokens }} out
+              {{ answer.usage?.input_tokens }} in / {{ answer.usage?.output_tokens }} out
             </dd>
           </div>
           <div class="flex items-center gap-1.5">
             <dt>Cost</dt>
             <dd class="text-foreground font-medium">
-              {{ askMutation.data.value.cost.amount }} {{ askMutation.data.value.cost.currency }}
+              {{ answer.cost?.amount }} {{ answer.cost?.currency }}
             </dd>
           </div>
           <div class="flex items-center gap-1.5">
             <dt>Completed</dt>
             <dd class="text-foreground font-medium">
-              {{ formatDateTime(askMutation.data.value.completed_at) }}
+              {{ answer.completed_at ? formatDateTime(answer.completed_at) : '' }}
             </dd>
           </div>
         </dl>

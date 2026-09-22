@@ -260,6 +260,18 @@ def stale_running_requests_statement(
     )
 
 
+def expired_execution_metadata_statement(
+    organisation_id: uuid.UUID,
+    expired_before: datetime,
+) -> Select[tuple[AIRequestRecord]]:
+    """Return queued/executing task variables past their global hard expiry."""
+    return select(AIRequestRecord).where(
+        AIRequestRecord.organisation_id == organisation_id,
+        AIRequestRecord.execution_metadata.is_not(None),
+        AIRequestRecord.execution_metadata_expires_at <= expired_before,
+    )
+
+
 # --- v0.8 Scope §6.3: durable transfer references ----------------------------
 
 

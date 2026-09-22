@@ -134,6 +134,7 @@ def _canned(
     *,
     structured: dict[str, object] | None = None,
     usage: TokenUsage | None = None,
+    finish_reason: str = "stop",
 ) -> ProviderResponse:
     return ProviderResponse(
         model="fake-model-document.classify",
@@ -141,7 +142,7 @@ def _canned(
         structured=structured,
         usage=usage or TokenUsage(input_tokens=10, output_tokens=10),
         latency_ms=1.0,
-        finish_reason="stop",
+        finish_reason=finish_reason,
     )
 
 
@@ -233,6 +234,32 @@ async def test_text_result_stays_declared_only() -> None:
     assert isinstance(result.output, str) and result.output
     assert provider.requests[0].output_schema is None
     assert provider.requests[0].output_json_schema is None
+
+
+async def test_provider_declared_truncated_text_is_never_returned_as_success() -> None:
+    """A non-empty prefix that hit the token ceiling is still incomplete."""
+    registries = InMemoryRegistries.default()
+    registries.tasks = InMemoryTaskRegistry(
+        {
+            "document.classify": TaskDefinition(
+                name="document.classify",
+                prompt_name="classify",
+                prompt_version=1,
+                input_variables=["document_id"],
+                declares_text_result=True,
+                output_schema=None,
+            )
+        }
+    )
+    provider = FakeLLMProvider()
+    provider.set_next_response(
+        _canned("A partial answer ending mid-sentence", finish_reason="length")
+    )
+    service, _ = _service(registries, provider=provider)
+
+    with pytest.raises(OutputValidationError, match="configured token limit"):
+        await service.execute(_request())
+    assert len(provider.requests) == 1
 
 
 # --- Item 2: bounded repair and bounded transient retries ---

@@ -1209,6 +1209,19 @@ class AIService:
                     raise ProviderResponseError(
                         "provider response model did not match the routed model"
                     )
+                if response.finish_reason == "length":
+                    # A non-empty text prefix can satisfy the loose text
+                    # contract while still ending mid-sentence. Never persist
+                    # or return a provider-declared truncated completion as a
+                    # successful result; the task's reviewed token allowance
+                    # must be corrected instead of hiding the cutoff in UI.
+                    pending_attempt.error_code = OutputValidationError.error_code
+                    observe_ai_validation_failure(
+                        task=task.name, provider=model.provider, model=model.model
+                    )
+                    raise OutputValidationError(
+                        "provider output reached the configured token limit"
+                    )
                 try:
                     output = self._validate_output(
                         effective_output_schema,
@@ -1280,6 +1293,10 @@ class AIService:
                             if repair_response.model != model.model:
                                 raise ProviderResponseError(
                                     "provider response model did not match the routed model"
+                                )
+                            if repair_response.finish_reason == "length":
+                                raise OutputValidationError(
+                                    "provider repair output reached the configured token limit"
                                 )
                             output = self._validate_output(
                                 effective_output_schema,

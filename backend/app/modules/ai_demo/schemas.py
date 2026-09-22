@@ -118,19 +118,16 @@ ASK_QUESTION_MAX_LENGTH = 512
 class DocumentAskRequest(BaseModel):
     """One QA submission: a private storage reference plus a bounded question.
 
-    The synchronous endpoint is the only ask path in this release: the source
-    is checked in the common execution boundary against
-    ``AI_ASK_MAX_SYNCHRONOUS_BYTES`` (5 MB by default, and never above the
-    inline aggregate threshold) after organisation policy and source authority,
-    and a larger source is rejected with ``ai_ask_attachment_too_large``. The
-    answer is returned inline; there is no durable asynchronous ask operation.
-    The question is bounded to the AI metadata value limit (v0.8 Scope §2.2).
+    ``sync=False`` (default) persists a bounded, expiring copy of the question
+    with the queued AI request and returns a durable-job acknowledgement.
+    ``sync=True`` keeps the bounded inline HTTP path for small documents.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     storage_reference: str = Field(max_length=1024)
     question: str = Field(min_length=1, max_length=ASK_QUESTION_MAX_LENGTH)
+    sync: bool = False
 
 
 class DocumentAskResponse(BaseModel):
@@ -144,6 +141,27 @@ class DocumentAskResponse(BaseModel):
     completed_at: datetime
 
 
+class DocumentAskAcceptedResponse(BaseModel):
+    """The durable-job acknowledgement (202) for a document question."""
+
+    job_id: str
+    request_id: str
+    status: ClassifyStatus = "queued"
+
+
+class DocumentAskResultResponse(BaseModel):
+    """The durable status and retained validated answer for one question."""
+
+    request_id: str
+    status: ClassifyStatus
+    error_code: str | None = None
+    output: str | None = None
+    routing: ClassifyRouting | None = None
+    usage: ClassifyUsage | None = None
+    cost: ClassifyCost | None = None
+    completed_at: datetime | None = None
+
+
 class ScratchUploadIntentRequest(BaseModel):
     """Declare one transient AI-scratch upload (v0.8 Scope §2.2/§6.5).
 
@@ -151,10 +169,9 @@ class ScratchUploadIntentRequest(BaseModel):
     ``ai/scratch/`` namespace so the AI layer classifies the source as
     transient. The declaration mirrors the files module's signed-upload flow:
     the browser PUTs the bytes directly to the signed URL, then completes the
-    upload. The declaration may be up to the large-file ceiling, but the
-    synchronous ask endpoint that consumes the reference is bounded by
-    ``AI_ASK_MAX_SYNCHRONOUS_BYTES`` and this release exposes no asynchronous
-    ask path, so only a document within that bound can be asked about.
+    upload. The declaration may be up to the large-file ceiling; larger inputs
+    are consumed by the durable ask path rather than inside the submitting HTTP
+    request.
     """
 
     model_config = ConfigDict(extra="forbid")

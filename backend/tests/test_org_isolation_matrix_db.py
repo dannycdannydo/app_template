@@ -89,6 +89,7 @@ _EXERCISED_ROUTES: set[tuple[str, str]] = {
     ("GET", "/api/v1/ai/classify/requests/{request_id}"),
     ("POST", "/api/v1/ai/classify"),
     ("POST", "/api/v1/ai/ask"),
+    ("GET", "/api/v1/ai/ask/requests/{request_id}"),
     ("POST", "/api/v1/ai/scratch/uploads"),
     ("POST", "/api/v1/ai/scratch/uploads/{upload_id}/complete"),
     ("GET", "/api/v1/platform/organisations"),
@@ -650,26 +651,27 @@ async def test_notification_delivery_worker_enforces_the_parent_org_boundary(
 async def test_ai_result_is_org_scoped(
     client: AsyncClient, world: IsolationWorld, private_key: rsa.RSAPrivateKey
 ) -> None:
-    own = await _call(
-        client,
-        "GET",
-        f"/api/v1/ai/classify/requests/{world.ai_request_a}",
-        private_key=private_key,
-        identity=world.a_owner,
-        org_id=world.org_a,
-    )
-    assert own.status_code == 200
-    assert own.json()["request_id"] == world.ai_request_a
+    for result_path in ("classify", "ask"):
+        own = await _call(
+            client,
+            "GET",
+            f"/api/v1/ai/{result_path}/requests/{world.ai_request_a}",
+            private_key=private_key,
+            identity=world.a_owner,
+            org_id=world.org_a,
+        )
+        assert own.status_code == 200
+        assert own.json()["request_id"] == world.ai_request_a
 
-    foreign = await _call(
-        client,
-        "GET",
-        f"/api/v1/ai/classify/requests/{world.ai_request_a}",
-        private_key=private_key,
-        identity=world.b_owner,
-        org_id=world.org_b,
-    )
-    _assert_error(foreign, NOT_FOUND, "ai_request_not_found")
+        foreign = await _call(
+            client,
+            "GET",
+            f"/api/v1/ai/{result_path}/requests/{world.ai_request_a}",
+            private_key=private_key,
+            identity=world.b_owner,
+            org_id=world.org_b,
+        )
+        _assert_error(foreign, NOT_FOUND, "ai_request_not_found")
 
 
 async def test_foreign_scratch_upload_completion_is_indistinguishable_from_missing(

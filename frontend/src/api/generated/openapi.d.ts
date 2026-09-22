@@ -803,17 +803,34 @@ export interface paths {
     put?: never
     /**
      * Ask Document
-     * @description Answer one question about a stored document.
+     * @description Answer synchronously or queue a durable document question.
      *
      *     The private storage reference and bounded question are passed to the
-     *     ``document.ask`` task; ``AIService`` checks the organisation policy and the
-     *     durable source authority, then enforces the synchronous bound — a source
-     *     above ``AI_ASK_MAX_SYNCHRONOUS_BYTES`` (5 MB by default) is rejected with
-     *     ``ai_ask_attachment_too_large`` before any provider call. The validated
-     *     answer is returned inline with safe routing/usage metadata. This release
-     *     exposes no durable asynchronous ask operation.
+     *     ``document.ask`` task after organisation policy and source authority are
+     *     checked. The default path returns 202 and runs through ``ai.execute``;
+     *     ``sync=true`` retains the existing 5,000,000-byte HTTP bound.
      */
     post: operations['ask_document_api_v1_ai_ask_post']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/api/v1/ai/ask/requests/{request_id}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /**
+     * Get Ask Result
+     * @description Return the durable answer status; a foreign request id is a 404.
+     */
+    get: operations['get_ask_result_api_v1_ai_ask_requests__request_id__get']
+    put?: never
+    post?: never
     delete?: never
     options?: never
     head?: never
@@ -976,22 +993,39 @@ export interface components {
       output_tokens: number
     }
     /**
+     * DocumentAskAcceptedResponse
+     * @description The durable-job acknowledgement (202) for a document question.
+     */
+    DocumentAskAcceptedResponse: {
+      /** Job Id */
+      job_id: string
+      /** Request Id */
+      request_id: string
+      /**
+       * Status
+       * @default queued
+       * @enum {string}
+       */
+      status: 'queued' | 'running' | 'succeeded' | 'failed'
+    }
+    /**
      * DocumentAskRequest
      * @description One QA submission: a private storage reference plus a bounded question.
      *
-     *     The synchronous endpoint is the only ask path in this release: the source
-     *     is checked in the common execution boundary against
-     *     ``AI_ASK_MAX_SYNCHRONOUS_BYTES`` (5 MB by default, and never above the
-     *     inline aggregate threshold) after organisation policy and source authority,
-     *     and a larger source is rejected with ``ai_ask_attachment_too_large``. The
-     *     answer is returned inline; there is no durable asynchronous ask operation.
-     *     The question is bounded to the AI metadata value limit (v0.8 Scope §2.2).
+     *     ``sync=False`` (default) persists a bounded, expiring copy of the question
+     *     with the queued AI request and returns a durable-job acknowledgement.
+     *     ``sync=True`` keeps the bounded inline HTTP path for small documents.
      */
     DocumentAskRequest: {
       /** Storage Reference */
       storage_reference: string
       /** Question */
       question: string
+      /**
+       * Sync
+       * @default false
+       */
+      sync: boolean
     }
     /**
      * DocumentAskResponse
@@ -1010,6 +1044,28 @@ export interface components {
        * Format: date-time
        */
       completed_at: string
+    }
+    /**
+     * DocumentAskResultResponse
+     * @description The durable status and retained validated answer for one question.
+     */
+    DocumentAskResultResponse: {
+      /** Request Id */
+      request_id: string
+      /**
+       * Status
+       * @enum {string}
+       */
+      status: 'queued' | 'running' | 'succeeded' | 'failed'
+      /** Error Code */
+      error_code?: string | null
+      /** Output */
+      output?: string | null
+      routing?: components['schemas']['ClassifyRouting'] | null
+      usage?: components['schemas']['ClassifyUsage'] | null
+      cost?: components['schemas']['ClassifyCost'] | null
+      /** Completed At */
+      completed_at?: string | null
     }
     /**
      * DocumentClassificationResult
@@ -1904,10 +1960,14 @@ export interface components {
      *
      *     ``allowed_provider_ids`` / ``allowed_model_ids`` are the registry-validated
      *     allowlists; an empty list means "no restriction from this knob".
-     *     ``monthly_budget`` ``None`` disables the budget; ``retention_policy_days``
-     *     ``None`` disables scheduled retention deletion. ``allowed_transfer_modes``
-     *     defaults to ``["inline"]`` (default-deny) and must always include
-     *     ``inline``; ``max_large_attachment_bytes`` defaults to the
+     *     ``monthly_budget`` ``None`` disables the budget. A
+     *     ``retention_policy_days`` value allows opted-in tasks to retain validated
+     *     output content for that period and tightens AI scratch lifetime when it is
+     *     shorter than the global scratch maximum. ``None`` means output content is
+     *     not retained while scratch uses its global maximum lifetime.
+     *     ``allowed_transfer_modes`` defaults to ``["inline"]``
+     *     (default-deny) and must always include ``inline``;
+     *     ``max_large_attachment_bytes`` defaults to the
      *     50,000,000-byte template ceiling and can only tighten it.
      */
     PlatformOrganisationAISettingsUpdate: {
@@ -2139,10 +2199,9 @@ export interface components {
      *     ``ai/scratch/`` namespace so the AI layer classifies the source as
      *     transient. The declaration mirrors the files module's signed-upload flow:
      *     the browser PUTs the bytes directly to the signed URL, then completes the
-     *     upload. The declaration may be up to the large-file ceiling, but the
-     *     synchronous ask endpoint that consumes the reference is bounded by
-     *     ``AI_ASK_MAX_SYNCHRONOUS_BYTES`` and this release exposes no asynchronous
-     *     ask path, so only a document within that bound can be asked about.
+     *     upload. The declaration may be up to the large-file ceiling; larger inputs
+     *     are consumed by the durable ask path rather than inside the submitting HTTP
+     *     request.
      */
     ScratchUploadIntentRequest: {
       /** Original Filename */
@@ -3817,6 +3876,49 @@ export interface operations {
         }
         content: {
           'application/json': components['schemas']['DocumentAskResponse']
+        }
+      }
+      /** @description Accepted */
+      202: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['DocumentAskAcceptedResponse']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  get_ask_result_api_v1_ai_ask_requests__request_id__get: {
+    parameters: {
+      query?: never
+      header?: {
+        'x-org-id'?: string | null
+        authorization?: string | null
+      }
+      path: {
+        request_id: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['DocumentAskResultResponse']
         }
       }
       /** @description Validation Error */

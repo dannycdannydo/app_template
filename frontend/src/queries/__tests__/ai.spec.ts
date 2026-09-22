@@ -16,8 +16,10 @@ import { client } from '@/api/client'
 import type { components } from '@/api/generated/openapi'
 import {
   aiQueryKeys,
+  isAskAccepted,
   isClassifyAccepted,
   useAskMutation,
+  useAskResultQuery,
   useClassifyMutation,
   useClassifyResultQuery,
 } from '@/queries/ai'
@@ -27,6 +29,8 @@ import { useOrganisationStore } from '@/stores/organisation'
 type ClassifyAcceptedResponse = components['schemas']['DocumentClassifyAcceptedResponse']
 type ClassifyResultResponse = components['schemas']['DocumentClassifyResultResponse']
 type ClassifySyncResponse = components['schemas']['DocumentClassifySyncResponse']
+type AskAcceptedResponse = components['schemas']['DocumentAskAcceptedResponse']
+type AskResultResponse = components['schemas']['DocumentAskResultResponse']
 
 const ORG_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 const REQUEST_ID = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
@@ -80,11 +84,25 @@ let pinia: Pinia
 let captured!: {
   result: ReturnType<typeof useClassifyResultQuery>
 }
+let capturedAsk!: { result: ReturnType<typeof useAskResultQuery> }
 
 function mountResultQuery(): void {
   const CapturingComponent = defineComponent({
     setup() {
       captured = { result: useClassifyResultQuery(REQUEST_ID) }
+      return {}
+    },
+    template: '<div />',
+  })
+  mount(CapturingComponent, {
+    global: { plugins: [pinia, [VueQueryPlugin, { queryClient }]] },
+  })
+}
+
+function mountAskResultQuery(): void {
+  const CapturingComponent = defineComponent({
+    setup() {
+      capturedAsk = { result: useAskResultQuery(REQUEST_ID) }
       return {}
     },
     template: '<div />',
@@ -213,27 +231,15 @@ describe('ai query composables', () => {
     expect(pollDecision(aiQueryKeys.result(ORG_A, REQUEST_ID))).toBe(false)
   })
 
-  it('submits a document question through the generated ask endpoint', async () => {
+  it('submits a durable document question through the generated ask endpoint', async () => {
     const organisation = useOrganisationStore()
     organisation.setSelectedOrganisation(ORG_A)
-    postMock.mockResolvedValue({
-      data: {
-        request_id: REQUEST_ID,
-        output: 'The renewal term is twelve months.',
-        routing: {
-          provider: 'fake',
-          model: 'fake-model-document.classify',
-          prompt_name: 'document.ask',
-          prompt_version: 1,
-          fallback_used: false,
-          region: '',
-        },
-        usage: { input_tokens: 10, output_tokens: 5 },
-        cost: { amount: '0.000000', currency: 'USD' },
-        completed_at: '2026-01-01T00:00:00Z',
-      },
-      error: undefined,
-    })
+    const acceptedAsk: AskAcceptedResponse = {
+      job_id: JOB_ID,
+      request_id: REQUEST_ID,
+      status: 'queued',
+    }
+    postMock.mockResolvedValue({ data: acceptedAsk, error: undefined })
 
     const CapturingComponent = defineComponent({
       setup() {
@@ -248,15 +254,45 @@ describe('ai query composables', () => {
     wrapper.vm.mutation.mutate({
       storage_reference: STORAGE_REF,
       question: 'What is the renewal term?',
+      sync: false,
     })
     await flushPromises()
     await flushPromises()
 
     expect(postMock).toHaveBeenCalledWith('/api/v1/ai/ask', {
-      body: { storage_reference: STORAGE_REF, question: 'What is the renewal term?' },
+      body: {
+        storage_reference: STORAGE_REF,
+        question: 'What is the renewal term?',
+        sync: false,
+      },
     })
     expect(wrapper.vm.mutation.isSuccess.value).toBe(true)
-    expect(wrapper.vm.mutation.data.value?.output).toBe('The renewal term is twelve months.')
+    expect(isAskAccepted(wrapper.vm.mutation.data.value!)).toBe(true)
+  })
+
+  it('polls a durable document answer by request id', async () => {
+    const organisation = useOrganisationStore()
+    organisation.setSelectedOrganisation(ORG_A)
+    const answer: AskResultResponse = {
+      request_id: REQUEST_ID,
+      status: 'succeeded',
+      error_code: null,
+      output: 'The renewal term is twelve months.',
+      routing: null,
+      usage: null,
+      cost: null,
+      completed_at: '2026-01-01T00:00:00Z',
+    }
+    getMock.mockResolvedValue({ data: answer, error: undefined })
+
+    mountAskResultQuery()
+    await flushPromises()
+    await flushPromises()
+
+    expect(getMock).toHaveBeenCalledWith('/api/v1/ai/ask/requests/{request_id}', {
+      params: { path: { request_id: REQUEST_ID } },
+    })
+    expect(capturedAsk.result.data.value?.output).toBe('The renewal term is twelve months.')
   })
 
   it('rejects an ask without a selected organisation before any HTTP call', async () => {
@@ -273,6 +309,7 @@ describe('ai query composables', () => {
     wrapper.vm.mutation.mutate({
       storage_reference: STORAGE_REF,
       question: 'What is this?',
+      sync: false,
     })
     await flushPromises()
     await flushPromises()

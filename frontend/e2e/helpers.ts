@@ -767,7 +767,18 @@ export async function mockBackendApi(
       }
       if (method === 'POST' && url.pathname === '/api/v1/ai/ask') {
         capturedHeaders.push({ authorization, orgId })
-        return json(ai.answer)
+        return json(
+          {
+            job_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+            request_id: ai.answer.request_id,
+            status: 'queued',
+          },
+          202,
+        )
+      }
+      if (method === 'GET' && url.pathname === `/api/v1/ai/ask/requests/${ai.answer.request_id}`) {
+        capturedHeaders.push({ authorization, orgId })
+        return json({ ...ai.answer, status: 'succeeded', error_code: null })
       }
     }
 

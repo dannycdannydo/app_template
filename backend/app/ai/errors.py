@@ -152,9 +152,8 @@ class SynchronousSourceTooLargeError(AIError):
     the organisation AI-enabled policy and the durable source authority, so an
     oversized disabled, unknown, expired or quarantined source still fails with
     its own precedence-preserving error and without a pre-authorisation read.
-    Permanent for the same request: the caller must supply a smaller source; no
-    durable asynchronous ask operation exists in this release, so the safe
-    message must not advertise one.
+    Permanent for the same synchronous request; the caller can use the default
+    durable operation for a larger source.
     """
 
     error_code = "ai_ask_attachment_too_large"

@@ -703,9 +703,10 @@ class Settings(BaseSettings):
         ),
     )
     # Synchronous AI request bound (plan P9). Long-running provider work must
-    # not run inside an HTTP request (BP §18). The ``document.ask`` endpoint is
-    # synchronous only, so a source whose head size exceeds this bound is
-    # rejected before any provider call. The bound can never exceed the
+    # not run inside an HTTP request (BP §18). ``document.ask`` is durable by
+    # default; this limits only its explicit ``sync=true`` path. A source whose
+    # head size exceeds the bound is rejected before any provider call. The
+    # bound can never exceed the
     # deployment's inline aggregate threshold (itself capped at 5,000,000
     # bytes): a value above the inline threshold would admit large-file work to
     # the synchronous path, defeating the control.
@@ -717,9 +718,8 @@ class Settings(BaseSettings):
             "Maximum source size, in bytes, that a synchronous ``document.ask`` "
             "request may process. A larger source is rejected before any "
             "provider call; cannot be configured above the inline aggregate "
-            "threshold (plan P9, BP §18). This release exposes no durable "
-            "asynchronous ask operation, so a larger document must be reduced "
-            "or processed through a different task."
+            "threshold (plan P9, BP §18). Larger documents use the default "
+            "durable ask operation."
         ),
     )
     # AI scratch lifecycle (plan P6). A scratch object is a throwaway AI input

@@ -20,9 +20,12 @@ const mockUseAskMutation = vi.hoisted(() =>
 )
 const mockUseFilePermissions = vi.hoisted(() => vi.fn<() => unknown>())
 const mockShowApiErrorToast = vi.hoisted(() => vi.fn<(error: unknown, options?: unknown) => void>())
+const mockUseAskResultQuery = vi.hoisted(() => vi.fn<() => unknown>())
 
 vi.mock('@/queries/ai', () => ({
   useAskMutation: mockUseAskMutation,
+  useAskResultQuery: mockUseAskResultQuery,
+  isAskAccepted: (response: { job_id?: string }) => response.job_id !== undefined,
   useScratchUploadMutation: vi.fn<
     () => {
       isPending: { value: boolean }
@@ -78,6 +81,8 @@ import AiAskView from '@/views/AiAskView.vue'
 import { useOrganisationStore } from '@/stores/organisation'
 
 type AskResponse = components['schemas']['DocumentAskResponse']
+type AskAcceptedResponse = components['schemas']['DocumentAskAcceptedResponse']
+type AskResultResponse = components['schemas']['DocumentAskResultResponse']
 
 const ORG_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 
@@ -100,7 +105,7 @@ function askResponse(): AskResponse {
 }
 
 interface MutationShape {
-  data: ReturnType<typeof ref<AskResponse | undefined>>
+  data: ReturnType<typeof ref<AskResponse | AskAcceptedResponse | undefined>>
   error: ReturnType<typeof ref<Error | undefined>>
   isPending: ReturnType<typeof ref<boolean>>
   isError: ReturnType<typeof ref<boolean>>
@@ -110,7 +115,7 @@ interface MutationShape {
 
 function stubMutation(mutation: Partial<MutationShape> = {}): MutationShape {
   const shape: MutationShape = {
-    data: ref<AskResponse | undefined>(undefined),
+    data: ref<AskResponse | AskAcceptedResponse | undefined>(undefined),
     error: ref<Error | undefined>(undefined),
     isPending: ref(false),
     isError: ref(false),
@@ -140,6 +145,9 @@ function mountView(): VueWrapper {
 describe('AiAskView', () => {
   beforeEach(() => {
     mockShowApiErrorToast.mockClear()
+    mockUseAskResultQuery.mockReturnValue({
+      data: ref<AskResultResponse | undefined>(undefined),
+    })
   })
 
   it('renders the upload and question cards for a user who can upload', () => {
@@ -183,10 +191,22 @@ describe('AiAskView', () => {
   it('submits the server-provided storage reference and shows the answer', async () => {
     stubPermissions(true)
     const response = askResponse()
+    const accepted: AskAcceptedResponse = {
+      job_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      request_id: 'request-1',
+      status: 'queued',
+    }
     const mutation = stubMutation({
-      data: ref<AskResponse | undefined>(response),
+      data: ref<AskResponse | AskAcceptedResponse | undefined>(accepted),
     })
-    mutation.mutateAsync.mockResolvedValue(response)
+    mutation.mutateAsync.mockResolvedValue(accepted)
+    mockUseAskResultQuery.mockReturnValue({
+      data: ref<AskResultResponse>({
+        ...response,
+        status: 'succeeded',
+        error_code: null,
+      }),
+    })
     const wrapper = mountView()
 
     await wrapper.find('[data-testid="ai-ask-mode-permanent"]').setValue(true)
@@ -198,6 +218,7 @@ describe('AiAskView', () => {
     expect(mutation.mutateAsync).toHaveBeenCalledWith({
       storage_reference: `organisations/${ORG_ID}/documents/99999999-9999-4999-8999-999999999999/original`,
       question: 'What is the term?',
+      sync: false,
     })
     expect(wrapper.find('[data-testid="ai-ask-answer"]').text()).toBe(
       'The renewal term is twelve months.',
@@ -225,6 +246,7 @@ describe('AiAskView', () => {
     expect(mutation.mutateAsync).toHaveBeenCalledWith({
       storage_reference: `organisations/${ORG_ID}/ai/scratch/99999999-9999-4999-8999-999999999999.pdf`,
       question: 'What is the term?',
+      sync: false,
     })
   })
 

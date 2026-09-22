@@ -102,7 +102,7 @@ human-readable grouping matches the `platform-only` classification.
 | `notifications` | `notifications.service`; user-scoped queries | `notifications.service`; `notifications.tasks` | `GET /api/v1/notifications`; `GET /api/v1/notifications/unread-count`; `PATCH .../{id}/read`; `PATCH .../read-all`; `POST .../test` |
 | `organisation_features` | `feature_flags.service` | `feature_flags.service` (platform route) | `GET /api/v1/platform/feature-flags`; `PUT /api/v1/platform/feature-flags/{key}` |
 | `organisation_ai_settings` | AI persistence/service; platform AI settings | `ai.persistence.service` (platform route) | `GET/PUT /api/v1/platform/organisations/{id}/ai-settings` |
-| `ai_requests` | AI service/execution/persistence; AI demo route | `ai.service`; `ai.execution` | `POST /api/v1/ai/classify`; `POST /api/v1/ai/ask`; `GET /api/v1/ai/classify/requests/{id}` |
+| `ai_requests` | AI service/execution/persistence; AI demo route | `ai.service`; `ai.execution` | `POST /api/v1/ai/classify`; `POST /api/v1/ai/ask`; `GET /api/v1/ai/classify/requests/{id}`; `GET /api/v1/ai/ask/requests/{id}` |
 | `ai_outputs` | AI persistence/service | `ai.service`/`ai.execution` | Same AI routes (result surface) |
 | `ai_attachment_references` | AI persistence/reconciliation; retention maintenance | `ai.persistence.references`; staging adapters | Internal AI transfer/reconcile paths |
 | `ai_scratch_uploads` | `ai.scratch` | `ai.scratch` | `POST /api/v1/ai/scratch/uploads`; `POST /api/v1/ai/scratch/uploads/{id}/complete` |

@@ -7,7 +7,9 @@ input_variables:
 required_capabilities:
   - documents
 parameter_defaults:
-  max_tokens: 1024
+  # Thinking-capable models count hidden reasoning against maxOutputTokens.
+  # Leave enough room for that reasoning plus a useful document summary.
+  max_tokens: 12288
   temperature: 0
 declares_text_result: true
 # v0.8 Scope §2.2/§6.5: the demonstration QA task carries a PDF inline at or
@@ -22,9 +24,10 @@ allowed_transfer_modes:
   - provider_upload
   - managed_signed_url
   - storage_reference
-# The QA demo does not opt into retaining validated output content: the
-# durable record keeps status, routing and usage only (BP §28, ADR-0017).
-retains_output_content: false
+# The durable ask result endpoint needs the validated answer. Content is still
+# retained only when the organisation's explicit retention policy permits it;
+# the existing retention job deletes it on that schedule (BP §28, ADR-0017).
+retains_output_content: true
 retry_policy:
   max_attempts: 2
   repair_attempts: 0

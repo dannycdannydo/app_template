@@ -23,7 +23,10 @@ contract:
   confused with another organisation's (BP §9). ``input_reference``/
   ``input_digest`` record where the input came from (a private storage
   reference and the SHA-256 digest of the resolved attachment) — never the
-  bytes themselves (BP §28, ADR-0017).
+  bytes themselves (BP §28, ADR-0017). A pre-enqueued durable execution may
+  additionally carry bounded ``execution_metadata`` (currently the
+  ``document.ask`` question) until the worker reaches a terminal outcome. It
+  has an independent hard expiry and is never copied to logs or audit events.
 - ``ai_outputs`` — the validated result of one request: the validated output
   JSON (only when the task-level opt-in and the organisation retention policy
   both permit content retention, v0.7 Scope §2) plus an output
@@ -153,8 +156,9 @@ class OrganisationAISettings(Base, TimestampMixin):
     monthly_budget: Mapped[Decimal | None] = mapped_column(
         Numeric(18, 6), nullable=True, default=None
     )
-    # How long ai_outputs records (and the scratch objects they reference)
-    # are kept. ``NULL`` means no retention deletion is scheduled.
+    # How long retained ai_outputs content (and scratch objects it references)
+    # is kept. ``NULL`` means opted-in tasks do not retain output content, so
+    # there is no content deletion schedule; reference/digest records remain.
     retention_policy_days: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
     # v0.8 Scope §2.2 transfer policy: the organisation's allowed transfer
     # modes default to ``inline`` only (default-deny — a non-inline mode is
@@ -201,6 +205,11 @@ class AIRequestRecord(Base, TimestampMixin):
         # paths; the composite index serves the org filter plus the
         # newest-first ordering, exactly like files/records/jobs.
         Index("ix_ai_requests_organisation_id_created_at", "organisation_id", "created_at"),
+        Index(
+            "ix_ai_requests_execution_metadata_expires_at",
+            "execution_metadata_expires_at",
+            postgresql_where=text("execution_metadata IS NOT NULL"),
+        ),
         # One row per actual provider dispatch, uniquely identified inside the
         # organisation by the caller-visible execution id and the 1-based
         # attempt number (v0.7 Scope §2). Org-scoped so a reused execution id
@@ -222,6 +231,10 @@ class AIRequestRecord(Base, TimestampMixin):
         CheckConstraint("estimated_cost >= 0", name="non_negative_estimated_cost"),
         CheckConstraint("cost >= 0", name="non_negative_cost"),
         CheckConstraint("latency_ms >= 0", name="non_negative_latency_ms"),
+        CheckConstraint(
+            "(execution_metadata IS NULL) = (execution_metadata_expires_at IS NULL)",
+            name="execution_metadata_expiry_pair",
+        ),
         CheckConstraint(
             "status IN ('queued', 'running', 'succeeded', 'failed')",
             name="ai_request_status",
@@ -295,6 +308,17 @@ class AIRequestRecord(Base, TimestampMixin):
     # digest of the resolved attachment. Never the bytes (BP §28, ADR-0017).
     input_reference: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     input_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Reference-only broker messages cannot carry task variables. The queued
+    # request row therefore owns the small, JSON-safe variables a durable AI
+    # worker must reconstruct. They are cleared at terminal settlement and by
+    # the global-expiry sweep after a crash/orphan; document bytes never live
+    # here. Both columns are NULL for synchronous requests and classification.
+    execution_metadata: Mapped[dict[str, str] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+    execution_metadata_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class AIOutputRecord(Base, TimestampMixin):

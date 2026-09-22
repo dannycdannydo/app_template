@@ -365,9 +365,8 @@ PROTECTED_ROUTES: list[RouteSpec] = [
         org_scoped=True,
         path_values={"request_id": _AI_REQUEST_ID},
     ),
-    # AI document QA demonstration (v0.8 Scope §2.2/§6.4): synchronous only,
-    # org-scoped and gated by the existing documents.upload permission like
-    # every document action; there is no arbitrary-prompt surface.
+    # AI document QA demonstration: submission is a document action and the
+    # durable result is an organisation-scoped document read.
     _route(
         "POST",
         "/api/v1/ai/ask",
@@ -376,6 +375,12 @@ PROTECTED_ROUTES: list[RouteSpec] = [
             "storage_reference": "organisations/00000000-0000-7000-8000-000000000000/ai/scratch/doc.txt",
             "question": "What is this document about?",
         },
+    ),
+    _route(
+        "GET",
+        "/api/v1/ai/ask/requests/{request_id}",
+        org_scoped=True,
+        path_values={"request_id": _AI_REQUEST_ID},
     ),
     # AI demo transient upload surface (v0.8 Scope §2.2/§6.5): the scratch
     # upload intent and completion are org-scoped document actions gated by

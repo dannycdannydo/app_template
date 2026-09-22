@@ -48,6 +48,7 @@ from app.ai.execution import (
 )
 from app.ai.persistence.models import AIRequestRecord, AIRequestStatus
 from app.ai.persistence.service import create_default_settings
+from app.modules.ai_demo import service as demo_service
 from app.modules.audit.models import AuditEvent
 from app.modules.jobs import service as jobs_service
 from app.modules.jobs.models import Job, JobStatus
@@ -127,6 +128,7 @@ async def _seed_organisation(session: AsyncSession) -> Organisation:
 async def _enable_ai(session: AsyncSession, organisation_id: uuid.UUID) -> None:
     settings_row = await create_default_settings(session, organisation_id=organisation_id)
     settings_row.enabled = True
+    settings_row.retention_policy_days = 1
     await session.commit()
 
 
@@ -327,6 +329,59 @@ async def test_worker_classifies_text_document_and_records_request(
         )
         == 1
     )
+
+
+async def test_worker_answers_durable_document_question_and_clears_input_metadata(
+    migrated_database: str, broker_and_worker: tuple[StubBroker, Worker, Any]
+) -> None:
+    """A durable ask survives the HTTP boundary and exposes its retained answer."""
+    _broker, _worker, ai_task = broker_and_worker
+    session_factory = _session_factory(migrated_database)
+    async with session_factory() as session:
+        organisation = await _seed_organisation(session)
+        await _enable_ai(session, organisation.id)
+        user = await _seed_user(session)
+        storage_key = await _put_authorized_object(
+            session,
+            organisation.id,
+            content=b"%PDF-1.4 fixture lease",
+            content_type="application/pdf",
+        )
+        accepted = await demo_service.enqueue_ask(
+            session,
+            organisation_id=organisation.id,
+            user=user,
+            storage_reference=storage_key,
+            question="What is the renewal term?",
+        )
+
+    ai_task.send(job_id=accepted.job_id)
+    await _wait_for_status(
+        session_factory,
+        uuid.UUID(accepted.job_id),
+        JobStatus.SUCCEEDED,
+    )
+    async with session_factory() as session:
+        result = await demo_service.get_ask_result(
+            session,
+            organisation_id=organisation.id,
+            request_id=accepted.request_id,
+        )
+        record = await session.scalar(
+            select(AIRequestRecord).where(
+                AIRequestRecord.organisation_id == organisation.id,
+                AIRequestRecord.request_id == accepted.request_id,
+                AIRequestRecord.attempt_number == 1,
+            )
+        )
+    assert result.status == "succeeded"
+    assert isinstance(result.output, str) and result.output
+    assert result.routing is not None
+    assert result.routing.prompt_name == "document.ask"
+    assert record is not None
+    assert record.task == "document.ask"
+    assert record.execution_metadata is None
+    assert record.execution_metadata_expires_at is None
 
 
 async def test_broker_message_carries_job_id_only_no_bytes(migrated_database: str) -> None:

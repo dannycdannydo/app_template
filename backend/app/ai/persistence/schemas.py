@@ -50,10 +50,14 @@ class PlatformOrganisationAISettingsUpdate(BaseModel):
 
     ``allowed_provider_ids`` / ``allowed_model_ids`` are the registry-validated
     allowlists; an empty list means "no restriction from this knob".
-    ``monthly_budget`` ``None`` disables the budget; ``retention_policy_days``
-    ``None`` disables scheduled retention deletion. ``allowed_transfer_modes``
-    defaults to ``["inline"]`` (default-deny) and must always include
-    ``inline``; ``max_large_attachment_bytes`` defaults to the
+    ``monthly_budget`` ``None`` disables the budget. A
+    ``retention_policy_days`` value allows opted-in tasks to retain validated
+    output content for that period and tightens AI scratch lifetime when it is
+    shorter than the global scratch maximum. ``None`` means output content is
+    not retained while scratch uses its global maximum lifetime.
+    ``allowed_transfer_modes`` defaults to ``["inline"]``
+    (default-deny) and must always include ``inline``;
+    ``max_large_attachment_bytes`` defaults to the
     50,000,000-byte template ceiling and can only tighten it.
     """
 

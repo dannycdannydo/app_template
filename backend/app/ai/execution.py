@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -55,11 +55,13 @@ from app.ai.persistence.models import AIRequestRecord, AIRequestStatus
 from app.ai.persistence.queries import (
     ai_latest_attempt_statement,
     ai_output_for_request_statement,
+    ai_request_by_request_id_statement,
     ai_winning_attempt_statement,
 )
 from app.ai.persistence.references import SQLTransferReferenceStore
 from app.ai.persistence.service import AIPersistencePortImpl
 from app.ai.schemas import AIRequest, AIResult
+from app.core.config import get_settings
 from app.core.exceptions import NotFoundError
 from app.core.logging import bind_worker_context
 from app.db.conventions import uuid7
@@ -78,10 +80,11 @@ JOB_TYPE_AI_EXECUTE = "ai.execute"
 #: running on the infrastructure ``default`` queue (jobs.tasks).
 HANDLER_QUEUE = "ai"
 
-#: The single demonstrated task this job executes (v0.7 Scope §2). The job is
-#: provider-neutral and task-agnostic in shape; the template ships the one
-#: non-product demonstration task and a derived application adds its own.
+#: The checked-in durable task allowlist. The worker reconstructs the task from
+#: the tenant-scoped queued request row; the broker still carries only job_id.
 DEMO_TASK = "document.classify"
+ASK_TASK = "document.ask"
+DURABLE_TASKS = frozenset({DEMO_TASK, ASK_TASK})
 
 #: Permanent error codes the AI execution job records on the durable row when
 #: the referenced object cannot become valid task input (before any dispatch,
@@ -174,12 +177,14 @@ async def execute_managed_ai(
     )
 
 
-async def enqueue_document_classification(
+async def enqueue_document_execution(
     session: AsyncSession,
     *,
     organisation_id: uuid.UUID,
     user_id: uuid.UUID,
     storage_reference: str,
+    task: str = DEMO_TASK,
+    metadata: dict[str, str] | None = None,
 ) -> QueuedAIExecution:
     """Durably schedule a queued AI request and its job in one transaction.
 
@@ -194,6 +199,18 @@ async def enqueue_document_classification(
     quarantined, deleted, expired or cross-organisation key is denied here as
     well as at worker execution (AC13).
     """
+    if task not in DURABLE_TASKS:
+        raise ValueError(f"unsupported durable AI task: {task!r}")
+    request_metadata = dict(metadata or {})
+    # Constructing the provider-neutral request here applies its bounded,
+    # JSON-safe metadata contract before any row is persisted.
+    AIRequest(
+        task=task,
+        storage_reference=storage_reference,
+        organisation_id=organisation_id,
+        user_id=user_id,
+        metadata=request_metadata,
+    )
     await runtime.get_ai_service().authorize_source(
         session=session,
         organisation_id=organisation_id,
@@ -207,9 +224,16 @@ async def enqueue_document_classification(
             user_id=user_id,
             request_id=request_id,
             attempt_number=1,
-            task=DEMO_TASK,
+            task=task,
             status=AIRequestStatus.QUEUED,
             input_reference=storage_reference,
+            execution_metadata=request_metadata or None,
+            execution_metadata_expires_at=(
+                datetime.now(UTC)
+                + timedelta(seconds=get_settings().ai_scratch_max_lifetime_seconds)
+                if request_metadata
+                else None
+            ),
         )
     )
     job = await jobs_service.schedule_job(
@@ -221,6 +245,22 @@ async def enqueue_document_classification(
         job_id=job_id,
     )
     return QueuedAIExecution(job_id=job.id, request_id=request_id_for_job(job.id))
+
+
+async def enqueue_document_classification(
+    session: AsyncSession,
+    *,
+    organisation_id: uuid.UUID,
+    user_id: uuid.UUID,
+    storage_reference: str,
+) -> QueuedAIExecution:
+    """Backward-compatible classification wrapper around the durable boundary."""
+    return await enqueue_document_execution(
+        session,
+        organisation_id=organisation_id,
+        user_id=user_id,
+        storage_reference=storage_reference,
+    )
 
 
 async def get_ai_execution_snapshot(
@@ -240,7 +280,7 @@ async def get_ai_execution_snapshot(
     if record is None:
         raise NotFoundError(
             code="ai_request_not_found",
-            message="The classification result could not be found.",
+            message="The AI result could not be found.",
         )
 
     output: dict[str, Any] | None = None
@@ -352,15 +392,58 @@ async def _execute_ai_attempt(context: DurableJobContext, session: AsyncSession)
     # persistence port and reference store rebind after each of their own
     # commits, so context is never assumed stale.
     await bind_organisation_context(session, context.organisation_id)
+    queued_request = await session.scalar(
+        ai_request_by_request_id_statement(context.organisation_id, request_id, 1)
+    )
+    task = queued_request.task if queued_request is not None else DEMO_TASK
+    metadata = {"source": "ai_demo", "job_id": str(job_uuid)}
+    if task not in DURABLE_TASKS:
+        failure = _PermanentJobFailure(
+            ERROR_CODE_INVALID_JOB_CONTEXT,
+            "The AI job names an unsupported task.",
+        )
+        await _clear_execution_metadata(
+            session,
+            organisation_id=context.organisation_id,
+            request_id=request_id,
+            error_code=failure.error_code,
+        )
+        await _fail_permanent(session, job_uuid, failure, owner_token=context.owner_token)
+        raise jobs_service.JobPermanentError(failure.message)
+    if task == ASK_TASK:
+        durable_metadata = queued_request.execution_metadata if queued_request is not None else None
+        expires_at = (
+            queued_request.execution_metadata_expires_at if queued_request is not None else None
+        )
+        question = durable_metadata.get("question") if durable_metadata is not None else None
+        if (
+            not isinstance(question, str)
+            or not question.strip()
+            or expires_at is None
+            or expires_at <= datetime.now(UTC)
+        ):
+            failure = _PermanentJobFailure(
+                ERROR_CODE_INVALID_JOB_CONTEXT,
+                "The durable document question is missing or expired.",
+            )
+            await _clear_execution_metadata(
+                session,
+                organisation_id=context.organisation_id,
+                request_id=request_id,
+                error_code=failure.error_code,
+            )
+            await _fail_permanent(session, job_uuid, failure, owner_token=context.owner_token)
+            raise jobs_service.JobPermanentError(failure.message)
+        metadata["question"] = question
     try:
         result = await execute_managed_ai(
             session,
             AIRequest(
-                task=DEMO_TASK,
+                task=task,
                 storage_reference=context.input_reference,
                 organisation_id=context.organisation_id,
                 user_id=context.created_by_user_id,
-                metadata={"source": "ai_demo", "job_id": str(job_uuid)},
+                metadata=metadata,
             ),
             request_id=request_id,
             ownership=context.ownership,
@@ -377,8 +460,19 @@ async def _execute_ai_attempt(context: DurableJobContext, session: AsyncSession)
             request_id,
             owner_token=context.owner_token,
         )
+        await _clear_execution_metadata(
+            session,
+            organisation_id=context.organisation_id,
+            request_id=request_id,
+        )
         return
     except AIError as exc:
+        await _clear_execution_metadata(
+            session,
+            organisation_id=context.organisation_id,
+            request_id=request_id,
+            error_code=exc.error_code,
+        )
         await _fail_permanent(
             session,
             job_uuid,
@@ -388,6 +482,11 @@ async def _execute_ai_attempt(context: DurableJobContext, session: AsyncSession)
         logger.warning("ai.execute.failed", error_code=exc.error_code)
         raise jobs_service.JobPermanentError(f"the AI execution failed ({exc.error_code})") from exc
 
+    await _clear_execution_metadata(
+        session,
+        organisation_id=context.organisation_id,
+        request_id=request_id,
+    )
     await jobs_service.succeed(
         session,
         job_id=job_uuid,
@@ -409,6 +508,28 @@ class _PermanentJobFailure(Exception):
         super().__init__(message)
         self.error_code = error_code
         self.message = message
+
+
+async def _clear_execution_metadata(
+    session: AsyncSession,
+    *,
+    organisation_id: uuid.UUID,
+    request_id: str,
+    error_code: str | None = None,
+) -> None:
+    """Remove transient task variables after settlement or permanent failure."""
+    await bind_organisation_context(session, organisation_id)
+    record = await session.scalar(
+        ai_request_by_request_id_statement(organisation_id, request_id, 1)
+    )
+    if record is None:
+        return
+    record.execution_metadata = None
+    record.execution_metadata_expires_at = None
+    if error_code is not None and record.status == AIRequestStatus.QUEUED:
+        record.status = AIRequestStatus.FAILED
+        record.error_code = error_code
+    await session.commit()
 
 
 async def _reconcile_replay(

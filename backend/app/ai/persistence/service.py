@@ -76,6 +76,7 @@ from app.ai.persistence.queries import (
     ai_request_record_statement,
     all_organisation_ids_statement,
     expired_ai_outputs_statement,
+    expired_execution_metadata_statement,
     expired_scratch_uploads_statement,
     organisation_ai_settings_for_update_statement,
     organisation_ai_settings_statement,
@@ -1118,7 +1119,9 @@ async def enforce_ai_retention(
 
     The sweep has two independent halves:
 
-    1. **Stale-reservation reconciliation** for *every* organisation: a row
+    1. **Transient execution cleanup and stale-reservation reconciliation** for
+       *every* organisation: expired durable task variables are cleared (a
+       still-queued request is failed), and a row
        stuck in ``running`` beyond :data:`STALE_RUNNING_THRESHOLD` is a crashed
        worker execution and is marked ``failed`` keeping its reserved cost
        (documented reservation policy: a crash never releases budget). This is
@@ -1153,6 +1156,7 @@ async def enforce_ai_retention(
     scratch_objects_deleted = 0
     scratch_intents_expired = 0
     stale_reconciled = 0
+    execution_metadata_cleared = 0
 
     for organisation_id in organisation_ids:
         # Plan P3 group 4a: ``organisation_ai_settings`` is now RLS-protected
@@ -1171,6 +1175,16 @@ async def enforce_ai_retention(
             record.status = AIRequestStatus.FAILED
             record.error_code = ERROR_CODE_WORKER_CRASHED
         stale_reconciled += len(stale_candidates)
+        expired_metadata = (
+            await session.scalars(expired_execution_metadata_statement(organisation_id, now))
+        ).all()
+        for record in expired_metadata:
+            record.execution_metadata = None
+            record.execution_metadata_expires_at = None
+            if record.status == AIRequestStatus.QUEUED:
+                record.status = AIRequestStatus.FAILED
+                record.error_code = ERROR_CODE_WORKER_CRASHED
+        execution_metadata_cleared += len(expired_metadata)
         await session.commit()
 
         # 1b. Scratch-intent expiry for this organisation (plan P6):
@@ -1231,7 +1245,7 @@ async def enforce_ai_retention(
         # 3. One audit event per affected organisation; its resource type and
         # metadata reflect whether the organisation configured retention.
         if retention_days is not None:
-            if outputs or org_scratch_deleted or stale_candidates:
+            if outputs or org_scratch_deleted or stale_candidates or expired_metadata:
                 await record_event(
                     session,
                     organisation_id=organisation_id,
@@ -1242,11 +1256,12 @@ async def enforce_ai_retention(
                         "outputs_deleted": len(outputs),
                         "scratch_objects_deleted": org_scratch_deleted,
                         "stale_requests_reconciled": len(stale_candidates),
+                        "execution_metadata_cleared": len(expired_metadata),
                         "retention_policy_days": retention_days,
                     },
                 )
                 organisations_purged += 1
-        elif stale_candidates:
+        elif stale_candidates or expired_metadata:
             await record_event(
                 session,
                 organisation_id=organisation_id,
@@ -1257,6 +1272,7 @@ async def enforce_ai_retention(
                     "outputs_deleted": 0,
                     "scratch_objects_deleted": 0,
                     "stale_requests_reconciled": len(stale_candidates),
+                    "execution_metadata_cleared": len(expired_metadata),
                     "retention_policy_days": None,
                 },
             )
@@ -1271,4 +1287,5 @@ async def enforce_ai_retention(
         "scratch_objects_deleted": scratch_objects_deleted,
         "scratch_intents_expired": scratch_intents_expired,
         "stale_requests_reconciled": stale_reconciled,
+        "execution_metadata_cleared": execution_metadata_cleared,
     }

@@ -18,14 +18,17 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import get_current_user, get_db, require_permission
 from app.modules.ai_demo import service
 from app.modules.ai_demo.schemas import (
+    DocumentAskAcceptedResponse,
     DocumentAskRequest,
     DocumentAskResponse,
+    DocumentAskResultResponse,
     DocumentClassifyAcceptedResponse,
     DocumentClassifyRequest,
     DocumentClassifyResultResponse,
@@ -39,12 +42,8 @@ from app.modules.users.models import User
 
 router = APIRouter(prefix="/api/v1/ai/classify", tags=["ai"])
 
-#: ``document.ask`` QA demonstration (v0.8 Scope §2.2/§6.4, plan P9):
-#: synchronous only and bounded by ``AI_ASK_MAX_SYNCHRONOUS_BYTES`` (5 MB by
-#: default), gated like every document action. The private reference + bounded
-#: question are forwarded unchanged; a source above the bound is rejected with
-#: ``ai_ask_attachment_too_large`` and this release exposes no durable
-#: asynchronous ask operation.
+#: ``document.ask`` is durable by default for document-scale work; ``sync=true``
+#: retains the existing bounded synchronous path for small inputs.
 ask_router = APIRouter(prefix="/api/v1/ai/ask", tags=["ai"])
 
 #: Demo-scoped transient upload surface (v0.8 Scope §2.2/§6.5): the AI test
@@ -63,11 +62,10 @@ scratch_router = APIRouter(prefix="/api/v1/ai/scratch", tags=["ai"])
 )
 async def classify_document(
     payload: DocumentClassifyRequest,
-    response: Response,
     session: Annotated[AsyncSession, Depends(get_db)],
     membership: Annotated[OrganisationMembership, Depends(require_permission("documents.upload"))],
     user: Annotated[User, Depends(get_current_user)],
-) -> DocumentClassifySyncResponse | DocumentClassifyAcceptedResponse:
+) -> DocumentClassifySyncResponse | JSONResponse:
     """Classify a document: synchronously (``sync=true``) or as a durable job.
 
     Both paths pass the private storage reference through ``AIService.execute``
@@ -83,8 +81,7 @@ async def classify_document(
             user=user,
             storage_reference=payload.storage_reference,
         )
-        response.status_code = 202
-        return accepted
+        return JSONResponse(status_code=202, content=accepted.model_dump(mode="json"))
     return await service.classify_sync(
         session,
         organisation_id=membership.organisation_id,
@@ -107,29 +104,57 @@ async def get_classify_result(
     )
 
 
-@ask_router.post("", response_model=DocumentAskResponse)
+@ask_router.post(
+    "",
+    response_model=DocumentAskResponse,
+    responses={202: {"model": DocumentAskAcceptedResponse}},
+)
 async def ask_document(
     payload: DocumentAskRequest,
     session: Annotated[AsyncSession, Depends(get_db)],
     membership: Annotated[OrganisationMembership, Depends(require_permission("documents.upload"))],
     user: Annotated[User, Depends(get_current_user)],
-) -> DocumentAskResponse:
-    """Answer one question about a stored document.
+) -> DocumentAskResponse | JSONResponse:
+    """Answer synchronously or queue a durable document question.
 
     The private storage reference and bounded question are passed to the
-    ``document.ask`` task; ``AIService`` checks the organisation policy and the
-    durable source authority, then enforces the synchronous bound — a source
-    above ``AI_ASK_MAX_SYNCHRONOUS_BYTES`` (5 MB by default) is rejected with
-    ``ai_ask_attachment_too_large`` before any provider call. The validated
-    answer is returned inline with safe routing/usage metadata. This release
-    exposes no durable asynchronous ask operation.
+    ``document.ask`` task after organisation policy and source authority are
+    checked. The default path returns 202 and runs through ``ai.execute``;
+    ``sync=true`` retains the existing 5,000,000-byte HTTP bound.
     """
+    if not payload.sync:
+        accepted = await service.enqueue_ask(
+            session,
+            organisation_id=membership.organisation_id,
+            user=user,
+            storage_reference=payload.storage_reference,
+            question=payload.question,
+        )
+        # FastAPI's primary ``response_model`` validates ordinary return values
+        # even when ``response.status_code`` is changed dynamically. Return the
+        # explicitly documented 202 response directly so it is not incorrectly
+        # validated as the synchronous 200 answer shape.
+        return JSONResponse(status_code=202, content=accepted.model_dump(mode="json"))
     return await service.ask_sync(
         session,
         organisation_id=membership.organisation_id,
         user=user,
         storage_reference=payload.storage_reference,
         question=payload.question,
+    )
+
+
+@ask_router.get("/requests/{request_id}", response_model=DocumentAskResultResponse)
+async def get_ask_result(
+    request_id: str,
+    session: Annotated[AsyncSession, Depends(get_db)],
+    membership: Annotated[OrganisationMembership, Depends(require_permission("documents.read"))],
+) -> DocumentAskResultResponse:
+    """Return the durable answer status; a foreign request id is a 404."""
+    return await service.get_ask_result(
+        session,
+        organisation_id=membership.organisation_id,
+        request_id=request_id,
     )
 
 

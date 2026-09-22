@@ -525,7 +525,11 @@ async def test_vertex_contract_uses_regional_endpoint_and_bearer(
                         "finishReason": "STOP",
                     }
                 ],
-                "usageMetadata": {"promptTokenCount": 9, "candidatesTokenCount": 3},
+                "usageMetadata": {
+                    "promptTokenCount": 9,
+                    "candidatesTokenCount": 3,
+                    "thoughtsTokenCount": 7,
+                },
             }
         )
 
@@ -555,7 +559,7 @@ async def test_vertex_contract_uses_regional_endpoint_and_bearer(
     assert response.model == "gemini-2.0-flash"
     assert response.structured == {"category": "lease"}
     assert response.usage.input_tokens == 9
-    assert response.usage.output_tokens == 3
+    assert response.usage.output_tokens == 10
     assert response.finish_reason == "stop"
 
 

@@ -845,21 +845,21 @@ hourly/daily intervals and let the coordinator schedule them.
   no non-inline mode and reject large files before any transfer. See
   `backend/app/ai/README.md` and README → Large AI attachments for the full
   contract.
-- **Synchronous ask bound (plan P9)**: `/api/v1/ai/ask` is synchronous only, so
-  it is bounded by `AI_ASK_MAX_SYNCHRONOUS_BYTES` (default 5,000,000 — the
-  inline threshold). The bound can be lowered but never raised above
+- **Durable ask and synchronous bound (plan P9)**: `/api/v1/ai/ask` queues a
+  durable `ai.execute` job by default and the UI polls the request result. The
+  optional `sync=true` path is bounded by `AI_ASK_MAX_SYNCHRONOUS_BYTES`
+  (default 5,000,000 — the inline threshold). The bound can be lowered but never raised above
   `AI_INLINE_AGGREGATE_THRESHOLD_BYTES`, so a large-file transfer can never run
   inside an HTTP request. The bound is enforced in the common `AIService.execute`
   boundary *after* the organisation AI-enabled policy and the P6 durable source
   authority and *before* any attachment bytes are read, so a disabled
   organisation or an unauthorised/quarantined/expired/foreign source keeps its
   own error and never triggers a pre-authorisation object read. A source above
-  the bound is rejected with `ai_ask_attachment_too_large`. The v0.8 non-inline
-  transfer modes remain implemented and tested at the `AIService` layer, but are
-  not reachable through this endpoint; this release exposes **no durable
-  asynchronous ask operation**, so the supported remedy is a smaller document.
-  Durable `document.classify` (`sync=false`) remains the supported long-running
-  AI route.
+  the bound is rejected with `ai_ask_attachment_too_large`; callers use the
+  default durable path for a larger document. Durable questions expire with
+  the global scratch lifetime and are cleared at terminal settlement. Configure
+  an organisation `retention_policy_days` value if its validated answer content
+  must be available from the polling endpoint.
 - **Vertex large-file staging (v0.8)**: `AI_VERTEX_TEMP_GCS_BUCKET` must be a
   user-provisioned private, single-region bucket in the configured
   `AI_VERTEX_LOCATION`, owned by `AI_VERTEX_PROJECT`. The workload

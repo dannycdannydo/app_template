@@ -119,6 +119,9 @@ describe('PlatformOrganisationAISettingsView', () => {
     const storage = wrapper.find('[data-testid="ai-settings-mode-storage_reference"]')
       .element as HTMLInputElement
     expect(storage.checked).toBe(true)
+    expect(wrapper.text()).toContain('AI content and scratch retention days')
+    expect(wrapper.text()).toContain('Empty means validated output content is not stored')
+    expect(wrapper.text()).not.toContain('empty = keep forever')
     expect(getMock).toHaveBeenCalledWith(
       '/api/v1/platform/organisations/{organisation_id}/ai-settings',
       { params: { path: { organisation_id: ORGANISATION_ID } } },

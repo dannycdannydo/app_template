@@ -340,7 +340,7 @@ async function save(): Promise<void> {
       <Card>
         <CardHeader>
           <CardTitle>Limits</CardTitle>
-          <CardDescription>Ceilings that can only tighten the template defaults.</CardDescription>
+          <CardDescription>Usage ceilings and validated AI-output retention.</CardDescription>
         </CardHeader>
         <CardContent class="grid max-w-md gap-4">
           <div class="flex flex-col gap-2">
@@ -369,7 +369,9 @@ async function save(): Promise<void> {
             />
           </div>
           <div class="flex flex-col gap-2">
-            <Label for="ai-settings-retention">Retention policy days (empty = keep forever)</Label>
+            <Label for="ai-settings-retention">
+              AI content and scratch retention days
+            </Label>
             <Input
               id="ai-settings-retention"
               v-model="form.retentionPolicyDays"
@@ -378,6 +380,12 @@ async function save(): Promise<void> {
               max="3650"
               data-testid="ai-settings-retention"
             />
+            <p class="text-muted-foreground text-xs">
+              Empty means validated output content is not stored; scratch uploads still expire at
+              the global maximum. When set, opted-in output may be retained for this period and
+              scratch lifetime is shortened to this value when it is lower than the global maximum.
+              Usage, cost and routing records are kept separately.
+            </p>
           </div>
         </CardContent>
       </Card>

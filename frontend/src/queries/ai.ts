@@ -14,6 +14,8 @@ type ClassifyAcceptedResponse = components['schemas']['DocumentClassifyAcceptedR
 type ClassifyResultResponse = components['schemas']['DocumentClassifyResultResponse']
 type AskRequest = components['schemas']['DocumentAskRequest']
 type AskResponse = components['schemas']['DocumentAskResponse']
+type AskAcceptedResponse = components['schemas']['DocumentAskAcceptedResponse']
+type AskResultResponse = components['schemas']['DocumentAskResultResponse']
 type ScratchUploadIntentRequest = components['schemas']['ScratchUploadIntentRequest']
 type ScratchUploadCompleteResponse = components['schemas']['ScratchUploadCompleteResponse']
 
@@ -29,6 +31,8 @@ export const aiQueryKeys = {
     ['organisations', organisationId, 'ai', 'classify', 'result'] as const,
   result: (organisationId: string, requestId: string) =>
     ['organisations', organisationId, 'ai', 'classify', 'result', requestId] as const,
+  askResult: (organisationId: string, requestId: string) =>
+    ['organisations', organisationId, 'ai', 'ask', 'result', requestId] as const,
 }
 
 /** Classification statuses that are not yet terminal and therefore warrant polling. */
@@ -44,6 +48,12 @@ export function isClassifyAccepted(
   response: ClassifySyncResponse | ClassifyAcceptedResponse,
 ): response is ClassifyAcceptedResponse {
   return (response as ClassifyAcceptedResponse).job_id !== undefined
+}
+
+export function isAskAccepted(
+  response: AskResponse | AskAcceptedResponse,
+): response is AskAcceptedResponse {
+  return (response as AskAcceptedResponse).job_id !== undefined
 }
 
 /**
@@ -131,20 +141,13 @@ export function useClassifyResultQuery(requestId: MaybeRefOrGetter<string>) {
 }
 
 /**
- * Submit one ``document.ask`` question about a stored document (v0.8 Scope
- * §2.2/§6.4).
- *
- * Synchronous only: the reference is resolved server-side (inline at or below
- * the 5 MB threshold) and the mutation resolves with the validated text answer
- * plus safe routing/usage metadata. The endpoint is bounded by
- * ``AI_ASK_MAX_SYNCHRONOUS_BYTES``, so a larger document is rejected before any
- * provider call (plan P9). Like every org-scoped call it reads the selected
- * organisation from Pinia; the generated client is never imported outside this
- * query layer (BP §15).
+ * Submit one ``document.ask`` question. The default path returns a durable job
+ * acknowledgement; ``sync=true`` retains the bounded inline response.
  */
 export function useAskMutation() {
   const organisation = useOrganisationStore()
   const organisationId = computed(() => organisation.selectedOrganisationId)
+  const queryClient = useQueryClient()
 
   return useMutation({
     mutationFn: async (payload: AskRequest) => {
@@ -154,7 +157,47 @@ export function useAskMutation() {
       const { data, error } = await client.POST('/api/v1/ai/ask', { body: payload })
       if (error) throw error
       if (!data) throw new Error('Empty ask response')
-      return data as AskResponse
+      return data as AskResponse | AskAcceptedResponse
+    },
+    onSuccess: (data) => {
+      if (isAskAccepted(data) && organisationId.value !== null) {
+        void queryClient.invalidateQueries({
+          queryKey: jobsQueryKeys.lists(organisationId.value),
+        })
+      }
+    },
+  })
+}
+
+/** Poll one durable document question until it reaches a terminal state. */
+export function useAskResultQuery(requestId: MaybeRefOrGetter<string>) {
+  const organisation = useOrganisationStore()
+  const organisationId = computed(() => organisation.selectedOrganisationId)
+  const resolvedRequestId = computed(() => toValue(requestId))
+
+  return useQuery({
+    queryKey: computed(() =>
+      organisationId.value === null
+        ? (['organisations', null] as const)
+        : aiQueryKeys.askResult(organisationId.value, resolvedRequestId.value),
+    ),
+    queryFn: async () => {
+      if (organisationId.value === null) {
+        throw new Error('Cannot load an answer without a selected organisation')
+      }
+      const { data, error } = await client.GET('/api/v1/ai/ask/requests/{request_id}', {
+        params: { path: { request_id: resolvedRequestId.value } },
+      })
+      if (error) throw error
+      if (!data) throw new Error('Empty answer result response')
+      return data as AskResultResponse
+    },
+    enabled: computed(() => organisationId.value !== null && resolvedRequestId.value !== ''),
+    retry: 2,
+    staleTime: 30_000,
+    refetchInterval: (query) => {
+      const status = (query.state.data as AskResultResponse | undefined)?.status
+      return status !== undefined && ACTIVE_CLASSIFY_STATUSES.has(status) ? 1000 : false
     },
   })
 }
@@ -165,13 +208,9 @@ export function useAskMutation() {
  *
  * The uploaded object lands in the organisation-scoped ``ai/scratch/``
  * namespace, which the AI layer classifies as transient. The upload contract
- * permits up to the 50 MB large-file ceiling, but the synchronous ask endpoint
- * is bounded by ``AI_ASK_MAX_SYNCHRONOUS_BYTES`` (5 MB by default, plan P9) and
- * this release exposes no asynchronous ask path, so a larger upload cannot be
- * asked about and must be reduced in size. No processing job exists for scratch
- * objects: the mutation resolves with the storage reference the caller sends to
- * the ask endpoint. The PUT goes to the signed URL through `putFile` (never the
- * generated client), the same direct-upload transport the files module uses.
+ * permits up to the 50 MB large-file ceiling. The durable ask worker consumes
+ * the returned reference without placing bytes on the broker. The PUT goes to
+ * the signed URL through `putFile` (never the generated client).
  */
 export function useScratchUploadMutation(options?: {
   onProgress?: (progress: UploadProgress) => void

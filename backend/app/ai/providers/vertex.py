@@ -238,7 +238,14 @@ class VertexAIAdapter(LLMProvider):
             usage_data = cast(dict[str, Any], usage_raw)
             usage = TokenUsage(
                 input_tokens=safe_int(usage_data.get("promptTokenCount")),
-                output_tokens=safe_int(usage_data.get("candidatesTokenCount")),
+                # Vertex reports visible candidate tokens and hidden thinking
+                # tokens separately. Both consume the generation allowance
+                # and are billable output; omitting thoughts understates cost
+                # and obscures MAX_TOKENS truncation on thinking models.
+                output_tokens=(
+                    safe_int(usage_data.get("candidatesTokenCount"))
+                    + safe_int(usage_data.get("thoughtsTokenCount"))
+                ),
             )
         else:
             usage = TokenUsage(input_tokens=0, output_tokens=0)

@@ -91,10 +91,10 @@ For a minimal Vertex setup: enable AI, `allowed_provider_ids=["vertex"]` (or
 
 ### 2.3 Vertex-specific setup
 
-The checked-in `document.ask` screen is a deliberately bounded synchronous
-demonstration. It is suitable for the inline path and the temporary Vertex GCS
-path, but product features handling larger or slower workloads should use the
-durable AI job boundary rather than extending this HTTP endpoint. The staging
+The checked-in `document.ask` screen uses the durable `ai.execute` boundary by
+default and polls its tenant-scoped result endpoint; `sync=true` remains a
+bounded inline option. Validated answer content is retained only when the
+organisation configures `retention_policy_days`. The staging
 diagnostic is intentionally not part of the application surface; cloud upload
 and deletion should be verified with the normal transfer contract tests or an
 explicit operator procedure.

@@ -1509,6 +1509,44 @@ async def test_stale_reservations_reconciled_without_retention_policy(
         await engine.dispose()
 
 
+async def test_expired_durable_question_is_cleared_without_retention_policy(
+    migrated_database: str,
+) -> None:
+    """Bounded task variables cannot outlive their hard expiry after a crash."""
+    engine, session_factory = _session_factory(migrated_database)
+    try:
+        async with session_factory() as session:
+            organisation = await _seed_organisation(session)
+            request = await _seed_request(
+                session,
+                organisation_id=organisation.id,
+                request_id="req-expired-question",
+                status=AIRequestStatus.QUEUED,
+            )
+            request.task = "document.ask"
+            request.execution_metadata = {"question": "What is the break clause?"}
+            request.execution_metadata_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            await session.commit()
+
+            summary = await ai_persistence.enforce_ai_retention(
+                session,
+                FakeObjectStorage(bucket="test-bucket"),
+                now=datetime.now(UTC),
+            )
+            assert summary["execution_metadata_cleared"] == 1
+
+            row = await session.scalar(
+                select(AIRequestRecord).where(AIRequestRecord.id == request.id)
+            )
+            assert row is not None
+            assert row.execution_metadata is None
+            assert row.execution_metadata_expires_at is None
+            assert row.status == AIRequestStatus.FAILED
+            assert row.error_code == ai_persistence.ERROR_CODE_WORKER_CRASHED
+    finally:
+        await engine.dispose()
+
+
 async def test_scratch_sweep_pages_past_the_first_listing(migrated_database: str) -> None:
     """An expired scratch object beyond the first listing page is still swept:
     the sweep advances past every page instead of stranding keys behind fresh

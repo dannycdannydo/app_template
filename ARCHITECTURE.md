@@ -117,16 +117,18 @@ AIService.execute(task=...)          app/ai/service.py
   budget-enforced in `AIService`; content never reaches logs, Sentry or audit
   metadata (retained output is a per-organisation policy with a documented deletion
   path).
-- **Bounded synchronous AI requests** (plan P9): `/api/v1/ai/ask` is synchronous
-  only and bounded by `AI_ASK_MAX_SYNCHRONOUS_BYTES` (default 5,000,000, never
-  above the inline aggregate threshold). The bound is enforced in the common
+- **Durable document questions with a bounded synchronous option** (plan P9):
+  `/api/v1/ai/ask` queues `ai.execute` by default and returns `202`; clients poll
+  `/api/v1/ai/ask/requests/{request_id}`. The optional `sync=true` path is bounded
+  by `AI_ASK_MAX_SYNCHRONOUS_BYTES` (default 5,000,000, never above the inline
+  aggregate threshold). The bound is enforced in the common
   `AIService.execute` boundary after organisation policy and source authority,
   so a disabled organisation or an unauthorised source keeps its own error and
   no pre-authorisation object read happens; a larger source is rejected with
   `ai_ask_attachment_too_large`, so long-running provider work never runs in an
-  HTTP request. The non-inline transfer modes remain implemented and tested at
-  the `AIService` layer and are reachable through durable `ai.execute`; this
-  release exposes no durable asynchronous ask path. In the hybrid profile Caddy and the API
+  HTTP request. The durable operation stores only the bounded question in the
+  tenant-scoped queued request, expires it independently, and keeps the broker
+  message reference-only. In the hybrid profile Caddy and the API
   share a private `edge` network and the API trusts only that subnet for
   `X-Forwarded-For`, so client-IP rate limiting is genuine per-client; the CSP
   `connect-src` names the configured storage origin so browser direct uploads

@@ -34,7 +34,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.ai import scratch as ai_scratch
 from app.ai.errors import AIError
 from app.ai.execution import (
+    ASK_TASK,
     enqueue_document_classification,
+    enqueue_document_execution,
     execute_managed_ai,
     get_ai_execution_snapshot,
 )
@@ -53,7 +55,9 @@ from app.modules.ai_demo.schemas import (
     ClassifyCost,
     ClassifyRouting,
     ClassifyUsage,
+    DocumentAskAcceptedResponse,
     DocumentAskResponse,
+    DocumentAskResultResponse,
     DocumentClassifyAcceptedResponse,
     DocumentClassifyResultResponse,
     DocumentClassifySyncResponse,
@@ -65,15 +69,6 @@ from app.storage import get_storage
 #: The single demonstrated task (kept in sync with ``app.ai.execution``).
 DEMO_TASK = "document.classify"
 
-#: The document QA demonstration task (v0.8 Scope §2.2, §6.4): a bounded
-#: question plus a private PDF. Plan P9 bounds the synchronous endpoint at
-#: ``AI_ASK_MAX_SYNCHRONOUS_BYTES`` (default and maximum: the 5,000,000-byte
-#: inline threshold), so the non-inline staging modes are not reachable through
-#: this endpoint; this release exposes no durable asynchronous ask operation, so
-#: a larger document is rejected with a safe "use a smaller document" error
-#: (recorded in the release docs).
-ASK_TASK = "document.ask"
-
 #: Each AI error code maps to one HTTP-shaped API error so the router never
 #: handles AI taxonomy itself. Messages stay generic and safe (BP §28) and
 #: take a subject noun (classification / question) so both demonstrations
@@ -82,14 +77,13 @@ _AI_ERROR_MAP: dict[str, APIError] = {
     "ai_unavailable": ServiceUnavailableError(
         code="ai_unavailable", message="AI is not enabled for this organisation."
     ),
-    # Plan P9 synchronous bound. The message names the supported remedy (a
-    # smaller document) and never advertises a durable asynchronous ask
-    # operation, which this release does not expose.
+    # Plan P9 synchronous bound. Callers that explicitly select the inline
+    # path can retry through the default durable operation for larger inputs.
     "ai_ask_attachment_too_large": ValidationError(
         code="ai_ask_attachment_too_large",
         message=(
             "The document is larger than the maximum size that can be processed "
-            "synchronously. Submit a smaller document."
+            "synchronously. Submit it as a background question instead."
         ),
     ),
     "budget_exceeded": ValidationError(
@@ -308,16 +302,14 @@ async def ask_sync(
     ``AIRequest`` contract stays unchanged; the answer is validated text, never
     unvalidated provider output (v0.7 Scope §6.4).
 
-    Plan P9 synchronous bound: the endpoint is synchronous only, so the source
-    size is checked against ``AI_ASK_MAX_SYNCHRONOUS_BYTES`` and a larger source
-    is rejected with ``ai_ask_attachment_too_large`` instead of running a long
-    large-file transfer inside an HTTP request (BP §18). The bound is enforced
+    Plan P9 synchronous bound: when explicitly selected, the synchronous path
+    checks the source against ``AI_ASK_MAX_SYNCHRONOUS_BYTES`` and rejects a
+    larger source instead of running a long transfer in HTTP (BP §18). The
+    default durable operation handles document-scale work. The bound is enforced
     inside the common ``AIService.execute`` boundary, *after* the organisation
     AI-enabled policy and the P6 source authority and *before* any attachment
     bytes are read, so a disabled organisation or an unauthorised key keeps its
-    own error and never triggers pre-authorisation storage I/O. There is no
-    durable asynchronous ask operation in this release, so the safe error asks
-    for a smaller document rather than advertising one.
+    own error and never triggers pre-authorisation storage I/O.
     """
     _validate_storage_reference(storage_reference, organisation_id)
     try:
@@ -355,6 +347,73 @@ async def ask_sync(
         ),
         cost=ClassifyCost(amount=result.cost.amount, currency=result.cost.currency),
         completed_at=result.completed_at,
+    )
+
+
+async def enqueue_ask(
+    session: AsyncSession,
+    *,
+    organisation_id: uuid.UUID,
+    user: User,
+    storage_reference: str,
+    question: str,
+) -> DocumentAskAcceptedResponse:
+    """Persist a durable document question and return its polling ids."""
+    _validate_storage_reference(storage_reference, organisation_id)
+    try:
+        queued = await enqueue_document_execution(
+            session,
+            organisation_id=organisation_id,
+            user_id=user.id,
+            storage_reference=storage_reference,
+            task=ASK_TASK,
+            metadata={"question": question},
+        )
+    except AIError as exc:
+        raise _translate_ai_error(exc, subject="question") from exc
+    return DocumentAskAcceptedResponse(job_id=str(queued.job_id), request_id=queued.request_id)
+
+
+async def get_ask_result(
+    session: AsyncSession,
+    *,
+    organisation_id: uuid.UUID,
+    request_id: str,
+) -> DocumentAskResultResponse:
+    """Return one organisation-scoped durable question result."""
+    record = await get_ai_execution_snapshot(
+        session,
+        organisation_id=organisation_id,
+        request_id=request_id,
+    )
+    output: str | None = None
+    if record.status == "succeeded" and record.output is not None:
+        candidate = record.output.get("text")
+        if isinstance(candidate, str) and candidate:
+            output = candidate
+    routing: ClassifyRouting | None = None
+    usage: ClassifyUsage | None = None
+    cost: ClassifyCost | None = None
+    if record.status == "succeeded":
+        routing = ClassifyRouting(
+            provider=record.provider or "",
+            model=record.model or "",
+            prompt_name=record.prompt_name or "",
+            prompt_version=record.prompt_version or 0,
+            fallback_used=record.fallback_used,
+            region=record.region,
+        )
+        usage = ClassifyUsage(input_tokens=record.input_tokens, output_tokens=record.output_tokens)
+        cost = ClassifyCost(amount=record.cost, currency="USD")
+    return DocumentAskResultResponse(
+        request_id=record.request_id,
+        status=record.status,
+        error_code=record.error_code,
+        output=output,
+        routing=routing,
+        usage=usage,
+        cost=cost,
+        completed_at=record.completed_at,
     )
 
 

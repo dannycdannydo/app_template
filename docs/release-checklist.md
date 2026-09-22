@@ -129,10 +129,10 @@ have. Each is a deliberate, reviewed boundary.
 - **Large non-inline AI files**: Azure OpenAI, DeepSeek and local adapters fail
   closed for non-inline files in this release; only OpenAI, Anthropic and Vertex
   implement transfer modes, and only when explicitly enabled.
-- **Synchronous AI ask bound**: `document.ask` is bounded by
-  `AI_ASK_MAX_SYNCHRONOUS_BYTES` (default and maximum 5,000,000 bytes). This
-  release exposes no durable asynchronous ask operation, so a larger document
-  must be reduced in size.
+- **Durable AI ask**: `document.ask` queues a durable job by default. Only its
+  explicit synchronous mode is bounded by `AI_ASK_MAX_SYNCHRONOUS_BYTES`
+  (default and maximum 5,000,000 bytes); larger documents use the durable path.
+  Returning answer content requires an organisation AI retention policy.
 - **Decompression-bomb protections and process document/page limits**: deferred
   to post-v1 (`SECURITY.md` → "Deferred controls"); the release ships the
   quarantine/failed states and the scanning seam.
