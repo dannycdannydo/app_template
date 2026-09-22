@@ -564,14 +564,14 @@ operations. Human review is required before changes are applied.
       before production-wide enablement — not at the adoption gate. New code and
       documentation use version-prefixed citations from the point the release
       scope exists.
-- [ ] Deliver each work unit through `implement -> review -> apply-and-commit`.
-- [ ] Keep migrations additive and reversible during the prototype and staged
+- [x] Deliver each work unit through `implement -> review -> apply-and-commit`.
+- [x] Keep migrations additive and reversible during the prototype and staged
       rollout.
-- [ ] Separate prototype migrations from any production enablement migration.
-- [ ] Define rollback and mixed-version behaviour before enabling enforcement.
-- [ ] Run policy and connection-pool tests against real PostgreSQL; mocked
+- [x] Separate prototype migrations from any production enablement migration.
+- [x] Define rollback and mixed-version behaviour before enabling enforcement.
+- [x] Run policy and connection-pool tests against real PostgreSQL; mocked
       session tests are not sufficient evidence.
-- [ ] Do not apply a production-wide policy rollout as part of approving the
+- [x] Do not apply a production-wide policy rollout as part of approving the
       prototype.
 
 Recommended sequence and expected size:
