@@ -25,21 +25,33 @@ FastAPI
 
 ## Backend structure
 
+The filesystem is authoritative. Routers live beside their domain module
+(`modules/<name>/router.py`), not in `app/api/`; there is no `app/events/` or
+`app/workers/` package. (Historical sketches in this file and the blueprint are
+design-level and have drifted.)
+
 ```text
 backend/app/
 ├── main.py              app factory, lifespan, middleware, exception handlers
-├── api/                 routers and shared dependencies (thin)
-├── core/                config, exceptions, logging, security, feature flags
-├── db/                  declarative base, session, conventions, migrations
-├── modules/             domain modules (users, organisations, teams, ...)
-├── integrations/        provider adapters (workos: organizations, invitations)
+├── broker.py            Dramatiq broker / middleware factory
+├── workers.py           Dramatiq entrypoint (imports the actor registry)
+├── api/                 shared request dependencies + health probes (thin)
+├── core/                config, exceptions, logging, security, rate limiting, feature flags
+├── db/                  declarative base, session, naming conventions, RLS context, role checks
+├── modules/             domain modules (users, organisations, permissions, records, files,
+│                        jobs, outbox, notifications, audit, feature_flags, invitations,
+│                        platform_admin, maintenance, webhooks, ai_demo)
+├── integrations/        provider adapters (workos: organizations, invitations, user management)
 ├── storage/             provider-neutral storage interface + adapters
 ├── email/               email interface + adapters
-├── ai/                  AI application layer (v0.7): AIService, task/prompt/model registries, provider adapters
-├── events/              domain events / outbox
-├── workers/             Dramatiq tasks
-└── observability/       logging, tracing, metrics
+├── scanning/            content-scanner interface + adapters (deny-by-default gate)
+├── ai/                  AI application layer: AIService, task/prompt/model registries, provider adapters
+├── job_coordinator/     outbox/durable-job coordinator (loop, reconciliation, dispatch registry)
+└── observability/       metrics and Sentry
 ```
+
+Alembic migrations live in `backend/alembic/`; the ORM models are registered on
+`Base.metadata` by the import block at the bottom of `app/db/base.py`.
 
 ## AI application layer (v0.7)
 

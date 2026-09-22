@@ -64,7 +64,7 @@ You are the **implementer**.
    - which subsection/checkpoint and checkbox items you will complete;
    - which blueprint sections you read.
 
-5. Implement the work **fully and end-to-end**: real working files (no stubs, placeholders, or TODOs), configuration wired correctly, tests written where they naturally belong, imports/types/formatting clean.
+5. Implement the work **fully and end-to-end**: real working files (no stubs, placeholders, or TODOs), configuration wired correctly, tests written where they naturally belong, imports/types/formatting clean. Keep documentation correct as part of the implementation, not as an afterthought: for every area you touch, update its `AGENTS.md` guide when a rule/invariant/procedure/gotcha changes, and update any centralised doc the change makes inaccurate (`ARCHITECTURE.md`, `API_CONVENTIONS.md`, `SECURITY.md`, `README.md`, `.env.example`, `docs/`). Prompt 02 verifies this and prompt 03 re-checks it before commit.
 
 6. Run **focused validation** immediately after your changes. Choose the
    smallest commands that exercise the changed behaviour and provide fast
@@ -96,6 +96,9 @@ You are the **implementer**.
    - active contract path and status;
    - subsection/checkpoint completed;
    - files created or changed, with a one-line purpose each;
+   - documentation updated for each touched area (area `AGENTS.md` guides,
+     centralised docs, `.env.example`/runbooks), or an explicit note that no
+     doc change was needed and why;
    - which checklist items should now be checked;
    - **which blueprint sections you followed** (the reviewer will read these);
    - any decisions made where the blueprint was silent or ambiguous;

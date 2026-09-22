@@ -369,9 +369,7 @@ async function save(): Promise<void> {
             />
           </div>
           <div class="flex flex-col gap-2">
-            <Label for="ai-settings-retention">
-              AI content and scratch retention days
-            </Label>
+            <Label for="ai-settings-retention"> AI content and scratch retention days </Label>
             <Input
               id="ai-settings-retention"
               v-model="form.retentionPolicyDays"

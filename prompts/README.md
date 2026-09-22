@@ -22,7 +22,7 @@ plan.
 | `00b-scope-review.md` | After `00-scope-next` | Reviewer | Scope plan reviewed; approved plan committed, or fixes requested |
 | `01-implement-next.md` | Starting a new chunk of work | Implementer | Next unchecked task is built, tested, and ready for review |
 | `02-review.md` | After implementation | Reviewer | Structured review with approve / request-changes verdict |
-| `03-apply-and-commit.md` | After review | Implementer | Review feedback applied, task checked off, committed |
+| `03-apply-and-commit.md` | After review | Implementer | Review feedback applied, documentation for touched areas updated, task checked off, committed |
 | `05-discuss-and-plan.md` | Before implementation, for a smoke-test sweep or emerging idea | Planning partner | Checkpointed standalone execution contract written as Draft, Active or Complete |
 
 ## Validation strategy
@@ -47,6 +47,23 @@ before review, and the complete local gate must be green before commit and PR.
 Contract sections named "Commands that must work", "Validation commands" or
 "Final gates" belong to prompt 03 when they name complete suites. They never
 override the prompt-01 or prompt-02 stage boundary.
+
+## Documentation follows the change
+
+Documentation is part of a work unit, never a later cleanup. Whoever changes
+behaviour updates the docs for every area they touch in the same change:
+
+- the `AGENTS.md` guide at the root of each touched area, whenever its rules,
+  invariants, layout, procedures or gotchas change;
+- any centralised doc the change makes inaccurate — `ARCHITECTURE.md`,
+  `API_CONVENTIONS.md`, `SECURITY.md`, `README.md`;
+- `.env.example`/`.env.production.example` for any new setting, and the relevant
+  `docs/` runbook (operations, backup, RLS) or a `docs/decisions/` ADR where one
+  applies.
+
+Prompt 01 writes the updates, prompt 02 reviews their accuracy against the diff,
+and prompt 03 is the final gate before `make check`, checkbox updates and commit
+(see `03-apply-and-commit.md` step 5). A stale guide is worse than none.
 
 ## The periodic audit
 

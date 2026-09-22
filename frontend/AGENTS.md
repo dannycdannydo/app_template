@@ -12,15 +12,15 @@ Stack: Vue 3 + TypeScript + Vite, Pinia (client state), TanStack Vue Query
 
 ## Layout (`src/`)
 
-| Path | Responsibility |
-| --- | --- |
-| `src/api/` | `client.ts` (typed `openapi-fetch` client + session middleware), `errors.ts` (`ApiError`), `generated/openapi.d.ts` |
-| `src/queries/` | **All** server-state composables + `queryClient.ts` + `organisationInvalidation.ts`; `README.md` is the canonical convention |
-| `src/stores/` | Pinia **client** state only (`session.ts`, `organisation.ts`, `ui.ts`) |
-| `src/features/auth/` | Auth slice; `workos.ts` is the only WorkOS SDK importer |
-| `src/components/ui/` | shadcn-vue primitives, one folder per component with an `index.ts` barrel |
-| `src/components/application/` | Reusable app components (no barrel; imported by `.vue` path) |
-| `src/views/`, `src/layouts/`, `src/router/`, `src/lib/` | Route screens (`*View.vue`), shell layout, routes/guards, shared helpers |
+| Path                                                    | Responsibility                                                                                                               |
+| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `src/api/`                                              | `client.ts` (typed `openapi-fetch` client + session middleware), `errors.ts` (`ApiError`), `generated/openapi.d.ts`          |
+| `src/queries/`                                          | **All** server-state composables + `queryClient.ts` + `organisationInvalidation.ts`; `README.md` is the canonical convention |
+| `src/stores/`                                           | Pinia **client** state only (`session.ts`, `organisation.ts`, `ui.ts`)                                                       |
+| `src/features/auth/`                                    | Auth slice; `workos.ts` is the only WorkOS SDK importer                                                                      |
+| `src/components/ui/`                                    | shadcn-vue primitives, one folder per component with an `index.ts` barrel                                                    |
+| `src/components/application/`                           | Reusable app components (no barrel; imported by `.vue` path)                                                                 |
+| `src/views/`, `src/layouts/`, `src/router/`, `src/lib/` | Route screens (`*View.vue`), shell layout, routes/guards, shared helpers                                                     |
 
 Tests live beside code in `__tests__/` directories; e2e specs live in `e2e/`.
 

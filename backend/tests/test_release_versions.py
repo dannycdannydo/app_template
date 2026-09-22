@@ -16,10 +16,16 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_PYPROJECT = REPOSITORY_ROOT / "backend" / "pyproject.toml"
 FRONTEND_PACKAGE = REPOSITORY_ROOT / "frontend" / "package.json"
+README = REPOSITORY_ROOT / "README.md"
 UPGRADES_DIR = REPOSITORY_ROOT / "docs" / "upgrades"
 
 RELEASE_RE = re.compile(r"^Release:\s+v(\S+)", re.MULTILINE)
 STATE_RE = re.compile(r"^State:\s+(\S+)", re.MULTILINE)
+# The front page names the current release so a fresh reader is not sent to a
+# superseded scope file. It is not one of the three version manifests, so it
+# needs its own guard against drifting behind a release (see the doc rule in
+# prompts/03-apply-and-commit.md).
+README_CURRENT_RELEASE_RE = re.compile(r"Current release:\s+\*\*v(\d+\.\d+\.\d+)\*\*")
 
 
 def _scope_path_for_version(version: str) -> Path:
@@ -67,6 +73,27 @@ def test_released_version_agrees_with_its_scope() -> None:
 
     assert release.group(1) == version
     assert state.group(1) == "complete"
+
+
+def test_readme_names_the_released_version() -> None:
+    """The front page must name the released version, not a superseded one.
+
+    The three package manifests and the scope file are checked above; the README
+    is not a manifest, so without this guard it silently drifts (it named v0.8
+    after v0.9 shipped). Keep the ``Current release: **vX.Y.Z**`` marker in
+    ``README.md`` in step with the recorded version.
+    """
+    with BACKEND_PYPROJECT.open("rb") as handle:
+        version = tomllib.load(handle)["project"]["version"]
+    readme = README.read_text(encoding="utf-8")
+    match = README_CURRENT_RELEASE_RE.search(readme)
+    assert match is not None, (
+        "README.md has no 'Current release: **vX.Y.Z**' marker; keep the front "
+        "page in step with the recorded version"
+    )
+    assert match.group(1) == version, (
+        f"README.md names release {match.group(1)} but {version} is recorded"
+    )
 
 
 def test_release_has_an_upgrade_guide() -> None:
