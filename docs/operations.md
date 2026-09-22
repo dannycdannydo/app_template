@@ -106,8 +106,10 @@ The check above is automated (RLS plan P4): `app.db.role_checks` connects with
 each configured credential and proves, from the server catalogue, that the
 authenticated role owns no table in `public`, carries none of
 `SUPERUSER`/`BYPASSRLS`/`CREATEDB`/`CREATEROLE` and inherits no privileged role.
-It runs automatically at production startup — `create_app`'s lifespan aborts the
-process before it serves traffic when a credential fails — and is available as a
+It runs automatically at production startup in **every normal runtime process**
+and aborts it before any work is served when a credential fails: the API
+(`create_app`'s lifespan), the Dramatiq worker (`app.workers.configure_worker`)
+and the outbox coordinator (its `_async_main`). It is also available as a
 pre-deployment command:
 
 ```bash

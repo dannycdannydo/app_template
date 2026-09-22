@@ -541,7 +541,12 @@ Each environment must confirm the separation by connecting through each
 credential and checking `current_user`, role attributes, protected-table
 ownership and inherited memberships; the per-environment procedure is in
 `docs/operations.md` and `docs/rls-rollout.md`. Plan P4 adds the automated
-startup/deployment check.
+startup/deployment check. The check is enforced at the start of every normal
+runtime process — the API (`create_app` lifespan), the Dramatiq worker
+(`app.workers.configure_worker`) and the outbox coordinator (`_async_main`) — so
+a worker or coordinator misconfigured to the owner or a `BYPASSRLS` role refuses
+to start rather than silently defeating every policy for background work. It is
+also exposed by `make verify-db-roles` for pre-deployment verification.
 
 ## Consequences
 

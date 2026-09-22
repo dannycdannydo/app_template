@@ -18,16 +18,21 @@ role cannot ``SET ROLE`` it (ADR-0022 decision 4).
 The check never connects with the owner credential — proving the *runtime*
 credential is restricted is the whole point, and a misconfigured runtime URL is
 caught precisely because the owner would fail the ownership/BYPASSRLS
-predicates. It runs automatically at production startup (``create_app``'s
-lifespan, before the process serves traffic) and is exposed by
-``scripts/verify_db_roles`` as the documented deployment check
+predicates. It runs automatically at the start of every normal runtime process
+before it serves traffic: the API from ``create_app``'s lifespan
+(:func:`verify_production_database_roles`), the Dramatiq worker from
+``app.workers.configure_worker`` (:func:`enforce_production_runtime_role`) and
+the outbox coordinator from its entrypoint
+(:func:`verify_production_coordinator_role`). It is also exposed by
+``scripts.verify_db_roles`` as the documented deployment check
 (``docs/operations.md`` → Database roles; ``docs/rls-rollout.md`` §5). Outside
-production the startup hook is a no-op, because the local/test arrangement uses
-the owner credential with RLS disabled.
+production every startup gate is a no-op, because the local/test arrangement
+uses the owner credential with RLS disabled.
 """
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Final
@@ -383,3 +388,52 @@ async def verify_production_database_roles(
     await verify_runtime_database_role(runtime_engine)
     if coordinator_engine is not None:
         await verify_coordinator_database_role(coordinator_engine)
+
+
+async def verify_production_coordinator_role(
+    settings: Settings, *, coordinator_engine: AsyncEngine
+) -> None:
+    """Enforce the coordinator role gate inside the coordinator's own loop.
+
+    The coordinator is a distinct production process on the non-bypass
+    ``app_coordinator`` credential (ADR-0022 decision 3). It calls this from
+    ``app.job_coordinator.loop._async_main`` before building the broker, so a
+    production coordinator refuses to start when its credential owns a table or
+    reaches a privileged role. It is a no-op outside production, mirroring
+    :func:`verify_production_database_roles`.
+    """
+    if settings.app_env != "production":
+        logger.debug("database_role_check_skipped", app_env=settings.app_env, label="coordinator")
+        return
+    await verify_coordinator_database_role(coordinator_engine)
+
+
+def enforce_production_runtime_role(settings: Settings) -> None:
+    """Enforce the runtime role gate for a synchronous process entrypoint.
+
+    The Dramatiq worker (``app.workers.configure_worker``) has no async lifespan,
+    so it calls this blocking gate before it installs the broker or registers
+    actors. It runs the same catalogue check against a short-lived engine built
+    from the runtime credential and disposes that engine before returning, so no
+    pooled connection is ever bound to this temporary event loop and the
+    worker's own ``AsyncIO`` loop starts clean (plan P4 bullet "no normal API or
+    worker path uses owner, superuser or BYPASSRLS credentials"). It is a no-op
+    outside production, mirroring :func:`verify_production_database_roles`.
+    """
+    if settings.app_env != "production":
+        logger.debug("database_role_check_skipped", app_env=settings.app_env, label="worker")
+        return
+
+    # Imported here rather than at module scope: ``app.db.session`` builds the
+    # process-wide engines on import, and keeping the edge local avoids a
+    # session -> role_checks import cycle.
+    from app.db.session import build_session_factory
+
+    async def _run() -> None:
+        runtime_engine, _ = build_session_factory(settings)
+        try:
+            await verify_runtime_database_role(runtime_engine)
+        finally:
+            await runtime_engine.dispose()
+
+    asyncio.run(_run())
