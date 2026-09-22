@@ -71,6 +71,17 @@ class Invitation(Base, TimestampMixin):
             unique=True,
             postgresql_where=text("status = 'sent'"),
         ),
+        # The pre-tenant login-time invitee lookup filters ``lower(email)`` with
+        # ``status = 'sent'``, which the plain ``email`` index cannot serve. Plan
+        # P4 group 5 creates this partial functional index in migration
+        # ``f1a2b3c4d5e6``; declaring it here keeps the ORM metadata and the
+        # migration in step so ``alembic check`` (the P2 migration-drift
+        # evidence) stays green.
+        Index(
+            "ix_invitations_lower_email",
+            text("lower(email)"),
+            postgresql_where=text("status = 'sent'"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UuidV7, primary_key=True, default=uuid7)

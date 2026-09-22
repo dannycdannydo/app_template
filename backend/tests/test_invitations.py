@@ -119,6 +119,27 @@ def test_invitation_indexes_cover_the_hot_queries() -> None:
     assert table.c.invited_by_user_id in indexed_columns
 
 
+def test_invitation_declares_the_login_lower_email_index() -> None:
+    """The pre-tenant invitee lookup index is declared on the model.
+
+    Plan P4 group 5 creates the partial functional index
+    ``ix_invitations_lower_email`` on ``invitations (lower(email)) WHERE
+    status = 'sent'`` in migration ``f1a2b3c4d5e6``. The ORM metadata must
+    declare it too, otherwise ``alembic check`` reports autogenerate drift
+    (the plan's P2 migration-drift evidence).
+    """
+    table = _table_of(Invitation)
+    index = next(
+        (index for index in table.indexes if index.name == "ix_invitations_lower_email"),
+        None,
+    )
+    assert index is not None, "ix_invitations_lower_email must be declared on Invitation"
+    assert [str(expression) for expression in index.expressions] == ["lower(email)"]
+    where = index.dialect_options["postgresql"].get("where")
+    assert where is not None, "the index must be partial (WHERE status = 'sent')"
+    assert str(where) == "status = 'sent'"
+
+
 # --- Query construction (the WHERE clauses the fake cannot apply) ---
 
 
