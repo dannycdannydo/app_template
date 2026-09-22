@@ -213,6 +213,71 @@ The v0.8 transfer modes (ADR-0017 amendment, `TEMPLATE_V0_8_SCOPE.md` §6.1–§
 
 The security suite (`test_security_suite.py`, `test_ai_import_boundary.py`, `test_ai_transfer_contracts.py`, `test_ai_gcs_managed_url.py`, `test_ai_anthropic_upload.py`, `test_ai_openai_upload.py`, `test_ai_vertex_staging.py`) proves the matrix: import boundaries keep transfer/provider concepts inside `app/ai/`, redaction tests keep logs/Sentry/audit/broker rows URL- and content-free, migration validity and generated-client drift stay green in CI, and the opt-in provider contract suites run only against dedicated non-production accounts.
 
+## Database row-level security and role separation (v0.9)
+
+The v0.9 release (ADR-0022, `TEMPLATE_V0_9_SCOPE.md`) adds PostgreSQL Row-Level
+Security (RLS) as a **default-deny backstop** to the application's organisation
+isolation. It supplements, and never replaces, the validated membership,
+permission and `404` controls above: even with RLS enabled, every service query
+keeps its explicit `organisation_id` predicate and a foreign row remains a
+`404`.
+
+- **Least-privilege database roles.** The ordinary API and worker path runs as
+  `app_runtime`: non-owner, non-superuser, `NOBYPASSRLS`, `NOINHERIT`. The outbox
+  coordinator, reliability-metrics refresh and `reconcile_jobs` run as
+  `app_coordinator`, a second non-bypass role whose policies are scoped to
+  dispatch state and whose UPDATE authority is granted per column. `DATABASE_URL`
+  (`app_owner`) is the schema-owner/migration credential and is never the runtime
+  path; production refuses to start without the runtime credential.
+- **No hidden universal bypass.** There is no implicit or request-selectable
+  bypass, and no request handler chooses its own role. Cross-tenant platform
+  access goes through explicit policies keyed to a transaction-local platform
+  context bound only after `require_platform_permission` authorises the caller;
+  the one-time bootstrap, the signature-verified `user.deleted` webhook and the
+  operator recovery/teardown CLI bind a separate, narrower `app.platform_service`
+  context. Platform status alone grants no tenant-row access.
+- **The one operational exception is isolated and audited.** `app_operator`
+  (`DATABASE_OPERATOR_URL`) is the only application role allowed to carry
+  `BYPASSRLS`, because its reviewed backup/restore/support operations are exactly
+  the cross-tenant reads a policy cannot express. It owns no table, has no
+  membership in either direction, the runtime role cannot `SET ROLE` it, it is
+  resolved only by `resolve_operator_database_url` (never falling back to the
+  runtime or owner credential), and no HTTP process or worker loads it. Every
+  use records who/when/where and the operation — never row contents, secrets,
+  tokens or provider responses (BP §28 never-log list).
+- **Fail-closed context.** Tenant, user and job context is bound with a
+  parameterised transaction-local `set_config(..., true)` after validation.
+  Missing, empty or malformed context returns no tenant rows and fails closed for
+  writes; it never means unrestricted access. Context cannot survive a commit,
+  rollback, exception, cancellation, timeout or pooled-connection reuse.
+- **Default-deny, matched policies.** Every enabled table has RLS enabled and
+  forced with matching `USING`/`WITH CHECK` policies, so inserts and updates
+  cannot create or move a row into another organisation. A `NULL` tenant key on
+  `audit_events`/`outbox_events` is never read as "all rows": global and
+  cross-tenant history is reachable only under the validated platform context or
+  the isolated operator credential. `notifications` additionally requires the
+  transaction-local user id, and indirect tables use a denormalised key or a
+  tested parent policy (ADR-0022 decision 6).
+- **Pre-tenant and control-plane lookups are narrow.** Authentication binds
+  `app.user_id` before the caller's own membership/invitation lookup under
+  SELECT-only user-keyed/email-keyed policies; a pre-tenant user context can
+  never write a membership, role grant or invitation. The verified
+  `invitation.revoked` webhook binds a single-row provider-keyed policy for a
+  read/lock and status flip only. Worker context comes from the durable `jobs`
+  row, never the broker.
+- **Startup/deployment gate.** `app.db.role_checks` refuses to start any normal
+  runtime process (API, Dramatiq worker, outbox coordinator) when its credential
+  owns a table, carries `SUPERUSER`/`BYPASSRLS`/`CREATEDB`/`CREATEROLE` or
+  inherits a privileged role, and asserts that `app_operator` is the only
+  `BYPASSRLS` application role. It is also `make verify-db-roles`.
+
+The real-PostgreSQL suites prove the controls: `test_rls_records_db.py` (P2
+prototype), the per-group `test_rls_*_enablement_db.py` suites,
+`test_rls_indirect_rows_db.py` (indirect-row strategies),
+`test_rls_operator_credential_boundary.py` (the operator credential) and the
+unchanged `test_org_isolation_matrix_db.py`, `test_tenant_isolation_registry.py`
+and `test_security_suite.py`.
+
 ## Reporting a vulnerability
 
 If you find a security issue, report it privately to the maintainers before disclosing publicly. Include a description of the issue, affected versions, and a minimal reproduction if possible. Do not open a public issue for security vulnerabilities.

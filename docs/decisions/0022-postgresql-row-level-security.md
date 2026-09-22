@@ -512,10 +512,11 @@ enablement migration.
 ### Release bookkeeping
 
 The production rollout (plan P3/P4) continues under the active plan, which
-remains the execution contract. A versioned release scope and immutable tag
-(anticipated as v0.9) are authored at release time, before production-wide
-enablement; rollout code and documentation adopt version-prefixed citations
-from that point.
+remains the execution contract until the release gates pass. The versioned
+release scope `TEMPLATE_V0_9_SCOPE.md` (`State: planned`) now records the same
+work as the release contract; the immutable `v0.9.0` tag is cut only after its
+release-time gates pass, and rollout code and documentation adopt
+version-prefixed citations from the point the scope exists.
 
 ### Deployment role separation
 
@@ -560,15 +561,16 @@ also exposed by `make verify-db-roles` for pre-deployment verification.
 - The adoption gate (2026-09-18) resolved this ADR to **Accepted**: RLS is
   adopted. The production rollout (P3/P4) continues under the active plan as a
   separate, versioned, human-reviewed work stream, so approving the prototype
-  did not by itself enable any production policy. A release scope and tag are
-  authored at release time; until then the active plan is the execution
-  contract.
+  did not by itself enable any production policy. The release contract
+  `TEMPLATE_V0_9_SCOPE.md` (`State: planned`) now exists; until its release
+  gates pass, the active plan is the execution contract.
 - The plan's versioned-scope rule is resolved by recorded human decision
   (2026-09-18): the RLS evaluation is governed by the active plan, and a
   versioned release scope and immutable tag are authored at release time,
-  before any production-wide enablement — not at the adoption gate. Prototype
-  (P2) code is removable evaluation work with no release tag; version-prefixed
-  citations apply once the release scope exists.
+  before any production-wide enablement — not at the adoption gate. The scope
+  is `TEMPLATE_V0_9_SCOPE.md`; prototype (P2) code is removable evaluation work
+  with no release tag, and version-prefixed citations apply now that the
+  release scope exists.
 
 This decision follows blueprint §8 (authentication), §9 (organisations and
 permissions), §10 (database conventions), §11 (transactions), §28
