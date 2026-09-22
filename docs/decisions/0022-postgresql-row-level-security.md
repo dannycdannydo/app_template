@@ -225,6 +225,33 @@ in the inventory as an explicit, reviewed exclusion enforced only by
 parent-existence application predicates. `record_revisions` and `ai_outputs`
 already carry `organisation_id` and keep their parent/composite foreign keys.
 
+**P4 final-strategy note (2026-09-22).** *This note records the strategy
+actually installed for the indirect family; it does not itself record the human
+review that plan P4 and `AGENTS.md` require before apply-and-commit.* The
+interim exclusion above is superseded for every indirect table, so no indirect
+table remains an exclusion:
+
+- `job_attempts` took the preferred **denormalised key** (plan P3 group 4b,
+  migration `d0e1f2a3b4c5`): a copied, non-null `organisation_id` tied to its
+  parent job by the composite `(job_id, organisation_id)` foreign key, so the
+  canonical `job_attempts_organisation_isolation` policy applies directly.
+- `notification_deliveries` (plan P3 group 2, migration `f5a6b7c8d9e0`) uses a
+  tested **parent-existence** RLS policy
+  (`notification_deliveries_parent_isolation`) that mirrors the parent
+  notification's organisation and recipient predicate, in place of the interim
+  exclusion.
+- `membership_roles` (plan P4 group 5, migration `f1a2b3c4d5e6`) uses a tested
+  **parent-existence** RLS read policy (`membership_roles_parent_isolation`)
+  split from the tenant-checked write policy
+  (`membership_roles_organisation_isolation`), in place of the interim
+  exclusion.
+
+`record_revisions` and `ai_outputs` carry `organisation_id`: `ai_outputs` keeps
+its composite parent foreign key, while `record_revisions` is an append-only
+ledger and deliberately has no parent foreign key. The consolidated conformance
+evidence for this decision is `backend/tests/test_rls_indirect_rows_db.py`,
+alongside each table group's own suite.
+
 ### 7. Nullable-tenant audit/outbox rows and global events
 
 A `NULL organisation_id` never means "all rows". The policy form is

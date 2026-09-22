@@ -441,6 +441,16 @@ the blocking indirect-membership-traversal and fail-closed `SET ROLE` probe
 findings were corrected. The indirect-rows bullet and the aggregate P4
 completion evidence below remain unchecked.
 
+**Human review recorded 2026-09-22 (indirect-row strategy conformance):** the
+tenant-isolation and control-plane implications of the P4 indirect-row
+conformance evidence were reviewed and approved. The unit adds the
+real-PostgreSQL `app_runtime` suite over `job_attempts` (denormalised key),
+`notification_deliveries` (parent existence) and `membership_roles` (parent read
+split from tenant-checked write), and the ADR-0022 decision-6 P4 final-strategy
+note recording those strategies in place of the interim exclusion. The review's
+mandatory documentation-accuracy fix (the decision-6 contradiction) and its
+non-blocking test-hardening findings were applied before approval.
+
 Known follow-up (separately scoped, not group 6): `alembic check` reports drift
 on `ix_invitations_lower_email` because the group-5 functional partial index is
 not declared on the `Invitation` ORM model. It must be picked up as its own work
@@ -450,7 +460,7 @@ unit so the P2 migration-drift evidence returns green.
       arbitrary tenant context.
 - [x] Protect membership, invitation and membership-role access according to
       their identity/control-plane classification.
-- [ ] Protect job attempts, notification deliveries and other indirect rows
+- [x] Protect job attempts, notification deliveries and other indirect rows
       using the approved parent or denormalised-key strategy.
 - [x] Handle global versus tenant audit/outbox events without treating a null
       tenant key as unrestricted access.
@@ -465,7 +475,7 @@ unit so the P2 migration-drift evidence returns green.
 
 P4 completion evidence:
 
-- [ ] The table inventory records a final policy or reviewed exclusion for
+- [x] The table inventory records a final policy or reviewed exclusion for
       every table.
 - [ ] No normal API or worker path uses owner, superuser or `BYPASSRLS`
       credentials.

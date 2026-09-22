@@ -72,7 +72,12 @@ blast radius.
 The machine-checked classification for every table is
 `backend/tests/tenant_isolation_registry.py`; the human-readable detail is
 `docs/rls-table-inventory.md`. Every table ends with either a tested policy or an
-explicit reviewed exclusion recorded in the inventory.
+explicit reviewed exclusion recorded in the inventory. The plan-P4 indirect-row
+strategies across groups — `job_attempts` (denormalised key and composite parent
+FK), `notification_deliveries` (parent existence) and `membership_roles` (parent
+read split from tenant-checked write) — are proven together by
+`backend/tests/test_rls_indirect_rows_db.py` rather than only inside each group
+suite.
 
 ### 3.1 Group 4 split and the group-4b prerequisite
 

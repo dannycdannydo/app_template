@@ -125,6 +125,36 @@ parent membership's durable organisation to equal the validated tenant
 (ADR-0022 decision 6). The policy design and rollback procedure are recorded in
 `docs/rls-rollout.md` §3.2.
 
+**Final indirect-row strategy (plan P4).** The plan's "protect job attempts,
+notification deliveries and other indirect rows using the approved parent or
+denormalised-key strategy" bullet is closed by the two ADR-0022 decision-6
+strategies, each with its own forced default-deny policy:
+
+- `job_attempts` uses the **denormalised key**: a copied, non-null
+  `organisation_id` (group 4b, migration `d0e1f2a3b4c5`) tied to its parent job
+  by the composite `(job_id, organisation_id)` foreign key, so the canonical
+  `job_attempts_organisation_isolation` policy applies directly and the copied
+  key cannot diverge from its parent.
+- `notification_deliveries` uses the **parent** strategy: it carries no tenant
+  key and the `notification_deliveries_parent_isolation` policy (group 2,
+  migration `f5a6b7c8d9e0`) evaluates an `EXISTS` against the parent
+  notification, mirroring the parent's organisation **and** recipient predicate
+  in both `USING` and `WITH CHECK`.
+- `membership_roles` uses the **parent** strategy: it carries no tenant key and
+  splits the parent-existence read visibility of
+  `membership_roles_parent_isolation` from the tenant-checked write authority of
+  `membership_roles_organisation_isolation` (group 5, migration
+  `f1a2b3c4d5e6`).
+
+`backend/tests/test_rls_indirect_rows_db.py` is the cross-cutting P4 conformance
+evidence for this bullet: against real PostgreSQL it asserts each table's schema
+shape (denormalised non-null key with the composite parent FK, or a parent key
+and no tenant key), that RLS is enabled and forced with the approved policy,
+that absent context fails closed for every indirect table, and that the
+restricted runtime role is bound by the parent/denormalised boundary — including
+the composite foreign key that rejects a `job_attempts` row whose copied tenant
+key does not match its parent job.
+
 ### 2.4 Operational
 
 | Table | Tenant key | Legitimate readers | Legitimate writers | Application access paths |
@@ -312,7 +342,9 @@ that closes the operational-tooling side of gaps 1 and 5: it is the one
 role in either direction, and is adopted only after membership normalisation.
 Gaps 1 (runtime separation), 2 (indirect tables), 4 (pre-tenant lookup)
 and the in-app platform context are already delivered by the P2/P3/group-5
-work. **Group 7 resolution (2026-09-20).** The remaining platform-only tables
+work; the indirect-row strategies are proven together by the plan-P4
+conformance suite `backend/tests/test_rls_indirect_rows_db.py`.
+**Group 7 resolution (2026-09-20).** The remaining platform-only tables
 (`platform_roles`, `platform_role_permissions`, `platform_memberships`,
 `bootstrap_states`) now carry their tested policies under migration
 `b4c5d6e7f8a9`, with RLS enabled and forced: the global platform catalogue is
