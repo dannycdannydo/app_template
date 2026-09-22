@@ -17,6 +17,7 @@ credentials, and ``migrated_database`` reverts to base at teardown.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import Iterator
 
@@ -38,10 +39,12 @@ from tests.rls_helpers import (
     upgrade_to_head,
 )
 
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.db.role_checks import (
     DatabaseRoleCheckError,
+    enforce_production_runtime_role,
     verify_coordinator_database_role,
+    verify_production_coordinator_role,
     verify_production_database_roles,
     verify_runtime_database_role,
 )
@@ -247,3 +250,57 @@ async def test_indirect_membership_chain_reaching_bypassrls_is_rejected(
         await runtime_engine.dispose()
         await coordinator_engine.dispose()
         await owner_engine.dispose()
+
+
+# --- Plan P4 aggregate evidence: the worker and coordinator startup gates ------
+
+
+def _production_settings(
+    *, runtime_url: str | None = None, coordinator_url: str | None = None
+) -> Settings:
+    return get_settings().model_copy(
+        update={
+            "app_env": "production",
+            "database_runtime_url": runtime_url,
+            "database_coordinator_url": coordinator_url,
+        }
+    )
+
+
+async def test_worker_gate_rejects_the_owner_and_accepts_the_runtime_credential(
+    migrated_database: str, runtime_database_url: str
+) -> None:
+    """``enforce_production_runtime_role`` fails closed on the owner credential.
+
+    The worker gate must reject a worker pointed at the schema owner (the
+    ``DATABASE_RUNTIME_URL`` misconfiguration the URL resolver cannot detect) and
+    pass on the migrated ``app_runtime`` login. It is deliberately synchronous
+    (the Dramatiq entrypoint has no event loop), so it owns its own loop and
+    cannot be awaited from the async suite; the assertion is made after the
+    blocking call returns.
+    """
+    with pytest.raises(DatabaseRoleCheckError):
+        await asyncio.to_thread(
+            enforce_production_runtime_role,
+            _production_settings(runtime_url=migrated_database),
+        )
+    await asyncio.to_thread(
+        enforce_production_runtime_role,
+        _production_settings(runtime_url=runtime_database_url),
+    )
+
+
+async def test_coordinator_gate_rejects_the_owner_and_accepts_the_coordinator_credential(
+    migrated_database: str, coordinator_database_url: str
+) -> None:
+    """``verify_production_coordinator_role`` fails closed on the owner credential."""
+    settings = _production_settings()
+    owner_engine = _engine(migrated_database)
+    coordinator_engine = _engine(coordinator_database_url)
+    try:
+        with pytest.raises(DatabaseRoleCheckError):
+            await verify_production_coordinator_role(settings, coordinator_engine=owner_engine)
+        await verify_production_coordinator_role(settings, coordinator_engine=coordinator_engine)
+    finally:
+        await owner_engine.dispose()
+        await coordinator_engine.dispose()

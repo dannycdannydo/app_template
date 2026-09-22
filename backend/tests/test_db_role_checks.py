@@ -19,6 +19,8 @@ from app.db.role_checks import (
     DatabaseRoleCheckError,
     RoleReport,
     _runtime_can_assume_operator,  # type: ignore[reportPrivateUsage]
+    enforce_production_runtime_role,
+    verify_production_coordinator_role,
     verify_production_database_roles,
 )
 
@@ -166,3 +168,59 @@ async def test_create_app_lifespan_aborts_before_serving_when_check_fails(
     with pytest.raises(DatabaseRoleCheckError):
         async with app.router.lifespan_context(app):
             raise AssertionError("lifespan must not yield when the role check fails")
+
+
+# --- Plan P4 aggregate evidence: the worker and coordinator gates --------------
+
+
+async def test_coordinator_gate_is_a_noop_outside_production() -> None:
+    settings = get_settings().model_copy(update={"app_env": "development"})
+    # A non-production call must not touch the engine at all.
+    await verify_production_coordinator_role(settings, coordinator_engine=cast(AsyncEngine, None))
+
+
+async def test_coordinator_gate_verifies_the_coordinator_engine_in_production(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[object] = []
+
+    async def fake_verify(engine: object) -> None:
+        seen.append(engine)
+
+    monkeypatch.setattr("app.db.role_checks.verify_coordinator_database_role", fake_verify)
+    settings = get_settings().model_copy(update={"app_env": "production"})
+    sentinel = cast(AsyncEngine, object())
+    await verify_production_coordinator_role(settings, coordinator_engine=sentinel)
+    assert seen == [sentinel]
+
+
+def test_worker_gate_is_a_noop_outside_production(monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden_factory(settings: object) -> object:
+        raise AssertionError("a non-production worker must not build a role-check engine")
+
+    monkeypatch.setattr("app.db.session.build_session_factory", forbidden_factory)
+    settings = get_settings().model_copy(update={"app_env": "test"})
+    enforce_production_runtime_role(settings)
+
+
+def test_worker_gate_builds_verifies_and_disposes_the_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class _Engine:
+        async def dispose(self) -> None:
+            events.append("disposed")
+
+    def fake_factory(settings: object) -> tuple[object, object]:
+        events.append("built")
+        return _Engine(), object()
+
+    async def fake_verify(engine: object) -> None:
+        events.append("verified")
+
+    monkeypatch.setattr("app.db.session.build_session_factory", fake_factory)
+    monkeypatch.setattr("app.db.role_checks.verify_runtime_database_role", fake_verify)
+    settings = get_settings().model_copy(update={"app_env": "production"})
+    enforce_production_runtime_role(settings)
+    assert events == ["built", "verified", "disposed"]

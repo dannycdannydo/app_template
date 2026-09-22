@@ -815,10 +815,17 @@ async def _async_main() -> None:
     """Wire settings, broker, registry and signals, then run until stopped."""
     from app.core.config import get_settings
     from app.core.logging import configure_logging
-    from app.db.session import coordinator_session_factory
+    from app.db.role_checks import verify_production_coordinator_role
+    from app.db.session import coordinator_engine, coordinator_session_factory
 
     settings = get_settings()
     configure_logging(log_level=settings.log_level, json_logs=not settings.debug)
+    # Plan P4: prove the coordinator credential is restricted before any work.
+    # The coordinator is a distinct production process; a credential that owned
+    # a table or reached BYPASSRLS would defeat every enabled row policy for
+    # dispatch settlement. The gate runs in this loop, so it shares the engine
+    # pool the coordinator will use. It is a no-op outside production.
+    await verify_production_coordinator_role(settings, coordinator_engine=coordinator_engine)
     # The registry's actor imports register the durable tasks with the
     # process broker; build it only after the broker is installed so the
     # actors bind to Redis (blueprint §36: one image, different commands).

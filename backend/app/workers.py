@@ -31,13 +31,22 @@ import dramatiq
 from app.broker import build_broker
 from app.core.config import get_settings
 from app.core.logging import configure_logging
+from app.db.role_checks import enforce_production_runtime_role
 
 _settings = get_settings()
 
 
 def configure_worker() -> None:
-    """Configure logging, the broker, and task registration for this process."""
+    """Configure logging, verify the runtime credential, and register tasks.
+
+    Plan P4: a production worker must never process jobs on the schema-owner or
+    a ``BYPASSRLS`` credential, because every enabled row policy would be
+    silently defeated for background work. The blocking role gate runs before
+    the broker is installed, so an unsafe credential aborts the worker at
+    startup. Outside production it is a no-op.
+    """
     configure_logging(log_level=_settings.log_level, json_logs=not _settings.debug)
+    enforce_production_runtime_role(_settings)
     dramatiq.set_broker(build_broker())
     # Task modules register their actors with the broker when imported. Import
     # them here, after the broker is set, so every actor is declared exactly

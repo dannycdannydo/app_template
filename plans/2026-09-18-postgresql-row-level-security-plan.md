@@ -467,6 +467,19 @@ note recording those strategies in place of the interim exclusion. The review's
 mandatory documentation-accuracy fix (the decision-6 contradiction) and its
 non-blocking test-hardening findings were applied before approval.
 
+**Human review recorded 2026-09-22 (worker and coordinator runtime-role
+gates):** the production-startup and infrastructure behaviour of the new
+fail-closed credential gates in the Dramatiq worker
+(`enforce_production_runtime_role` from `configure_worker`) and the outbox
+coordinator (`verify_production_coordinator_role` from `_async_main`), together
+with their database-role safety, were reviewed and approved. This extends the
+2026-09-20 startup/deployment approval to the two background runtime processes;
+the reviewer confirmed the worker gate's short-lived engine is disposed before
+the Dramatiq `AsyncIO` loop starts, the coordinator gate runs on the engine it
+will use, the gates are no-ops outside production, and a misconfigured worker
+exits non-zero rather than starting silently. The review's non-blocking
+should-fix and nit findings were applied before approval.
+
 Known follow-up (separately scoped, not group 6): `alembic check` reports drift
 on `ix_invitations_lower_email` because the group-5 functional partial index is
 not declared on the `Invitation` ORM model. It must be picked up as its own work
@@ -493,9 +506,9 @@ P4 completion evidence:
 
 - [x] The table inventory records a final policy or reviewed exclusion for
       every table.
-- [ ] No normal API or worker path uses owner, superuser or `BYPASSRLS`
+- [x] No normal API or worker path uses owner, superuser or `BYPASSRLS`
       credentials.
-- [ ] Platform and recovery procedures work without creating a hidden tenant
+- [x] Platform and recovery procedures work without creating a hidden tenant
       bypass in the ordinary application.
 
 ## Reference map

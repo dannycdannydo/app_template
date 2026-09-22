@@ -472,18 +472,35 @@ must contain no superuser, `BYPASSRLS` or protected-table-owner role. The same
 per-environment verification is repeated in `docs/operations.md`.
 
 **Automated check (plan P4).** The catalogue verification above is now executed
-by `app.db.role_checks`. A production process runs it from `create_app`'s
-lifespan and refuses to serve traffic when the runtime credential owns a table,
-carries `SUPERUSER`/`BYPASSRLS`/`CREATEDB`/`CREATEROLE` or inherits a privileged
-role; the check never connects with the owner credential, so an environment that
-points both URLs at the same role is rejected rather than silently accepted. The
-coordinator credential is checked the same way when configured. The same check
-is available before deployment:
+by `app.db.role_checks` and enforced at the start of **every normal runtime
+process** before it serves traffic:
+
+- the API runs it from `create_app`'s lifespan
+  (`verify_production_database_roles`, runtime and coordinator credentials);
+- the Dramatiq worker runs `enforce_production_runtime_role` from
+  `app.workers.configure_worker` before it installs the broker; and
+- the outbox coordinator runs `verify_production_coordinator_role` from its
+  `_async_main` before it builds the dispatch registry.
+
+A process refuses to start when its credential owns a table, carries
+`SUPERUSER`/`BYPASSRLS`/`CREATEDB`/`CREATEROLE` or inherits a privileged role, so
+a misconfigured worker or coordinator can no longer silently defeat every
+enabled policy for background work. The check never connects with the owner
+credential, so an environment that points both URLs at the same role is rejected
+rather than silently accepted. The gate is a no-op outside production. The same
+check is available before deployment:
 
 ```bash
 make verify-db-roles
 # or: cd backend && uv run python -m scripts.verify_db_roles
 ```
+
+Reviewed operator tooling is deliberately outside this runtime gate: the
+recovery, bootstrap-provisioning and reconciliation CLIs in `backend/scripts/`
+run on the restricted runtime or coordinator credential at an operator's
+direction and enforce no role gate of their own, because they are operator
+commands rather than the ordinary application; `make verify-db-roles` is the
+documented pre-check before running them.
 
 Group 6 adds the isolated operational credential, and it uses the same checks
 with one deliberate difference — `app_operator` is the **only** application
