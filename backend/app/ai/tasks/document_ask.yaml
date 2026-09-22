@@ -48,4 +48,9 @@ model_preferences:
 quality_tier: economy
 latency_tier: interactive
 max_input_tokens: 4096
-max_estimated_cost: "0.02"
+# The per-dispatch ceiling must cover the reviewed 12,288-token output
+# allowance at the priciest task-eligible model (Anthropic Claude Sonnet at
+# $15/M output ≈ $0.20 with a full input budget), or the fully reviewed
+# Anthropic managed-URL/provider-upload transfer path becomes unroutable.
+# The organisation monthly budget remains the separate spend control.
+max_estimated_cost: "0.25"

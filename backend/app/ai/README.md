@@ -223,13 +223,15 @@ input_variables:
 required_capabilities:
   - documents
 parameter_defaults:
-  max_tokens: 1024
+  max_tokens: 12288
   temperature: 0
 declares_text_result: true
 allowed_transfer_modes:
   - inline
+  - provider_upload
+  - managed_signed_url
   - storage_reference
-retains_output_content: false
+retains_output_content: true
 retry_policy:
   max_attempts: 2
   repair_attempts: 0
@@ -239,11 +241,12 @@ fallback_policy:
   allow_local: true
 model_preferences:
   - vertex.gemini-2.0-flash
+  - openai.gpt-4o-mini
   - fake.document-classifier
 quality_tier: economy
 latency_tier: interactive
 max_input_tokens: 4096
-max_estimated_cost: "0.02"
+max_estimated_cost: "0.25"
 ```
 
 Notes:
