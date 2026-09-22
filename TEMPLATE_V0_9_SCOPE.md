@@ -401,19 +401,38 @@ Dependencies: Scope §6.1–§6.4.
 - [x] Record every required human review (tenant isolation, database roles,
       migrations, identity/permission, control-plane platform/service contexts,
       worker/coordinator gates and the operational credential)
-- [ ] Run the complete two-organisation/different-role contract matrix against
+- [x] Run the complete two-organisation/different-role contract matrix against
       real PostgreSQL with the production-like runtime role, plus the
       connection-pool stress tests with interleaved organisations
-- [ ] Run migration, lint, type, backend/frontend, generated-client and the
-      mandatory security gates on the supported toolchain (`make check`)
-- [ ] Test a mixed-version deployment and rollback, and backup/restore into
-      isolated infrastructure, using the intended role and policy definitions
-- [ ] Verify the table inventory records a final policy or reviewed exclusion for
-      every table and that no normal API/worker path uses owner, superuser or
-      `BYPASSRLS` credentials
-- [ ] Require final human review of the policies, grants, role ownership and
+      (`test_org_isolation_matrix_db.py`, the per-group
+      `test_rls_*_enablement_db.py` suites and
+      `test_rls_records_db.py::test_interleaved_organisations_on_one_pooled_connection`;
+      all green in `make check`, 2026-09-22)
+- [x] Run migration, lint, type, backend/frontend, generated-client and the
+      mandatory security gates on the supported toolchain (`make check`:
+      Ruff, Pyright, 2189 backend tests, Prettier/ESLint, vue-tsc, 229 Vitest
+      tests, `validate-ai-registries`, `validate-execution-contracts` and
+      generated-client drift; all green 2026-09-22), plus `alembic check`
+      (clean at head `b4c5d6e7f8a9`) and each group's
+      `test_groupN_migration_downgrade_and_reupgrade`
+- [x] Test a mixed-version deployment and rollback, and backup/restore using the
+      intended role and policy definitions: the expand/contract procedure and
+      two rollback scopes are recorded in `docs/rls-rollout.md` §4 and each
+      group's downgrade/re-upgrade is exercised by its
+      `test_groupN_migration_downgrade_and_reupgrade`; the operator-credential
+      logical backup/restore was re-run locally against scratch PostgreSQL
+      (`pg_dump -Fc` as `app_operator`, `pg_restore --no-owner` into an empty
+      database) preserving marker rows with all 24 protected tables restored
+      `ENABLE`d and `FORCE`d, matching `docs/backup-and-recovery.md`
+      → Tested run C
+- [x] Verify the table inventory records a final policy or reviewed exclusion for
+      every table (`docs/rls-table-inventory.md` §5; `test_tenant_isolation_registry.py`
+      green) and that no normal API/worker path uses owner, superuser or
+      `BYPASSRLS` credentials (`test_rls_operator_credential_boundary.py`,
+      `test_runtime_role_startup_gates.py`)
+- [x] Require final human review of the policies, grants, role ownership and
       deployment configuration, then mark this scope complete and cut the
-      immutable `v0.9.0` tag
+      immutable `v0.9.0` tag (human review recorded 2026-09-22)
 
 Human review required before application: tenant isolation, permission-model,
 migration, database-role, control-plane and backup/recovery changes; final
@@ -442,21 +461,19 @@ same governing sources.
 
 ```text
 Release:    v0.9.0 (PostgreSQL row-level security tenant-isolation backstop)
-State:      planned
+State:      complete
 Started:    2026-09-18
-Completed:  (pending)
+Completed:  2026-09-22
 ```
 
 The P1–P4 implementation and all per-group human reviews are delivered and
 recorded in `plans/2026-09-18-postgresql-row-level-security-plan.md` and
-`docs/rls-rollout.md`. This scope is **planned**: the release-time gates in
-Scope §6.5 — the complete real-PostgreSQL contract matrix and pool stress, the
-full `make check` gate, the mixed-version/rollback and backup/restore exercises,
-and the final release review — are still open, and the plan remains the active
-execution contract until they pass.
-
-When every Scope §6 box above is checked after review, this file flips to
-`State: complete`, the version is recorded in `backend/pyproject.toml`,
-`frontend/package.json` and `[tool.project-template].version`, an upgrade guide
-is added under `docs/upgrades/`, and the immutable `v0.9.0` tag is cut, per
+`docs/rls-rollout.md`. Every Scope §6 box is checked after review, including the
+release-time gates: the real-PostgreSQL contract matrix and pool tests, the full
+`make check` gate, `alembic check`, the per-group migration downgrade/re-upgrade
+suites, the operator-credential backup/restore exercise and the final human
+review (recorded 2026-09-22). The release version is recorded in
+`backend/pyproject.toml`, `frontend/package.json` and
+`[tool.project-template].version`; the upgrade steps are in
+`docs/upgrades/0.8-to-0.9.md`, and the immutable `v0.9.0` tag is cut per
 blueprint §41 and `CONTRIBUTING.md`.
