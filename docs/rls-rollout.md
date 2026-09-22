@@ -541,9 +541,10 @@ and has no membership in either direction, and that the runtime role cannot
 
 The rollout is executed by the active plan
 `plans/2026-09-18-postgresql-row-level-security-plan.md` (checkpoints P3 and
-P4); no separate scope is required to make progress. A versioned release scope
-and immutable tag (anticipated as v0.9) are authored at release time, before
-production-wide enablement, and rollout code and documentation adopt
-version-prefixed citations from that point. P3 and P4 remain separately
-reviewed work units, and no production policy is enabled as part of approving
-the prototype.
+P4); no separate scope is required to make progress. The versioned release
+scope `TEMPLATE_V0_9_SCOPE.md` (`State: planned`) now records the same work as
+the release contract, and the immutable `v0.9.0` tag is cut only after its §6.5
+release-time gates pass; the plan remains the execution contract until then.
+Rollout code and documentation adopt version-prefixed citations from the point
+the scope exists. P3 and P4 remain separately reviewed work units, and no
+production policy is enabled as part of approving the prototype.

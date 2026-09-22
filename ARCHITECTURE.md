@@ -295,6 +295,77 @@ snapshot a `deleted` record_revisions row, then hard-delete the row
   does not depend only on the absence of API write paths and cannot be bypassed
   by `TRUNCATE` as the table-owning role.
 
+## Tenant isolation and PostgreSQL row-level security (v0.9)
+
+Organisation isolation is enforced first in the application (validated
+`X-Org-Id` context, membership/permission checks, org-scoped queries and a
+foreign-row `404`) and independently in the database by PostgreSQL Row-Level
+Security (RLS) as a **default-deny backstop** (ADR-0022, `TEMPLATE_V0_9_SCOPE.md`).
+RLS is supplementary: enabling a policy never relaxes the application predicate,
+permission check or `404` behaviour. The invariant is that an ordinary
+application connection cannot read or change an organisation-owned row without
+trusted transaction-local context authorising that row.
+
+```text
+request / worker claim / coordinator cycle
+        │
+        ▼
+validated context bound transaction-locally (set_config(..., true))
+        │   app.organisation_id, app.user_id, app.job_id,
+        │   app.platform_admin, app.platform_service, app.invitation_provider_id
+        ▼
+protected query → PostgreSQL evaluates the table's default-deny policy
+        │   absent/empty/malformed context → no rows, writes fail closed
+        ▼
+context clears automatically on commit/rollback and never survives pool reuse
+```
+
+- **Separate roles.** `DATABASE_URL` (`app_owner`) owns the schema and runs
+  Alembic/DDL only. `DATABASE_RUNTIME_URL` (`app_runtime`) is the ordinary API
+  and worker path: non-owner, non-superuser, `NOBYPASSRLS`, `NOINHERIT`.
+  `DATABASE_COORDINATOR_URL` (`app_coordinator`) is a second non-bypass role
+  whose policies are scoped to dispatch state rather than a tenant.
+  `DATABASE_OPERATOR_URL` (`app_operator`) is the isolated, audited operational
+  credential — the only application role allowed to carry `BYPASSRLS` — loaded
+  only by CLI/ops tooling, never by an HTTP process or worker. `app_metrics` is
+  a `NOLOGIN` `SECURITY DEFINER` aggregate role.
+- **Context propagation.** `app/db/rls.py` binds each value with a parameterised
+  transaction-local `set_config(key, $1, true)` only after the membership/
+  permission path (or, for workers, the durable row) validates it. Context is
+  never taken from a request body or broker message and never interpolated into
+  SQL.
+- **Policies per classification** (`docs/rls-table-inventory.md`): direct
+  organisation-owned tables take the canonical
+  `organisation_id = app_current_tenant_id()` policy; `notifications` adds the
+  transaction-local user id; `job_attempts` uses a denormalised non-null
+  `organisation_id` tied to its parent by a composite FK;
+  `notification_deliveries` and `membership_roles` use parent-existence policies
+  (the latter splitting read visibility from tenant-checked write authority);
+  `audit_events`/`outbox_events` are null-safe, and a `NULL` tenant key never
+  means "all rows".
+- **Explicit control-plane paths, no universal bypass.** Workers bind
+  `app.job_id` for a single-row `FOR SELECT` bootstrap read of the durable
+  `jobs` row, clear it, then bind that row's organisation. The coordinator,
+  reliability-metrics refresh and `reconcile_jobs` use `app_coordinator` with
+  column-level UPDATE grants. The platform plane binds a validated
+  `app.platform_admin` context after authorisation; the one-time bootstrap, the
+  signature-verified `user.deleted` webhook and the operator recovery/teardown
+  CLI bind the separate, narrow `app.platform_service` context. Platform status
+  alone grants no tenant-row access.
+- **Startup/deployment gate.** `app.db.role_checks` proves from the server
+  catalogue that each runtime credential owns no table in `public`, carries none
+  of `SUPERUSER`/`BYPASSRLS`/`CREATEDB`/`CREATEROLE` and inherits no privileged
+  role. It runs at the start of the API, the Dramatiq worker and the outbox
+  coordinator and aborts a misconfigured process before it serves work; the same
+  check is `make verify-db-roles`.
+- **Rollout and rollback.** Each table group is enabled by its own bounded,
+  additive, reversible Alembic migration with cross-organisation tests and an
+  `EXPLAIN` review before enforcement. The approved order, per-group design,
+  mixed-version/expand–contract procedure and the two rollback scopes (policy
+  layer vs schema downgrade) are in `docs/rls-rollout.md`; operations and the
+  operator backup path are in `docs/operations.md` and
+  `docs/backup-and-recovery.md`.
+
 ## Frontend structure
 
 Vue 3 + TypeScript SPA. Directory layout, conventions, and state-management split follow blueprint §14; UI follows the design system in blueprint §16 (reusable application components above shadcn-vue primitives). API types are generated, never hand-written (blueprint §15).
