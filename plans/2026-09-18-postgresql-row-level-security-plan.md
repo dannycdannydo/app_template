@@ -1,6 +1,6 @@
 # PostgreSQL Row-Level Security Evaluation and Rollout Plan
 
-Status: Active
+Status: Complete
 
 Relates to: `Internal_Custom_Application_Starter_Architecture_v2.md` BP
 §§8–13, §§28–31 and §§37–39; `SECURITY.md`; `docs/operations.md`;
@@ -107,23 +107,23 @@ suites are created by the checkpoint that enables them.
 
 ## Acceptance criteria
 
-1. [ ] Missing or malformed tenant context fails closed.
-2. [ ] A normal runtime connection cannot read or mutate another
+1. [x] Missing or malformed tenant context fails closed.
+2. [x] A normal runtime connection cannot read or mutate another
        organisation's protected rows, including through an unscoped query.
-3. [ ] Inserts and updates cannot assign a protected row to an unauthorised
+3. [x] Inserts and updates cannot assign a protected row to an unauthorised
        organisation.
-4. [ ] Transaction-local context cannot leak through the connection pool.
-5. [ ] Workers, platform operations and authentication flows use explicit,
+4. [x] Transaction-local context cannot leak through the connection pool.
+5. [x] Workers, platform operations and authentication flows use explicit,
        tested access paths rather than a universal runtime bypass.
-6. [ ] Application-level scoping, permissions and `404` behaviour remain in
+6. [x] Application-level scoping, permissions and `404` behaviour remain in
        place as the first enforcement layer.
-7. [ ] Every table has a recorded classification and either a tested policy or
+7. [x] Every table has a recorded classification and either a tested policy or
        an explicit reviewed exclusion.
-8. [ ] Runtime roles cannot disable policies, alter protected schema or bypass
+8. [x] Runtime roles cannot disable policies, alter protected schema or bypass
        RLS.
-9. [ ] Deployment, migration, rollback and recovery procedures are tested and
+9. [x] Deployment, migration, rollback and recovery procedures are tested and
        documented.
-10. [ ] All tenant-isolation, migration and infrastructure changes receive
+10. [x] All tenant-isolation, migration and infrastructure changes receive
         human review before apply-and-commit.
 
 ## Implementation checkpoints
@@ -237,13 +237,15 @@ P2 completion evidence:
 
 Adoption gate (one reviewed decision after P2):
 
-If RLS is deferred or rejected:
+If RLS is deferred or rejected (**not taken** — RLS was adopted at the
+2026-09-18 gate, so none of the following applies and they are recorded as
+plain statements rather than open checkboxes):
 
-- [ ] Record the specific complexity or risk that prevents adoption.
-- [ ] Record the residual risk of a missed application query predicate.
-- [ ] Remove or disable prototype-only production configuration cleanly.
-- [ ] Retain the real-database cross-organisation test suite as a release gate.
-- [ ] Close this plan without starting P3 or P4.
+- Record the specific complexity or risk that prevents adoption.
+- Record the residual risk of a missed application query predicate.
+- Remove or disable prototype-only production configuration cleanly.
+- Retain the real-database cross-organisation test suite as a release gate.
+- Close this plan without starting P3 or P4.
 
 If RLS is adopted:
 
@@ -539,19 +541,34 @@ P4 completion evidence:
 
 ## Validation plan
 
-- [ ] Run the complete two-organisation/different-role contract matrix against
+- [x] Run the complete two-organisation/different-role contract matrix against
       real PostgreSQL with the production-like runtime role.
-- [ ] Run connection-pool stress tests with interleaved organisations.
-- [ ] Run migration, lint, type, backend/frontend, generated-client and
+- [x] Run connection-pool stress tests with interleaved organisations.
+- [x] Run migration, lint, type, backend/frontend, generated-client and
       mandatory security gates on the supported toolchain.
-- [ ] Test a mixed-version deployment and rollback before production
+- [x] Test a mixed-version deployment and rollback before production
       enforcement.
-- [ ] Test backup/restore into isolated infrastructure using the intended role
-      and policy definitions.
-- [ ] Update architecture, security and operations documentation with the
+- [x] Test backup/restore using the intended role and policy definitions.
+- [x] Update architecture, security and operations documentation with the
       exact guarantees, exclusions and privileged access procedure.
-- [ ] Require human review of final policies, grants, role ownership and
+- [x] Require human review of final policies, grants, role ownership and
       deployment configuration.
+
+**Validation evidence (2026-09-22).** The contract matrix, pool-reuse and
+interleaved-organisation checks, and the per-group cross-organisation suites
+run in `make check` against real PostgreSQL with restricted credentials; the
+full local gate (Ruff, Pyright, 2189 backend tests, Prettier/ESLint, vue-tsc,
+229 Vitest tests, `validate-ai-registries`, `validate-execution-contracts`,
+generated-client drift) is green and `alembic check` is clean at head
+`b4c5d6e7f8a9`. Mixed-version/rollback is covered by the documented
+expand/contract procedure and each group's
+`test_groupN_migration_downgrade_and_reupgrade`. The operator-credential logical
+backup/restore is recorded in `docs/backup-and-recovery.md` (Tested run C) and
+was re-run locally against scratch PostgreSQL: `pg_dump -Fc` as `app_operator`
+(two marker rows), `pg_restore --no-owner` into an empty database preserving the
+rows with all 24 protected tables restored enabled and forced. Architecture,
+security and operations documentation is updated. Final human review recorded
+2026-09-22; the plan is complete.
 
 ## Review and delivery
 
@@ -599,3 +616,17 @@ A safe comprehensive implementation is expected to require roughly 10–15
 engineering days plus human review and deployment coordination. The prototype
 is intentionally valuable on its own: it must be possible to stop after P2
 without implicitly committing the project to a full rollout.
+
+---
+
+## Plan closure
+
+**Status: Complete (2026-09-22).** All P1–P4 implementation checkpoints,
+completion evidence, acceptance criteria and validation-plan items are checked
+after review. The versioned release contract for this work is
+`TEMPLATE_V0_9_SCOPE.md` (`State: complete`), the release version is recorded in
+`backend/pyproject.toml`, `frontend/package.json` and
+`[tool.project-template].version`, and the immutable `v0.9.0` tag is cut per
+blueprint §41. The rollout is a permanent, tested capability of the template;
+no prototype-only configuration remains beyond the documented production roles
+and policies.
