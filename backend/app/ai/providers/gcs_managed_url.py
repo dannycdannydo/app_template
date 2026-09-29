@@ -3,8 +3,8 @@
 The managed-signed-url mode mints a short-lived signed URL from the source
 storage and hands it to the provider as a file input. That only works when
 the source storage is publicly reachable over HTTPS. In development the
-template's storage seam is typically a local MinIO instance over plain HTTP —
-a signed URL from it would be rejected by the minter and unreachable by any
+template's storage seam is typically a local SeaweedFS instance over plain HTTP
+— a signed URL from it would be rejected by the minter and unreachable by any
 cloud provider anyway.
 
 This module is the development seam for that case (v0.8 Scope §2.3/§6.4,
@@ -136,7 +136,7 @@ class GcsManagedUrlStager:
     """Re-verify a private source, stage it into the GCS temp bucket and mint a URL.
 
     Used only when the source storage cannot produce a provider-reachable
-    HTTPS signed URL (local MinIO in development). It serves retained sources
+    HTTPS signed URL (local SeaweedFS in development). It serves retained sources
     (``managed_signed_url`` mode) and the Anthropic local-transient path
     (Scope §6.6: a transient source gets a signed URL to its scratch-GCS copy
     instead of a beta Files API upload). The staged GCS copy is an AI-owned

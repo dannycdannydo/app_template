@@ -102,10 +102,11 @@ broker/rate-limit topology and every gate were otherwise unchanged.
   unchanged (`git diff --exit-code` clean), now verified on a committed tree.
 - **Protected-route security suite** (**CI**):
   `pytest tests/test_security_suite.py tests/test_security.py` — 503 passed.
-- **External upload** (**CI**): MinIO `pytest -m storage_integration` — 8
-  passed; the `e2e/ai-ask.spec.ts` journey against the real external storage
-  origin ran on Chromium, Firefox and WebKit — 30 passed in `make e2e`. Later
-  runs use the pinned SeaweedFS service instead (SeaweedFS plan P2).
+- **External upload** (**CI**): MinIO (the test service in use at the time)
+  `pytest -m storage_integration` — 8 passed; the `e2e/ai-ask.spec.ts` journey
+  against the real external storage origin ran on Chromium, Firefox and WebKit
+  — 30 passed in `make e2e`. Later runs use the pinned SeaweedFS service instead
+  (SeaweedFS plan P2).
 - **Deployment Compose configuration** (**CI**): hybrid-VPS production and
   local fullstack `config` plus the Redis-policy and deployment-boundary
   assertions passed.

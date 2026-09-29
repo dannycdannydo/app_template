@@ -649,9 +649,9 @@ def test_storage_public_endpoint_can_be_set_explicitly() -> None:
         app_env="development",
         database_url="postgresql+asyncpg://x",
         storage_endpoint_url="http://localhost:9000",
-        storage_public_endpoint_url="http://minio:9000",
+        storage_public_endpoint_url="http://seaweedfs:9000",
     )
-    assert settings.storage_public_endpoint_url == "http://minio:9000"
+    assert settings.storage_public_endpoint_url == "http://seaweedfs:9000"
 
 
 def test_storage_provider_rejects_unknown_values() -> None:

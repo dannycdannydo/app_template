@@ -1,8 +1,8 @@
 """S3-compatible object storage adapter (blueprint §17, ADR-0006, Scope §6.2).
 
 ``S3Storage`` is the first real implementation of the :class:`ObjectStorage`
-interface: it talks to any S3-compatible service (MinIO locally, AWS S3 or any
-other S3-compatible provider elsewhere) through boto3. The boto3/botocore SDK
+interface: it talks to any S3-compatible service (SeaweedFS locally, AWS S3 or
+any other S3-compatible provider elsewhere) through boto3. The boto3/botocore SDK
 is imported only in this module — no other module outside ``app/storage/`` may
 import it (ADR-0006). Every blocking SDK call runs in a worker thread via
 ``asyncio.to_thread`` so the adapter satisfies the asyncio interface without
@@ -12,7 +12,7 @@ Two boto3 clients are kept. The data-plane client targets
 ``storage_endpoint_url`` for the API's own head/delete/bucket operations; the
 pre-signing client targets ``storage_public_endpoint_url``, the host the
 browser actually reaches (in the dev-docker stack the API talks to
-``http://minio:9000`` while the browser must PUT to ``http://localhost:9000``).
+``http://seaweedfs:9000`` while the browser must PUT to ``http://localhost:9000``).
 A URL pre-signed against the host the browser will use verifies, because the
 signature covers that host. When the public endpoint equals the data endpoint
 the two clients are the same object.
@@ -97,7 +97,7 @@ class S3Storage(ObjectStorage):
         self._client: Any = cast(Any, boto3.client(**client_kwargs))  # pyright: ignore[reportUnknownMemberType]
 
         # Pre-sign against the host the browser will use when it differs from
-        # the API's own storage host (e.g. dev-docker: minio:9000 vs
+        # the API's own storage host (e.g. dev-docker: seaweedfs:9000 vs
         # localhost:9000). The signature covers the host, so the URL only
         # verifies when the browser targets exactly this endpoint.
         if public_endpoint_url and public_endpoint_url != endpoint_url:

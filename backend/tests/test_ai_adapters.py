@@ -426,7 +426,7 @@ async def test_anthropic_managed_url_alone_dispatches_document_url_source() -> N
         return _json_response(_canned_anthropic_response(content='{"category": "lease"}'))
 
     adapter = AnthropicAdapter(api_key="ant-test", client=_client(handler))
-    managed_url = "https://minio.example.test/lease.pdf?X-Amz-Signature=x"
+    managed_url = "https://managed.example.test/lease.pdf?X-Amz-Signature=x"
     await adapter.complete(_anthropic_staged_request(staged_file=None, managed_url=managed_url))
     body = json.loads(captured[0].content)
     blocks = _anthropic_content_blocks(body)
@@ -1284,7 +1284,7 @@ async def test_openai_staged_file_managed_url_dispatches_input_file_url() -> Non
 
     adapter = OpenAIAdapter(api_key="sk-test", client=_client(handler))
     managed_url = (
-        "https://minio.example.test/org-bucket/lease.pdf?"
+        "https://managed.example.test/org-bucket/lease.pdf?"
         "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=secret-bearer-material"
     )
     response = await adapter.complete(
@@ -1365,7 +1365,7 @@ async def test_openai_managed_url_never_leaks_into_errors_or_logs() -> None:
         return _json_response({"error": {"message": "boom"}}, status=429)
 
     adapter = OpenAIAdapter(api_key="sk-test", client=_client(handler))
-    managed_url = "https://minio.example.test/lease.pdf?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=secret"
+    managed_url = "https://managed.example.test/lease.pdf?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=secret"
     with pytest.raises(ProviderRateLimitError) as excinfo:
         await adapter.complete(
             _staged_request(
@@ -1378,7 +1378,7 @@ async def test_openai_managed_url_never_leaks_into_errors_or_logs() -> None:
         )
     assert excinfo.value.retryable is True
     assert "X-Amz-Signature" not in str(excinfo.value)
-    assert "minio" not in str(excinfo.value)
+    assert "managed.example.test" not in str(excinfo.value)
 
 
 async def test_openai_staged_file_and_attachments_are_mutually_exclusive() -> None:
@@ -1401,7 +1401,7 @@ async def test_openai_managed_url_alone_dispatches_input_file_url() -> None:
         return _json_response(_canned_responses_response(content='{"category": "lease"}'))
 
     adapter = OpenAIAdapter(api_key="sk-test", client=_client(handler))
-    managed_url = "https://minio.example.test/lease.pdf?X-Amz-Signature=x"
+    managed_url = "https://managed.example.test/lease.pdf?X-Amz-Signature=x"
     response = await adapter.complete(
         _request(
             managed_url=managed_url,

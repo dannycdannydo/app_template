@@ -115,7 +115,7 @@ class ManagedUrlStager(Protocol):
     """The dev managed-URL staging seam (v0.8 Scope §2.3, §6.4/§6.5).
 
     A source storage that cannot produce a provider-reachable HTTPS signed URL
-    (local MinIO in development) is served by a stager that re-verifies the
+    (local SeaweedFS in development) is served by a stager that re-verifies the
     retained source, stages a copy into the user-provisioned GCS temp bucket
     and mints an HTTPS URL the provider can fetch. ``None`` (production with a
     public HTTPS storage) mints the URL directly from the source storage.

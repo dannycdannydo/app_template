@@ -18,7 +18,7 @@ Use a **provider-neutral storage interface** in the template (`storage/`), with 
 
 ## Consequences
 
-- The same application code runs on the hybrid VPS profile (S3-compatible, e.g. MinIO) and the managed Azure profile (Blob Storage).
+- The same application code runs on the hybrid VPS profile (any S3-compatible service, e.g. AWS S3 or another compatible provider) and the managed Azure profile (Blob Storage).
 - Adapter work is duplicated only at the boundary, and only when a new provider is genuinely needed.
 - Files are treated as untrusted input at the storage boundary (see `SECURITY.md`).
 
