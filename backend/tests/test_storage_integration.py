@@ -22,6 +22,7 @@ import asyncio
 import os
 import uuid
 from typing import Any, NoReturn, cast
+from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 import boto3
 import httpx
@@ -64,6 +65,24 @@ def _storage(*, bucket: str = _BUCKET) -> S3Storage:
         access_key_id=_ACCESS_KEY,
         secret_access_key=_SECRET_KEY,
     )
+
+
+def _query_parameters(url: str) -> dict[str, str]:
+    """Return a signed URL's first-level query parameters as a plain dict."""
+    return {key: values[0] for key, values in parse_qs(urlsplit(url).query).items()}
+
+
+def _swap_url_host(url: str) -> str:
+    """Return the URL with its host swapped to the alternate loopback name.
+
+    ``localhost`` and ``127.0.0.1`` reach the same test server, but a SigV4
+    signature binds the literal host, so the replayed request must be refused.
+    """
+    parts = urlsplit(url)
+    current = parts.hostname or ""
+    alternate = "127.0.0.1" if current != "127.0.0.1" else "localhost"
+    netloc = alternate if parts.port is None else f"{alternate}:{parts.port}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
 @pytest.fixture(scope="module")
@@ -132,6 +151,50 @@ async def test_private_bucket_denies_unsigned_requests(storage: S3Storage) -> No
     async with httpx.AsyncClient() as client:
         response = await client.put(unsigned_url, content=b"unsigned put")
     assert response.status_code == 403
+
+    await storage.delete_object(key)
+
+
+async def test_signed_urls_use_sigv4(storage: S3Storage) -> None:
+    """Plan P4: the adapter's signed URLs use SigV4 and bind the request host."""
+    key = f"organisations/org-integration/sigv4/{uuid.uuid4()}/original.pdf"
+    upload = await storage.create_upload_url(
+        file_id=uuid.uuid4(),
+        object_key=key,
+        content_type="application/pdf",
+        size_bytes=1,
+    )
+    download = await storage.create_download_url(object_key=key)
+    for signed in (upload, download):
+        parameters = _query_parameters(signed.url)
+        assert parameters["X-Amz-Algorithm"] == "AWS4-HMAC-SHA256"
+        assert "host" in parameters["X-Amz-SignedHeaders"].split(";")
+        # SigV2 query authentication must not be used.
+        assert "AWSAccessKeyId" not in parameters
+        assert "Signature" not in parameters
+
+
+async def test_signed_url_replayed_against_a_different_host_is_refused(
+    storage: S3Storage,
+) -> None:
+    """Plan P4: a SigV4 URL is host-bound, so replaying it against the same
+    server under a different host name is refused with 403 while the original
+    URL still succeeds."""
+    endpoint_host = urlsplit(_ENDPOINT).hostname
+    if endpoint_host not in {"localhost", "127.0.0.1", "::1"}:
+        _fail_or_skip(f"host-swap check needs a loopback endpoint, got {endpoint_host}")
+    content = b"%PDF-1.7 host binding " + uuid.uuid4().hex.encode()
+    key = f"organisations/org-integration/host-binding/{uuid.uuid4()}/original.pdf"
+    await _upload(storage, key, content, "application/pdf")
+
+    download = await storage.create_download_url(object_key=key)
+    swapped = _swap_url_host(download.url)
+    assert swapped != download.url
+    async with httpx.AsyncClient() as client:
+        refused = await client.get(swapped)
+        accepted = await client.get(download.url)
+    assert refused.status_code == 403
+    assert accepted.status_code == 200
 
     await storage.delete_object(key)
 

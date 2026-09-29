@@ -17,6 +17,13 @@ A URL pre-signed against the host the browser will use verifies, because the
 signature covers that host. When the public endpoint equals the data endpoint
 the two clients are the same object.
 
+Presigned URLs use SigV4 (`AWS4-HMAC-SHA256` query authentication) explicitly,
+so the signature binds the request host and no longer relies on the deprecated
+SigV2 scheme (plan P4, ADR-0014). SigV4 caps a presigned URL's lifetime at 7
+days; the adapter's configured TTLs are far shorter (15 minutes by default), so
+the cap is never reached. Both clients share the same signing configuration, so
+the data client and the public-endpoint pre-signing client produce SigV4 URLs.
+
 The configured bucket is created lazily on first use (idempotent, thread-safe)
 so `make dev` works without a provisioning step; buckets stay private — the
 adapter only ever hands out short-lived pre-signed URLs, never public reads.
@@ -50,6 +57,17 @@ _BUCKET_ALREADY_EXISTS_CODES = {"BucketAlreadyExists", "BucketAlreadyOwnedByYou"
 #: byte ceiling can be enforced mid-stream.
 _STREAM_CHUNK_BYTES = 1024 * 1024
 
+#: Explicit signature version for both boto3 clients (plan P4, ADR-0014).
+#: Without it botocore presigns S3 URLs with the deprecated SigV2 query scheme,
+#: which does not bind the request host. SigV4 signs the host (`host` appears in
+#: ``X-Amz-SignedHeaders``), so a URL replayed against a different host is
+#: refused.
+_SIGNATURE_VERSION = "s3v4"
+
+#: SigV4's hard cap on a presigned URL's lifetime (7 days). Configured TTLs must
+#: stay below it; the template's own TTLs are minutes, never days.
+SIGV4_MAX_PRESIGN_SECONDS = 7 * 24 * 60 * 60
+
 
 class S3Storage(ObjectStorage):
     """S3-compatible :class:`ObjectStorage` implementation over boto3."""
@@ -74,6 +92,11 @@ class S3Storage(ObjectStorage):
         if not url_ttl or url_ttl <= timedelta(0):
             raise ValueError("S3Storage url_ttl must be positive")
 
+        # SigV4 signs a region into the credential scope, so an empty region is
+        # resolved to us-east-1 explicitly rather than left to botocore's
+        # ambient configuration (the ``storage_region`` setting documents this
+        # fallback, and bucket creation already treats empty as us-east-1).
+        region = region or "us-east-1"
         self._bucket = bucket
         self._region = region
         self._url_ttl = url_ttl
@@ -84,13 +107,13 @@ class S3Storage(ObjectStorage):
             "service_name": "s3",
             "endpoint_url": endpoint_url,
             "config": Config(
+                signature_version=_SIGNATURE_VERSION,
                 connect_timeout=5,
                 read_timeout=5,
                 retries={"max_attempts": 2},
             ),
         }
-        if region:
-            client_kwargs["region_name"] = region
+        client_kwargs["region_name"] = region
         if access_key_id:
             client_kwargs["aws_access_key_id"] = access_key_id
             client_kwargs["aws_secret_access_key"] = secret_access_key
@@ -115,7 +138,7 @@ class S3Storage(ObjectStorage):
         # only for regions they know, and our development default is
         # us-east-1, so the constraint is sent solely when needed.
         self._create_bucket_kwargs: dict[str, Any] = {}
-        if region and region != "us-east-1":
+        if region != "us-east-1":
             self._create_bucket_kwargs["CreateBucketConfiguration"] = {"LocationConstraint": region}
 
     @property

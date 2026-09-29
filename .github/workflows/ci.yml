@@ -137,9 +137,11 @@ jobs:
   # SeaweedFS-backed storage integration tests (v0.5 Scope §6.7, blueprint §17;
   # SeaweedFS plan P2): the S3 adapter is proven against a real S3-compatible
   # server — signed upload round trip, private-bucket denial (unsigned GET ->
-  # 403), lazy bucket creation, head/delete, copy/promotion and the browser
-  # CORS contract. The tests carry the `storage_integration` marker and are
-  # excluded from the default `make test` suite (see backend/pyproject.toml),
+  # 403), lazy bucket creation, head/delete, copy/promotion, the browser CORS
+  # contract and the P4 SigV4 assertions (query-auth algorithm, host binding
+  # and a host-swapped URL refused with 403). The tests carry the
+  # `storage_integration` marker and are excluded from the default `make test`
+  # suite (see backend/pyproject.toml),
   # so this dedicated service-backed job is where that marker runs. The pinned
   # SeaweedFS release is the same artefact local development uses and is pulled
   # anonymously with no registry credentials. STORAGE_INTEGRATION_REQUIRED turns

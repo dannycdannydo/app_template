@@ -1,6 +1,6 @@
 # 01 — SeaweedFS for Local S3 Development and Integration Tests
 
-Status: Active
+Status: Complete
 
 Replace the unavailable MinIO community image in local development and CI with
 SeaweedFS as the S3-compatible test server. Keep the application's provider-
@@ -203,24 +203,24 @@ storage contract.
 
 ### P4 — Presign storage URLs with SigV4
 
-- [ ] Set `signature_version="s3v4"` explicitly in the `S3Storage` client
+- [x] Set `signature_version="s3v4"` explicitly in the `S3Storage` client
   `Config`, so both the data client and the public-endpoint pre-signing client
   produce SigV4 presigned PUT/GET URLs (`X-Amz-Algorithm=AWS4-HMAC-SHA256`,
   `host` in `X-Amz-SignedHeaders`). No other adapter behaviour, `STORAGE_*`
   setting, TTL or key layout changes.
-- [ ] Add unit tests in `backend/tests/test_storage_s3.py` that assert SigV4
+- [x] Add unit tests in `backend/tests/test_storage_s3.py` that assert SigV4
   query parameters on upload and download URLs, including the split
   public-endpoint case, and that configured TTL bounds stay under the SigV4
   7-day maximum.
-- [ ] Extend `backend/tests/test_storage_integration.py` (adding assertions,
+- [x] Extend `backend/tests/test_storage_integration.py` (adding assertions,
   never weakening them) to prove, against the pinned SeaweedFS, that signed
   URLs are SigV4 and that a signed URL replayed against a different host is
   refused with `403`. The CI `storage-integration` job must run these with no
   skips.
-- [ ] Confirm that consumers of adapter-issued URLs are unaffected: the
+- [x] Confirm that consumers of adapter-issued URLs are unaffected: the
   browser direct-upload path (`frontend/src/lib/upload.ts`), the AI transfer
   and managed-signed-URL paths, and the e2e storage journey.
-- [ ] Update ADR-0014 with the signature-version decision, the 7-day presign
+- [x] Update ADR-0014 with the signature-version decision, the 7-day presign
   cap and the share-link pattern for long-lived links. Also update the
   `ARCHITECTURE.md` storage section, `backend/AGENTS.md` where it states
   adapter rules, and the status of finding 1 in
