@@ -183,7 +183,7 @@ CI image and service changes, and any new environment or credential handling.
 
 ### P3 — Verify, document and retire MinIO test dependencies
 
-- [ ] Run the service-backed integration suite from a clean local environment and
+- [x] Run the service-backed integration suite from a clean local environment and
   on the PR CI workflow; confirm no test is skipped due to endpoint or CORS
   configuration.
 - [x] Run `make validate-execution-contracts`, Compose validation, the required
