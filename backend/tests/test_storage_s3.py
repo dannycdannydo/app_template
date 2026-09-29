@@ -18,12 +18,14 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 from unittest.mock import Mock
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
 from app.ai.attachments import MAX_ATTACHMENT_BYTES
+from app.ai.transfer import MANAGED_URL_MAX_TTL_SECONDS
 from app.core.config import Settings
-from app.storage import ObjectStorage, S3Storage
+from app.storage import SIGV4_MAX_PRESIGN_SECONDS, ObjectStorage, S3Storage
 from app.storage.base import DEFAULT_SIGNED_URL_TTL
 from app.storage.factory import get_storage
 from app.storage.types import ObjectInfo, SignedUrl
@@ -73,6 +75,23 @@ def _client_error(code: str) -> Exception:
         {"Error": {"Code": code, "Message": "boom"}, "ResponseMetadata": {}},
         "Operation",
     )
+
+
+def _storage_with_real_presign(*, public_endpoint: str | None = None) -> S3Storage:
+    """Return storage whose real boto3 clients sign URLs locally.
+
+    Presigning is a pure local computation (no network calls), so a real client
+    can prove the produced query parameters without a provider. Bucket creation
+    is skipped by marking the bucket ensured.
+    """
+    storage = _make_storage(public_endpoint=public_endpoint)
+    storage._bucket_ensured = True  # type: ignore[reportPrivateUsage]
+    return storage
+
+
+def _query_parameters(url: str) -> dict[str, str]:
+    """Return a URL's first-level query parameters as a plain dict."""
+    return {key: values[0] for key, values in parse_qs(urlparse(url).query).items()}
 
 
 async def test_s3_is_an_object_storage_implementation() -> None:
@@ -133,6 +152,97 @@ async def test_download_url_presigns_a_get() -> None:
     )
     assert download.method == "GET"
     assert download.url == "https://presigned/download"
+
+
+async def test_upload_and_download_urls_use_sigv4() -> None:
+    """Plan P4: presigned URLs are SigV4, not the deprecated SigV2 scheme.
+
+    Presigning is local, so the real botocore client (not a mock) produces the
+    URL and the test asserts the actual query authentication: the algorithm, a
+    host-bound signed-header set, and the absence of SigV2 parameters.
+    """
+    storage = _storage_with_real_presign()
+    upload = await storage.create_upload_url(
+        file_id=_FILE_ID,
+        object_key=_KEY,
+        content_type="application/pdf",
+        size_bytes=1024,
+    )
+    download = await storage.create_download_url(object_key=_KEY)
+
+    upload_parameters = _query_parameters(upload.url)
+    download_parameters = _query_parameters(download.url)
+    for parameters in (upload_parameters, download_parameters):
+        assert parameters["X-Amz-Algorithm"] == "AWS4-HMAC-SHA256"
+        assert parameters["X-Amz-Credential"]
+        assert parameters["X-Amz-Date"]
+        assert parameters["X-Amz-Signature"]
+        assert "host" in parameters["X-Amz-SignedHeaders"].split(";")
+        # SigV2 query authentication must not be used.
+        assert "AWSAccessKeyId" not in parameters
+        assert "Signature" not in parameters
+    # The upload binds the declared content type; the download only binds host.
+    assert "content-type" in upload_parameters["X-Amz-SignedHeaders"].split(";")
+    assert upload_parameters["X-Amz-Expires"] == str(int(DEFAULT_SIGNED_URL_TTL.total_seconds()))
+
+
+async def test_sigv4_expiry_follows_an_overridden_ttl() -> None:
+    storage = _storage_with_real_presign()
+    upload = await storage.create_upload_url(
+        file_id=_FILE_ID,
+        object_key=_KEY,
+        content_type="application/pdf",
+        size_bytes=1024,
+        expires_in=timedelta(minutes=5),
+    )
+    assert _query_parameters(upload.url)["X-Amz-Expires"] == "300"
+
+
+async def test_empty_region_signs_the_us_east_1_scope() -> None:
+    """SigV4 needs a region, and an unset region must not be left to botocore's
+    ambient configuration (the adapter documents a us-east-1 fallback)."""
+    storage = S3Storage(
+        bucket=_BUCKET,
+        endpoint_url=_ENDPOINT,
+        region="",
+        access_key_id="test-access-key",
+        secret_access_key="test-secret-key",
+    )
+    storage._bucket_ensured = True  # type: ignore[reportPrivateUsage]
+    download = await storage.create_download_url(object_key=_KEY)
+    credential = _query_parameters(download.url)["X-Amz-Credential"]
+    assert credential.split("/")[2] == "us-east-1"
+
+
+async def test_split_public_endpoint_signs_sigv4_against_the_public_host() -> None:
+    """Both clients carry the SigV4 config, so the public-endpoint pre-signer
+    also produces a host-bound SigV4 URL."""
+    storage = _storage_with_real_presign(public_endpoint=_PUBLIC_ENDPOINT)
+    download = await storage.create_download_url(object_key=_KEY)
+    assert urlparse(download.url).netloc == "public.local:9000"
+    parameters = _query_parameters(download.url)
+    assert parameters["X-Amz-Algorithm"] == "AWS4-HMAC-SHA256"
+    assert "host" in parameters["X-Amz-SignedHeaders"].split(";")
+
+
+def test_both_clients_are_configured_for_sigv4() -> None:
+    storage = _make_storage(public_endpoint=_PUBLIC_ENDPOINT)
+    assert storage._client.meta.config.signature_version == "s3v4"  # type: ignore[reportPrivateUsage]
+    assert storage._presign_client.meta.config.signature_version == "s3v4"  # type: ignore[reportPrivateUsage]
+
+
+def test_configured_signed_url_ttl_bounds_stay_under_the_sigv4_cap() -> None:
+    """Plan P4: no configured presign lifetime may reach SigV4's 7-day cap."""
+    assert DEFAULT_SIGNED_URL_TTL.total_seconds() <= SIGV4_MAX_PRESIGN_SECONDS
+    assert MANAGED_URL_MAX_TTL_SECONDS <= SIGV4_MAX_PRESIGN_SECONDS
+    upload_ttl_field = Settings.model_fields["storage_upload_url_ttl_seconds"]
+    upper_bounds = [
+        bound.le  # type: ignore[attr-defined]
+        for bound in upload_ttl_field.metadata
+        if getattr(bound, "le", None) is not None
+    ]
+    assert upper_bounds, "storage_upload_url_ttl_seconds must declare an upper bound"
+    assert max(upper_bounds) <= SIGV4_MAX_PRESIGN_SECONDS
 
 
 async def test_head_object_maps_metadata() -> None:

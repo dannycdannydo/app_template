@@ -1,6 +1,6 @@
 # ADR 0014: S3 Adapter as the First Storage Implementation and `documents.*` Gating for Files and Jobs
 
-Status: Accepted (amended 2026-09-29: local/CI test service changed from MinIO to SeaweedFS, production stays provider-neutral; `plans/01-seaweedfs-storage-testing.md` P3)
+Status: Accepted (amended 2026-09-29: local/CI test service changed from MinIO to SeaweedFS, production stays provider-neutral, `plans/01-seaweedfs-storage-testing.md` P3; presigned URLs moved to SigV4, P4)
 
 ## Context
 
@@ -44,6 +44,42 @@ ADR-0006 defined a provider-neutral `ObjectStorage` interface with adapters for 
   production storage provider. Production remains provider-neutral behind the
   `S3Storage` adapter and `STORAGE_PROVIDER=s3`, and may run against any
   S3-compatible service.
+
+### Amendment (2026-09-29: presigned URLs use SigV4)
+
+- **`S3Storage` signs presigned URLs with SigV4.** Both boto3 clients
+  (the data client and the public-endpoint pre-signing client) set
+  `signature_version="s3v4"` explicitly, so presigned PUT/GET URLs use
+  `AWS4-HMAC-SHA256` query authentication. Without it botocore presigned S3
+  URLs with the deprecated SigV2 scheme (`plans/01-seaweedfs-storage-testing.md`
+  finding 1). SigV4 signs the request host (`host` appears in
+  `X-Amz-SignedHeaders`), so a URL replayed against a different host is refused;
+  SigV2 did not bind the host.
+- **An empty `STORAGE_REGION` resolves to `us-east-1` in the adapter.** SigV4
+  signs the region into `X-Amz-Credential`, so the credential scope must be
+  deterministic rather than left to botocore's ambient
+  `AWS_REGION`/`AWS_DEFAULT_REGION`/profile resolution. An empty `region` is now
+  resolved to `us-east-1` explicitly, matching the `storage_region` setting's own
+  documented fallback (`app/core/config.py`) and the bucket-creation behaviour
+  that already treated empty as `us-east-1`. This is the only adapter behaviour
+  change beyond `signature_version`; no `STORAGE_*` setting, TTL or object-key
+  layout changed. **Operator consequence:** a deployment whose bucket is outside
+  `us-east-1` must set `STORAGE_REGION` explicitly — leaving it empty and relying
+  on ambient AWS configuration now produces a URL signed for the wrong region,
+  which S3 rejects.
+- **7-day presign cap.** SigV4 caps a presigned URL's lifetime at 7 days
+  (shorter under temporary credentials). The template's signed URLs are minutes
+  — 15 minutes by default, at most 1 hour for the browser upload capability
+  (`storage_upload_url_ttl_seconds`, `le=3600`), and 1,800 s for AI managed
+  URLs — so the cap is never reached, and browser uploads still bind the
+  declared `Content-Type`.
+- **Long-lived links use app-issued share links, not raw storage URLs.** A link
+  that must work without a logged-in session (for example a file inside a
+  shared export) must not embed a storage URL. The chosen pattern is an opaque,
+  hashed, expiring and revocable token at a public app route that records an
+  audit event and redirects to a fresh short-lived SigV4 URL. That is a new
+  unauthenticated, tenant-data-serving endpoint, so it needs its own design and
+  human review (authentication and tenant isolation) when an app requires it.
 
 ## Consequences
 

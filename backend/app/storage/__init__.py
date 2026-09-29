@@ -9,11 +9,12 @@ never a provider SDK; the concrete adapter is selected from settings through
 from app.storage.base import DEFAULT_SIGNED_URL_TTL, ObjectStorage
 from app.storage.factory import get_storage
 from app.storage.fake import FakeObjectStorage
-from app.storage.s3 import S3Storage
+from app.storage.s3 import SIGV4_MAX_PRESIGN_SECONDS, S3Storage
 from app.storage.types import ObjectInfo, SignedUrl
 
 __all__ = [
     "DEFAULT_SIGNED_URL_TTL",
+    "SIGV4_MAX_PRESIGN_SECONDS",
     "FakeObjectStorage",
     "ObjectInfo",
     "ObjectStorage",

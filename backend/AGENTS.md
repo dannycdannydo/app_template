@@ -81,6 +81,10 @@ that alters a backend rule or convention.
   adapter package: `app/storage/`, `app/email/`, `app/scanning/`,
   `app/integrations/workos/`, `app/ai/providers/`. The AI boundary is enforced by
   `tests/test_ai_import_boundary.py`.
+- `S3Storage` presigns with SigV4 (`signature_version="s3v4"`): signed URLs are
+  host-bound and capped at 7 days. Keep all signing configuration in the adapter
+  and never mint long-lived raw storage links — a link for a logged-out user uses
+  an app-issued share link that redirects to a fresh short-lived SigV4 URL.
 - Long-running work goes through durable jobs, never inline HTTP (see
   `app/job_coordinator/AGENTS.md`).
 

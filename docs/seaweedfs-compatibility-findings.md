@@ -129,8 +129,8 @@ There is **no blocking gap**: every S3 behaviour the repository relies on is
 tested reliably, so P2 can proceed after review. The following observations
 need a decision or care in P2/P3. None of them is a SeaweedFS deficiency.
 
-1. **The presigned URLs are SigV2, not SigV4.** With botocore `1.43.66` and the
-   unchanged `S3Storage` client configuration (no explicit
+1. **The presigned URLs are SigV2, not SigV4 (resolved by P4).** With botocore
+   `1.43.66` and the unchanged `S3Storage` client configuration (no explicit
    `signature_version`), presigned URLs use SigV2 query authentication
    (`AWSAccessKeyId`/`Signature`/`Expires`) and path-style addressing
    (`<endpoint>/<bucket>/<key>`). This comes from the client, so the MinIO path
@@ -141,13 +141,15 @@ need a decision or care in P2/P3. None of them is a SeaweedFS deficiency.
    same swap was rejected). SigV2 is also deprecated by AWS and rejected by
    newer S3 regions.
 
-   **Owner decision (2026-09-29): adopt SigV4.** The adapter will set
-   `signature_version="s3v4"` explicitly. This is scheduled as checkpoint **P4**
-   of this plan, after the migration, so that P1–P3 prove the replacement
-   server against unchanged adapter behaviour. Until P4 lands, the acceptance
-   evidence reads "signed (SigV2 query-auth) upload/download".
-   SeaweedFS already verifies SigV4 presigned URLs correctly (see the direct
-   probes above).
+   **Owner decision (2026-09-29): adopt SigV4; implemented in P4.** The adapter
+   sets `signature_version="s3v4"` explicitly on both boto3 clients, so the
+   data client and the public-endpoint pre-signing client both produce SigV4
+   URLs. P4 landed after P1–P3, so those checkpoints proved the replacement
+   server against the unchanged adapter behaviour. The acceptance wording now
+   reads "signed (SigV4 query-auth) upload/download". SeaweedFS verifies SigV4
+   presigned URLs correctly (see the direct probes above, and the P4
+   integration assertions that signed URLs are SigV4 and a host-swapped URL is
+   refused with `403`).
 
    Consequence: SigV4 caps presigned-URL lifetime at 7 days (shorter under
    temporary credentials). This does not affect the template, whose signed URLs
