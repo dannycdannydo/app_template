@@ -6,9 +6,9 @@ regress at the query level. These tests run the real migration and the real
 service against a reachable PostgreSQL (same skip pattern as
 ``test_records_db.py``: migrated to head up front, reverted to base
 afterwards). Object storage stays on the in-memory fake (pinned by
-``STORAGE_PROVIDER=fake`` in ``conftest.py``), so no MinIO is needed — the
-verification seam between the service and the adapter is already proven by the
-storage contract tests.
+``STORAGE_PROVIDER=fake`` in ``conftest.py``), so no live storage server is
+needed; the verification seam between the service and the adapter is already
+proven by the storage contract tests.
 """
 
 from __future__ import annotations

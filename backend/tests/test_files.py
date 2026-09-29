@@ -2,8 +2,9 @@
 
 The full ASGI stack runs with the fakes from ``context_helpers.py`` and the
 in-memory ``FakeObjectStorage`` (pinned by ``STORAGE_PROVIDER=fake`` in
-``conftest.py``), so the suite needs neither PostgreSQL nor MinIO; the
-real-database scoping and status-filter proof lives in ``test_files_db.py``.
+``conftest.py``), so the suite needs neither PostgreSQL nor a live storage
+server; the real-database scoping and status-filter proof lives in
+``test_files_db.py``.
 These tests exercise the direct-upload flow: permission gating per route,
 intent-time validation (oversized, disallowed type/extension, no smuggled
 object key), the intent response shape, completion verification (existence,

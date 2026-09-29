@@ -409,7 +409,7 @@ class AIService:
         self._transfer_stores = dict(transfer_stores or {})
         # v0.8 Scope §2.3/§6.4-§6.5: the dev managed-URL staging seam — used
         # when the source storage cannot produce a provider-reachable HTTPS
-        # signed URL (local MinIO); ``None`` mints the URL directly.
+        # signed URL (local SeaweedFS); ``None`` mints the URL directly.
         self._managed_url_stager = managed_url_stager
         # Test-only seam (v0.7 Scope §6.5): ``execute`` without a recorder
         # port is refused by default so the supported entry point can never

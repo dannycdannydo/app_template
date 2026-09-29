@@ -3,7 +3,7 @@
 The fake never touches a provider: it stores bytes in a dict, mints
 deterministic signed URLs (fixed TTL, object key embedded, expiry derivable),
 and tracks bucket creation. It is the adapter the pytest suite pins via
-``STORAGE_PROVIDER=fake`` so ``make check`` needs no MinIO or network.
+``STORAGE_PROVIDER=fake`` so ``make check`` needs no storage server or network.
 
 ``put`` is not part of the :class:`ObjectStorage` interface — it simulates the
 browser's direct PUT against the signed URL so tests can round-trip an upload.

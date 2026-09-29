@@ -1,6 +1,6 @@
 # ADR 0008: Local Development Model — Native App Code, Containerised Infrastructure
 
-Status: Accepted
+Status: Accepted (amended 2026-09-29: the local/CI S3-compatible service is SeaweedFS, replacing MinIO; `plans/01-seaweedfs-storage-testing.md` P3)
 
 ## Context
 
@@ -23,7 +23,7 @@ Host (native)                  Docker Compose
 ─────────────────              ──────────────────────
 Vue (pnpm dev)                 PostgreSQL
 FastAPI (uvicorn --reload)     Redis
-Dramatiq (uv run dramatiq)     (MinIO, Mailpit in later releases)
+Dramatiq (uv run dramatiq)     (SeaweedFS, Mailhog — added in later releases)
 Outbox coordinator
 ```
 
@@ -34,14 +34,14 @@ Outbox coordinator
   port publication or broken network attachment.
 - A second command, `make dev-docker`, runs the **entire** stack (API, frontend, worker, coordinator, Postgres, broker Redis, rate-limit Redis) in containers. It exists for CI parity, fresh-clone onboarding verification, Dockerfile validation, and deployment debugging — not for daily use.
 - `compose.local.yml` carries the local services. Docker Compose profiles (or an equivalent mechanism within the single file) separate the infra-only set from the full-stack set, so both commands are served from the blueprint's existing three-file Compose layout (BP §36) without adding a fourth file.
-- PostgreSQL, Redis and MinIO use explicit named volumes. `make dev-down` preserves them; guarded `CONFIRM_RESET=1 make dev-reset` deletes and recreates all three together before applying migrations. Resetting only the database or broker is unsupported because Dramatiq messages reference durable PostgreSQL job rows. External WorkOS identities remain outside this local reset boundary.
+- PostgreSQL, Redis and SeaweedFS use explicit named volumes. `make dev-down` preserves them; guarded `CONFIRM_RESET=1 make dev-reset` deletes and recreates all three together (PostgreSQL, the broker and rate-limit Redis, and SeaweedFS) before applying migrations. Resetting only the database or broker is unsupported because Dramatiq messages reference durable PostgreSQL job rows. External WorkOS identities remain outside this local reset boundary.
 - `backend/Dockerfile` and `frontend/Dockerfile` remain required: they serve CI, both production profiles (BP §35), and the `make dev-docker` path.
 
 ## Consequences
 
 - The host must provide the application toolchains (Python 3.13 + `uv`, Node + `pnpm`). This is documented in the README clean-clone procedure and `.env.example`.
 - Because `make dev-docker` is the 5%-path, **CI must exercise the full-Docker path** (blueprint §42 already requires a fresh-clone "start local services" validation); otherwise it rots into a broken onboarding trap.
-- Future infrastructure services (MinIO, Mailpit, LocalStack) are added to `compose.local.yml` as their releases arrive, not retrofitted into v0.1.
+- Future infrastructure services are added to `compose.local.yml` as their releases arrive, not retrofitted into v0.1.
 - This ADR supersedes the v0.1 §6.7 wording that required volume-mount live reload; the v0.1 scope file §6.7 is amended accordingly to match this decision and §2.
 
 ---

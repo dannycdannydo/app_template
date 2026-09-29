@@ -37,7 +37,7 @@ provider requests. The adapter:
   the delete-only contract and the mandatory reconciliation job.
 
 Local-transient path (Scope §6.6 lesson from the OpenAI build): with a local
-storage seam (offline MinIO), a managed signed URL minted from that storage
+storage seam (offline SeaweedFS), a managed signed URL minted from that storage
 can never resolve from the provider's network, so a **transient** source is
 served by staging the verified object into the scratch GCS staging directory
 and providing a signed URL to that GCS object as the URL document source

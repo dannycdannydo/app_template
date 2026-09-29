@@ -4,13 +4,13 @@
  * The browser PUTs the file straight to the signed URL issued by the
  * upload-intent endpoint (blueprint §17 direct upload flow). That request is
  * deliberately not a generated-client call: the signed URL is opaque to the
- * app and may be cross-origin (MinIO locally, the storage provider's host in
- * production), so it goes through a plain `XMLHttpRequest`, which exposes the
+ * app and may be cross-origin (SeaweedFS locally, the storage provider's host
+ * in production), so it goes through a plain `XMLHttpRequest`, which exposes the
  * per-byte progress events `fetch` still lacks. `onProgress` receives the
  * XHR's length-computable values so the UI can render a real progress bar.
  *
- * Only `2xx` statuses resolve; MinIO answers signed PUTs with `200`. The
- * upload URL is the storage provider's own signed artifact, so no
+ * Only `2xx` statuses resolve; an S3-compatible server answers signed PUTs with
+ * `200`. The upload URL is the storage provider's own signed artifact, so no
  * credentials are attached — the signature in the URL is the auth.
  */
 

@@ -155,7 +155,7 @@ explicit operator procedure.
     a short-lived read-only HTTPS URL (default TTL 900 s, max 1,800 s) minted
     just-in-time per dispatch from the source storage and sent as a native
     file-URL input (`input_file.file_url` / Anthropic `document` `url`
-    source) — no provider copy is ever made. A local storage seam (MinIO over
+    source) — no provider copy is ever made. A local storage seam (SeaweedFS over
     plain HTTP, which the minter refuses and a provider could not reach
     anyway) is served in development by staging the verified source into the
     user-provisioned GCS temp bucket and minting a GCS v4 RSA-signed HTTPS
@@ -338,7 +338,7 @@ credentials.
 | `inline` | yes | default; ≤ 5,000,000 aggregate bytes |
 | `storage_reference` | yes (Vertex) | private GCS staging, `age = 1` deployer-owned lifecycle backstop (asynchronous; not an exact 24-hour guarantee) |
 | `provider_upload` | yes (OpenAI, Anthropic) | OpenAI Files API `user_data` upload with configured `expires_after` + best-effort delete; Anthropic beta Files API (pinned header) with delete-only retention + best-effort delete |
-| `managed_signed_url` | yes | direct just-in-time signed URL for retained sources; with a local (MinIO) storage seam in development the source is staged into the GCS temp bucket and a GCS v4-signed HTTPS URL is minted instead — the same scratch-GCS seam serves the Anthropic local-transient path (v0.8 Scope §6.6) |
+| `managed_signed_url` | yes | direct just-in-time signed URL for retained sources; with a local (SeaweedFS) storage seam in development the source is staged into the GCS temp bucket and a GCS v4-signed HTTPS URL is minted instead — the same scratch-GCS seam serves the Anthropic local-transient path (v0.8 Scope §6.6) |
 
 Non-inline modes are default-deny at the deployment level
 (`AI_ENABLED_TRANSFER_MODES`, empty by default) and per organisation

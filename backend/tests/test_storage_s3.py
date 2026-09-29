@@ -4,8 +4,8 @@ These run in the default suite and never touch the network: boto3's client
 objects are replaced with mocks so the tests exercise the adapter's own logic
 (pre-signed URL parameters, error mapping, checksum parsing, lazy bucket
 creation, idempotence). The real provider behaviour — a signed upload round
-trip through a live server, private-bucket denial and lazy creation against
-MinIO — is proven by ``test_storage_integration.py`` under the
+trip through a live S3-compatible server, private-bucket denial and lazy
+creation — is proven by ``test_storage_integration.py`` under the
 ``storage_integration`` marker.
 
 moto was evaluated for these tests and rejected: moto 5.x does not intercept
@@ -28,7 +28,7 @@ from app.storage.base import DEFAULT_SIGNED_URL_TTL
 from app.storage.factory import get_storage
 from app.storage.types import ObjectInfo, SignedUrl
 
-_ENDPOINT = "http://minio.local:9000"
+_ENDPOINT = "http://storage.local:9000"
 _PUBLIC_ENDPOINT = "http://public.local:9000"
 _BUCKET = "test-bucket"
 _KEY = "organisations/org-1/documents/file-1/original.pdf"
@@ -327,8 +327,8 @@ def test_get_storage_returns_cached_s3_when_configured(monkeypatch: pytest.Monke
             storage_bucket="test-bucket",
             storage_endpoint_url="http://localhost:9000",
             storage_region="us-east-1",
-            storage_access_key_id="minioadmin",
-            storage_secret_access_key="minioadmin",
+            storage_access_key_id="seaweedfs",
+            storage_secret_access_key="seaweedfs",
         ),
     )
     storage = get_storage()

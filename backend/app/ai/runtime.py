@@ -150,7 +150,7 @@ def _managed_url_stager() -> ManagedUrlStager | None:
     """Build the dev managed-URL staging seam when the storage cannot presign
     an HTTPS URL a provider could reach (v0.8 Scope §2.3, §6.4/§6.5).
 
-    With local MinIO in development, a retained >5 MB source is staged into
+    With local SeaweedFS in development, a retained >5 MB source is staged into
     the user-provisioned GCS temp bucket (the same one Vertex ``storage_reference``
     uses, with the deployer's ``age = 1`` lifecycle backstop) and the provider
     receives a GCS v4 RSA-signed HTTPS URL. The stager is built only when the

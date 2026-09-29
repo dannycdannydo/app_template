@@ -24,8 +24,8 @@ os.environ["APP_ENV"] = "test"
 os.environ["DATABASE_URL"] = "postgresql+asyncpg://app:app@localhost:5432/app_template_test"
 # The storage adapter must never touch a real provider in the suite: pin the
 # in-memory fake and an explicit test bucket (Scope §6.1) so ``make check``
-# needs no MinIO. STORAGE_* credentials a developer exported are harmless here
-# because the fake ignores them.
+# needs no storage server. STORAGE_* credentials a developer exported are
+# harmless here because the fake ignores them.
 os.environ["STORAGE_PROVIDER"] = "fake"
 os.environ["STORAGE_BUCKET"] = "test-bucket"
 # The email adapter must never touch a real relay in the suite: pin the

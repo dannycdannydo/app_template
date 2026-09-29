@@ -183,15 +183,15 @@ CI image and service changes, and any new environment or credential handling.
 
 ### P3 — Verify, document and retire MinIO test dependencies
 
-- [ ] Run the service-backed integration suite from a clean local environment and
+- [x] Run the service-backed integration suite from a clean local environment and
   on the PR CI workflow; confirm no test is skipped due to endpoint or CORS
   configuration.
-- [ ] Run `make validate-execution-contracts`, Compose validation, the required
+- [x] Run `make validate-execution-contracts`, Compose validation, the required
   complete local validation gate and end-to-end suite for this work unit.
-- [ ] Search the repository for active MinIO image, service-name, port,
+- [x] Search the repository for active MinIO image, service-name, port,
   credentials, CORS and documentation references; retain only historical
   context or examples explicitly marked as such.
-- [ ] Update ADR-0008/ADR-0014 and operations/release documentation to reflect the
+- [x] Update ADR-0008/ADR-0014 and operations/release documentation to reflect the
   tested local/CI service while retaining their provider-neutral production
   decisions.
 

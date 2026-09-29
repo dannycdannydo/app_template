@@ -218,7 +218,10 @@ class Settings(BaseSettings):
     )
     storage_endpoint_url: str = Field(
         default="",
-        description="S3-compatible endpoint (e.g. MinIO); required in production",
+        description=(
+            "S3-compatible endpoint (e.g. AWS S3 or another compatible provider; "
+            "SeaweedFS locally); required in production"
+        ),
     )
     storage_public_endpoint_url: str = Field(
         default="",

@@ -1,7 +1,7 @@
 """Dev managed-URL staging tests (v0.8 Scope §2.3, §6.4/§6.5).
 
-The dev seam for a local storage seam (plain-HTTP MinIO): a retained source is
-re-verified, staged into the private GCS temp bucket through the real
+The dev seam for a local storage seam (plain-HTTP SeaweedFS): a retained source
+is re-verified, staged into the private GCS temp bucket through the real
 ``GcsTransferStore`` and exposed as a GCS v4 RSA-signed HTTPS URL. These tests
 exercise the wiring hermetically: the GCS JSON/upload API is answered by a
 deterministic in-test transport (the same endpoint shapes the real store uses,
@@ -372,10 +372,10 @@ def test_gcs_v4_signed_url_structure_and_tll_bounds(
     [
         ("http://localhost:9000", True),
         ("http://127.0.0.1:9000", True),
-        ("http://minio:9000", True),  # single-label docker-compose service name
+        ("http://seaweedfs:9000", True),  # single-label docker-compose service name
         ("http://192.168.1.10:9000", True),  # private range
         ("https://s3.amazonaws.com", False),
-        ("https://minio.example.com", False),
+        ("https://storage.example.com", False),
         ("http://public.example.com", False),  # public plain HTTP: never local
         ("", False),
     ],

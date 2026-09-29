@@ -887,7 +887,7 @@ export async function setupPlatformAdminJourney(page: Page, clientId: string) {
  * files/jobs surface, including an intercepted storage host for the direct
  * PUT. The upload URL points at `https://storage.example.com`, which is not
  * under `/api/v1`, so this helper also fulfils that PUT with CORS headers —
- * the browser XHR enforces CORS exactly as it would against real MinIO.
+ * the browser XHR enforces CORS exactly as it would against a real S3 server.
  */
 export async function setupFilesJourney(page: Page, clientId: string) {
   const fixture = createRecordFixture()

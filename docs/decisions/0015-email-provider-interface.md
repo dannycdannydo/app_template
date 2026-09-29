@@ -54,8 +54,8 @@ suite needs no Mailhog and never touches a real relay.
 web UI on 8025; `.env.example` documents the Mailhog-friendly SMTP defaults.
 Mailhog-backed SMTP adapter tests carry the `email_integration` marker and
 are excluded from the default suite (the same contract as the
-`storage_integration` MinIO tests), run explicitly against the local stack or
-a CI Mailhog service.
+`storage_integration` SeaweedFS tests), run explicitly against the local stack
+or a CI Mailhog service.
 
 **Production fail-fast**: `EMAIL_PROVIDER=fake` is rejected when
 `APP_ENV=production`, and `EMAIL_PROVIDER=smtp` in production requires
