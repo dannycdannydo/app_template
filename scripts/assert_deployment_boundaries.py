@@ -112,6 +112,27 @@ def _assert_local(document: dict[str, Any]) -> None:
     assert environment.get("STORAGE_PUBLIC_ORIGIN"), "frontend must receive STORAGE_PUBLIC_ORIGIN"
     assert environment.get("NGINX_ENVSUBST_FILTER") == "STORAGE_PUBLIC_ORIGIN"
 
+    # The local stack runs the pinned SeaweedFS S3 gateway (SeaweedFS plan P2).
+    # Its CORS allowlist is server-wide and defaults to `*` upstream, so the
+    # resolved `-s3.allowedOrigins` must always name an explicit origin, and the
+    # API must reach the service on the compose network rather than a host port.
+    storage = document["services"].get("seaweedfs")
+    assert storage, "the local stack must run the pinned SeaweedFS storage service"
+    command = _command(storage)
+    assert "mini" in command, "the local storage service must run `weed mini`"
+    allowed = [part for part in command if part.startswith("-s3.allowedOrigins=")]
+    assert len(allowed) == 1, "the local storage CORS must be configured exactly once"
+    allowed_origins = allowed[0].split("=", 1)[1]
+    origins = [origin.strip() for origin in allowed_origins.split(",")]
+    assert origins and all(origin and origin != "*" for origin in origins), (
+        "the local storage CORS must name explicit origins, never a wildcard"
+    )
+
+    endpoint = _environment(document["services"]["api"]).get("STORAGE_ENDPOINT_URL", "")
+    assert urlsplit(endpoint).hostname == "seaweedfs", (
+        f"the API must reach the local storage service on the compose network: {endpoint!r}"
+    )
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()

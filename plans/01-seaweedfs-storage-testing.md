@@ -164,16 +164,16 @@ relevant storage assertions pass.
 
 ### P2 — Migrate local Compose and CI
 
-- [ ] Replace the local MinIO service with pinned SeaweedFS configuration, keeping
+- [x] Replace the local MinIO service with pinned SeaweedFS configuration, keeping
   host/native and Compose-internal S3 endpoints aligned with `STORAGE_*`.
-- [ ] Provide the local data volume, startup command, health check, credentials and
+- [x] Provide the local data volume, startup command, health check, credentials and
   non-wildcard browser CORS configuration needed by the existing workflow.
-- [ ] Replace the CI MinIO container step with the same pinned SeaweedFS artifact
+- [x] Replace the CI MinIO container step with the same pinned SeaweedFS artifact
   and configuration; run the entire `storage_integration` marker against it.
-- [ ] Update `make dev`/`make dev-docker` dependencies, deployment-boundary tests,
+- [x] Update `make dev`/`make dev-docker` dependencies, deployment-boundary tests,
   `.env.example`, CI comments and operations/release docs. Remove MinIO-specific
   settings only when no remaining local/CI consumer needs them.
-- [ ] Preserve storage integration coverage and keep application production
+- [x] Preserve storage integration coverage and keep application production
   configuration provider-neutral.
 
 Dependencies: P1 complete and reviewed.

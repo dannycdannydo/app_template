@@ -24,6 +24,7 @@ NGINX_TEMPLATE = REPO_ROOT / "frontend" / "nginx.conf.template"
 FRONTEND_DOCKERFILE = REPO_ROOT / "frontend" / "Dockerfile"
 PRODUCTION_EXAMPLE = REPO_ROOT / ".env.production.example"
 ENV_EXAMPLE = REPO_ROOT / ".env.example"
+CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 BOUNDARY_ASSERTION_SCRIPT = REPO_ROOT / "scripts" / "assert_deployment_boundaries.py"
 
 
@@ -93,12 +94,35 @@ def test_local_nginx_template_substitutes_only_the_storage_origin() -> None:
     assert environment["NGINX_ENVSUBST_FILTER"] == "STORAGE_PUBLIC_ORIGIN"
 
 
-def test_local_minio_allows_the_configured_browser_origin() -> None:
-    """Local MinIO configures CORS server-wide, so the browser direct upload
-    from the frontend origin works in `make dev` (plan P9 item 1)."""
+def test_local_seaweedfs_matches_the_configured_browser_storage_contract() -> None:
+    """The local stack runs the pinned SeaweedFS gateway, which configures CORS
+    server-wide, so the browser direct upload from the frontend origin works in
+    `make dev` (plan P9 item 1; SeaweedFS plan P2)."""
     compose = yaml.safe_load(LOCAL_COMPOSE.read_text(encoding="utf-8"))
-    environment = compose["services"]["minio"]["environment"]
-    assert environment["MINIO_API_CORS_ALLOW_ORIGIN"].startswith("${STORAGE_CORS_ALLOWED_ORIGIN:")
+    service = compose["services"]["seaweedfs"]
+    assert service["image"].startswith("chrislusf/seaweedfs:4.48@sha256:"), (
+        "the local storage image must be pinned by immutable digest"
+    )
+    # Compose and CI must run the same pinned artefact, so a digest bump in one
+    # file cannot leave the other behind.
+    assert service["image"] in CI_WORKFLOW.read_text(encoding="utf-8"), (
+        "CI must run the same pinned SeaweedFS image as local Compose"
+    )
+    command = service["command"]
+    assert "mini" in command and "-dir=/data" in command
+    assert "-s3.allowedOrigins=${STORAGE_CORS_ALLOWED_ORIGIN:-" in command
+    assert "-s3.allowedOrigins=${STORAGE_CORS_ALLOWED_ORIGIN:-*}" not in command
+    environment = service["environment"]
+    assert environment["AWS_ACCESS_KEY_ID"].startswith("${STORAGE_ACCESS_KEY_ID:")
+    assert environment["AWS_SECRET_ACCESS_KEY"].startswith("${STORAGE_SECRET_ACCESS_KEY:")
+    assert "http://localhost:9000/healthz" in service["healthcheck"]["test"]
+    assert "seaweedfs_data:/data" in service["volumes"]
+
+    # Every application process reaches the service on the compose network,
+    # never the host-facing STORAGE_ENDPOINT_URL from `.env`.
+    for name in ("api", "worker", "coordinator"):
+        app_environment = compose["services"][name]["environment"]
+        assert app_environment["STORAGE_ENDPOINT_URL"] == "http://seaweedfs:9000"
     assert ENV_EXAMPLE.read_text(encoding="utf-8").count("STORAGE_CORS_ALLOWED_ORIGIN=") >= 1
 
 
@@ -209,3 +233,51 @@ def test_assert_production_rejects_a_signed_query_string_origin() -> None:
                 endpoint="https://storage.example.com",
             )
         )
+
+
+def _local_document(
+    *,
+    allowed_origins: str = "http://localhost:5173",
+    api_endpoint: str = "http://seaweedfs:9000",
+) -> dict[str, object]:
+    return {
+        "services": {
+            "frontend": {
+                "environment": {
+                    "STORAGE_PUBLIC_ORIGIN": "http://localhost:9000",
+                    "NGINX_ENVSUBST_FILTER": "STORAGE_PUBLIC_ORIGIN",
+                }
+            },
+            "api": {"environment": {"STORAGE_ENDPOINT_URL": api_endpoint}},
+            "seaweedfs": {
+                "command": (
+                    "mini -dir=/data -s3.port=9000 "
+                    f"-s3.allowedOrigins={allowed_origins} "
+                    "-master.telemetry=false -admin.ui=false -webdav=false"
+                )
+            },
+        }
+    }
+
+
+def test_assert_local_accepts_the_seaweedfs_storage_contract() -> None:
+    script = _load_boundary_script()
+    script._assert_local(_local_document())
+
+
+def test_assert_local_rejects_a_wildcard_cors_origin() -> None:
+    script = _load_boundary_script()
+    with pytest.raises(AssertionError):
+        script._assert_local(_local_document(allowed_origins="*"))
+
+
+def test_assert_local_rejects_a_wildcard_entry_in_the_cors_list() -> None:
+    script = _load_boundary_script()
+    with pytest.raises(AssertionError):
+        script._assert_local(_local_document(allowed_origins="http://localhost:5173,*"))
+
+
+def test_assert_local_rejects_a_storage_endpoint_outside_the_compose_network() -> None:
+    script = _load_boundary_script()
+    with pytest.raises(AssertionError):
+        script._assert_local(_local_document(api_endpoint="http://localhost:9000"))

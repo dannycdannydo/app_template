@@ -49,7 +49,7 @@ contracts. Those are the Manual and Opt-in steps below.
      signatures are rejected. The suite includes the completeness guard.
    - CI job: `backend-test`.
 6. **External upload** (**CI**)
-   - MinIO-backed storage tests: `cd backend && uv run pytest -m storage_integration`
+   - SeaweedFS-backed storage tests: `cd backend && uv run pytest -m storage_integration`
      (CI job: `storage-integration`).
    - Browser journey against the real external storage origin:
      `cd frontend && pnpm test:e2e -- e2e/ai-ask.spec.ts` (CI job:
@@ -104,7 +104,8 @@ broker/rate-limit topology and every gate were otherwise unchanged.
   `pytest tests/test_security_suite.py tests/test_security.py` — 503 passed.
 - **External upload** (**CI**): MinIO `pytest -m storage_integration` — 8
   passed; the `e2e/ai-ask.spec.ts` journey against the real external storage
-  origin ran on Chromium, Firefox and WebKit — 30 passed in `make e2e`.
+  origin ran on Chromium, Firefox and WebKit — 30 passed in `make e2e`. Later
+  runs use the pinned SeaweedFS service instead (SeaweedFS plan P2).
 - **Deployment Compose configuration** (**CI**): hybrid-VPS production and
   local fullstack `config` plus the Redis-policy and deployment-boundary
   assertions passed.

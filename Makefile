@@ -31,17 +31,17 @@ endef
 
 .PHONY: dev dev-docker dev-infra-check dev-down dev-reset worker coordinator jobs-reconcile jobs-reconcile-apply verify-db-roles migrate provision-admin provision-admin-delete recover-admin lint typecheck test test-ai-contracts e2e format generate-client validate-ai-registries validate-execution-contracts check
 
-## Start PostgreSQL + Redis + MinIO + Mailhog in Docker, then run the API,
+## Start PostgreSQL + Redis + SeaweedFS + Mailhog in Docker, then run the API,
 ## Dramatiq worker, outbox coordinator and frontend natively with live reload
 ## (ADR-0008/ADR-0019).
 ## Infra stays up after Ctrl-C so `make migrate` and repeat `make dev` runs
 ## keep working; stop it with
 ## `make dev-down`.
 dev:
-	$(COMPOSE_CMD) up -d --wait --remove-orphans postgres redis-broker redis-rate-limit minio mailhog
+	$(COMPOSE_CMD) up -d --wait --remove-orphans postgres redis-broker redis-rate-limit seaweedfs mailhog
 	$(MAKE) dev-infra-check
 	$(MAKE) migrate
-	@echo "API on http://localhost:8000 (live reload), worker native, frontend on http://localhost:5173, MinIO console on http://localhost:9001, Mailhog UI on http://localhost:8025. Ctrl-C stops the apps; Postgres/Redis/MinIO/Mailhog stay up."
+	@echo "API on http://localhost:8000 (live reload), worker native, frontend on http://localhost:5173, S3 storage on http://localhost:9000, Mailhog UI on http://localhost:8025. Ctrl-C stops the apps; Postgres/Redis/SeaweedFS/Mailhog stay up."
 	@$(load_env) exec bash scripts/dev.sh
 
 ## Verify infrastructure through the host-facing URL used by the native API
@@ -64,10 +64,10 @@ dev-reset:
 		exit 2; \
 	fi
 	$(COMPOSE_CMD) down -v --remove-orphans
-	$(COMPOSE_CMD) up -d --wait --remove-orphans postgres redis-broker redis-rate-limit minio mailhog
+	$(COMPOSE_CMD) up -d --wait --remove-orphans postgres redis-broker redis-rate-limit seaweedfs mailhog
 	$(MAKE) dev-infra-check
 	$(MAKE) migrate
-	@echo "Local PostgreSQL, Redis and MinIO state reset; clean infrastructure is ready. Run make dev to start the applications."
+	@echo "Local PostgreSQL, Redis and SeaweedFS state reset; clean infrastructure is ready. Run make dev to start the applications."
 
 ## Build and run the entire stack in containers (CI parity, onboarding,
 ## Dockerfile validation). Ctrl-C stops all services.
