@@ -3,10 +3,10 @@
 # One shared workflow runs the quality gate on every push to main and on
 # every pull request. Jobs map to the release checklist items: backend
 # format/lint, backend typecheck, backend tests, storage integration tests
-# against MinIO (v0.5 Scope §6.7), frontend format/lint, frontend typecheck,
-# frontend tests, generated-client drift, migration validity, container
-# build, and the Playwright smoke journeys (v0.3 Scope §6.8: "Playwright
-# smoke journeys wired into CI").
+# against SeaweedFS (v0.5 Scope §6.7; SeaweedFS plan P2), frontend
+# format/lint, frontend typecheck, frontend tests, generated-client drift,
+# migration validity, container build, and the Playwright smoke journeys
+# (v0.3 Scope §6.8: "Playwright smoke journeys wired into CI").
 #
 # Local `make lint` auto-fixes; CI runs the same checks in check-only mode
 # (no --fix) so formatting and lint failures fail the build instead of being
@@ -134,18 +134,19 @@ jobs:
       - name: Test (pytest)
         run: uv run pytest
 
-  # MinIO-backed storage integration tests (v0.5 Scope §6.7, blueprint §17):
-  # the S3 adapter is proven against a real S3-compatible server — signed
-  # upload round trip, private-bucket denial (unsigned GET -> 403) and lazy
-  # bucket creation. The tests carry the `storage_integration` marker and are
+  # SeaweedFS-backed storage integration tests (v0.5 Scope §6.7, blueprint §17;
+  # SeaweedFS plan P2): the S3 adapter is proven against a real S3-compatible
+  # server — signed upload round trip, private-bucket denial (unsigned GET ->
+  # 403), lazy bucket creation, head/delete, copy/promotion and the browser
+  # CORS contract. The tests carry the `storage_integration` marker and are
   # excluded from the default `make test` suite (see backend/pyproject.toml),
-  # so this dedicated service-backed job is where that marker runs. The
-  # Start the same pinned MinIO release used by local development, sourced
-  # from Quay, explicitly: release images default to the MinIO CLI, while
-  # GitHub service containers cannot override the image command with
-  # `server /data`.
+  # so this dedicated service-backed job is where that marker runs. The pinned
+  # SeaweedFS release is the same artefact local development uses and is pulled
+  # anonymously with no registry credentials. STORAGE_INTEGRATION_REQUIRED turns
+  # the module's endpoint/CORS skips into failures, so a half-started server or
+  # a missing CORS origin fails the job rather than silently skipping.
   storage-integration:
-    name: Storage integration tests (MinIO)
+    name: Storage integration tests (SeaweedFS)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -153,32 +154,37 @@ jobs:
       STORAGE_BUCKET: ci-storage-tests
       STORAGE_ENDPOINT_URL: http://localhost:9000
       STORAGE_REGION: us-east-1
-      STORAGE_ACCESS_KEY_ID: minioadmin
-      STORAGE_SECRET_ACCESS_KEY: minioadmin
+      STORAGE_ACCESS_KEY_ID: seaweedfs
+      STORAGE_SECRET_ACCESS_KEY: seaweedfs
       # Plan P9 external-origin browser uploads: the storage server must allow
       # the frontend origin, and the CORS journey asserts it does.
       STORAGE_CORS_ALLOWED_ORIGIN: https://app.example.com
+      # Fail the job instead of skipping when the server or CORS origin is
+      # missing (SeaweedFS plan P2).
+      STORAGE_INTEGRATION_REQUIRED: "1"
     defaults:
       run:
         working-directory: backend
     steps:
       - uses: actions/checkout@v7
-      - name: Start pinned MinIO
+      - name: Start pinned SeaweedFS
         run: |
-          docker run --detach --rm --name minio-ci \
+          docker run --detach --rm --name seaweedfs-ci \
             --publish 9000:9000 \
-            --env MINIO_ROOT_USER=minioadmin \
-            --env MINIO_ROOT_PASSWORD=minioadmin \
-            --env MINIO_API_CORS_ALLOW_ORIGIN=https://app.example.com \
-            quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z \
-            server /data
+            --volume /data \
+            --env AWS_ACCESS_KEY_ID=seaweedfs \
+            --env AWS_SECRET_ACCESS_KEY=seaweedfs \
+            chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d \
+            mini -dir=/data -s3.port=9000 \
+                 -s3.allowedOrigins=https://app.example.com \
+                 -master.telemetry=false -admin.ui=false -webdav=false
           for attempt in {1..10}; do
-            if curl --fail --silent http://localhost:9000/minio/health/live; then
+            if curl --fail --silent http://localhost:9000/healthz; then
               exit 0
             fi
             sleep 5
           done
-          docker logs minio-ci
+          docker logs seaweedfs-ci
           exit 1
       - uses: astral-sh/setup-uv@v9.0.0
         with:
@@ -188,7 +194,7 @@ jobs:
           cache-python: true
       - name: Sync dependencies from lockfile
         run: uv sync --frozen
-      - name: Test the S3 adapter against MinIO
+      - name: Test the S3 adapter against SeaweedFS
         run: uv run pytest -m storage_integration
 
   # Mailhog-backed email integration tests (v0.6 Scope §6.8, blueprint §20):

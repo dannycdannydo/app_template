@@ -109,7 +109,7 @@ reportMissingTypeStubs = false
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-# The default suite must stay provider-free (Scope §6.2): MinIO-backed S3
+# The default suite must stay provider-free (Scope §6.2): SeaweedFS-backed S3
 # adapter tests carry the storage_integration marker, Mailhog-backed SMTP
 # adapter tests carry the email_integration marker, and live AI provider
 # contract tests carry the ai_contracts marker; all are excluded unless
@@ -120,7 +120,7 @@ addopts = "-ra -m 'not storage_integration and not email_integration and not ai_
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = [
-    "storage_integration: S3 adapter tests that need a live S3-compatible service (MinIO); skipped when unreachable",
+    "storage_integration: S3 adapter tests that need a live S3-compatible service (SeaweedFS); skipped when unreachable unless STORAGE_INTEGRATION_REQUIRED is set",
     "email_integration: SMTP adapter tests that need a live SMTP relay (Mailhog); skipped when unreachable",
     "ai_contracts: opt-in live AI provider contract tests that need dedicated non-production credentials (Scope §6.3); skipped when credentials are absent",
 ]

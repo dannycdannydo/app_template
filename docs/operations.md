@@ -501,13 +501,14 @@ short-lived signed URLs, so the browser must be allowed to reach that origin:
   provider signing header such as `x-amz-*`). Never use `*`. Expose `ETag` only
   if the client verifies checksums. A wrong CORS policy is visible in the
   browser console as a preflight failure before the API receives the request.
-  MinIO configures CORS server-wide rather than per bucket, so the local
-  `compose.local.yml` passes `STORAGE_CORS_ALLOWED_ORIGIN` as
-  `MINIO_API_CORS_ALLOW_ORIGIN` (default `http://localhost:5173`); CI starts
-  MinIO with the same setting. The MinIO-backed `storage_integration` suite
-  proves from the browser's perspective that the preflight and the direct
-  signed `PUT` from the authorised origin succeed while a forbidden origin is
-  refused (`backend/tests/test_storage_integration.py`), and the Playwright
+  SeaweedFS configures CORS server-wide rather than per bucket, so the local
+  `compose.local.yml` passes `STORAGE_CORS_ALLOWED_ORIGIN` as the
+  `-s3.allowedOrigins` flag (default `http://localhost:5173`); CI starts the
+  pinned SeaweedFS image with the same setting. The SeaweedFS-backed
+  `storage_integration` suite proves from the browser's perspective that the
+  preflight and the direct signed `PUT` from the authorised origin succeed
+  while a forbidden origin is refused
+  (`backend/tests/test_storage_integration.py`), and the Playwright
   `ai-ask` journey proves the browser itself enforces the storage origin's CORS
   (positive and negative) against a real external storage server
   (`frontend/e2e/ai-ask.spec.ts`, `frontend/e2e/storage-server.mjs`).

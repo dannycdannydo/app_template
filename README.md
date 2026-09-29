@@ -35,11 +35,11 @@ Makefile                 Command surface for development and quality gates
 
 ## Prerequisites
 
-Local development follows **ADR-0008**: PostgreSQL, Redis and MinIO run in Docker, while the API, the Dramatiq worker and the frontend run natively on the host. The host toolchain is therefore required and pinned:
+Local development follows **ADR-0008**: PostgreSQL, Redis and SeaweedFS run in Docker, while the API, the Dramatiq worker and the frontend run natively on the host. The host toolchain is therefore required and pinned:
 
 - **Python 3.13** with `uv` for the backend (`uv` installs Python if needed; the version is recorded in `backend/.python-version`)
 - **Node >= 24** with `pnpm` (11.x) for the frontend
-- **Docker with Compose** for PostgreSQL, Redis and MinIO
+- **Docker with Compose** for PostgreSQL, Redis and SeaweedFS
 - `make`
 
 ## Clean clone
@@ -52,7 +52,7 @@ cp .env.example .env
 cd backend && uv sync
 cd ../frontend && pnpm install
 
-# 3. Start PostgreSQL + Redis + MinIO, apply migrations, and run the API, the
+# 3. Start PostgreSQL + Redis + SeaweedFS, apply migrations, and run the API, the
 #    Dramatiq worker and the frontend natively with live reload (this is the
 #    day-to-day workflow)
 cd .. && make dev
@@ -68,7 +68,7 @@ replace `REDIS_URL` with `BROKER_REDIS_URL` plus `RATE_LIMIT_REDIS_URL`, using
 distinct ports. For example, keep a host-native Redis on 6379 and publish the
 broker on 6381 by updating both `BROKER_REDIS_PORT` and `BROKER_REDIS_URL`.
 
-The API is served at `http://localhost:8000` (docs at `/docs`), the frontend at `http://localhost:5173` (which proxies API traffic to the backend), and the MinIO admin console at `http://localhost:9001`.
+The API is served at `http://localhost:8000` (docs at `/docs`), the frontend at `http://localhost:5173` (which proxies API traffic to the backend), and the local S3-compatible object storage at `http://localhost:9000` (SeaweedFS; there is no admin console).
 
 For CI parity, onboarding, or Dockerfile validation the **entire stack runs in containers** instead:
 
@@ -76,9 +76,9 @@ For CI parity, onboarding, or Dockerfile validation the **entire stack runs in c
 make dev-docker
 ```
 
-`make dev` and `make dev-docker` apply pending Alembic migrations before the API serves traffic. `make migrate` remains available for a deliberate migration-only step. The container command starts the same Postgres, Redis and MinIO plus the API, worker and frontend containers (built from `backend/Dockerfile` and `frontend/Dockerfile`). Both commands share `deploy/compose/compose.local.yml`: the default service set is infrastructure only, and the `fullstack` Compose profile adds the application containers.
+`make dev` and `make dev-docker` apply pending Alembic migrations before the API serves traffic. `make migrate` remains available for a deliberate migration-only step. The container command starts the same Postgres, Redis and SeaweedFS plus the API, worker and frontend containers (built from `backend/Dockerfile` and `frontend/Dockerfile`). Both commands share `deploy/compose/compose.local.yml`: the default service set is infrastructure only, and the `fullstack` Compose profile adds the application containers.
 
-Local PostgreSQL, Redis and MinIO state persists across ordinary container
+Local PostgreSQL, Redis and SeaweedFS state persists across ordinary container
 restarts. Use `make dev-down` to remove the containers while preserving that
 state. When the local state is disposable, run
 `CONFIRM_RESET=1 make dev-reset` to erase all three stores together, recreate
@@ -120,11 +120,11 @@ To tear the test admin down again (e.g. to provision a different one and re-test
 
 | Command                          | What it does                                                                                                                                                                                                               |
 | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `make dev`                       | Start Postgres, Redis, MinIO, Mailhog, API, Dramatiq worker, outbox coordinator, and frontend                                                                                                                              |
+| `make dev`                       | Start Postgres, Redis, SeaweedFS, Mailhog, API, Dramatiq worker, outbox coordinator, and frontend                                                                                                                          |
 | `make dev-docker`                | Entire stack in containers (CI parity, onboarding)                                                                                                                                                                         |
 | `make dev-infra-check`           | Verify the host-facing broker/rate-limit Redis URLs and other local infrastructure                                                                                                                                         |
 | `make dev-down`                  | Remove local containers and network while preserving application data                                                                                                                                                      |
-| `CONFIRM_RESET=1 make dev-reset` | Erase PostgreSQL, Redis and MinIO together, recreate infrastructure, and migrate                                                                                                                                           |
+| `CONFIRM_RESET=1 make dev-reset` | Erase PostgreSQL, Redis and SeaweedFS together, recreate infrastructure, and migrate                                                                                                                                       |
 | `make migrate`                   | Run Alembic migrations                                                                                                                                                                                                     |
 | `make worker`                    | Run the Dramatiq worker natively (`uv run dramatiq app.workers`)                                                                                                                                                           |
 | `make coordinator`               | Run the PostgreSQL outbox coordinator natively (`uv run python -m app.job_coordinator`)                                                                                                                                    |
@@ -157,7 +157,7 @@ A dedicated platform-authorisation plane, separate from organisation roles, gate
 
 ### Files and durable jobs
 
-Provider-neutral object storage with signed direct uploads (ADR-0006): the browser PUTs bytes straight to MinIO/S3 through a short-lived signed URL, the backend verifies the stored object on completion, and a `process_file` worker job drives the file `pending → uploaded → processing → ready` while the UI polls job progress. Files and jobs are org-scoped and gated by `documents.*` permissions (ADR-0014). Uploaded objects are immutable: the signed PUT targets a unique staging key and only a server-side promotion writes the final key, with a pinned content identity. See `API_CONVENTIONS.md` → "Files and jobs".
+Provider-neutral object storage with signed direct uploads (ADR-0006): the browser PUTs bytes straight to the S3-compatible object store through a short-lived signed URL, the backend verifies the stored object on completion, and a `process_file` worker job drives the file `pending → uploaded → processing → ready` while the UI polls job progress. Files and jobs are org-scoped and gated by `documents.*` permissions (ADR-0014). Uploaded objects are immutable: the signed PUT targets a unique staging key and only a server-side promotion writes the final key, with a pinned content identity. See `API_CONVENTIONS.md` → "Files and jobs".
 
 ### Notifications and observability
 

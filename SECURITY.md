@@ -141,7 +141,7 @@ There is no hidden universal bypass.
 
 The generic Linux VPS / container-host profile (`deploy/compose/compose.hybrid-vps.yml`, `deploy/caddy/`, `.github/workflows/deploy-vps.yml`) is the portable production baseline. It runs Caddy, the static Vue artifact, the FastAPI backend, the Dramatiq worker and isolated private broker/rate-limit Redis services on the host; PostgreSQL, object storage, WorkOS, transactional email and monitoring stay external (ADR-0007). The following controls are mandatory for any deployment built from this profile:
 
-- **Firewall**: the host firewall allows only 22/TCP (SSH), 80/TCP and 443/TCP from the public internet, plus the egress ports the external services need. Configure it at the provider or host level (ufw/firewalld/nftables); never expose PostgreSQL, Redis, MinIO or the API port directly.
+- **Firewall**: the host firewall allows only 22/TCP (SSH), 80/TCP and 443/TCP from the public internet, plus the egress ports the external services need. Configure it at the provider or host level (ufw/firewalld/nftables); never expose PostgreSQL, Redis, the object store or the API port directly.
 - **SSH keys only**: password and root SSH login are disabled (`PasswordAuthentication no`, `PermitRootLogin no`); the deploy workflow authenticates with a dedicated deploy key (GitHub secret `DEPLOY_SSH_KEY`) that has no password and is restricted to the release directory and docker group on the host.
 - **Non-public isolated Redis**: both Redis containers bind only to the internal
   compose network, use separate strong passwords and fail fast when either is

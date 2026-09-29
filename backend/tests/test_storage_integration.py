@@ -1,16 +1,19 @@
-"""MinIO-backed S3 adapter integration tests (Scope §6.2, blueprint §17).
+"""SeaweedFS-backed S3 adapter integration tests (Scope §6.2, blueprint §17).
 
 These prove the acceptance-criteria items a mock cannot: a signed upload round
 trip through a real S3-compatible server, private-bucket denial of unsigned
 requests (unsigned GET -> 403) and lazy bucket creation. They carry the
 ``storage_integration`` marker and are excluded from the default suite by the
-pytest addopts in ``pyproject.toml``; run them against the MinIO started by
+pytest addopts in ``pyproject.toml``; run them against the SeaweedFS started by
 ``make dev`` (or a CI service) with:
 
     uv run pytest -m storage_integration
 
 Every test skips when the configured endpoint is unreachable, so a developer
-without MinIO running sees skips, not failures.
+without SeaweedFS running sees skips, not failures. Set
+``STORAGE_INTEGRATION_REQUIRED=1`` (as the CI job does) to turn those skips into
+failures, so a half-started server or a missing CORS origin fails the run
+instead of silently passing.
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 import boto3
 import httpx
@@ -33,8 +36,24 @@ pytestmark = pytest.mark.storage_integration
 _ENDPOINT = os.environ.get("STORAGE_ENDPOINT_URL", "http://localhost:9000")
 _BUCKET = os.environ.get("STORAGE_BUCKET", "test-bucket")
 _REGION = os.environ.get("STORAGE_REGION", "us-east-1")
-_ACCESS_KEY = os.environ.get("STORAGE_ACCESS_KEY_ID", "minioadmin")
-_SECRET_KEY = os.environ.get("STORAGE_SECRET_ACCESS_KEY", "minioadmin")
+_ACCESS_KEY = os.environ.get("STORAGE_ACCESS_KEY_ID", "seaweedfs")
+_SECRET_KEY = os.environ.get("STORAGE_SECRET_ACCESS_KEY", "seaweedfs")
+
+#: When set truthy, endpoint/CORS gaps fail the run instead of skipping. The CI
+#: job sets it so a half-started server or a missing CORS origin cannot pass as
+#: skips (SeaweedFS plan P2). Assertions themselves are never weakened.
+_REQUIRED = os.environ.get("STORAGE_INTEGRATION_REQUIRED", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+}
+
+
+def _fail_or_skip(reason: str) -> NoReturn:
+    """Fail when the run demands a service, otherwise skip."""
+    if _REQUIRED:
+        pytest.fail(reason, pytrace=False)
+    pytest.skip(reason)
 
 
 def _storage(*, bucket: str = _BUCKET) -> S3Storage:
@@ -49,12 +68,12 @@ def _storage(*, bucket: str = _BUCKET) -> S3Storage:
 
 @pytest.fixture(scope="module")
 def storage() -> S3Storage:
-    """Probe connectivity once; skip the whole module when MinIO is down."""
+    """Probe connectivity once; skip the whole module when storage is down."""
     candidate = _storage()
     try:
         asyncio.run(candidate.ensure_bucket())
     except Exception as exc:
-        pytest.skip(f"S3-compatible storage not reachable at {_ENDPOINT}: {exc}")
+        _fail_or_skip(f"S3-compatible storage not reachable at {_ENDPOINT}: {exc}")
     return candidate
 
 
@@ -149,10 +168,10 @@ async def test_delete_missing_object_is_idempotent(storage: S3Storage) -> None:
 
 
 #: The exact frontend origin the browser uploads from, matching the storage
-#: server's configured CORS allowlist (``MINIO_API_CORS_ALLOW_ORIGIN`` for
-#: MinIO, the bucket CORS policy for a managed S3 provider). The dedicated CI
-#: job sets it; without it these cases skip so an unconfigured local MinIO does
-#: not fail an opt-in run.
+#: server's configured CORS allowlist (``-s3.allowedOrigins`` for SeaweedFS,
+#: the bucket CORS policy for a managed S3 provider). The dedicated CI job sets
+#: it; without it these cases skip so an unconfigured local server does not fail
+#: an opt-in run.
 BROWSER_ORIGIN = os.environ.get("STORAGE_CORS_ALLOWED_ORIGIN")
 FORBIDDEN_ORIGIN = "https://evil.example.com"
 
@@ -161,12 +180,12 @@ async def test_browser_put_from_the_authorised_origin_succeeds(storage: S3Storag
     """The external-origin browser journey (AC20): the CORS preflight and the
     direct signed PUT from the configured frontend origin both succeed.
 
-    MinIO configures CORS server-wide (``MINIO_API_CORS_ALLOW_ORIGIN``) rather
+    SeaweedFS configures CORS server-wide (``-s3.allowedOrigins``) rather
     than through the per-bucket S3 CORS API, so this asserts the running
     storage server's configuration rather than writing it.
     """
     if BROWSER_ORIGIN is None:
-        pytest.skip("STORAGE_CORS_ALLOWED_ORIGIN is not configured")
+        _fail_or_skip("STORAGE_CORS_ALLOWED_ORIGIN is not configured")
     content = b"%PDF-1.7 browser cors " + uuid.uuid4().hex.encode()
     key = f"organisations/org-integration/cors/{uuid.uuid4()}/original.pdf"
     upload = await storage.create_upload_url(
@@ -208,7 +227,7 @@ async def test_browser_preflight_from_a_forbidden_origin_is_refused(
     """A browser on an unauthorised origin gets no CORS grant, so it cannot
     drive an upload to the storage origin."""
     if BROWSER_ORIGIN is None:
-        pytest.skip("STORAGE_CORS_ALLOWED_ORIGIN is not configured")
+        _fail_or_skip("STORAGE_CORS_ALLOWED_ORIGIN is not configured")
     key = f"organisations/org-integration/cors/{uuid.uuid4()}/original.pdf"
     object_url = f"{_ENDPOINT.rstrip('/')}/{_BUCKET}/{key}"
     async with httpx.AsyncClient() as client:
