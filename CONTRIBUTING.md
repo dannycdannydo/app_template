@@ -94,6 +94,86 @@ release, state, start and completion dates.
 - `backend/tests/test_release_versions.py` enforces the version/scope
   consistency so a release cannot drift out of step with its scope document.
 
+## Porting template changes to derived apps
+
+Apps built from this template can take later template fixes and features by
+cherry-picking the template's reviewed commits, rather than re-running the
+template's plans. Git cherry-pick replays a commit's diff with a three-way
+merge, so this works even when the app was created with GitHub's "Use this
+template" and shares no history with the template.
+
+### Keeping the template portable
+
+- Keep each template change in focused commits: one work unit per commit, no
+  unrelated edits mixed in, so an app can take exactly the change it needs.
+- Tag every release (see *Versioning and releases*) and keep the
+  `docs/upgrades/` guide current. The guide is the checklist a derived app
+  follows after porting.
+
+### Keeping an app portable
+
+- Record the template release the app is synced to in
+  `[tool.project-template].version` in the app's `backend/pyproject.toml`.
+  Update it only after a full release has been ported.
+- Put app features in new modules, routes, views and migrations. Keep edits to
+  template-owned core files (`backend/app/core/config.py`, CI workflows,
+  Compose files, `AGENTS.md` guides, shared docs) small and together in one
+  place, because conflicts only occur where both sides edit the same lines.
+
+### Porting procedure
+
+1. In the app repository, add the template as a remote once:
+   `git remote add template <template-repo-url>`, then `git fetch template --tags`.
+2. List what is new since the app's recorded version:
+   `git log --oneline --no-merges <synced-tag>..template/main`.
+3. Check how much the change overlaps the app's customisations. Compare
+   `git diff --name-only <first-commit>^..<last-commit>` (the template range)
+   with `git diff --name-only <app-base>..HEAD` (the app's changes). Little
+   overlap means cherry-pick; heavy overlap means port with a prompt (below).
+4. On a dedicated branch, cherry-pick the range in order:
+   `git cherry-pick <first-commit>^..<last-commit>`. Skip commits that are not
+   part of the change being ported.
+5. Resolve conflicts by keeping the template's intent and the app's
+   customisation together. Then work through the gotchas below.
+6. Run the full `make check`, plus `make e2e` and any service-backed CI jobs
+   the change touches, in the app. A clean cherry-pick shows that the diff
+   applied, not that it works with the app's customisations.
+7. The same human-review categories apply as in the template (see *Review
+   requirements*). Approval given in the template does not cover the app's
+   conflict resolutions.
+
+### Gotchas
+
+- **Alembic migrations.** A template migration's `down_revision` points to the
+  template's previous head, not the app's. After cherry-picking, re-parent it
+  onto the app's current head and run `alembic heads` to confirm a single head.
+  If both sides changed the same table, review the combined schema by hand.
+- **Generated API client.** Never hand-merge `frontend/src/api/generated/`.
+  Port the backend changes, then run `make generate-client`.
+- **Lockfiles.** Resolve `backend/uv.lock` and `frontend/pnpm-lock.yaml`
+  conflicts by taking the app's version and re-running `uv lock` /
+  `pnpm install`. Do not merge them line by line.
+- **Plans and handoff files.** Port a template plan file only as a reference.
+  Do not make it `Status: Active` in the app, because its checkboxes are
+  already done.
+
+### Porting with a prompt
+
+When an app has drifted too far for a clean cherry-pick, export the reviewed
+commits as patches and give them to an agent as a porting brief:
+
+```bash
+git format-patch <first-commit>^..<last-commit> -o <app>/.handoff/template-patches
+```
+
+The prompt should say that the patches are already reviewed and approved in
+the template, so the agent ports their intent and does not redesign them. The
+agent keeps pinned versions, digests, security decisions and test assertions
+exactly as they are, adapts only what the app's customisations force, and
+lists every adaptation in its handoff. Include the relevant plan, ADRs and
+findings docs so the agent has the reasoning behind each decision. The ported
+work then goes through the normal implement → review → apply-and-commit loop.
+
 ## Dependency policy
 
 Do not add dependencies without documenting why. Substantial additions should be recorded in an ADR (see `docs/decisions/`).
