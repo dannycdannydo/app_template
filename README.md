@@ -26,7 +26,8 @@ backend/                 FastAPI application (app/, alembic/, pyproject.toml)
 frontend/                Vue 3 + Vite application (src/, Dockerfile, nginx.conf.template)
 deploy/compose/          Compose files (compose.local.yml = local development)
 deploy/caddy/            Pinned Caddy edge build (TLS, security headers, rate limits)
-docs/decisions/          Architecture decision records (ADR 0001-0022)
+deploy/backup/           Opt-in off-site backup job image (pg_dump + rclone, ADR-0023)
+docs/decisions/          Architecture decision records (ADR 0001-0023)
 docs/                    Operations, backup/recovery, RLS and release docs
 .github/workflows/       CI pipeline
 Makefile                 Command surface for development and quality gates
@@ -175,7 +176,7 @@ PostgreSQL row-level security is a **default-deny backstop** for organisation is
 
 ### Deployment (hybrid VPS profile)
 
-The provider-neutral production baseline (blueprint §35.1, ADR-0007): a generic Linux VPS / container-host profile in `deploy/compose/compose.hybrid-vps.yml` (Caddy edge, static Vue artifact, FastAPI, Dramatiq worker, and isolated private broker/rate-limit Redis services) with managed PostgreSQL, object storage, WorkOS, transactional email and monitoring as external services. Deployment runs through `.github/workflows/deploy-vps.yml`: it builds immutable images and a versioned frontend artifact, SSHes to a configurable host, runs exactly one deliberate `alembic upgrade head`, recreates the services and waits for `/ready`, retaining the previous release for rollback. See `.env.production.example`, `docs/operations.md`, `docs/backup-and-recovery.md` and `SECURITY.md` → "Hybrid VPS production profile".
+The provider-neutral production baseline (blueprint §35.1, ADR-0007): a generic Linux VPS / container-host profile in `deploy/compose/compose.hybrid-vps.yml` (Caddy edge, static Vue artifact, FastAPI, Dramatiq worker, and isolated private broker/rate-limit Redis services) with managed PostgreSQL, object storage, WorkOS, transactional email and monitoring as external services. Deployment runs through `.github/workflows/deploy-vps.yml`: it builds immutable images and a versioned frontend artifact, SSHes to a configurable host, runs exactly one deliberate `alembic upgrade head`, recreates the services and waits for `/ready`, retaining the previous release for rollback. An opt-in `offsite-backup` service (ADR-0023) copies a nightly encrypted `pg_dump` and the storage bucket to an S3-compatible bucket at a second provider; it stays idle until the `BACKUP_S3_*` destination is configured. See `.env.production.example`, `docs/operations.md`, `docs/backup-and-recovery.md` and `SECURITY.md` → "Hybrid VPS production profile".
 
 ## Releases
 

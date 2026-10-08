@@ -23,7 +23,7 @@ and never replaces, the application layer:
 | `app_runtime` | `DATABASE_RUNTIME_URL` | API and Dramatiq workers | non-owner, non-superuser, `NOBYPASSRLS`, `NOINHERIT` |
 | `app_metrics` | none (NOLOGIN) | the `SECURITY DEFINER` aggregate metrics function only | non-owner, non-superuser, `NOBYPASSRLS`, `NOINHERIT`; narrow policy scoped to attention-required delivery rows |
 | `app_coordinator` | `DATABASE_COORDINATOR_URL` (group 4b) | outbox coordinator, reliability-metrics refresh and `reconcile_jobs` CLI | second non-bypass role, policies scoped to dispatch state, not a tenant |
-| `app_operator` | `DATABASE_OPERATOR_URL` (group 6) | backup/restore, support and emergency CLI | isolated, audited operational credential; owns no table, member of no other role; may carry `BYPASSRLS`; loaded only by CLI/ops tooling |
+| `app_operator` | `DATABASE_OPERATOR_URL` (group 6) | backup/restore (including the scheduled `offsite-backup` service, ADR-0023), support and emergency CLI | isolated, audited operational credential; owns no table, member of no other role; may carry `BYPASSRLS`; loaded only by CLI/ops tooling |
 
 `app_runtime` is provisioned by the P2 prototype migration (created `NOLOGIN`,
 or safely adopted if a deployment pre-provisioned it, then granted a login

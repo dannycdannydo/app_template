@@ -341,7 +341,8 @@ context clears automatically on commit/rollback and never survives pool reuse
   whose policies are scoped to dispatch state rather than a tenant.
   `DATABASE_OPERATOR_URL` (`app_operator`) is the isolated, audited operational
   credential — the only application role allowed to carry `BYPASSRLS` — loaded
-  only by CLI/ops tooling, never by an HTTP process or worker. `app_metrics` is
+  only by CLI/ops tooling and the isolated, opt-in `offsite-backup` service
+  (ADR-0023), never by an HTTP process or worker. `app_metrics` is
   a `NOLOGIN` `SECURITY DEFINER` aggregate role.
 - **Context propagation.** `app/db/rls.py` binds each value with a parameterised
   transaction-local `set_config(key, $1, true)` only after the membership/

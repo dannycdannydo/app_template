@@ -62,8 +62,13 @@ contracts. Those are the Manual and Opt-in steps below.
    - `docker compose -f deploy/compose/compose.local.yml --profile fullstack config`
    - `scripts/assert_redis_compose_policy.py` (broker `noeviction`/AOF vs
      rate-limit counter policy) and `scripts/assert_deployment_boundaries.py`
-     (Caddy-only forwarded-IP trust and CSP storage origin).
-   - CI jobs: `compose-hybrid-vps-validation`, `caddy-edge-validation`.
+     (Caddy-only forwarded-IP trust, CSP storage origin, and the off-site
+     backup service's network/port/env isolation).
+   - Off-site backup image: `docker build deploy/backup`, shellcheck of
+     `deploy/backup/offsite-backup.sh`, and an unconfigured container reporting
+     `disabled` (ADR-0023).
+   - CI jobs: `compose-hybrid-vps-validation`, `caddy-edge-validation`,
+     `offsite-backup-validation`.
 8. **Full gates** (**Manual**)
    - `make lint`, `make typecheck`, `make test`, `make e2e`,
      `make validate-ai-registries`, `make validate-execution-contracts`,
