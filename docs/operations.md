@@ -57,6 +57,15 @@ to an image built locally from the release checkout
 (`docker build deploy/caddy`); the compose-file placeholder is not a real
 image and will not pull.
 
+The `offsite-backup` service runs the pinned backup image
+(`deploy/backup/Dockerfile`: PostgreSQL 17 client tools + rclone, ADR-0023),
+published the same way as `<registry>/<org>/<app>-backup:<git-sha>` and passed
+as `BACKUP_IMAGE`; for a manual `docker compose up`, set `BACKUP_IMAGE` the same
+way as `CADDY_IMAGE` (or build it with `docker build deploy/backup`). The
+service is always deployed but idles until the `BACKUP_S3_*` destination is
+configured; setup, monitoring and restore are in `docs/backup-and-recovery.md`
+→ Off-site backup job.
+
 ## Database roles and row-level security (ADR-0022)
 
 The production database uses separate credentials. `DATABASE_URL` is the
@@ -142,14 +151,21 @@ cannot `SET ROLE` it (`SET ROLE app_operator` as `app_runtime` must fail with
   an unset value raises rather than falling back to the runtime or owner role,
   and no HTTP process or worker loads it.
 - A logical backup (`pg_dump`) or a cross-tenant support read connects with this
-  credential. It is granted `SELECT` on the application tables and sequences
+  credential. The scheduled `offsite-backup` service is the one long-running
+  process that holds it: it runs on its own Compose network with no published
+  port, receives only its named variables, and translates the URL to libpq
+  environment variables itself, so the password never appears on a command
+  line (ADR-0023). It is granted `SELECT` on the application tables and sequences
   (`pg_dump` reads each sequence's `last_value`, so the sequence grant is what
   makes the backup executable); destructive restore remains an explicit,
   separately reviewed operation and follows `docs/backup-and-recovery.md`.
   `DATABASE_OPERATOR_URL` is a SQLAlchemy async URL, so libpq tools must use the
   plain `postgresql://` form (strip the `+asyncpg` suffix) as Procedure 1 shows.
 - Every use is a privileged operational path: record who ran it, what operation
-  was performed and against which environment. Do **not** place row contents,
+  was performed and against which environment. For the nightly off-site backup
+  the service's `event=started` / `event=succeeded` log lines are that record;
+  manual `run-once`, `fetch-dump` and `restore-files` runs are recorded like any
+  other operator action. Do **not** place row contents,
   secrets, tokens or provider responses in the record or in an audit event
   (BP §28 never-log list).
 - Verify the separation the same way as the runtime check above: connect with

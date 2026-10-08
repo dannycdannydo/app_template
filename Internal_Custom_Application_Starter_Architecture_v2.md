@@ -2261,7 +2261,8 @@ Run health check
 - disk alerts;
 - container resource limits;
 - documented rollback;
-- off-site configuration backups.
+- off-site configuration backups;
+- off-site encrypted data backups at a second provider (opt-in `offsite-backup` service, ADR-0023).
 
 Because PostgreSQL and object storage are external, application data does not depend entirely on one VPS disk.
 
@@ -2431,6 +2432,10 @@ Staging must never use production data or credentials.
 For fully managed infrastructure, use provider-native backups and recovery.
 
 For the hybrid profile, managed PostgreSQL provides durable database backup.
+Provider-native backups share the provider account with the data, so the
+template also ships an opt-in `offsite-backup` service (ADR-0023) that copies a
+nightly encrypted logical dump and the object-storage bucket to an
+S3-compatible bucket at a second provider.
 
 The project must still document:
 

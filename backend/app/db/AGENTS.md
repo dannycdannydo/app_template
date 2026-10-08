@@ -28,7 +28,7 @@ transaction-local context authorises that row.
 | `app_runtime` | `DATABASE_RUNTIME_URL` | API and Dramatiq workers | non-owner, `NOBYPASSRLS`, `NOINHERIT`; subject to every policy |
 | `app_coordinator` | `DATABASE_COORDINATOR_URL` | outbox coordinator, reliability metrics, `reconcile_jobs` | second non-bypass role, policies scoped to dispatch state, not a tenant |
 | `app_metrics` | none (NOLOGIN) | the `SECURITY DEFINER` aggregate delivery count | narrow policy; no tenant read |
-| `app_operator` | `DATABASE_OPERATOR_URL` | backup/restore, support, emergency CLI only | the **only** application role that may carry `BYPASSRLS`; owns no table, member of nothing |
+| `app_operator` | `DATABASE_OPERATOR_URL` | backup/restore (incl. the isolated `offsite-backup` service, ADR-0023), support, emergency CLI only | the **only** application role that may carry `BYPASSRLS`; owns no table, member of nothing |
 
 `resolve_database_url` / `resolve_coordinator_database_url` /
 `resolve_operator_database_url` (`app/db/session.py`) select the credential and
