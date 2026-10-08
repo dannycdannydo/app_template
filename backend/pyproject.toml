@@ -33,12 +33,12 @@ dependencies = [
     # use a maintained parser for incremental updates, xref streams and
     # compressed object streams instead of rejecting normal modern PDFs or
     # maintaining a partial security-sensitive parser in the template.
-    "pypdf>=6.16.0",
+    "pypdf>=6.19.0",
     # v0.7 prompt/task/model registries are reviewed YAML assets. PyYAML's
     # safe loader is used (never the object-constructing loader); it was
     # already present transitively and is now an explicit runtime contract.
     "pyyaml>=6.0.3",
-    "pyjwt>=2.10.0",
+    "pyjwt>=2.15.0",
     # v0.6 observability (Scope §6.1, blueprint §28): Prometheus text-format
     # metrics on GET /metrics; sentry-sdk for error tracking, initialised only
     # when SENTRY_DSN is set. Both are pinned by uv.lock and justified in
