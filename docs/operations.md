@@ -35,6 +35,7 @@ export COMPOSE="docker compose -f compose.hybrid-vps.yml --env-file .env.product
 | `coordinator` | backend image, `python -m app.job_coordinator`                                       | normally 1; safe to replicate                                           | Claims PostgreSQL outbox rows, publishes reference-only broker messages, reconciles queued jobs and schedules maintenance (ADR-0019) |
 | `redis-broker` | `redis:7-alpine`, password + AOF + `noeviction`                                      | 1 instance                                                              | Dedicated Dramatiq transport; never published                                                                                        |
 | `redis-rate-limit` | `redis:7-alpine`, password + `allkeys-lru`                                        | 1 instance                                                              | Disposable distributed API counters; never published                                                                                 |
+| `offsite-backup` | custom image from `deploy/backup/Dockerfile` (PostgreSQL 17 client + rclone)          | 1 instance                                                              | Nightly encrypted `pg_dump` + bucket copy to a second provider; idles unless `BACKUP_S3_*` is set (ADR-0023, docs/backup-and-recovery.md) |
 
 Initial defaults: 1 API replica, 1 worker process at `WORKER_CONCURRENCY=8`,
 1 coordinator, 1 Caddy, and 2 isolated Redis services. Compose limits each service (CPU/memory) and rotates JSON
@@ -259,7 +260,7 @@ The AI layer adds its own families (`ai_requests_total`,
 | Stale worker messages      | `jobs_stale_messages_total` rising                                                | warning                |
 | Disk pressure              | host disk or Caddy/Redis log volumes ≥ 80%                                        | warning (90% critical) |
 | Certificate expiry         | Let's Encrypt renewal failures in Caddy logs; cert expiry within 14 days          | critical               |
-| Backup failure             | failed backup job / missing backup marker (docs/backup-and-recovery.md)           | critical               |
+| Backup failure             | `BACKUP_HEARTBEAT_URL` monitor missed (~26 h); `offsite-backup` unhealthy; `event=failed` in its logs (docs/backup-and-recovery.md → Off-site backup job) | critical               |
 | Redis unavailable          | API `rate_limiter_unavailable` errors; `redis-cli ping` failure                   | critical               |
 | Broker memory / rejection  | broker memory > 80% for 10 min; OOM error replies increase                        | warning / critical     |
 | Queue metric refresh       | refresh success 0 or last success older than 90 s                                 | critical               |

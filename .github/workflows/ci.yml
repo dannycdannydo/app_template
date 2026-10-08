@@ -445,6 +445,26 @@ jobs:
           docker compose -f deploy/compose/compose.local.yml --profile fullstack config --format json |
             python scripts/assert_deployment_boundaries.py --profile local
 
+  # Off-site backup validation (ADR-0023): the pinned backup image builds, the
+  # job script passes shellcheck, and an unconfigured container reports itself
+  # disabled rather than failing, so a deployment without a backup destination
+  # stays green.
+  offsite-backup-validation:
+    name: Off-site backup image validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Shellcheck the backup job
+        run: >-
+          docker run --rm -v "$PWD/deploy/backup:/mnt:ro"
+          koalaman/shellcheck:v0.10.0@sha256:2097951f02e735b613f4a34de20c40f937a6c8f18ecb170612c88c34517221fb
+          /mnt/offsite-backup.sh
+      - name: Build the backup image
+        run: docker build --tag app-template-backup:ci deploy/backup
+      - name: An unconfigured job is disabled, not failing
+        run: test "$(docker run --rm app-template-backup:ci check-config)" = disabled
+
   # Edge validation (Scope §6.6, blueprint §35.1): the pinned Caddy image
   # (v2.11.4 + caddy-ratelimit v0.1.0) builds, the Caddyfile parses and is
   # formatted, so the edge rate-limiting implementation stays reproducible

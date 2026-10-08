@@ -24,6 +24,11 @@ _APPLICATION_SERVICES = {
     "redis-rate-limit",
 }
 
+#: The off-site backup job (ADR-0023). It holds the BYPASSRLS operational
+#: credential, so it must stay off the application and edge networks, publish
+#: no port and receive only its named variables, never the whole env file.
+_BACKUP_SERVICE = "offsite-backup"
+
 
 def _command(service: dict[str, Any]) -> list[str]:
     command = service.get("command", [])
@@ -65,7 +70,7 @@ def parse_public_origin(value: str) -> str:
 
 def _assert_production(document: dict[str, Any]) -> None:
     services = document["services"]
-    expected = _APPLICATION_SERVICES | {"caddy"}
+    expected = _APPLICATION_SERVICES | {"caddy", _BACKUP_SERVICE}
     assert set(services) == expected, f"unexpected services: {sorted(set(services) ^ expected)}"
 
     edge = document["networks"]["edge"]
@@ -104,6 +109,19 @@ def _assert_production(document: dict[str, Any]) -> None:
         names = _network_names(services[name])
         assert "backend" in names, f"{name} must join the backend network"
         assert "edge" not in names, f"{name} must not join the browser-facing edge network"
+
+    backup = services[_BACKUP_SERVICE]
+    assert _network_names(backup) == {"backup"}, (
+        "the off-site backup job must join only its own backup network"
+    )
+    assert not backup.get("ports"), "the off-site backup job must not publish a port"
+    assert not backup.get("env_file"), (
+        "the off-site backup job must receive named variables, not the whole env file"
+    )
+    for name in _APPLICATION_SERVICES | {"caddy"}:
+        assert "backup" not in _network_names(services[name]), (
+            f"{name} must not join the off-site backup network"
+        )
 
 
 def _assert_local(document: dict[str, Any]) -> None:

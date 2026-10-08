@@ -153,6 +153,7 @@ The generic Linux VPS / container-host profile (`deploy/compose/compose.hybrid-v
 - **Container resource limits**: every service declares explicit CPU/memory `deploy.resources.limits` and JSON-file log rotation (`max-size`/`max-file`) in the compose file.
 - **Documented rollback**: every release is immutable (image tagged by commit SHA, frontend artifact checksum-verified into `releases/<sha>`); `releases/current` is an atomic symlink and the previous release is retained, so rollback is a one-line symlink flip plus `docker compose up -d` (docs/operations.md, docs/backup-and-recovery.md).
 - **Off-site configuration backups**: the `.env.production` file, the Caddyfile, the compose file and the `releases/` metadata are backed up off-site; without them a lost host cannot be rebuilt (docs/backup-and-recovery.md — secret recovery, lost VPS replacement).
+- **Off-site data backups**: the opt-in `offsite-backup` service copies a nightly `pg_dump` and the storage bucket to a second provider, encrypted on the host (rclone crypt) with `BACKUP_ENCRYPTION_PASSWORD`, using a destination key without delete permission. It holds the `BYPASSRLS` operational credential, so it receives only its named variables and runs on its own network with no published port (ADR-0023, docs/backup-and-recovery.md — Off-site backup job).
 
 ### Trusted proxy and client-IP handling
 
