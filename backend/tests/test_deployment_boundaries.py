@@ -198,6 +198,7 @@ def _production_document(*, origin: str, endpoint: str) -> dict[str, object]:
             "coordinator": {"networks": {"backend": None}},
             "redis-broker": {"networks": {"backend": None}},
             "redis-rate-limit": {"networks": {"backend": None}},
+            "offsite-backup": {"networks": {"backup": None}},
         },
         "networks": {"edge": {"ipam": {"config": [{"subnet": subnet}]}}},
     }
@@ -222,6 +223,28 @@ def test_assert_production_rejects_an_origin_that_does_not_match_the_endpoint() 
                 endpoint="https://storage.example.com",
             )
         )
+
+
+@pytest.mark.parametrize(
+    "backup_overrides",
+    [
+        {"networks": {"backup": None, "backend": None}},
+        {"networks": {"backup": None}, "ports": [{"target": 8080}]},
+        {"networks": {"backup": None}, "env_file": [{"path": ".env.production"}]},
+    ],
+)
+def test_assert_production_rejects_an_exposed_backup_job(
+    backup_overrides: dict[str, object],
+) -> None:
+    script = _load_boundary_script()
+    document = _production_document(
+        origin="https://storage.example.com", endpoint="https://storage.example.com"
+    )
+    services = document["services"]
+    assert isinstance(services, dict)
+    services["offsite-backup"] = backup_overrides
+    with pytest.raises(AssertionError):
+        script._assert_production(document)
 
 
 def test_assert_production_rejects_a_signed_query_string_origin() -> None:

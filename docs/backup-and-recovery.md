@@ -54,8 +54,8 @@ from them plus the deployment artifacts.
 
 | Asset                                                                     | Source of truth          | Backup mechanism                                                                       | Frequency                                                                            | Retention                                          | RPO           | RTO                                                       |
 | ------------------------------------------------------------------------- | ------------------------ | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ | -------------------------------------------------- | ------------- | --------------------------------------------------------- |
-| Database (PostgreSQL)                                                     | Managed DB provider      | Provider-native backups + point-in-time recovery (PITR)                                | Continuous PITR (≥ 24 h window) + nightly logical dump (`pg_dump -Fc`) sent off-site | PITR ≥ 7 days; dumps ≥ 30 days                     | ≤ 5 min       | ≤ 30 min                                                  |
-| Object storage bucket                                                     | S3-compatible provider   | Bucket versioning + cross-region/bucket replication                                    | Continuous (per object write)                                                        | Versioning ≥ 90 days; replicate to a second bucket | 0 (versioned) | ≤ 15 min                                                  |
+| Database (PostgreSQL)                                                     | Managed DB provider      | Provider-native backups + point-in-time recovery (PITR); encrypted nightly dump to a second provider ([Off-site backup job](#off-site-backup-job)) | Continuous PITR (≥ 24 h window) + nightly logical dump (`pg_dump -Fc`) sent off-site | PITR ≥ 7 days; dumps ≥ 30 days                     | ≤ 5 min       | ≤ 30 min                                                  |
+| Object storage bucket                                                     | S3-compatible provider   | Bucket versioning + cross-region/bucket replication, or the nightly encrypted copy to a second provider ([Off-site backup job](#off-site-backup-job)) | Continuous (per object write)                                                        | Versioning ≥ 90 days; replicate to a second bucket | 0 (versioned) | ≤ 15 min                                                  |
 | Secrets (`.env.production`)                                               | Operator                 | Encrypted copy off the host (password manager, secret vault, or encrypted archive)     | On every change                                                                      | Indefinite (every version)                         | 0             | ≤ 30 min                                                  |
 | Deployment artifacts (compose file, Caddyfile, images, frontend artifact) | Git + container registry | Git history + immutable images in the registry; the host retains the newest 3 releases | Every release                                                                        | Images/artifacts ≥ 6 months; host releases 3       | 0             | ≤ 30 min                                                  |
 | Certificates (TLS)                                                        | Caddy (Let's Encrypt)    | Auto-renewed by Caddy; no manual backup needed                                         | Continuous                                                                           | Renewed before expiry                              | 0             | automatic                                                 |
@@ -91,6 +91,103 @@ depends on and what losing each one means:
 Recovery ordering after a partial or total loss: restore the database first
 (most state), then object storage, then secrets/configuration, then start the
 services, then verify through `/ready` and the external checks.
+
+---
+
+## Off-site backup job
+
+Provider-native PITR and bucket versioning live in the same provider account
+as the data they protect, so they do not survive a lost, locked or compromised
+account, an unpaid bill, or a deletion by someone holding the account's
+credentials. The `offsite-backup` service in `compose.hybrid-vps.yml`
+(ADR-0023, image built from `deploy/backup/`) covers that gap: once a night it
+takes a custom-format `pg_dump` with the isolated operational credential
+(`DATABASE_OPERATOR_URL`, the one `BYPASSRLS` role, so no row is silently
+omitted), checks the archive with `pg_restore --list`, and uploads it plus a
+copy of the `STORAGE_BUCKET` objects to an S3-compatible bucket **at a
+different provider**. Everything is encrypted on the host with rclone crypt
+(contents and object names) before upload.
+
+### Enabling it
+
+The job is opt-in by configuration. With none of the destination variables set
+it logs `event=disabled` and idles (the container is healthy). It runs only
+when all four are set in `.env.production`:
+
+| Variable | Purpose |
+| --- | --- |
+| `BACKUP_S3_ENDPOINT` | S3 endpoint of the second provider, e.g. `https://fsn1.your-objectstorage.com` (Hetzner) or `https://s3.eu-central-003.backblazeb2.com` (B2) |
+| `BACKUP_S3_BUCKET` | destination bucket, created in advance |
+| `BACKUP_S3_ACCESS_KEY_ID` / `BACKUP_S3_SECRET_ACCESS_KEY` | destination key |
+
+Once those are set, `BACKUP_ENCRYPTION_PASSWORD` and `DATABASE_OPERATOR_URL`
+(plus the `STORAGE_*` source settings unless `BACKUP_INCLUDE_FILES=false`) are
+required; a partial configuration makes the job exit with an
+`event=config_error` line naming the missing variables, and Docker keeps
+restarting it so the failure stays visible. Optional settings:
+`BACKUP_S3_REGION`, `BACKUP_S3_PREFIX` (separate several deployments in one
+bucket), `BACKUP_HOUR_UTC` (default 2) and `BACKUP_HEARTBEAT_URL`.
+`app_operator` is installed `NOLOGIN`; grant it a login credential out of band
+before enabling the job (`docs/operations.md` → Operational database access).
+Check a configuration without running anything:
+
+```bash
+$COMPOSE run --rm --no-deps offsite-backup check-config   # enabled | disabled
+```
+
+### Destination setup (once per deployment)
+
+1. Create a private bucket at a provider other than the one hosting the
+   database and files, in an acceptable data-residency region.
+2. Issue a key scoped to that bucket with list/read/write but **no delete**.
+   The job never deletes: dump names are unique (`db/<UTC timestamp>.dump`)
+   and the file copy never removes destination objects, so a leaked host
+   credential cannot erase the backups.
+3. Set retention on the provider side: a lifecycle rule expiring objects under
+   `<prefix>/` after the retention period (dumps ≥ 30 days per the table
+   above), and object lock / retention mode if the provider supports it.
+   Because names are encrypted, apply the rule to the whole prefix. If the rule
+   expires a file copy whose original still exists, the next nightly run
+   re-uploads it, so the file copy is never more than a day incomplete; the
+   rule in effect bounds how long a file deleted at the source stays
+   recoverable off-site.
+4. Store `BACKUP_ENCRYPTION_PASSWORD` in the password manager alongside the
+   `.env.production` copy (Procedure 3). Without it the off-site data cannot be
+   decrypted.
+5. Run one backup by hand and confirm it succeeds:
+   `$COMPOSE run --rm --no-deps offsite-backup run-once`.
+
+### Monitoring
+
+- **Heartbeat (recommended):** set `BACKUP_HEARTBEAT_URL` to a dead-man's-switch
+  monitor (healthchecks.io, Better Stack, Uptime Kuma push) that alerts when no
+  ping arrives within ~26 hours. It catches failed runs, a stopped container
+  and a lost host alike.
+- **Container health:** `offsite-backup` turns unhealthy when it is enabled and
+  the last successful run is older than 26 hours (`docker compose ps`).
+- **Logs:** `$COMPOSE logs offsite-backup` shows `event=succeeded` /
+  `event=failed` lines with no object keys or secrets.
+
+### Restoring from the off-site copy
+
+Use this when the provider's own PITR or versioning is unavailable (lost
+account, provider-side loss). The image carries the decryption and
+`pg_restore` tooling, so restore runs from the same image with the same
+`BACKUP_*` settings — on the original host or a replacement:
+
+```bash
+$COMPOSE run --rm --no-deps offsite-backup list            # available dumps
+install -d -m 700 restore                                  # plaintext lands here
+$COMPOSE run --rm --no-deps --user "$(id -u):$(id -g)" -v "$PWD/restore:/restore" \
+  offsite-backup fetch-dump latest /restore/database.dump  # decrypt + verify
+```
+
+Then restore `restore/database.dump` into a new, empty database exactly as in
+Procedure 1 (fallback), with `pg_restore --no-owner -d "$RESTORE_URL"`, and
+delete the local copy afterwards. To put the file copy back into a recreated
+bucket, point the `STORAGE_*` settings at it and run
+`$COMPOSE run --rm --no-deps offsite-backup restore-files` (copies only
+missing or differing objects). The RPO of this path is up to 24 hours.
 
 ---
 
@@ -136,7 +233,10 @@ between providers). Take the dump and connect for the restore with the isolated
 operational credential (`DATABASE_OPERATOR_URL`, role `app_operator`), which is
 the one `BYPASSRLS` application role (ADR-0022 decision 4): a `pg_dump` run as a
 non-`BYPASSRLS` role would silently omit every row an enabled policy hides.
-Restore into an empty database with the schema-owner credential:
+Restore into an empty database with the schema-owner credential. The
+`offsite-backup` job produces this dump every night; fetch and decrypt one with
+`fetch-dump` (see [Off-site backup job](#off-site-backup-job)) instead of taking
+a new one when the source database is gone:
 
 ```bash
 # Take the dump with the isolated operational credential (the one BYPASSRLS
@@ -354,11 +454,12 @@ semantics) and both Redis volumes are rebuilt empty.
    release still exists as an immutable image in the registry and as the
    frontend artifact in the release store.
 4. **Pull the immutable images** (the workflow sets these; manually,
-   `BACKEND_IMAGE` and `CADDY_IMAGE` must name the commit-pinned refs in
-   `.env.production`, or the compose-file placeholders will not pull):
+   `BACKEND_IMAGE`, `CADDY_IMAGE` and `BACKUP_IMAGE` must name the
+   commit-pinned refs in `.env.production`, or the compose-file placeholders
+   will not pull):
 
    ```bash
-   $COMPOSE pull api worker coordinator caddy
+   $COMPOSE pull api worker coordinator caddy offsite-backup
    ```
 
 5. **Run exactly one deliberate migration** (the database is external and was
@@ -541,6 +642,30 @@ group-6 migration now also grants `SELECT` on the schema's sequences (reverted
 on downgrade), which is what makes the documented operator-backed backup an
 executable procedure rather than a table-only approximation.
 
+### Tested run D: off-site backup job round trip on scratch infrastructure
+
+Environment: 2026-10-08, development machine; scratch `postgres:17-alpine`
+(one marker row, password containing `@`, `/` and `:` URL-encoded in an
+asyncpg-style `DATABASE_OPERATOR_URL`); one pinned SeaweedFS container serving
+both the application bucket (one `documents/<id>/original` object and one
+`staging/` object) and the destination bucket; the `deploy/backup` image.
+
+| Step | Command | Result |
+| --- | --- | --- |
+| Back up | `docker run --env-file … offsite-backup run-once` | exit 0; `event=succeeded` |
+| Inspect destination raw | `rclone lsf -R` on the destination bucket | only encrypted names under the prefix |
+| Inspect decrypted | `rclone lsf -R vault:` | `db/<timestamp>.dump` and the `original` object; `staging/` excluded |
+| List / fetch | `offsite-backup list`; `offsite-backup fetch-dump latest /restore/db.dump` | dumps listed; archive decrypted and verified (rclone also checked writing as the host user via `--user`) |
+| Restore | `pg_restore --no-owner -d restored /restore/db.dump` | marker row present — **PASS** |
+| File restore | delete the source object; `offsite-backup restore-files` | object restored with original content — **PASS** |
+| Failure | wrong database password | `pg_dump` error, exit 1, no dump uploaded |
+| Wrong passphrase | `fetch-dump` with another `BACKUP_ENCRYPTION_PASSWORD` | exit 1, nothing decrypted |
+| Gating | no destination / partial destination / missing passphrase | `disabled` (healthy) / `config_error` exit 1 / `config_error` exit 1 |
+| Health | scheduler started 30 h ago with no successful run | `health` exit 1 |
+
+A run against the real destination provider (Hetzner, B2, …) is part of each
+deployment's destination setup (step 5 above).
+
 ### Tested run B: environment recreation on scratch infrastructure
 
 Environment: fresh scratch directory standing in for a new host, the shipped
@@ -668,8 +793,9 @@ in `backend/app/main.py`; every other path keeps the strict allowlist
 
 ## Backup verification schedule
 
-- **Nightly**: logical database dump produced and shipped off-site; bucket
-  versioning/replication health check; backup-failure alerts armed.
+- **Nightly**: logical database dump produced and shipped off-site by the
+  `offsite-backup` job (heartbeat received); bucket versioning/replication
+  health check; backup-failure alerts armed.
 - **Weekly**: verify the latest dump restores into scratch infrastructure
   (tested run A re-run, at minimum the dump-then-restore loop) and that a
   scratch boot of the current images against the restored database passes

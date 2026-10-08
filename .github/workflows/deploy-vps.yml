@@ -89,6 +89,7 @@ jobs:
       git_sha: ${{ steps.sha.outputs.sha }}
       backend_image: ${{ steps.meta.outputs.image }}
       caddy_image: ${{ steps.meta.outputs.caddy_image }}
+      backup_image: ${{ steps.meta.outputs.backup_image }}
       frontend_artifact: ${{ steps.package.outputs.artifact }}
       frontend_checksum: ${{ steps.package.outputs.checksum }}
     steps:
@@ -119,9 +120,11 @@ jobs:
           fi
           image="${{ env.REGISTRY }}/${{ github.repository }}-backend:${tag}"
           caddy_image="${{ env.REGISTRY }}/${{ github.repository }}-caddy:${tag}"
+          backup_image="${{ env.REGISTRY }}/${{ github.repository }}-backup:${tag}"
           echo "image=${image}" >> "$GITHUB_OUTPUT"
           echo "caddy_image=${caddy_image}" >> "$GITHUB_OUTPUT"
-          echo "Built and will publish: ${image} ${caddy_image}"
+          echo "backup_image=${backup_image}" >> "$GITHUB_OUTPUT"
+          echo "Built and will publish: ${image} ${caddy_image} ${backup_image}"
 
       - name: Build and push the backend image
         uses: docker/build-push-action@v7.3.0
@@ -141,6 +144,17 @@ jobs:
           context: ./deploy/caddy
           push: true
           tags: ${{ steps.meta.outputs.caddy_image }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push the off-site backup image
+        # Always published so the compose file can pull it; the job itself
+        # idles until the BACKUP_S3_* destination is configured (ADR-0023).
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: ./deploy/backup
+          push: true
+          tags: ${{ steps.meta.outputs.backup_image }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -243,12 +257,13 @@ jobs:
         env:
           BACKEND_IMAGE: ${{ needs.build.outputs.backend_image }}
           CADDY_IMAGE: ${{ needs.build.outputs.caddy_image }}
+          BACKUP_IMAGE: ${{ needs.build.outputs.backup_image }}
         run: |
           set -euo pipefail
           # Pass the values into the remote shell; the quoted heredoc prevents
           # local expansion, so nothing here is interpolated twice.
           ssh "$DEPLOY_HOST" \
-            "RELEASE_DIR='$RELEASE_DIR' BACKEND_IMAGE='$BACKEND_IMAGE' CADDY_IMAGE='$CADDY_IMAGE' bash -s" <<'EOF'
+            "RELEASE_DIR='$RELEASE_DIR' BACKEND_IMAGE='$BACKEND_IMAGE' CADDY_IMAGE='$CADDY_IMAGE' BACKUP_IMAGE='$BACKUP_IMAGE' bash -s" <<'EOF'
           set -euo pipefail
           compose="docker compose -f $RELEASE_DIR/compose.hybrid-vps.yml --env-file $RELEASE_DIR/.env.production"
 
@@ -258,20 +273,20 @@ jobs:
 
           # The immutable images are addressed by content commit, so the pulls
           # are reproducible and the running image always matches the release.
-          BACKEND_IMAGE="$BACKEND_IMAGE" CADDY_IMAGE="$CADDY_IMAGE" $compose pull api worker caddy
+          BACKEND_IMAGE="$BACKEND_IMAGE" CADDY_IMAGE="$CADDY_IMAGE" BACKUP_IMAGE="$BACKUP_IMAGE" $compose pull api worker caddy offsite-backup
 
           # Exactly one deliberate migration per release (blueprint §37);
           # --no-deps keeps the one-off container off the application network.
-          BACKEND_IMAGE="$BACKEND_IMAGE" CADDY_IMAGE="$CADDY_IMAGE" $compose run --rm --no-deps api alembic upgrade head
+          BACKEND_IMAGE="$BACKEND_IMAGE" CADDY_IMAGE="$CADDY_IMAGE" BACKUP_IMAGE="$BACKUP_IMAGE" $compose run --rm --no-deps api alembic upgrade head
 
           # Recreate the services on the new image tags. The previous release
           # stays under releases/<previous>/ and releases/current is a symlink
           # that flips back atomically for rollback.
-          BACKEND_IMAGE="$BACKEND_IMAGE" CADDY_IMAGE="$CADDY_IMAGE" $compose up -d --remove-orphans
+          BACKEND_IMAGE="$BACKEND_IMAGE" CADDY_IMAGE="$CADDY_IMAGE" BACKUP_IMAGE="$BACKUP_IMAGE" $compose up -d --remove-orphans
 
           # Wait for readiness inside the API container with a 5-minute timeout.
           for i in $(seq 1 60); do
-            if BACKEND_IMAGE="$BACKEND_IMAGE" CADDY_IMAGE="$CADDY_IMAGE" $compose exec -T api python -c \
+            if BACKEND_IMAGE="$BACKEND_IMAGE" CADDY_IMAGE="$CADDY_IMAGE" BACKUP_IMAGE="$BACKUP_IMAGE" $compose exec -T api python -c \
                 "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready', timeout=3)" 2>/dev/null; then
               echo "API ready after $((i * 5))s"
               exit 0

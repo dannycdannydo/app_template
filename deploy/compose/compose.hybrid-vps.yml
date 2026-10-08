@@ -21,6 +21,8 @@
 #                      blueprint §36), e.g. ghcr.io/<org>/<app>-backend:<sha>
 #   CADDY_IMAGE        edge image built from deploy/caddy (pinned Caddy +
 #                      caddy-ratelimit module)
+#   BACKUP_IMAGE       off-site backup image built from deploy/backup
+#                      (PostgreSQL client + rclone)
 #
 # The API and worker read the same environment file (the v0.6 setting
 # surface: DATABASE_URL, BROKER_REDIS_URL, RATE_LIMIT_REDIS_URL, WorkOS,
@@ -337,6 +339,55 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # Off-site backup job (ADR-0023, docs/backup-and-recovery.md → Off-site
+  # backup job): a nightly encrypted pg_dump plus a copy of the application
+  # bucket to an S3-compatible bucket at a second provider. Opt-in by
+  # configuration: with no BACKUP_S3_* destination set it logs that it is
+  # disabled and idles. It receives only the variables it needs (never the
+  # whole environment file) and joins its own network, so it can reach the
+  # external database and storage but not Redis or the edge.
+  offsite-backup:
+    image: ${BACKUP_IMAGE:-ghcr.io/example/app-template-backup:local}
+    restart: unless-stopped
+    environment:
+      BACKUP_S3_ENDPOINT: ${BACKUP_S3_ENDPOINT:-}
+      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET:-}
+      BACKUP_S3_ACCESS_KEY_ID: ${BACKUP_S3_ACCESS_KEY_ID:-}
+      BACKUP_S3_SECRET_ACCESS_KEY: ${BACKUP_S3_SECRET_ACCESS_KEY:-}
+      BACKUP_S3_REGION: ${BACKUP_S3_REGION:-}
+      BACKUP_S3_PREFIX: ${BACKUP_S3_PREFIX:-}
+      BACKUP_ENCRYPTION_PASSWORD: ${BACKUP_ENCRYPTION_PASSWORD:-}
+      BACKUP_HOUR_UTC: ${BACKUP_HOUR_UTC:-2}
+      BACKUP_INCLUDE_FILES: ${BACKUP_INCLUDE_FILES:-true}
+      BACKUP_HEARTBEAT_URL: ${BACKUP_HEARTBEAT_URL:-}
+      DATABASE_OPERATOR_URL: ${DATABASE_OPERATOR_URL:-}
+      STORAGE_ENDPOINT_URL: ${STORAGE_ENDPOINT_URL:-}
+      STORAGE_BUCKET: ${STORAGE_BUCKET:-}
+      STORAGE_REGION: ${STORAGE_REGION:-}
+      STORAGE_ACCESS_KEY_ID: ${STORAGE_ACCESS_KEY_ID:-}
+      STORAGE_SECRET_ACCESS_KEY: ${STORAGE_SECRET_ACCESS_KEY:-}
+    networks:
+      - backup
+    # Healthy while disabled; unhealthy when enabled and the last successful
+    # run is older than 26 hours (or the first run is overdue).
+    healthcheck:
+      test: ["CMD", "offsite-backup", "health"]
+      interval: 5m
+      timeout: 10s
+      retries: 1
+      start_period: 30s
+    stop_grace_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   caddy_data:
   caddy_config:
@@ -356,3 +407,6 @@ networks:
   # Private application network for the API, worker, coordinator and the two
   # Redis instances. Never published beyond the host.
   backend:
+  # Egress-only network for the off-site backup job; it shares nothing with
+  # the application services.
+  backup:
