@@ -32,7 +32,7 @@
     "reka-ui": "2.10.1",
     "tailwind-merge": "3.6.0",
     "vee-validate": "^4.15.1",
-    "vue": "3.5.40",
+    "vue": "3.5.43",
     "vue-router": "5.2.0",
     "vue-sonner": "^2.0.9",
     "zod": "^3.25.76"
@@ -64,7 +64,7 @@
     "typescript": "6.0.3",
     "vite": "8.2.0",
     "vite-plugin-vue-devtools": "8.2.1",
-    "vitest": "4.1.10",
+    "vitest": "4.1.11",
     "vue-eslint-parser": "10.4.1",
     "vue-tsc": "3.3.9"
   },
